@@ -1,0 +1,785 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
+
+import { AccessGate } from './components/AccessGate'
+import type { AccessGateStatus } from './components/AccessGate'
+import { Header } from './components/Header'
+import { MappingStage } from './components/stages/MappingStage'
+import { PlayingStage } from './components/stages/PlayingStage'
+import { QuestionStage } from './components/stages/QuestionStage'
+import { ReadingStage } from './components/stages/ReadingStage'
+import { requestWebChessAnswer } from './lib/answer'
+import { composeProblemParts, requestProblemDivision } from './lib/division'
+import {
+  applyMove,
+  chooseAutoMove,
+  coordKey,
+  createInitialPieces,
+  getGameOutcome,
+  getLegalMoves,
+  isSameCoord,
+} from './lib/game'
+import { normalizeProblemInput, problemPartAt } from './lib/problem'
+import { PIECE_METAPHORS, synthesizeReading } from './lib/reading'
+import {
+  createWebChessSession,
+  deleteWebChessSession,
+  getWebChessSession,
+  isSessionRequiredError,
+} from './lib/session'
+import type { AuthenticatedSession } from './lib/session'
+import type {
+  AnswerStatus,
+  CaptureRecord,
+  CellCoord,
+  DivisionPhase,
+  DivisionStatus,
+  GameOutcome,
+  LastMove,
+  Piece,
+  ProblemPart,
+  Side,
+  Stage,
+} from './types'
+
+const EMPTY_SET = new Set<string>()
+const CAST_REVEAL_INTERVAL_MS = 90
+const DIVISION_PHASE_DURATION_MS = 780
+
+type AccessState =
+  | {
+      status: AccessGateStatus
+      message?: string
+    }
+  | {
+      status: 'authenticated'
+      session: AuthenticatedSession
+    }
+
+function otherSide(side: Side): Side {
+  return side === 'white' ? 'black' : 'white'
+}
+
+function outcomeNotice(outcome: GameOutcome): string {
+  if (outcome.reason === 'king-captured' && outcome.winner) {
+    const winner = outcome.winner === 'white' ? 'White' : 'Black'
+    return `${winner} reached the opposing Core Purpose. The captured signals and ending are becoming an answer.`
+  }
+  if (outcome.reason === 'no-progress') {
+    return 'The board reached a reflective standstill. The captured signals and ending are becoming an answer.'
+  }
+  if (outcome.reason === 'move-limit') {
+    return 'The board completed its full arc. The captured signals and ending are becoming an answer.'
+  }
+  return 'Neither side has an open path. The captured signals and ending are becoming an answer.'
+}
+
+export function App() {
+  const [accessState, setAccessState] = useState<AccessState>({ status: 'checking' })
+  const [endingSession, setEndingSession] = useState(false)
+  const [sessionActionError, setSessionActionError] = useState('')
+  const [stage, setStage] = useState<Stage>('question')
+  const [problem, setProblem] = useState('')
+  const [parts, setParts] = useState<ProblemPart[]>([])
+  const [pieces, setPieces] = useState<Piece[]>([])
+  const [turn, setTurn] = useState<Side>('white')
+  const [turnNumber, setTurnNumber] = useState(1)
+  const [quietPlies, setQuietPlies] = useState(0)
+  const [captures, setCaptures] = useState<CaptureRecord[]>([])
+  const [outcome, setOutcome] = useState<GameOutcome | null>(null)
+  const [selectedPieceId, setSelectedPieceId] = useState<string | null>(null)
+  const [focusedCell, setFocusedCell] = useState<CellCoord | null>(null)
+  const [lastMove, setLastMove] = useState<LastMove | null>(null)
+  const [mappingProgress, setMappingProgress] = useState(0)
+  const [divisionStatus, setDivisionStatus] = useState<DivisionStatus>('idle')
+  const [divisionPhase, setDivisionPhase] = useState<DivisionPhase>('analyzing')
+  const [divisionModel, setDivisionModel] = useState('')
+  const [divisionPrompt, setDivisionPrompt] = useState('')
+  const [divisionError, setDivisionError] = useState('')
+  const [autoPlaying, setAutoPlaying] = useState(false)
+  const [notice, setNotice] = useState('Choose a white piece. Its possible paths will appear.')
+  const [answerStatus, setAnswerStatus] = useState<AnswerStatus>('idle')
+  const [answer, setAnswer] = useState('')
+  const [answerModel, setAnswerModel] = useState('gpt-5.6-sol')
+  const [answerPrompt, setAnswerPrompt] = useState('')
+  const [answerError, setAnswerError] = useState('')
+  const sessionRequestRef = useRef<AbortController | null>(null)
+  const divisionRequestRef = useRef<AbortController | null>(null)
+  const answerRequestRef = useRef<AbortController | null>(null)
+  const sessionActive = accessState.status === 'authenticated'
+  const csrfToken = sessionActive ? accessState.session.csrfToken : ''
+  const gameFinishing = outcome !== null && stage === 'playing'
+
+  const requireSession = useCallback((message?: string) => {
+    const explanation =
+      message || 'Your access session has expired. Enter the access code to continue.'
+    divisionRequestRef.current?.abort()
+    answerRequestRef.current?.abort()
+    setAutoPlaying(false)
+    setDivisionStatus((current) => current === 'loading' ? 'error' : current)
+    setAnswerStatus((current) => current === 'loading' ? 'error' : current)
+    setDivisionError(explanation)
+    setAnswerError(explanation)
+    setAccessState({
+      status: 'unauthenticated',
+      message: explanation,
+    })
+  }, [])
+
+  const checkAccess = useCallback(() => {
+    sessionRequestRef.current?.abort()
+    const controller = new AbortController()
+    sessionRequestRef.current = controller
+    setAccessState({ status: 'checking' })
+
+    void getWebChessSession(controller.signal)
+      .then((session) => {
+        if (controller.signal.aborted || sessionRequestRef.current !== controller) return
+        setSessionActionError('')
+        setAccessState(
+          session.authenticated
+            ? { status: 'authenticated', session }
+            : { status: 'unauthenticated' },
+        )
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || sessionRequestRef.current !== controller) return
+        setAccessState({
+          status: 'error',
+          message: error instanceof Error
+            ? error.message
+            : 'WebChess could not check access right now.',
+        })
+      })
+  }, [])
+
+  const authenticate = useCallback(async (accessCode: string) => {
+    sessionRequestRef.current?.abort()
+    const controller = new AbortController()
+    sessionRequestRef.current = controller
+    const session = await createWebChessSession(accessCode, controller.signal)
+    if (controller.signal.aborted || sessionRequestRef.current !== controller) return
+
+    setSessionActionError('')
+    setAccessState({ status: 'authenticated', session })
+  }, [])
+
+  const selectedPiece = useMemo(
+    () => pieces.find((piece) => piece.id === selectedPieceId) ?? null,
+    [pieces, selectedPieceId],
+  )
+  const legalMoves = useMemo(
+    () => (selectedPiece ? getLegalMoves(selectedPiece, pieces) : []),
+    [pieces, selectedPiece],
+  )
+  const focusedPart = useMemo(() => {
+    if (parts.length !== 64) return null
+    if (focusedCell) return problemPartAt(parts, focusedCell)
+    return captures.at(-1)?.part ?? null
+  }, [captures, focusedCell, parts])
+  const reading = useMemo(
+    () => synthesizeReading(problem, captures, parts),
+    [captures, parts, problem],
+  )
+  const captureKeys = useMemo(
+    () => new Set(captures.map((capture) => coordKey(capture.cell))),
+    [captures],
+  )
+  const focusedKeys = useMemo(
+    () => (focusedCell ? new Set([coordKey(focusedCell)]) : EMPTY_SET),
+    [focusedCell],
+  )
+
+  useEffect(() => {
+    const controller = new AbortController()
+    sessionRequestRef.current = controller
+
+    void getWebChessSession(controller.signal)
+      .then((session) => {
+        if (controller.signal.aborted || sessionRequestRef.current !== controller) return
+        setAccessState(
+          session.authenticated
+            ? { status: 'authenticated', session }
+            : { status: 'unauthenticated' },
+        )
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || sessionRequestRef.current !== controller) return
+        setAccessState({
+          status: 'error',
+          message: error instanceof Error
+            ? error.message
+            : 'WebChess could not check access right now.',
+        })
+      })
+
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    if (accessState.status !== 'authenticated') return
+
+    const remainingMs = Date.parse(accessState.session.expiresAt) - Date.now()
+    if (remainingMs > 2_147_483_647) return
+
+    const timer = window.setTimeout(
+      () => requireSession('Your access session has expired. Enter the access code to continue.'),
+      Math.max(0, remainingMs),
+    )
+    return () => window.clearTimeout(timer)
+  }, [accessState, requireSession])
+
+  useEffect(() => {
+    if (
+      !sessionActive ||
+      stage !== 'mapping' ||
+      divisionStatus !== 'success' ||
+      divisionPhase !== 'casting' ||
+      parts.length !== 64
+    ) return
+
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      const revealTimer = window.setTimeout(() => setMappingProgress(64), 0)
+      return () => window.clearTimeout(revealTimer)
+    }
+
+    const interval = window.setInterval(() => {
+      setMappingProgress((current) => {
+        if (current >= 64) {
+          window.clearInterval(interval)
+          return 64
+        }
+        return current + 1
+      })
+    }, CAST_REVEAL_INTERVAL_MS)
+
+    return () => window.clearInterval(interval)
+  }, [divisionPhase, divisionStatus, parts.length, sessionActive, stage])
+
+  useEffect(() => {
+    if (
+      !sessionActive ||
+      stage !== 'mapping' ||
+      divisionStatus !== 'success' ||
+      parts.length !== 64 ||
+      divisionPhase === 'casting'
+    ) return
+
+    const phases: readonly DivisionPhase[] = [
+      'facets-received',
+      'facets-permuted',
+      'hexagrams-permuted',
+      'paired',
+      'casting',
+    ]
+    const phaseIndex = phases.indexOf(divisionPhase)
+    const nextPhase = phases[phaseIndex + 1]
+    if (!nextPhase) return
+
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    const timer = window.setTimeout(() => setDivisionPhase(nextPhase), reduceMotion ? 0 : DIVISION_PHASE_DURATION_MS)
+    return () => window.clearTimeout(timer)
+  }, [divisionPhase, divisionStatus, parts.length, sessionActive, stage])
+
+  useEffect(() => () => {
+    sessionRequestRef.current?.abort()
+    divisionRequestRef.current?.abort()
+    answerRequestRef.current?.abort()
+  }, [])
+
+  useEffect(() => {
+    if (!sessionActive) return
+
+    const frame = window.requestAnimationFrame(() => {
+      if (stage === 'question') {
+        document.getElementById('problem')?.focus()
+        return
+      }
+
+      const stageRoot = document.querySelector<HTMLElement>('[data-stage-root]')
+      stageRoot?.focus({ preventScroll: true })
+      stageRoot?.scrollIntoView?.({ block: 'start' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [sessionActive, stage])
+
+  const finishGame = useCallback((finished: GameOutcome) => {
+    setOutcome(finished)
+    setAutoPlaying(false)
+    setSelectedPieceId(null)
+    setNotice(outcomeNotice(finished))
+  }, [])
+
+  const movePiece = useCallback(
+    (pieceId: string, destination: CellCoord) => {
+      const movingPiece = pieces.find((piece) => piece.id === pieceId)
+      if (!movingPiece || movingPiece.side !== turn || parts.length !== 64 || outcome) return false
+
+      try {
+        const result = applyMove(pieces, pieceId, destination, parts, turnNumber)
+        const nextSide = otherSide(turn)
+        const nextQuietPlies = result.capture ? 0 : quietPlies + 1
+        const finished = getGameOutcome(result.pieces, {
+          quietPlies: nextQuietPlies,
+          ply: turnNumber,
+        })
+        const completed = finished
+          ? {
+              ...finished,
+              ...(result.capture?.captured.kind === 'king'
+                ? { terminalCapture: result.capture }
+                : {}),
+            }
+          : null
+
+        setPieces(result.pieces)
+        setLastMove({ from: movingPiece.position, to: destination })
+        setFocusedCell(destination)
+        setSelectedPieceId(null)
+        setQuietPlies(nextQuietPlies)
+
+        if (result.capture) {
+          setCaptures((current) => [...current, result.capture!])
+        }
+
+        if (completed) {
+          finishGame(completed)
+        } else {
+          setTurn(nextSide)
+          setTurnNumber((current) => current + 1)
+          const nextTurn = `${nextSide === 'white' ? 'White' : 'Black'} moves next.`
+          if (result.capture) {
+            setNotice(`${result.capture.narration} ${nextTurn}`)
+          } else if (result.promoted) {
+            setNotice(`A pawn crossed the whole question and became agency: a new queen. ${nextTurn}`)
+          } else {
+            const part = problemPartAt(parts, destination)
+            setNotice(`${movingPiece.kind} moved through ${part.dimension.toLowerCase()}: ${part.keyword}. ${nextTurn}`)
+          }
+        }
+        return true
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : 'That path is closed.')
+        return false
+      }
+    },
+    [finishGame, outcome, parts, pieces, quietPlies, turn, turnNumber],
+  )
+
+  const playOneTurn = useCallback(() => {
+    if (outcome) return
+
+    const choice = chooseAutoMove(pieces, turn, `${problem}/${turnNumber}`)
+    if (!choice) {
+      const nextSide = otherSide(turn)
+      const otherSideCanMove = chooseAutoMove(pieces, nextSide, `${problem}/${turnNumber}/reply`)
+      if (!otherSideCanMove) {
+        finishGame({
+          winner: null,
+          reason: 'no-moves',
+          completedTurn: Math.max(0, turnNumber - 1),
+        })
+        return
+      }
+
+      const nextQuietPlies = quietPlies + 1
+      const safetyEnding = getGameOutcome(pieces, {
+        quietPlies: nextQuietPlies,
+        ply: turnNumber,
+      })
+      if (safetyEnding) {
+        finishGame(safetyEnding)
+        return
+      }
+
+      setQuietPlies(nextQuietPlies)
+      setTurn(nextSide)
+      setTurnNumber((current) => current + 1)
+      setNotice(`${turn === 'white' ? 'White' : 'Black'} found no open path. ${nextSide === 'white' ? 'White' : 'Black'} responds.`)
+      return
+    }
+
+    movePiece(choice.pieceId, choice.to)
+  }, [finishGame, movePiece, outcome, pieces, problem, quietPlies, turn, turnNumber])
+
+  useEffect(() => {
+    if (!sessionActive || !autoPlaying || stage !== 'playing' || outcome) return
+
+    const timer = window.setTimeout(playOneTurn, 680)
+    return () => window.clearTimeout(timer)
+  }, [autoPlaying, outcome, playOneTurn, sessionActive, stage])
+
+  useEffect(() => {
+    if (!sessionActive || stage !== 'playing' || !outcome) return
+
+    const revealTimer = window.setTimeout(() => {
+      setAnswerStatus('loading')
+      setStage('reading')
+    }, 1_100)
+    return () => window.clearTimeout(revealTimer)
+  }, [outcome, sessionActive, stage])
+
+  useEffect(() => {
+    if (
+      !sessionActive ||
+      !csrfToken ||
+      stage !== 'reading' ||
+      !outcome ||
+      answerStatus !== 'loading'
+    ) return
+
+    const controller = new AbortController()
+    answerRequestRef.current = controller
+    const generateAnswer = async () => {
+      try {
+        const generated = await requestWebChessAnswer(
+          problem,
+          outcome,
+          captures,
+          controller.signal,
+          csrfToken,
+        )
+        if (controller.signal.aborted || answerRequestRef.current !== controller) return
+        setAnswer(generated.answer)
+        setAnswerModel(generated.model)
+        setAnswerPrompt(generated.prompt)
+        setAnswerError('')
+        setAnswerStatus('success')
+      } catch (error) {
+        if (controller.signal.aborted) return
+        const failure = error as Error & { prompt?: string }
+        setAnswerError(failure.message)
+        if (failure.prompt) setAnswerPrompt(failure.prompt)
+        setAnswerStatus('error')
+        if (isSessionRequiredError(failure)) {
+          requireSession(failure.message)
+        }
+      } finally {
+        if (answerRequestRef.current === controller) {
+          answerRequestRef.current = null
+        }
+      }
+    }
+
+    void generateAnswer()
+    return () => controller.abort()
+  }, [
+    answerStatus,
+    captures,
+    csrfToken,
+    outcome,
+    problem,
+    requireSession,
+    sessionActive,
+    stage,
+  ])
+
+  const clearAnswer = () => {
+    answerRequestRef.current?.abort()
+    answerRequestRef.current = null
+    setAnswerStatus('idle')
+    setAnswer('')
+    setAnswerModel('gpt-5.6-sol')
+    setAnswerPrompt('')
+    setAnswerError('')
+  }
+
+  const analyzeProblem = async (subject: string) => {
+    if (!sessionActive || !csrfToken) {
+      requireSession()
+      return
+    }
+
+    divisionRequestRef.current?.abort()
+    const controller = new AbortController()
+    divisionRequestRef.current = controller
+
+    setParts([])
+    setMappingProgress(0)
+    setDivisionStatus('loading')
+    setDivisionPhase('analyzing')
+    setDivisionModel('')
+    setDivisionPrompt('')
+    setDivisionError('')
+
+    try {
+      const analysis = await requestProblemDivision(subject, controller.signal, csrfToken)
+      const composedParts = composeProblemParts(analysis.facets, analysis.seed)
+      if (controller.signal.aborted || divisionRequestRef.current !== controller) return
+
+      setParts(composedParts)
+      setDivisionModel(analysis.model)
+      setDivisionPrompt(analysis.prompt)
+      setDivisionStatus('success')
+      setDivisionPhase('facets-received')
+    } catch (error) {
+      if (controller.signal.aborted || divisionRequestRef.current !== controller) return
+      const failure = error as Error & { prompt?: string }
+      setParts([])
+      setMappingProgress(0)
+      setDivisionPrompt(failure.prompt ?? '')
+      setDivisionError(failure.message)
+      setDivisionStatus('error')
+      if (isSessionRequiredError(failure)) {
+        requireSession(failure.message)
+      }
+    }
+  }
+
+  const beginMapping = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!sessionActive) {
+      requireSession()
+      return
+    }
+    const cleaned = normalizeProblemInput(problem)
+    if (cleaned.length < 12) return
+
+    setProblem(cleaned)
+    setStage('mapping')
+    void analyzeProblem(cleaned)
+  }
+
+  const retryDivision = () => {
+    void analyzeProblem(problem)
+  }
+
+  const beginPlay = () => {
+    if (
+      !sessionActive ||
+      parts.length !== 64 ||
+      divisionStatus !== 'success' ||
+      mappingProgress < 64
+    ) return
+    setPieces(createInitialPieces())
+    setTurn('white')
+    setTurnNumber(1)
+    setQuietPlies(0)
+    setCaptures([])
+    setOutcome(null)
+    setLastMove(null)
+    setFocusedCell(null)
+    clearAnswer()
+    setNotice('White begins at the edge. Choose a piece, or let the board play all the way to an ending.')
+    setStage('playing')
+  }
+
+  const selectPiece = (pieceId: string) => {
+    if (stage !== 'playing' || autoPlaying || gameFinishing) return
+
+    const piece = pieces.find((candidate) => candidate.id === pieceId)
+    if (!piece) return
+    setFocusedCell(piece.position)
+
+    if (piece.side !== turn) {
+      setNotice(`${turn === 'white' ? 'White' : 'Black'} is moving now. The other side must wait.`)
+      return
+    }
+
+    setSelectedPieceId((current) => (current === pieceId ? null : pieceId))
+    const metaphor = PIECE_METAPHORS[piece.kind]
+    setNotice(`${metaphor.label}: ${metaphor.role}.`)
+  }
+
+  const selectCell = (cell: CellCoord) => {
+    setFocusedCell(cell)
+    if (!selectedPiece || autoPlaying || gameFinishing) return
+
+    if (legalMoves.some((move) => isSameCoord(move, cell))) {
+      movePiece(selectedPiece.id, cell)
+      return
+    }
+
+    const occupant = pieces.find((piece) => isSameCoord(piece.position, cell))
+    if (occupant?.side === turn) selectPiece(occupant.id)
+  }
+
+  const toggleAutoPlay = () => {
+    if (gameFinishing) return
+    const shouldPlay = !autoPlaying
+    setSelectedPieceId(null)
+    setAutoPlaying(shouldPlay)
+    setNotice(
+      shouldPlay
+        ? 'The players are weighing pressure, safety, and purpose as they play to the end.'
+        : `Auto-play paused. Choose a ${turn === 'white' ? 'White' : 'Black'} piece or play one turn.`,
+    )
+  }
+
+  const retryAnswer = () => {
+    if (!sessionActive) {
+      requireSession()
+      return
+    }
+    setAnswer('')
+    setAnswerError('')
+    setAnswerStatus('loading')
+  }
+
+  const replayProblem = () => {
+    setPieces(createInitialPieces())
+    setTurn('white')
+    setTurnNumber(1)
+    setQuietPlies(0)
+    setCaptures([])
+    setOutcome(null)
+    setSelectedPieceId(null)
+    setFocusedCell(null)
+    setLastMove(null)
+    setAutoPlaying(false)
+    clearAnswer()
+    setNotice('Replay preserves these 64 facets in the same places. Guided play follows the same path; your own moves can create another one.')
+    setStage('playing')
+  }
+
+  const reset = () => {
+    divisionRequestRef.current?.abort()
+    divisionRequestRef.current = null
+    setStage('question')
+    setProblem('')
+    setParts([])
+    setPieces([])
+    setTurn('white')
+    setTurnNumber(1)
+    setQuietPlies(0)
+    setCaptures([])
+    setOutcome(null)
+    setSelectedPieceId(null)
+    setFocusedCell(null)
+    setLastMove(null)
+    setMappingProgress(0)
+    setDivisionStatus('idle')
+    setDivisionPhase('analyzing')
+    setDivisionModel('')
+    setDivisionPrompt('')
+    setDivisionError('')
+    setAutoPlaying(false)
+    setSessionActionError('')
+    clearAnswer()
+    setNotice('Choose a white piece. Its possible paths will appear.')
+  }
+
+  const endSession = async () => {
+    if (accessState.status !== 'authenticated' || endingSession) return
+
+    setEndingSession(true)
+    setSessionActionError('')
+    try {
+      await deleteWebChessSession(accessState.session.csrfToken)
+      reset()
+      setAccessState({
+        status: 'unauthenticated',
+        message: 'Your access session has ended.',
+      })
+    } catch (error) {
+      setSessionActionError(
+        error instanceof Error ? error.message : 'WebChess could not end the access session.',
+      )
+    } finally {
+      setEndingSession(false)
+    }
+  }
+
+  const visibleStage = sessionActive ? stage : 'question'
+
+  return (
+    <div className={`app-shell stage-${visibleStage}`}>
+      <div className="paper-noise" aria-hidden="true" />
+      <Header stage={visibleStage} onReset={reset} />
+
+      <main className="main-content">
+        {!sessionActive ? (
+          <AccessGate
+            status={accessState.status}
+            message={accessState.message}
+            onAuthenticate={authenticate}
+            onRetryCheck={checkAccess}
+          />
+        ) : stage === 'question' ? (
+          <QuestionStage
+            problem={problem}
+            setProblem={setProblem}
+            onSubmit={beginMapping}
+          />
+        ) : null}
+
+        {sessionActive && stage === 'mapping' && (
+          <MappingStage
+            problem={problem}
+            parts={parts}
+            progress={mappingProgress}
+            divisionStatus={divisionStatus}
+            divisionPhase={divisionPhase}
+            divisionModel={divisionModel}
+            divisionPrompt={divisionPrompt}
+            divisionError={divisionError}
+            onBegin={beginPlay}
+            onRetry={retryDivision}
+          />
+        )}
+
+        {sessionActive && stage === 'playing' && (
+          <PlayingStage
+            problem={problem}
+            parts={parts}
+            pieces={pieces}
+            turn={turn}
+            turnNumber={turnNumber}
+            captures={captures}
+            selectedPiece={selectedPiece}
+            selectedPieceId={selectedPieceId}
+            legalMoves={legalMoves}
+            focusedPart={focusedPart}
+            focusedKeys={focusedKeys}
+            captureKeys={captureKeys}
+            lastMove={lastMove}
+            autoPlaying={autoPlaying}
+            gameFinishing={gameFinishing}
+            notice={notice}
+            onPieceSelect={selectPiece}
+            onCellSelect={selectCell}
+            onStep={playOneTurn}
+            onToggleAuto={toggleAutoPlay}
+          />
+        )}
+
+        {sessionActive && stage === 'reading' && outcome && (
+          <ReadingStage
+            problem={problem}
+            parts={parts}
+            pieces={pieces}
+            captures={captures}
+            lastMove={lastMove}
+            reading={reading}
+            outcome={outcome}
+            answerStatus={answerStatus}
+            answer={answer}
+            answerModel={answerModel}
+            answerPrompt={answerPrompt}
+            answerError={answerError}
+            captureKeys={captureKeys}
+            onRetryAnswer={retryAnswer}
+            onReplay={replayProblem}
+            onReset={reset}
+          />
+        )}
+      </main>
+
+      <footer className="site-footer">
+        <span>WebChess</span>
+        <span>A thinking game inspired by change, not a prediction.</span>
+        {sessionActionError && <span role="alert">{sessionActionError}</span>}
+        {sessionActive && (
+          <button
+            className="text-button"
+            type="button"
+            onClick={() => void endSession()}
+            disabled={endingSession}
+          >
+            {endingSession ? 'Ending session…' : 'End session'}
+          </button>
+        )}
+      </footer>
+    </div>
+  )
+}
