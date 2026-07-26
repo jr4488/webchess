@@ -148,9 +148,41 @@ describe('auto-play engine with a worker', () => {
     const engine = createAutoPlayEngine()
 
     const pending = engine.chooseMove(pieces, 'white', 'crash', { depth: 2 })
-    worker.instances[0]!.fail()
+    const crashed = worker.instances[0]!
+    crashed.fail()
 
     expect((await pending).status).toBe('failed')
+    expect(crashed.terminated).toBe(true)
+
+    const recovered = engine.chooseMove(pieces, 'white', 'recovered', { depth: 2 })
+    expect(worker.instances).toHaveLength(2)
+    worker.instances[1]!.reply({ id: 2, move: null })
+    expect(await recovered).toEqual({ status: 'ok', move: null })
+    engine.dispose()
+  })
+
+  it('drops a worker whose postMessage throws so the following request can recover', async () => {
+    class ThrowingWorker extends FakeWorker {
+      override postMessage(): void {
+        throw new Error('worker is gone')
+      }
+    }
+    FakeWorker.instances = []
+    globalThis.Worker = ThrowingWorker as unknown as typeof Worker
+    const engine = createAutoPlayEngine()
+
+    await expect(engine.chooseMove(pieces, 'white', 'gone', { depth: 2 })).resolves.toEqual({
+      status: 'failed',
+      message: 'worker is gone',
+    })
+    const failedWorker = FakeWorker.instances[0]!
+    expect(failedWorker.terminated).toBe(true)
+
+    globalThis.Worker = FakeWorker as unknown as typeof Worker
+    const recovered = engine.chooseMove(pieces, 'white', 'recovered', { depth: 2 })
+    expect(FakeWorker.instances.at(-1)).not.toBe(failedWorker)
+    FakeWorker.instances.at(-1)!.reply({ id: 2, move: null })
+    expect(await recovered).toEqual({ status: 'ok', move: null })
     engine.dispose()
   })
 
@@ -159,13 +191,20 @@ describe('auto-play engine with a worker', () => {
     const engine = createAutoPlayEngine()
 
     const pending = engine.chooseMove(pieces, 'white', 'reset', { depth: 2 })
+    const abandoned = worker.instances[0]!
     engine.reset()
 
     expect(await pending).toEqual({ status: 'superseded' })
-    expect(worker.instances[0]!.terminated).toBe(true)
+    expect(abandoned.terminated).toBe(true)
 
-    void engine.chooseMove(pieces, 'white', 'after-reset', { depth: 2 })
+    const afterReset = engine.chooseMove(pieces, 'white', 'after-reset', { depth: 2 })
     expect(worker.instances).toHaveLength(2)
+    abandoned.reply({ id: 1, move: null })
+    abandoned.fail()
+    expect(worker.instances[1]!.terminated).toBe(false)
+
+    worker.instances[1]!.reply({ id: 2, move: null })
+    expect(await afterReset).toEqual({ status: 'ok', move: null })
     engine.dispose()
   })
 

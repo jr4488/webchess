@@ -32,7 +32,7 @@ const MAX_DEPTH = 8
 export interface EngineOptions {
   /** Fixes the depth instead of spending the node budget. Used by tests. */
   depth?: number
-  /** Game ply of the position, so the search knows the move limit. */
+  /** Number of game plies already completed in the supplied position. */
   ply?: number
   /** Non-capturing plies played so far, for the progress limit. */
   quietPlies?: number

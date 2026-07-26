@@ -6,7 +6,7 @@ export type MoveChooser = (
   pieces: readonly Piece[],
   side: Side,
   seed: string | number,
-  ply: number,
+  completedPlies: number,
   quietPlies: number,
 ) => AutoMove | null
 
@@ -54,7 +54,7 @@ export function playMatch(options: {
 
   for (; ply <= maxPlies; ply += 1) {
     const chooser = turn === 'white' ? options.white : options.black
-    const move = chooser(pieces, turn, `${options.seed}/${ply}`, ply, quietPlies)
+    const move = chooser(pieces, turn, `${options.seed}/${ply}`, ply - 1, quietPlies)
 
     if (!move) {
       const opponent: Side = turn === 'white' ? 'black' : 'white'

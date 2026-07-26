@@ -65,6 +65,13 @@ export function createAutoPlayEngine(): AutoPlayEngine {
       })
 
       created.addEventListener('error', () => {
+        // An error event means this worker can no longer be trusted. Ignore a
+        // late event from a worker that reset() already replaced, but make the
+        // active dead worker disposable so the next request can start fresh.
+        if (worker !== created) return
+        created.terminate()
+        worker = null
+
         if (!pending) return
         const settle = pending.settle
         pending = null
@@ -129,9 +136,25 @@ export function createAutoPlayEngine(): AutoPlayEngine {
       }
 
       const request: EngineRequest = { id, pieces, side, seed, ...(options ? { options } : {}) }
+      const activeWorker = worker
       return new Promise<EngineResult>((resolve) => {
         pending = { id, settle: resolve }
-        worker?.postMessage(request)
+        try {
+          activeWorker.postMessage(request)
+        } catch (error) {
+          activeWorker.terminate()
+          if (worker === activeWorker) worker = null
+          if (!pending || pending.id !== id) return
+
+          pending = null
+          resolve({
+            status: 'failed',
+            message:
+              error instanceof Error
+                ? error.message
+                : 'The move engine stopped unexpectedly.',
+          })
+        }
       })
     },
 

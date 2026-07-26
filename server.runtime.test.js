@@ -356,7 +356,11 @@ describe('executable server boundary', () => {
 
     const socket = createNetConnection(address.port, '127.0.0.1')
     socket.on('error', () => {})
-    const socketClosed = once(socket, 'close')
+    // A forced shutdown may reset this intentionally incomplete request.
+    // Wait for close without letting node:events.once reject on that reset.
+    const socketClosed = new Promise((resolve) => {
+      socket.once('close', resolve)
+    })
     await once(socket, 'connect')
     socket.write(
       'POST /api/session HTTP/1.1\r\n' +

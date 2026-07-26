@@ -4,6 +4,13 @@ import type { Piece } from '../../types'
 import { createInitialPieces } from '../game'
 import { MATE_SCORE } from './evaluate'
 import { findBestMove, searchBestMove } from './index'
+import { Search } from './search'
+import {
+  EMPTY,
+  encodeMove,
+  positionFromPieces,
+  squareOf,
+} from './position'
 
 function at(
   id: string,
@@ -114,17 +121,66 @@ describe('node budget', () => {
 })
 
 describe('draw awareness', () => {
-  it('knows a position at the progress limit is already drawn', () => {
-    const pieces = [
-      at('wk', 'white', 'king', 7, 0),
-      at('wq', 'white', 'queen', 5, 2),
-      at('bk', 'black', 'king', 0, 0),
-    ]
+  const winningPosition = [
+    at('wk', 'white', 'king', 7, 0),
+    at('wq', 'white', 'queen', 5, 2),
+    at('bk', 'black', 'king', 0, 0),
+  ]
 
-    const winning = findBestMove(pieces, 'white', 'progress', { depth: 3, quietPlies: 0 })
-    const exhausted = findBestMove(pieces, 'white', 'progress', { depth: 3, quietPlies: 99 })
+  it('draws on exactly the 100th quiet ply, not one ply early', () => {
+    const stillLive = findBestMove(
+      winningPosition,
+      'white',
+      'progress',
+      { depth: 1, quietPlies: 98 },
+    )
+    const exhausted = findBestMove(
+      winningPosition,
+      'white',
+      'progress',
+      { depth: 1, quietPlies: 99 },
+    )
 
-    expect(winning?.score).toBeGreaterThan(0)
+    expect(stillLive?.score).toBeGreaterThan(0)
     expect(Math.abs(exhausted!.score)).toBe(0)
+  })
+
+  it('draws on exactly the 256th completed ply, not one ply early', () => {
+    const stillLive = findBestMove(
+      winningPosition,
+      'white',
+      'move-limit',
+      { depth: 1, ply: 254 },
+    )
+    const exhausted = findBestMove(
+      winningPosition,
+      'white',
+      'move-limit',
+      { depth: 1, ply: 255 },
+    )
+
+    expect(stillLive?.score).toBeGreaterThan(0)
+    expect(Math.abs(exhausted!.score)).toBe(0)
+  })
+
+  it('stops a quiescence capture exactly at the 256-ply horizon', () => {
+    const pieces = [
+      at('wk', 'white', 'king', 7, 7),
+      at('wq', 'white', 'queen', 4, 1),
+      at('bk', 'black', 'king', 0, 7),
+      at('bp', 'black', 'pawn', 3, 0),
+    ]
+    const rootMove = encodeMove(squareOf(7, 7), squareOf(6, 7), EMPTY, false)
+    const scoreAt = (completedPlies: number) => new Search(
+      positionFromPieces(pieces, 'white'),
+      {
+        depth: 1,
+        startPly: completedPlies,
+        startQuietPlies: 0,
+      },
+    ).scoreRootMove(rootMove)
+
+    expect(scoreAt(253)).toBeLessThan(0)
+    expect(scoreAt(254)).toBe(0)
   })
 })
