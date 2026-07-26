@@ -3,7 +3,7 @@
   min-height: 100vh;
   overflow: clip;
   background:
-    radial-gradient(circle at 8% 5%, rgba(var(--cream-rgb), 0.92), transparent 28rem),
+    radial-gradient(circle at 8% 5%, rgba(var(--panel-rgb), 0.92), transparent 28rem),
     radial-gradient(circle at 92% 30%, rgba(var(--gold-rgb), 0.12), transparent 32rem),
     var(--paper);
 }
@@ -23,7 +23,8 @@
   top: 8px;
   left: 8px;
   padding: 10px 14px;
-  color: var(--cream) !important;
+  /* The accent is a bright pink here, so the legible pairing is dark on it. */
+  color: var(--void) !important;
   background: var(--vermillion);
   font-size: 0.72rem;
   font-weight: 700;
@@ -568,8 +569,9 @@
   padding: clamp(30px, 4vw, 58px);
   border: 1px solid var(--line-strong);
   background:
-    linear-gradient(135deg, rgba(var(--cream-rgb), 0.66), rgba(var(--paper-deep-rgb), 0.4)),
-    repeating-linear-gradient(0deg, transparent 0 38px, rgba(var(--ink-rgb), 0.035) 38px 39px);
+    linear-gradient(135deg, rgba(var(--panel-rgb), 0.66), rgba(var(--paper-deep-rgb), 0.4)),
+    repeating-linear-gradient(0deg, transparent 0 38px, rgba(var(--ink-rgb), 0.035) 38px 39px),
+    var(--paper);
   box-shadow: 18px 18px 0 rgba(var(--ink-rgb), 0.045);
 }
 
@@ -754,12 +756,12 @@
   padding: 25px 22px;
   border-right: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
-  background: rgba(var(--cream-rgb), 0.23);
+  background: rgba(var(--panel-rgb), 0.5);
   transition: background 180ms ease;
 }
 
 .piece-metaphor-grid article:hover {
-  background: rgba(var(--panel-rgb), 0.66);
+  background: rgba(var(--panel-rgb), 0.85);
 }
 
 .piece-metaphor__number {
@@ -1042,7 +1044,7 @@
   grid-template-columns: 52px 1fr;
   gap: 18px;
   padding: 24px;
-  background: rgba(var(--ink-rgb), 0.95);
+  background: rgba(var(--panel-rgb), 0.95);
 }
 
 .transparency-card li > span {

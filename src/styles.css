@@ -86,7 +86,7 @@ body {
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(circle at 15% 10%, rgba(var(--cream-rgb), 0.9), transparent 28rem),
+    radial-gradient(circle at 15% 10%, rgba(var(--panel-rgb), 0.9), transparent 28rem),
     radial-gradient(circle at 92% 72%, rgba(var(--gold-rgb), 0.14), transparent 31rem),
     var(--paper);
 }
@@ -1175,8 +1175,8 @@ button:disabled {
   padding: 14px;
   border: 1px solid rgba(var(--ink-rgb), 0.22);
   background:
-    linear-gradient(135deg, rgba(var(--cream-rgb), 0.92), rgba(var(--gold-pale-rgb), 0.2)),
-    var(--cream);
+    linear-gradient(135deg, rgba(var(--panel-rgb), 0.92), rgba(var(--gold-pale-rgb), 0.08)),
+    var(--paper);
   box-shadow: 0 14px 34px rgba(var(--shadow-rgb), 0.08);
 }
 
@@ -1611,7 +1611,7 @@ button:disabled {
   border-color: rgba(var(--cream-rgb), 0.2);
   background:
     linear-gradient(135deg, rgba(var(--cream-rgb), 0.09), rgba(var(--gold-rgb), 0.08)),
-    rgba(var(--ink-deep-rgb), 0.65);
+    rgba(var(--paper-deep-rgb), 0.75);
   box-shadow: none;
 }
 
@@ -2400,7 +2400,7 @@ button:disabled {
   border: 1px solid rgba(var(--cream-rgb), 0.36);
   border-radius: 99px;
   color: var(--cream);
-  background: rgba(var(--ink-rgb), 0.84);
+  background: rgba(var(--paper-deep-rgb), 0.9);
   font-size: 0.62rem;
   letter-spacing: 0.07em;
   text-transform: uppercase;
@@ -2850,9 +2850,10 @@ button:disabled {
   border: 1px solid var(--line-strong);
   color: var(--ink);
   background:
-    linear-gradient(rgba(var(--cream-rgb), 0.89), rgba(var(--cream-rgb), 0.89)),
-    repeating-linear-gradient(0deg, transparent 0 27px, rgba(var(--ink-rgb), 0.05) 27px 28px);
-  box-shadow: 16px 18px 0 rgba(var(--gold-deep-rgb), 0.06), var(--shadow);
+    linear-gradient(rgba(var(--panel-rgb), 0.89), rgba(var(--panel-rgb), 0.89)),
+    repeating-linear-gradient(0deg, transparent 0 27px, rgba(var(--ink-rgb), 0.05) 27px 28px),
+    var(--paper-deep);
+  box-shadow: 16px 18px 0 rgba(var(--gold-deep-rgb), 0.12), var(--shadow);
 }
 
 .reading-sheet::after {
