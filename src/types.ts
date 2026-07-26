@@ -113,6 +113,14 @@ export interface Piece {
   moved: boolean
 }
 
+export interface AutoMove {
+  pieceId: string
+  from: CellCoord
+  to: CellCoord
+  score: number
+  captured?: Piece
+}
+
 export interface CaptureRecord {
   id: string
   turn: number

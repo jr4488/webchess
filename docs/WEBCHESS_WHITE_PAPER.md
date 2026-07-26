@@ -396,24 +396,22 @@ Captures identify items for inspection. The game provides a coherent path and st
 
 The interface supports three modes: the user may move pieces manually, request one guided turn, or enable autoplay. Autoplay begins disabled; once enabled, it repeatedly chooses guided moves until an ending. A manual session therefore reaches the end only if the user continues play or turns autoplay on.
 
-For each guided turn, the player evaluates every currently legal move and chooses the highest-scoring candidate. Equal scores are broken by a deterministic hash derived from the normalized problem, turn number, side, piece, and destination. The cast’s random division seed does **not** affect move choice. Consequently, different casts of the same problem place different semantic material under what is otherwise the same guided trajectory, unless the player makes a move or another part of the board state differs.
+For each guided turn, the player searches ahead with negamax and alpha-beta pruning, extending the search over captures so that no position is scored in the middle of an exchange. Equal scores are broken by a deterministic hash derived from the normalized problem, turn number, side, piece, and destination. The cast’s random division seed does **not** affect move choice. Consequently, different casts of the same problem place different semantic material under what is otherwise the same guided trajectory, unless the player makes a move or another part of the board state differs.
 
-The current heuristic rewards:
+The search accounts for two rules specific to this variant. There is no check: a King is captured outright, and the search treats that as terminal, which is what makes the player defend its own King rather than trading it for material. A side with no legal move passes rather than losing, so the search models a pass and treats a board where neither side can move as drawn.
 
-- capturing material, with overwhelming priority for a King capture;
-- radial progress in the side’s assigned direction;
-- pawn momentum and promotion;
-- convergence toward opposing pieces;
-- direct pressure on the opposing King.
+The position evaluation is deliberately small, because the search rather than the scoring function is expected to do the work:
 
-It penalizes:
+- material, in conventional centipawn values;
+- pawn advance in the side’s assigned direction, accelerating toward promotion;
+- a slight preference for the middle rings, where sliding pieces keep more directions;
+- once a side is clearly ahead, a term for driving the opposing King toward an inner or outer ring and covering its escape squares, since a wrapping board has no corners to trap it in.
 
-- moving a piece where it can be captured immediately;
-- exposing the side’s own King.
+Candidate moves are ordered by static exchange evaluation, which plays out the whole sequence of captures on a square using the cheapest available attacker. This both improves pruning and lets the player distinguish a defended capture from a free one.
 
-The heuristic is **designed** to reduce aimless orbiting, value safety, pursue conflict, and move toward an ending more purposefully than uniform random legal play. The repository does not yet contain a comparative simulation demonstrating that advantage, so it remains a testable engineering claim. The policy also remains semantically blind. The move evaluator does not read the facet, its evidence quality, the hexagram theme, or the user’s domain. “Better move” means “higher under the game heuristic,” not “better analysis of the real problem.”
+Depth is not fixed. The player deepens repeatedly until it has spent a fixed budget of search nodes, keeping the last depth it completed. Counting nodes rather than seconds means the depth chosen depends only on the position, so the same problem replays identically on a slow machine and a fast one. In practice this reaches depth four to six, at roughly two seconds a move, and the search runs in a worker thread so the board stays responsive.
 
-For reference, non-King capture value begins at 12,000 plus 1,000 times the WebChess base piece value; a King capture receives 1,000,000. Radial progress is worth 40 per ring. Enemy-King pressure, hanging-piece risk, own-King exposure, promotion, pawn momentum, and distance to the opposition add secondary terms. These numbers are design choices, not learned or experimentally calibrated parameters.
+The advantage over the previous one-ply scorer is measured rather than asserted: the repository plays full games between the two and requires the search to win or draw all of them, and separately requires a deeper search to finish with more material than a shallower one. The policy nevertheless remains semantically blind. The move evaluator does not read the facet, its evidence quality, the hexagram theme, or the user’s domain. “Better move” means “better under the game evaluation,” not “better analysis of the real problem.”
 
 ### 7.4 Completion
 
@@ -913,7 +911,7 @@ The matrix supports a program of research, not a marketing claim of established 
 **Mitigations:**
 
 - state this limitation in the interface;
-- compare the current heuristic with random play, human play, and semantic move policies;
+- compare the current search policy with random play, human play, and semantic move policies;
 - separate chess-quality scores from facet-relevance scores;
 - never rename the attention weight “importance” or “confidence.”
 
@@ -1106,7 +1104,7 @@ A preregistered factorial or staged trial should include at least:
 7. **Full WebChess:** current complete pipeline.
 8. **Multi-seed WebChess:** several casts are compared before synthesis.
 
-Useful additional ablations include random legal play versus the guided heuristic, human-selected moves versus autoplay, captured-facet-only versus all-facet audit, and animation versus a static event log.
+Useful additional ablations include random legal play versus the guided search, human-selected moves versus autoplay, captured-facet-only versus all-facet audit, and animation versus a static event log.
 
 ### 17.3 Tasks and participants
 
@@ -1379,7 +1377,7 @@ The proper claim is therefore neither mystical nor dismissive:
 | First turn | White |
 | Play modes | Manual moves, one guided turn, or autoplay; autoplay initially off |
 | Special rules | Direct King capture; initial clear two-ring pawn advance; pawn promotion; no check, castling, or en passant |
-| Move policy | Deterministic scored guided move; equal scores use a problem-and-turn-derived hash |
+| Move policy | Alpha-beta search with a capture extension, deepened to a fixed node budget; equal scores use a problem-and-turn-derived hash |
 | Attention weight | Captured role, active role, and middle-ring meeting bonus |
 | Local leading signals | Up to 3 facet groups, with modest recurrence lift |
 | Ending | King capture, mutual immobility, 100 quiet plies, or 256 total plies; a one-sided immobility causes a counted pass |

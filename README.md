@@ -368,5 +368,5 @@ These fixtures cover obvious templates and lexical near-duplication. They are a 
 - Rooks travel radially or around a ring; bishops travel along ring-sector diagonals.
 - Knights, queens, and kings combine the corresponding polar moves.
 - White pawns move inward and Black pawns move outward.
-- The guided players compare material value, immediate recapture risk, King safety, direct pressure, radial progress, and convergence toward opponents. Equal moves use a seeded tie-break, so replaying the current board follows the same guided path.
+- The guided players search several moves ahead, following every exchange to its end before judging a position, and weigh material, King safety, pawn advance, and the squares each piece commands. Search runs in a worker thread and deepens until it has spent a fixed budget of positions, so it thinks for about two seconds a move without freezing the board. Equal moves use a seeded tie-break, and the budget is counted in positions rather than seconds, so replaying the current board follows the same guided path on any machine.
 - Castling and en passant are intentionally omitted in this reflective circular variant.

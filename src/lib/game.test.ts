@@ -28,6 +28,11 @@ function keys(coords: readonly CellCoord[]): string[] {
   return coords.map(coordKey)
 }
 
+function polarGap(left: CellCoord, right: CellCoord): number {
+  const sectorGap = Math.abs(left.sector - right.sector)
+  return Math.abs(left.ring - right.ring) + Math.min(sectorGap, 8 - sectorGap)
+}
+
 describe('polar chess setup', () => {
   it('places Black inside and White outside with standard piece counts', () => {
     const pieces = createInitialPieces()
@@ -162,8 +167,8 @@ describe('moves and captures', () => {
     const other = piece('white-knight', 'white', 'knight', 6, 5)
     const pieces = [attacker, target, other]
 
-    const first = chooseAutoMove(pieces, 'white', 'turn-4')
-    const replay = chooseAutoMove(pieces, 'white', 'turn-4')
+    const first = chooseAutoMove(pieces, 'white', 'turn-4', { depth: 2 })
+    const replay = chooseAutoMove(pieces, 'white', 'turn-4', { depth: 2 })
 
     expect(replay).toEqual(first)
     expect(first).toMatchObject({ pieceId: attacker.id, to: target.position })
@@ -180,6 +185,7 @@ describe('moves and captures', () => {
       [rook, whiteKing, blackQueen, blackKing],
       'white',
       'king-value',
+      { depth: 2 },
     )
 
     expect(choice).toMatchObject({ pieceId: rook.id, to: blackKing.position })
@@ -191,13 +197,13 @@ describe('moves and captures', () => {
     const pawn = piece('black-pawn', 'black', 'pawn', 4, 1)
     const queen = piece('black-queen', 'black', 'queen', 2, 0)
 
-    const choice = chooseAutoMove([rook, pawn, queen], 'white', 'capture-value')
+    const choice = chooseAutoMove([rook, pawn, queen], 'white', 'capture-value', { depth: 2 })
 
     expect(choice).toMatchObject({ pieceId: rook.id, to: queen.position })
     expect(choice?.captured?.kind).toBe('queen')
   })
 
-  it('avoids a high-progress destination where the moving piece can be taken immediately', () => {
+  it('does not park a piece where it can be taken for nothing', () => {
     const rook = piece('white-rook', 'white', 'rook', 6, 0)
     const whiteKing = piece('white-king', 'white', 'king', 7, 4)
     const attackingRook = piece('black-rook', 'black', 'rook', 0, 1)
@@ -207,49 +213,70 @@ describe('moves and captures', () => {
       [rook, whiteKing, attackingRook, blackKing],
       'white',
       'safe-progress',
+      { depth: 3 },
     )
 
-    expect(choice).toMatchObject({ pieceId: rook.id, to: { ring: 1, sector: 0 } })
+    // (0, 0) is covered by the black rook along ring 0 and wins nothing.
     expect(choice?.to).not.toEqual({ ring: 0, sector: 0 })
   })
 
-  it('keeps a blocker in place when moving it would expose its own king', () => {
+  it('does not leave its king on the bishop diagonal a blocker was covering', () => {
     const whiteKing = piece('white-king', 'white', 'king', 5, 1)
     const blockingRook = piece('white-rook', 'white', 'rook', 4, 0)
     const safePawn = piece('white-pawn', 'white', 'pawn', 6, 4)
     const attackingBishop = piece('black-bishop', 'black', 'bishop', 2, 6)
     const blackKing = piece('black-king', 'black', 'king', 0, 3)
+    const board = [whiteKing, blockingRook, safePawn, attackingBishop, blackKing]
 
-    const choice = chooseAutoMove(
-      [whiteKing, blockingRook, safePawn, attackingBishop, blackKing],
-      'white',
-      'protect-king',
-    )
+    const choice = chooseAutoMove(board, 'white', 'protect-king', { depth: 2 })
+    expect(choice).not.toBeNull()
 
-    expect(choice?.pieceId).toBe(safePawn.id)
+    // Holding the block and stepping the king off the diagonal are both fine;
+    // what matters is that Black cannot take the king in reply.
+    const after = applyMove(board, choice!.pieceId, choice!.to, makeProblemParts('protect'), 1)
+    const reply = chooseAutoMove(after.pieces, 'black', 'protect-king/reply', { depth: 2 })
+    expect(reply?.captured?.kind).not.toBe('king')
   })
 
-  it('turns back from the far edge to converge on an opposing piece', () => {
-    const whiteKing = piece('white-king', 'white', 'king', 0, 0)
-    const blackKing = piece('black-king', 'black', 'king', 7, 0)
-
-    const choice = chooseAutoMove([whiteKing, blackKing], 'white', 'edge-convergence')
-
-    expect(choice).toMatchObject({
-      pieceId: whiteKing.id,
-      from: whiteKing.position,
-      to: { ring: 1, sector: 0 },
-    })
-  })
-
-  it('prefers a move that puts direct pressure on the opposing king', () => {
+  it('closes on the opposing king once it is far enough ahead to hunt', () => {
     const rook = piece('white-rook', 'white', 'rook', 4, 0)
     const whiteKing = piece('white-king', 'white', 'king', 7, 7)
     const blackKing = piece('black-king', 'black', 'king', 2, 2)
+    const board = [rook, whiteKing, blackKing]
 
-    const choice = chooseAutoMove([rook, whiteKing, blackKing], 'white', 'king-pressure')
+    const before = polarGap(whiteKing.position, blackKing.position)
+    const choice = chooseAutoMove(board, 'white', 'king-pressure', { depth: 3 })
+    expect(choice).not.toBeNull()
 
-    expect(choice).toMatchObject({ pieceId: rook.id, to: { ring: 2, sector: 0 } })
+    const moved = choice!.pieceId === whiteKing.id ? choice!.to : whiteKing.position
+    const rookAfter = choice!.pieceId === rook.id ? choice!.to : rook.position
+
+    // Either the king walks in or the rook cuts a ring nearer the black king.
+    const closerKing = polarGap(moved, blackKing.position) < before
+    const cuttingRook =
+      Math.abs(rookAfter.ring - blackKing.position.ring) <
+      Math.abs(rook.position.ring - blackKing.position.ring)
+    expect(closerKing || cuttingRook).toBe(true)
+  })
+
+  it('refuses a winning capture that leaves its own king to be taken', () => {
+    // The rook shields the white king from the bishop's diagonal. Taking the
+    // queen wins material for exactly one ply, then loses the game.
+    const whiteKing = piece('white-king', 'white', 'king', 7, 0)
+    const blockingRook = piece('white-rook', 'white', 'rook', 5, 2)
+    const pawn = piece('white-pawn', 'white', 'pawn', 6, 0)
+    const bishop = piece('black-bishop', 'black', 'bishop', 4, 3)
+    const queen = piece('black-queen', 'black', 'queen', 5, 6)
+    const blackKing = piece('black-king', 'black', 'king', 0, 0)
+
+    const choice = chooseAutoMove(
+      [whiteKing, blockingRook, pawn, bishop, queen, blackKing],
+      'white',
+      'exposed-king',
+      { depth: 2 },
+    )
+
+    expect(choice?.captured?.kind).not.toBe('queen')
   })
 
   it('drives an alternating replay from setup toward capture signals', () => {
@@ -259,7 +286,7 @@ describe('moves and captures', () => {
 
     for (let turn = 1; turn <= 24; turn += 1) {
       const side = turn % 2 === 1 ? 'white' : 'black'
-      const move = chooseAutoMove(pieces, side, `replay-${turn}`)
+      const move = chooseAutoMove(pieces, side, `replay-${turn}`, { depth: 2 })
       expect(move).not.toBeNull()
       if (!move) break
 
@@ -272,10 +299,10 @@ describe('moves and captures', () => {
   })
 
   it('returns null when a side has no pieces or legal moves', () => {
-    expect(chooseAutoMove([], 'black', 1)).toBeNull()
+    expect(chooseAutoMove([], 'black', 1, { depth: 2 })).toBeNull()
 
     const trappedPawn = piece('pawn', 'white', 'pawn', 0, 0)
-    expect(chooseAutoMove([trappedPawn], 'white', 1)).toBeNull()
+    expect(chooseAutoMove([trappedPawn], 'white', 1, { depth: 2 })).toBeNull()
   })
 
   it('normalizes sector comparisons around the seam', () => {

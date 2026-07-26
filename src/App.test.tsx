@@ -4,6 +4,27 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 import { makeDivisionAnalysis } from './test/fixtures'
 
+/**
+ * These tests play whole games to check the app's staging, so they use the real
+ * move rules at the shallowest depth. The engine's own strength is covered in
+ * its tests; searching to full depth here would cost minutes per game.
+ */
+vi.mock('./lib/auto-play', async () => {
+  const { findBestMove } = await import('./lib/engine')
+
+  return {
+    createAutoPlayEngine: () => ({
+      chooseMove: (
+        pieces: Parameters<typeof findBestMove>[0],
+        side: Parameters<typeof findBestMove>[1],
+        seed: Parameters<typeof findBestMove>[2],
+      ) => Promise.resolve({ status: 'ok', move: findBestMove(pieces, side, seed, { depth: 1 }) }),
+      reset: () => {},
+      dispose: () => {},
+    }),
+  }
+})
+
 const ACTIVE_SESSION = {
   authenticated: true,
   csrfToken: 'test-csrf-token',

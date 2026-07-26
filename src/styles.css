@@ -2416,6 +2416,23 @@ button:disabled {
   animation: marker-pulse 900ms ease-in-out infinite;
 }
 
+/* The search runs for a second or more, so the marker quickens to show the
+   pause is deliberate rather than a stall. */
+.auto-indicator.is-thinking {
+  border-color: rgba(var(--gold-rgb), 0.55);
+}
+
+.auto-indicator.is-thinking span {
+  background: var(--vermillion);
+  animation-duration: 460ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auto-indicator.is-thinking span {
+    animation: none;
+  }
+}
+
 .play-caption {
   display: flex;
   justify-content: center;

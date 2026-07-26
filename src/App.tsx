@@ -13,7 +13,6 @@ import { requestWebChessAnswer } from './lib/answer'
 import { composeProblemParts, requestProblemDivision } from './lib/division'
 import {
   applyMove,
-  chooseAutoMove,
   coordKey,
   createInitialPieces,
   getGameOutcome,
@@ -21,6 +20,8 @@ import {
   hasLegalMove,
   isSameCoord,
 } from './lib/game'
+import { createAutoPlayEngine } from './lib/auto-play'
+import type { AutoPlayEngine } from './lib/auto-play'
 import { normalizeProblemInput, problemPartAt } from './lib/problem'
 import { PIECE_METAPHORS, synthesizeReading } from './lib/reading'
 import {
@@ -113,6 +114,7 @@ export function App() {
   const [answerPrompt, setAnswerPrompt] = useState('')
   const [answerError, setAnswerError] = useState('')
   const [answerActivity, setAnswerActivity] = useState<ModelActivityState | null>(null)
+  const [thinking, setThinking] = useState(false)
   const sessionRequestRef = useRef<AbortController | null>(null)
   const divisionRequestRef = useRef<AbortController | null>(null)
   const answerRequestRef = useRef<AbortController | null>(null)
@@ -130,11 +132,30 @@ export function App() {
     answerStatusRef.current = answerStatus
   }, [answerStatus, divisionStatus])
 
+  // Built on first use and torn down on unmount. It is deliberately not held in
+  // state: unmounting disposes it, and under StrictMode's remount a disposed
+  // engine would linger and refuse every later search.
+  const engineRef = useRef<AutoPlayEngine | null>(null)
+  const getEngine = useCallback(() => {
+    engineRef.current ??= createAutoPlayEngine()
+    return engineRef.current
+  }, [])
+
+  useEffect(
+    () => () => {
+      engineRef.current?.dispose()
+      engineRef.current = null
+    },
+    [],
+  )
+
   const resetGameState = useCallback(() => {
     divisionRequestRef.current?.abort()
     divisionRequestRef.current = null
     answerRequestRef.current?.abort()
     answerRequestRef.current = null
+    engineRef.current?.reset()
+    setThinking(false)
     setStage('question')
     setProblem('')
     setParts([])
@@ -488,14 +509,28 @@ export function App() {
     [finishGame, outcome, parts, pieces, quietPlies, turn, turnNumber],
   )
 
-  const playOneTurn = useCallback(() => {
+  const playOneTurn = useCallback(async () => {
     if (outcome) return
 
-    const choice = chooseAutoMove(pieces, turn, `${problem}/${turnNumber}`)
+    setThinking(true)
+    const result = await getEngine().chooseMove(pieces, turn, `${problem}/${turnNumber}`, {
+      ply: turnNumber,
+      quietPlies,
+    })
+    if (result.status === 'superseded') return
+
+    setThinking(false)
+
+    if (result.status === 'failed') {
+      setAutoPlaying(false)
+      setNotice(`${result.message} Move a piece yourself to continue.`)
+      return
+    }
+
+    const choice = result.move
     if (!choice) {
       const nextSide = otherSide(turn)
-      const otherSideCanMove = chooseAutoMove(pieces, nextSide, `${problem}/${turnNumber}/reply`)
-      if (!otherSideCanMove) {
+      if (!hasLegalMove(pieces, nextSide)) {
         finishGame({
           winner: null,
           reason: 'no-moves',
@@ -522,12 +557,14 @@ export function App() {
     }
 
     movePiece(choice.pieceId, choice.to)
-  }, [finishGame, movePiece, outcome, pieces, problem, quietPlies, turn, turnNumber])
+  }, [finishGame, getEngine, movePiece, outcome, pieces, problem, quietPlies, turn, turnNumber])
 
   useEffect(() => {
     if (!sessionActive || !autoPlaying || stage !== 'playing' || outcome) return
 
-    const timer = window.setTimeout(playOneTurn, 680)
+    // The search itself takes a moment, so the pause before it only has to keep
+    // a quick reply from erasing the move the viewer just watched land.
+    const timer = window.setTimeout(() => void playOneTurn(), 320)
     return () => window.clearTimeout(timer)
   }, [autoPlaying, outcome, playOneTurn, sessionActive, stage])
 
@@ -724,7 +761,7 @@ export function App() {
   }
 
   const selectPiece = (pieceId: string) => {
-    if (stage !== 'playing' || autoPlaying || gameFinishing) return
+    if (stage !== 'playing' || autoPlaying || gameFinishing || thinking) return
 
     const piece = pieces.find((candidate) => candidate.id === pieceId)
     if (!piece) return
@@ -742,7 +779,7 @@ export function App() {
 
   const selectCell = (cell: CellCoord) => {
     setFocusedCell(cell)
-    if (!selectedPiece || autoPlaying || gameFinishing) return
+    if (!selectedPiece || autoPlaying || gameFinishing || thinking) return
 
     if (legalMoves.some((move) => isSameCoord(move, cell))) {
       movePiece(selectedPiece.id, cell)
@@ -878,11 +915,12 @@ export function App() {
             captureKeys={captureKeys}
             lastMove={lastMove}
             autoPlaying={autoPlaying}
+            thinking={thinking}
             gameFinishing={gameFinishing}
             notice={notice}
             onPieceSelect={selectPiece}
             onCellSelect={selectCell}
-            onStep={playOneTurn}
+            onStep={() => void playOneTurn()}
             onToggleAuto={toggleAutoPlay}
           />
         )}

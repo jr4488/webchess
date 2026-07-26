@@ -31,6 +31,7 @@ interface PlayingStageProps {
   captureKeys: ReadonlySet<string>
   lastMove: LastMove | null
   autoPlaying: boolean
+  thinking: boolean
   gameFinishing: boolean
   notice: string
   onPieceSelect: (pieceId: string) => void
@@ -54,6 +55,7 @@ export function PlayingStage({
   captureKeys,
   lastMove,
   autoPlaying,
+  thinking,
   gameFinishing,
   notice,
   onPieceSelect,
@@ -66,9 +68,11 @@ export function PlayingStage({
   const processMode = gameFinishing ? 'finishing' : autoPlaying ? 'autoplay' : 'paused'
   const processHeadline = gameFinishing
     ? 'The conflict trail is becoming a reading'
-    : autoPlaying
-      ? `${turn === 'white' ? 'Outside evidence' : 'Inside intent'} is choosing move ${turnNumber}`
-      : 'The board is ready for your move'
+    : thinking
+      ? `${turn === 'white' ? 'Outside evidence' : 'Inside intent'} is searching for move ${turnNumber}`
+      : autoPlaying
+        ? `${turn === 'white' ? 'Outside evidence' : 'Inside intent'} is choosing move ${turnNumber}`
+        : 'The board is ready for your move'
   const autoplayStatus = gameFinishing
     ? 'Game complete. The captured signals and ending are becoming an answer.'
     : autoPlaying
@@ -102,13 +106,18 @@ export function PlayingStage({
             highlightedCellKeys={focusedKeys}
             lastMove={lastMove}
             revealParts
-            disabled={autoPlaying || gameFinishing}
+            disabled={autoPlaying || gameFinishing || thinking}
             onPieceSelect={onPieceSelect}
             onCellSelect={onCellSelect}
           />
-          {(autoPlaying || gameFinishing) && (
-            <div className="auto-indicator" aria-hidden="true">
-              <span aria-hidden="true" /> {gameFinishing ? 'Game complete · weaving the final answer' : `Playing to the end · Move ${turnNumber}`}
+          {(autoPlaying || gameFinishing || thinking) && (
+            <div className={`auto-indicator ${thinking && !gameFinishing ? 'is-thinking' : ''}`} aria-hidden="true">
+              <span aria-hidden="true" />{' '}
+              {gameFinishing
+                ? 'Game complete · weaving the final answer'
+                : thinking
+                  ? `${turn === 'white' ? 'White' : 'Black'} is reading the position · Move ${turnNumber}`
+                  : `Playing to the end · Move ${turnNumber}`}
             </div>
           )}
         </div>
@@ -161,8 +170,8 @@ export function PlayingStage({
             {autoPlaying ? <Pause size={17} /> : <Play size={17} />}
             {autoPlaying ? 'Pause auto-play' : 'Auto-play to the end'}
           </button>
-          <button className="step-button" type="button" onClick={onStep} disabled={autoPlaying || gameFinishing}>
-            <StepForward size={17} /> Play one turn
+          <button className="step-button" type="button" onClick={onStep} disabled={autoPlaying || gameFinishing || thinking}>
+            <StepForward size={17} /> {thinking ? 'Searching…' : 'Play one turn'}
           </button>
         </div>
         <p className="play-help">Choose a piece yourself, play one turn, or let WebChess continue to the end.</p>
