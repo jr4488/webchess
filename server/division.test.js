@@ -244,6 +244,32 @@ describe('semantic division service', () => {
     expect(parse).not.toHaveBeenCalled()
   })
 
+  it('continues the authoritative division when public rationale is unavailable', async () => {
+    const { client, parse } = clientReturning()
+    const rationaleFailure = new Error('optional public rationale failed')
+    const create = vi.fn().mockRejectedValue(rationaleFailure)
+    client.responses.create = create
+    const onRationale = vi.fn()
+
+    const result = await divideProblemSemantically(
+      { problem: PROBLEM },
+      {
+        client,
+        onRationale,
+        seedFactory: () => 'fail-soft-seed',
+      },
+    )
+
+    expect(result.status).toBe(200)
+    expect(result.body).toMatchObject({
+      seed: 'fail-soft-seed',
+      facets: expect.arrayContaining([expect.objectContaining({ id: 1 })]),
+    })
+    expect(create).toHaveBeenCalledOnce()
+    expect(parse).toHaveBeenCalledOnce()
+    expect(onRationale).not.toHaveBeenCalled()
+  })
+
   it('returns 503 with the inspectable prompt when the server key is absent', async () => {
     const result = await divideProblemSemantically(
       { problem: PROBLEM },
@@ -279,7 +305,7 @@ describe('semantic division service', () => {
       seedFactory: () => 'route-seed',
     })
     const layer = app.router.stack.find((candidate) => candidate.route?.path === '/api/divide')
-    const handler = layer.route.stack[0].handle
+    const handler = layer.route.stack.at(-1).handle
     const response = {
       status: vi.fn().mockReturnThis(),
       json: vi.fn(),

@@ -150,6 +150,13 @@ WebChess has five principal layers:
 4. **Capture interpretation:** each conflict combines side direction, two piece metaphors, one literal facet, one change lens, and a heuristic attention weight.
 5. **AI synthesis:** a second model receives the bounded game evidence and writes a grounded candidate response.
 
+The server exposes those two model stages through a provider abstraction.
+<code>openai-api</code> is the default direct Responses API adapter;
+<code>codex-chatgpt</code> is an optional local adapter that uses a dedicated
+ChatGPT-authenticated Codex CLI. Selection is explicit and fail-closed: neither
+adapter silently substitutes the other when credentials, allowance, model
+access, readiness, or a request fails.
+
 The human remains outside and above this pipeline. The system transforms and prioritizes material; the user decides whether a mapping is meaningful, supplies real evidence, rejects false associations, and owns any resulting action.
 
 ### 4.1 Formal representation
@@ -218,14 +225,14 @@ where:
 - \(h\) is the independently paired I Ching lens;
 - \(w\) is the heuristic attention weight.
 
-The final synthesis receives the original problem, ending, turn/ply and conflict counts, definitions of both side polarities, grouped captured lenses, and the ordered conflict trail. It does not receive ordinary non-capturing moves, full piece trajectories, uncaptured facets, or hidden model reasoning.
+The final synthesis receives the original question, outcome, turn/ply and conflict totals, definitions of both side polarities, grouped captured facets with recurrence counts and peak attention weights, and the chronological capture trail. It does not receive ordinary non-capturing moves, full piece trajectories, uncaptured facets, or hidden model reasoning.
 
 ### 4.3 Visible work, progress, and animation
 
 WebChess treats animation as a state-communication layer. During division, the interface advances through six named milestones:
 
-1. Sol analyzing 64 candidate facets;
-2. 64 Sol facets received;
+1. configured model analyzing 64 candidate facets;
+2. 64 model facets received;
 3. problem facets independently shuffled;
 4. I Ching lenses independently shuffled;
 5. facets paired with hexagrams;
@@ -241,7 +248,7 @@ These displays communicate public process state. They do not claim to visualize 
 
 ### 5.1 Input contract
 
-The server collapses whitespace and accepts a problem statement from 12 to 240 characters. This short input is not treated as a complete specification. It is the object of analysis. Trusted policy is sent through the Responses API <code>instructions</code> field, while the player’s problem is serialized separately as JSON data in <code>input</code>. That role separation and data delimiting reduce instruction confusion; they do not make arbitrary user text intrinsically safe or eliminate the need to validate output.
+The server collapses whitespace and accepts a problem statement from 12 to 240 characters. This short input is not treated as a complete specification. It is the object of analysis, and the original question is sent to the selected model provider in this first run. The provider abstraction keeps trusted policy separate from serialized user data: API mode uses the Responses API <code>instructions</code> and <code>input</code> fields, while local Codex mode uses a trusted instruction file and passes the delimited user payload on standard input. That role separation and data delimiting reduce instruction confusion; they do not make arbitrary user text intrinsically safe or eliminate the need to validate output.
 
 ### 5.2 The 8 × 8 analytic matrix
 
@@ -275,7 +282,7 @@ This design produces systematic coverage without prescribing the content. “Evi
 
 ### 5.3 Model and structured output
 
-The current default is the OpenAI model ID **gpt-5.6-sol**. The division call uses the Responses API with medium reasoning effort, a maximum of 20,000 output tokens, and Structured Outputs through a Zod schema. OpenAI’s documentation describes [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol) as a reasoning model for complex professional work, and its [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs) explains that schema-constrained responses can adhere to a supplied JSON Schema.
+The current configurable default is the model ID **gpt-5.6-sol**. The division call uses medium reasoning effort and the same JSON Schema across providers. Direct API mode uses Structured Outputs through the Responses API with a maximum of 20,000 output tokens. Local Codex mode runs non-interactively with the schema, but its CLI adapter cannot enforce the Responses API token-ceiling field; WebChess instead bounds the run with strict event parsing, a 2 MiB standard-output cap, and a 120-second timeout. OpenAI’s documentation describes [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol) as a reasoning model for complex professional work, and its [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs) explains that schema-constrained responses can adhere to a supplied JSON Schema.
 
 The schema requires exactly 64 objects, each with an integer ID from 1 through 64 and bounded strings for title, focus, question, and keyword. Application validation then adds invariants that schema shape alone cannot express:
 
@@ -562,7 +569,7 @@ That makes the hexagram a generator of questions rather than an authority over a
 
 After the game reaches an ending, the server applies bounded structural validation and copies only allowed fields into the final prompt:
 
-- the original problem;
+- the original question;
 - the game outcome and completion reason;
 - the total turn/ply count (serialized as <code>total_moves</code>) and total conflicts;
 - explicit definitions of White and Black;
@@ -609,19 +616,27 @@ The final call uses a strict Zod Structured Output with one field for each secti
 
 ### 10.3 Model configuration
 
-The default final model is **gpt-5.6-sol**, configurable on the server. The Responses API call uses pro reasoning mode with medium effort, a 12,000-token ceiling, and storage disabled at the Responses application-state layer. OpenAI’s [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) recommends matching effort and mode to task difficulty and validating the choice with representative evaluations.
+The configurable default final model is **gpt-5.6-sol**. Direct API mode uses pro reasoning mode with medium effort, has a 12,000-output-token ceiling, and disables Responses application-state storage with <code>store: false</code>. Local Codex mode maps the medium reasoning effort but cannot set the API-specific pro mode or enforce its token field; its structured result is bounded by the schema and parser, a 2 MiB standard-output cap, and a 120-second timeout, and it follows the signed-in ChatGPT workspace's data controls. OpenAI’s [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) recommends matching effort and mode to task difficulty and validating the choice with representative evaluations.
 
 The interface displays process milestones and the inspectable prompt, not private chain-of-thought. Reasoning tokens are not user-visible, and they should not be presented as proof of quality. What can be evaluated is the output, its cited evidence, its calibration, its consistency, and the consequences of acting on it.
 
 ### 10.4 Privacy and security boundary
 
-The API key remains server-side and must never be exposed in a browser variable. Paid routes fail closed unless a private access code and session-signing secret meet their minimum lengths. A successful login creates a signed, bounded-lifetime, <code>HttpOnly</code>, <code>SameSite=Strict</code> cookie scoped to <code>/api</code>; production cookies are also <code>Secure</code>. Paid requests require an allowed origin, a valid session, and the matching in-memory CSRF token. Login attempts and per-session model calls are rate-limited, while a process-global daily call ceiling and concurrency gate bound aggregate work. Upstream requests have a 120-second timeout, retries are disabled, and client disconnects propagate cancellation. JSON bodies are limited to 256 KB and errors remain JSON.
+WebChess has an explicit, fail-closed provider abstraction. <code>openai-api</code> is the default and sends requests directly to the Responses API with a server-side project key. <code>codex-chatgpt</code> is an optional, single-owner local mode that invokes the exact audited Codex CLI 0.145.0 with a dedicated ChatGPT login. Credentials must never be exposed in a browser variable, and a provider failure never triggers fallback to the other provider.
 
-Trusted policy and serialized user data use separate Responses API fields, payloads and parsed output are bounded, and both model calls use <code>store: false</code>. The question form discloses both model submissions before play and notes the default abuse-monitoring retention caveat.
+The Codex mode requires Linux, a safely root-owned Bubblewrap installation, the standalone static Linux ELF payload from Codex CLI 0.145.0, a separate absolute canonical <code>WEBCHESS_CODEX_HOME</code> owned by the WebChess user with mode <code>0700</code>, and file-backed credential storage. JavaScript launchers, shell wrappers, and dynamically linked Codex executables are rejected. It refuses the operator's shared <code>~/.codex</code> home and forbids configuration, hooks, rules, project instructions, skills, plugins, and memories in the dedicated home. Each non-interactive run is placed inside a required Bubblewrap filesystem boundary and a root-deny Codex permission profile; shell and browser tools, the separate <code>standalone_web_search</code> feature, collaboration, and normal session persistence are disabled. Native Responses <code>web_search</code> is a separate, explicit opt-in and defaults to disabled. <code>WEBCHESS_CODEX_SHA256</code> can pin the audited executable digest, while <code>WEBCHESS_BWRAP_PATH</code> and <code>WEBCHESS_CA_BUNDLE_PATH</code> support explicit safe system paths. WebChess neither reads nor copies the shared Codex credential. These controls narrow the local subprocess, but they do not make an agent runtime suitable for a public, remote, reverse-proxied, or multi-user service. Codex mode is restricted to one owner and loopback requests; replacement by another process running as that same owner is outside this threat model.
 
-That setting must be described precisely. It disables normal storage of Responses application state; it does not by itself mean that no service-side retention of any kind can occur. OpenAI’s current [API data-controls documentation](https://developers.openai.com/api/docs/guides/your-data) distinguishes model-training use, abuse-monitoring logs, application state, and Zero Data Retention eligibility; abuse-monitoring logs may be retained for up to 30 days by default unless different approved controls apply. Users should not submit secrets or sensitive regulated information unless the deployment’s contractual, organizational, and retention controls have been independently reviewed.
+<code>WEBCHESS_CODEX_WEB_SEARCH</code> accepts <code>disabled</code>, <code>cached</code>, <code>indexed</code>, or <code>live</code>. The tracked example and application default are <code>disabled</code>; a local ignored <code>.env</code> can opt this checkout into another mode. Cached mode uses an OpenAI-maintained pre-indexed cache, indexed mode gates external retrieval through the search index, and live mode fetches current web information. This native search tool does not enable browser control, shell tools, or general internet access for model-generated commands. OpenAI's [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) documents the four modes, while its [web-search guidance](https://learn.chatgpt.com/docs/web-search) says to treat every web result as untrusted input and notes that cached mode lowers but does not remove prompt-injection risk.
 
-The access revocation set, rate limits, daily ceiling, and concurrency gate are process-local. They reset on restart and do not coordinate multiple replicas. A single-process deployment and an OpenAI project budget are therefore the current operational backstops unless those controls are moved to shared storage.
+Enabling search also expands the data boundary: queries derived from the original question and game context may leave the local process, and the query itself may reveal a sensitive subject even when all results are public. Workspace policy can still make search unavailable; when it is available, the native tool does not request approval for each search and may issue multiple queries during either model run. Retrieved pages or snippets can be false, stale, malicious, or crafted to redirect the model. Cached and indexed modes can reduce exposure to arbitrary live pages but cannot remove query-disclosure, misinformation, or prompt-injection risk. Consequential claims still require independent verification against primary sources, and users should avoid secrets or sensitive regulated information.
+
+Paid routes fail closed unless a private access code and session-signing secret meet their minimum lengths. A successful login creates a signed, bounded-lifetime, <code>HttpOnly</code>, <code>SameSite=Strict</code> cookie scoped to <code>/api</code>. API-mode production cookies are also <code>Secure</code>. Direct loopback HTTP in local Codex mode omits <code>Secure</code> for cross-browser compatibility and therefore must never leave its enforced single-owner loopback boundary. Paid requests require an allowed origin, a valid provider-bound session, and the matching in-memory CSRF token. Login attempts and per-session model calls are rate-limited, while a process-global daily call ceiling and provider-specific concurrency gate bound aggregate work: four simultaneous model requests in API mode and one in local Codex mode. Upstream requests have a 120-second timeout, retries are disabled, and client disconnects propagate cancellation. JSON bodies are limited to 256 KB and errors remain JSON.
+
+In direct API mode, trusted policy and serialized user data use separate Responses API fields, payloads and parsed output are bounded, and both model calls use <code>store: false</code>. That setting disables normal storage of Responses application state; it does not by itself mean that no service-side retention of any kind can occur. OpenAI’s current [API data-controls documentation](https://developers.openai.com/api/docs/guides/your-data) distinguishes model-training use, abuse-monitoring logs, application state, and Zero Data Retention eligibility; abuse-monitoring logs may be retained for up to 30 days by default unless different approved controls apply.
+
+Local Codex mode does not use the API project's <code>store: false</code> setting. Its requests are governed by the signed-in ChatGPT workspace's plan, permissions, retention, residency, and data-use controls. ChatGPT/Codex allowance and credits, workspace limits, rate limits, and model availability apply; the mode is not free or unlimited. The question form identifies the active provider and links to its applicable data controls before play. The official [Codex authentication guide](https://learn.chatgpt.com/docs/auth) describes ChatGPT sign-in, and the [ChatGPT data-controls FAQ](https://help.openai.com/en/articles/7730893-data-controls-faq) describes user-facing controls. Users should not submit secrets or sensitive regulated information unless the selected provider's contractual, organizational, and retention controls have been independently reviewed.
+
+Sessions are bound to a random process epoch, so every restart invalidates all prior cookies and requires a new access-code sign-in; a logged-out cookie cannot become valid again after restart. Rate limits, the daily ceiling, and the concurrency gate are process-local. They reset on restart and do not coordinate multiple replicas. A single-process deployment and an OpenAI project budget are therefore the current API-mode operational backstops unless those controls are moved to shared storage. Local Codex mode must remain a single loopback process, and its owner must monitor the signed-in workspace allowance and credits.
 
 ---
 
@@ -984,18 +999,25 @@ The matrix supports a program of research, not a marketing claim of established 
 
 ### 15.12 Privacy, security, and sensitive decisions
 
-**Risk:** Problems may contain personal, strategic, health, legal, or confidential information. Prompt injection may be embedded in user text. Credentials may be exposed if placed client-side.
+**Risk:** Problems may contain personal, strategic, health, legal, or confidential information. Prompt injection may be embedded in user text or retrieved web content. Search queries derived from the problem can disclose its sensitive subject. Credentials may be exposed if placed client-side.
 
 **Mitigations:**
 
-- keep keys server-side;
+- keep API keys and local credentials server-side;
 - bound and validate input and output;
 - separate trusted instructions from user and game data;
 - require signed sessions, same-origin/CSRF checks, rate limits, a global quota,
   bounded concurrency, timeouts, and disconnect cancellation;
 - document retention accurately;
-- use an OpenAI project budget because process-local controls reset and do not
-  coordinate replicas;
+- use an OpenAI project budget in API mode because process-local controls reset
+  and do not coordinate replicas;
+- restrict ChatGPT/Codex mode to one owner on loopback, use its dedicated
+  credential home and required Bubblewrap boundary, and monitor workspace
+  allowance and credits;
+- keep native Codex web search disabled by default, disclose the selected mode,
+  and treat retrieved content as untrusted;
+- minimize search-query disclosure and verify consequential web claims against
+  primary sources;
 - redact or avoid sensitive information;
 - obtain appropriate organizational review;
 - do not deploy as an autonomous high-stakes decision maker.
@@ -1340,10 +1362,11 @@ The proper claim is therefore neither mystical nor dismissive:
 
 | Component | Current setting |
 |---|---|
+| Model provider | <code>openai-api</code> by default; optional <code>codex-chatgpt</code> for single-owner loopback use |
 | Problem length | 12–240 normalized characters |
 | Division model | <code>gpt-5.6-sol</code> by default; server-configurable |
 | Division reasoning | Medium effort |
-| Division token ceiling | 20,000 |
+| Division output bound | API mode: 20,000 output tokens; local Codex: schema/parser, 2 MiB standard-output cap, and 120-second timeout |
 | Division output | Exactly 64 schema-valid facets plus bounded template/overlap checks; semantic distinctness, relevance, and correctness are not proven |
 | Analytic grid | 8 dimensions × 8 movements |
 | Random seed | 16 cryptographically random bytes, encoded as 32 hexadecimal characters |
@@ -1358,14 +1381,15 @@ The proper claim is therefore neither mystical nor dismissive:
 | Attention weight | Captured role, active role, and middle-ring meeting bonus |
 | Local leading signals | Up to 3 facet groups, with modest recurrence lift |
 | Ending | King capture, mutual immobility, 100 quiet plies, or 256 total plies; a one-sided immobility causes a counted pass |
-| Final evidence | Original problem, outcome, counts, polarities, grouped captured facets, and capture trail; no non-capture move log or uncaptured-facet manifest |
+| Final evidence | Original question, outcome, turn/conflict totals, polarities, grouped captured facets with recurrence counts and peak weights, and the capture trail; no non-capture move log or uncaptured-facet manifest |
 | Final model | <code>gpt-5.6-sol</code> by default; server-configurable |
-| Final reasoning | Pro mode, medium effort |
-| Final token ceiling | 12,000 |
+| Final reasoning | API mode: Pro mode with medium effort; local Codex: medium effort mapping only |
+| Final output bound | API mode: 12,000 output tokens; local Codex: schema/parser, 2 MiB standard-output cap, and 120-second timeout |
 | Final answer request | Strict five-section Structured Output, exactly three actions, two-to-three-sentence opening, and 450–750 rendered words |
-| API state setting | <code>store: false</code> for both calls |
+| Codex web search | Native Responses <code>web_search</code>; <code>disabled</code> by default, optionally <code>cached</code>, <code>indexed</code>, or <code>live</code>; shell, browser, and standalone search remain disabled |
+| Provider data controls | API mode sends both calls with <code>store: false</code>; local Codex mode uses signed-in ChatGPT workspace controls |
 | Paid-route access | Signed HttpOnly session, same-origin and CSRF checks |
-| Spend controls | Per-session rate limit, process-global daily quota, and four-call concurrency gate; process-local only |
+| Spend controls | Per-session rate limit and process-global daily quota; concurrency four in API mode and one in local Codex mode; process-local only |
 
 ## Appendix B. Glossary
 
@@ -1486,3 +1510,7 @@ The list includes sources cited directly in the paper and additional primary or 
 85. Wilhelm, R. (Trans.), & Baynes, C. F. (English trans.). (1967). *The I Ching or Book of Changes* (3rd ed.). Princeton University Press. [Berkeley Law Library record](https://lawcat.berkeley.edu/record/541043)
 86. Wouters, P., van Nimwegen, C., van Oostendorp, H., & van der Spek, E. D. (2013). A meta-analysis of the cognitive and motivational effects of serious games. *Journal of Educational Psychology, 105*(2), 249–265. [DOI](https://doi.org/10.1037/a0031311)
 87. Zhang, J., & Norman, D. A. (1994). Representations in distributed cognitive tasks. *Cognitive Science, 18*(1), 87–122. [DOI](https://doi.org/10.1207/s15516709cog1801_3)
+88. OpenAI. (n.d.). Codex authentication. Retrieved July 24, 2026. [Documentation](https://learn.chatgpt.com/docs/auth)
+89. OpenAI. (n.d.). Data Controls FAQ. Retrieved July 24, 2026. [Help Center](https://help.openai.com/en/articles/7730893-data-controls-faq)
+90. OpenAI. (n.d.). Codex configuration reference. Retrieved July 24, 2026. [Documentation](https://learn.chatgpt.com/docs/config-file/config-reference)
+91. OpenAI. (n.d.). Codex web search. Retrieved July 24, 2026. [Documentation](https://learn.chatgpt.com/docs/web-search)

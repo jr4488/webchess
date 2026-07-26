@@ -4,6 +4,7 @@ import {
   randomBytes as secureRandomBytes,
   timingSafeEqual,
 } from 'node:crypto'
+import { isIP } from 'node:net'
 
 export const SESSION_COOKIE_NAME = 'webchess_session'
 export const CSRF_HEADER_NAME = 'x-webchess-csrf'
@@ -13,18 +14,75 @@ function cleanString(value) {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+function parseTrustProxy(value) {
+  if (value === undefined || value === null || value === false) {
+    return { trustProxy: false }
+  }
+  if (typeof value !== 'string') {
+    return {
+      trustProxy: false,
+      problem: 'WEBCHESS_TRUST_PROXY must be false or a comma-separated IP/CIDR allowlist.',
+    }
+  }
+
+  const normalized = value.trim()
+  if (!normalized || normalized.toLowerCase() === 'false') {
+    return { trustProxy: false }
+  }
+
+  const entries = normalized.split(',').map((entry) => entry.trim())
+  for (const entry of entries) {
+    if (!entry) {
+      return {
+        trustProxy: false,
+        problem: 'WEBCHESS_TRUST_PROXY contains an empty proxy address.',
+      }
+    }
+
+    const slash = entry.lastIndexOf('/')
+    const address = slash === -1 ? entry : entry.slice(0, slash)
+    const prefix = slash === -1 ? undefined : entry.slice(slash + 1)
+    const addressFamily = isIP(address)
+    const maximumPrefix = addressFamily === 4 ? 32 : 128
+    const numericPrefix = prefix === undefined ? undefined : Number(prefix)
+    if (
+      addressFamily === 0 ||
+      (prefix !== undefined && (
+        !/^(?:0|[1-9]\d*)$/u.test(prefix) ||
+        numericPrefix === 0 ||
+        numericPrefix > maximumPrefix
+      ))
+    ) {
+      return {
+        trustProxy: false,
+        problem: `WEBCHESS_TRUST_PROXY contains an invalid IP or CIDR: ${entry}`,
+      }
+    }
+  }
+
+  return { trustProxy: entries }
+}
+
 export function resolveSecurityConfig(options = {}) {
   const accessCode = cleanString(options.accessCode ?? process.env.WEBCHESS_ACCESS_CODE)
   const sessionSecret = cleanString(
     options.sessionSecret ?? process.env.WEBCHESS_SESSION_SECRET,
   )
-  const configuredOrigins = options.allowedOrigins ??
-    cleanString(process.env.WEBCHESS_ALLOWED_ORIGINS).split(',')
-  const allowedOrigins = (
-    Array.isArray(configuredOrigins)
-      ? configuredOrigins
-      : String(configuredOrigins).split(',')
+  const trustProxyResult = parseTrustProxy(
+    options.trustProxy ?? process.env.WEBCHESS_TRUST_PROXY,
   )
+  const configuredOrigins = options.allowedOrigins ??
+    cleanString(process.env.WEBCHESS_ALLOWED_ORIGINS)
+  const originEntries = Array.isArray(configuredOrigins)
+    ? configuredOrigins
+    : String(configuredOrigins).split(',')
+  const originsExplicitlyConfigured = Array.isArray(configuredOrigins)
+    ? configuredOrigins.length > 0
+    : cleanString(configuredOrigins).length > 0
+  const hasEmptyConfiguredOrigin =
+    originsExplicitlyConfigured &&
+    originEntries.some((origin) => cleanString(origin).length === 0)
+  const allowedOrigins = originEntries
     .map((origin) => cleanString(origin).replace(/\/+$/, ''))
     .filter(Boolean)
 
@@ -35,9 +93,26 @@ export function resolveSecurityConfig(options = {}) {
   if (Buffer.byteLength(sessionSecret, 'utf8') < 32) {
     problems.push('WEBCHESS_SESSION_SECRET must contain at least 32 bytes.')
   }
+  if (
+    accessCode &&
+    sessionSecret &&
+    constantTimeStringEqual(accessCode, sessionSecret)
+  ) {
+    problems.push('WEBCHESS_ACCESS_CODE and WEBCHESS_SESSION_SECRET must be different.')
+  }
+  if (trustProxyResult.problem) {
+    problems.push(trustProxyResult.problem)
+  }
+  if (hasEmptyConfiguredOrigin) {
+    problems.push('WEBCHESS_ALLOWED_ORIGINS contains an empty origin.')
+  }
   for (const origin of allowedOrigins) {
     try {
-      if (new URL(origin).origin !== origin) {
+      const parsedOrigin = new URL(origin)
+      if (
+        !['http:', 'https:'].includes(parsedOrigin.protocol) ||
+        parsedOrigin.origin !== origin
+      ) {
         problems.push(`WEBCHESS_ALLOWED_ORIGINS contains an invalid origin: ${origin}`)
       }
     } catch {
@@ -49,6 +124,7 @@ export function resolveSecurityConfig(options = {}) {
     accessCode,
     sessionSecret,
     allowedOrigins,
+    trustProxy: trustProxyResult.trustProxy,
     configured: problems.length === 0,
     problems,
   }
@@ -98,11 +174,13 @@ function sign(value, secret) {
   return createHmac('sha256', secret).update(value).digest('base64url')
 }
 
-function validSessionShape(value) {
+function validSessionShape(value, providerId, sessionEpoch) {
   return Boolean(
     value &&
     typeof value === 'object' &&
-    value.v === 1 &&
+    value.v === 3 &&
+    value.provider === providerId &&
+    value.epoch === sessionEpoch &&
     typeof value.sid === 'string' &&
     value.sid.length >= 24 &&
     typeof value.csrf === 'string' &&
@@ -115,8 +193,17 @@ function validSessionShape(value) {
 
 export function createSessionManager(options) {
   const secret = options.secret
+  const providerId = cleanString(options.providerId)
+  if (!providerId) {
+    throw new TypeError('A model provider ID is required for WebChess sessions.')
+  }
   const now = options.now ?? Date.now
   const randomBytes = options.randomBytes ?? secureRandomBytes
+  const sessionEpoch = options.sessionEpoch ??
+    randomBytes(16).toString('base64url')
+  if (typeof sessionEpoch !== 'string' || sessionEpoch.length < 16) {
+    throw new TypeError('A strong session epoch is required.')
+  }
   const ttlMs = options.ttlMs ?? DEFAULT_SESSION_TTL_MS
   const revokedSessions = new Map()
 
@@ -131,7 +218,9 @@ export function createSessionManager(options) {
   function issue() {
     const issuedAt = now()
     const payload = {
-      v: 1,
+      v: 3,
+      provider: providerId,
+      epoch: sessionEpoch,
       sid: randomBytes(24).toString('base64url'),
       csrf: randomBytes(24).toString('base64url'),
       iat: issuedAt,
@@ -164,7 +253,7 @@ export function createSessionManager(options) {
     const timestamp = now()
     pruneRevocations(timestamp)
     if (
-      !validSessionShape(session) ||
+      !validSessionShape(session, providerId, sessionEpoch) ||
       session.iat > timestamp + 60_000 ||
       session.exp <= timestamp ||
       revokedSessions.has(session.sid)
@@ -179,7 +268,7 @@ export function createSessionManager(options) {
   }
 
   function revoke(session) {
-    if (validSessionShape(session)) {
+    if (validSessionShape(session, providerId, sessionEpoch)) {
       revokedSessions.set(session.sid, session.exp)
     }
   }

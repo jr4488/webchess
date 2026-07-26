@@ -4,17 +4,20 @@ import { ArrowRight, CircleAlert, RefreshCw, RotateCcw, Shield, Sparkles } from 
 import { PIECE_GLYPHS } from '../../constants'
 import { cellKey } from '../../lib/board'
 import { PIECE_METAPHORS } from '../../lib/reading'
+import type { SessionProvider } from '../../lib/session'
 import type {
   CaptureRecord,
   AnswerStatus,
   FinalReading,
   GameOutcome,
   LastMove,
+  ModelActivityState,
   Piece,
   ProblemPart,
 } from '../../types'
 import { ProcessGraphic } from '../ProcessGraphic'
 import { RadialBoard } from '../RadialBoard'
+import { ModelActivityPanel } from '../ModelActivityPanel'
 
 const EMPTY_SET = new Set<string>()
 
@@ -182,6 +185,7 @@ function AnswerText({ answer }: { answer: string }) {
 
 interface ReadingStageProps {
   problem: string
+  provider: SessionProvider
   parts: readonly ProblemPart[]
   pieces: readonly Piece[]
   captures: readonly CaptureRecord[]
@@ -193,6 +197,7 @@ interface ReadingStageProps {
   answerModel: string
   answerPrompt: string
   answerError: string
+  answerActivity: ModelActivityState | null
   captureKeys: ReadonlySet<string>
   onRetryAnswer: () => void
   onReplay: () => void
@@ -201,6 +206,7 @@ interface ReadingStageProps {
 
 export function ReadingStage({
   problem,
+  provider,
   parts,
   pieces,
   captures,
@@ -212,6 +218,7 @@ export function ReadingStage({
   answerModel,
   answerPrompt,
   answerError,
+  answerActivity,
   captureKeys,
   onRetryAnswer,
   onReplay,
@@ -223,7 +230,8 @@ export function ReadingStage({
   const strongestKey = strongestCapture ? new Set([cellKey(strongestCapture.cell)]) : EMPTY_SET
   const uniqueCapturedFacetCount = new Set(captures.map((capture) => capture.part.id)).size
   const answerServiceName = answerModel.trim()
-  const answerServiceLabel = answerServiceName || 'the answer service'
+  const answerModelLabel = answerServiceName || provider.model
+  const answerServiceLabel = `${answerModelLabel} via ${provider.label}`
   const winnerName = outcome.winner === 'white' ? 'White' : outcome.winner === 'black' ? 'Black' : null
   const capturedSideName = outcome.terminalCapture?.captured.side === 'white' ? 'White' : 'Black'
   const attackerName = outcome.terminalCapture?.attacker.side === 'white' ? 'White' : 'Black'
@@ -275,25 +283,36 @@ export function ReadingStage({
         <section className={`ai-answer-card is-${answerStatus}`} aria-busy={answerStatus === 'loading'}>
           <p className="sr-only" role="status" aria-live="polite">
             {answerStatus === 'loading'
-              ? answerServiceName
-                ? `${answerServiceName} received the captured signals. The final answer is being composed.`
-                : 'The answer service received the captured signals. The final answer is being composed.'
+              ? `${answerServiceLabel} received the captured signals. The final answer is being composed.`
               : answerStatus === 'error'
                 ? 'The final answer could not be reached.'
                 : answerStatus === 'success'
                   ? 'The final answer is ready.'
                   : ''}
           </p>
+          {answerActivity && answerStatus !== 'error' && (
+            <ModelActivityPanel
+              activity={answerActivity}
+              modelLabel={answerModelLabel}
+              providerLabel={provider.label}
+              summary={`Weighing ${captures.length} captured signals across ${outcome.completedTurn} moves, then composing the five checked answer sections.`}
+              metrics={[
+                { label: 'Captured signals', value: captures.length },
+                { label: 'Unique facets', value: uniqueCapturedFacetCount },
+                { label: 'Moves', value: outcome.completedTurn },
+              ]}
+            />
+          )}
           {answerStatus === 'loading' && (
             <div className="answer-workspace">
               <div>
                 <small>Asking {answerServiceLabel}</small>
                 <h2>The captured signals have become a prompt.</h2>
-                <p>Only the captured facet signals, their I Ching lenses, piece metaphors, and the game outcome were assembled and sent. The answer service is composing a practical response.</p>
+                <p>The original question, outcome, game totals and polarities, plus the captured facets, I Ching lenses, recurrence, weights, piece metaphors, and trail were assembled and sent. Uncaptured facets were not. The model is composing a practical response.</p>
               </div>
               <ProcessGraphic
                 mode="answering"
-                headline={`${answerServiceName || 'The answer service'} is composing the final answer`}
+                headline={`${answerServiceLabel} is composing the final answer`}
                 active
                 activeIndices={activeCaptureIndices}
                 metrics={[
@@ -310,15 +329,15 @@ export function ReadingStage({
             <>
               <CircleAlert size={24} />
               <div>
-                <small>The board reading is ready</small>
-                <h2>The GPT answer could not be reached.</h2>
+                <small>The board reading is ready · {answerServiceLabel}</small>
+                <h2>The model answer could not be reached.</h2>
                 <p>{answerError}</p>
                 <button className="secondary-button answer-retry" type="button" onClick={onRetryAnswer}>
                   <RefreshCw size={15} /> Try the answer again
                 </button>
                 {answerPrompt && (
                   <details className="answer-prompt">
-                    <summary>See the prompt waiting to be sent</summary>
+                    <summary>See the prompt used for this attempt</summary>
                     <pre>{answerPrompt}</pre>
                   </details>
                 )}
@@ -328,7 +347,7 @@ export function ReadingStage({
 
           {answerStatus === 'success' && (
             <div className="ai-answer-result">
-              <small>{answerServiceName || 'Answer service'} · answer from {captures.length} captured signals</small>
+              <small>{answerModelLabel} · {provider.label} · answer from {captures.length} captured signals</small>
               <h2>A direction from the captured signals</h2>
               <AnswerText answer={answer} />
               {answerPrompt && (

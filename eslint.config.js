@@ -7,7 +7,7 @@ import tseslint from 'typescript-eslint'
 export default tseslint.config(
   { ignores: ['coverage', 'dist'] },
   {
-    files: ['server.mjs', 'server/**/*.{js,mjs}'],
+    files: ['*.{js,mjs}', 'server/**/*.{js,mjs}'],
     extends: [js.configs.recommended],
     languageOptions: {
       ecmaVersion: 2023,

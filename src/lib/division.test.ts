@@ -112,4 +112,41 @@ describe('semantic problem division', () => {
       message: 'Your access session has expired.',
     })
   })
+
+  it('requires a fresh session for a specifically identified stale CSRF token', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: 'The request security token is invalid.',
+      code: 'csrf',
+    }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    })))
+
+    await expect(requestProblemDivision(
+      'How should this plan change?',
+      undefined,
+      'stale-token',
+    )).rejects.toMatchObject({
+      name: 'SessionRequiredError',
+      message: 'The request security token is invalid.',
+    })
+  })
+
+  it('does not mistake an origin rejection for an expired session', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: 'Request origin is not allowed.',
+    }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    })))
+
+    await expect(requestProblemDivision(
+      'How should this plan change?',
+      undefined,
+      'csrf-token',
+    )).rejects.toMatchObject({
+      name: 'Error',
+      message: 'Request origin is not allowed.',
+    })
+  })
 })

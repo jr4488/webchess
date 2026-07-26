@@ -28,7 +28,7 @@ const METHOD_STEPS = [
     number: '02',
     label: 'Divide it',
     title: 'AI proposes a 64-cell perspective map.',
-    body: 'Sol works across eight practical dimensions and eight movements of change. Bounded checks reject obvious numbered templates and widespread near-duplicates; they do not prove every facet is relevant or distinct.',
+    body: 'The configured model works across eight practical dimensions and eight movements of change. Bounded checks reject obvious numbered templates and widespread near-duplicates; they do not prove every facet is relevant or distinct.',
   },
   {
     number: '03',
@@ -40,7 +40,7 @@ const METHOD_STEPS = [
     number: '04',
     label: 'Read it',
     title: 'AI turns the trail into an answer.',
-    body: 'Sol receives the original problem, ending, capture trail, recurring facets, attention weights, piece metaphors, and change lenses—then proposes practical next moves.',
+    body: 'The configured model receives the original problem, ending, capture trail, recurring facets, attention weights, piece metaphors, and change lenses—then proposes practical next moves.',
   },
 ] as const
 
@@ -212,8 +212,9 @@ export function HomePage() {
               <p className="system-index">03 · AI</p>
               <h3>Analysis happens before and after play.</h3>
               <p>
-                GPT-5.6-sol first proposes 64 bounded perspectives on the problem. After the game,
-                it receives the capture trail and produces an answer with concrete next moves.
+                The configured model first proposes 64 bounded perspectives on the problem. After
+                the game, it receives the capture trail and produces an answer with concrete next
+                moves.
               </p>
               <small>AI expands the map, then synthesizes the trace.</small>
             </article>
@@ -269,9 +270,9 @@ export function HomePage() {
             <p className="eyebrow"><span /> Bounded decomposition</p>
             <h2 id="facets-title">Eight dimensions × eight movements.</h2>
             <p>
-              Sol must address every intersection. Deterministic checks can reject obvious numbered
-              scaffolds and widespread near-duplicate wording, but cannot guarantee semantic
-              distinctness, relevance, or correctness.
+              The configured model must address every intersection. Deterministic checks can reject
+              obvious numbered scaffolds and widespread near-duplicate wording, but cannot guarantee
+              semantic distinctness, relevance, or correctness.
             </p>
           </div>
 
@@ -413,10 +414,10 @@ export function HomePage() {
           <div className="transparency-card">
             <div>
               <p className="eyebrow"><span /> What AI actually sees</p>
-              <h2 id="transparency-title">Two calls. Two distinct jobs.</h2>
+              <h2 id="transparency-title">Two model passes. Two distinct jobs.</h2>
             </div>
             <ol>
-              <li><span>01</span><div><strong>Before play</strong><p>The original problem is sent to Sol for a structured 64-facet analysis using medium reasoning.</p></div></li>
+              <li><span>01</span><div><strong>Before play</strong><p>The original problem is sent to the configured model for a structured 64-facet analysis using medium reasoning.</p></div></li>
               <li><span>02</span><div><strong>After the ending</strong><p>The problem, outcome, capture trail, weights, metaphors, and captured lenses become the final answer prompt.</p></div></li>
             </ol>
             <p className="transparency-card__note">
@@ -442,7 +443,7 @@ export function HomePage() {
             </details>
             <details>
               <summary>Are all 64 facets sent into the final answer?</summary>
-              <p>No. The full map guides the board, but the final AI receives only the captured facets and their lenses, plus recurrence, weights, the capture trail, and ending. Uncaptured facets remain available for inspection during play.</p>
+              <p>No. The full map guides the board, but the final model receives the original problem, outcome and game totals, side polarities, captured facets and lenses, recurrence, weights, and the capture trail. Uncaptured facets remain available for inspection during play and are not sent in that final request.</p>
             </details>
             <details>
               <summary>How does every game finish?</summary>

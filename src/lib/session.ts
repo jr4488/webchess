@@ -1,7 +1,23 @@
+export type SessionProviderId = 'openai-api' | 'codex-chatgpt' | 'ollama'
+export type SessionProviderBilling =
+  'platform-api' | 'chatgpt-workspace' | 'local-compute'
+export type SessionProviderWebSearch = 'disabled' | 'cached' | 'indexed' | 'live'
+
+export interface SessionProvider {
+  id: SessionProviderId
+  label: string
+  billing: SessionProviderBilling
+  localOnly: boolean
+  dataControlsUrl: string
+  model: string
+  webSearch: SessionProviderWebSearch
+}
+
 export interface AuthenticatedSession {
   authenticated: true
   csrfToken: string
   expiresAt: string
+  provider: SessionProvider
 }
 
 export interface AnonymousSession {
@@ -35,6 +51,82 @@ export function isSessionRequiredError(error: unknown): error is SessionRequired
   )
 }
 
+function parseProvider(value: unknown): SessionProvider | null {
+  if (!value || typeof value !== 'object') return null
+
+  const provider = value as Record<string, unknown>
+  const id = provider.id
+  const billing = provider.billing
+  const label = provider.label
+  const localOnly = provider.localOnly
+  const dataControlsUrl = provider.dataControlsUrl
+  const model = provider.model
+  const webSearch = provider.webSearch
+
+  if (
+    (id !== 'openai-api' && id !== 'codex-chatgpt' && id !== 'ollama') ||
+    (
+      billing !== 'platform-api' &&
+      billing !== 'chatgpt-workspace' &&
+      billing !== 'local-compute'
+    ) ||
+    (
+      webSearch !== 'disabled' &&
+      webSearch !== 'cached' &&
+      webSearch !== 'indexed' &&
+      webSearch !== 'live'
+    ) ||
+    typeof label !== 'string' ||
+    label.trim().length === 0 ||
+    typeof localOnly !== 'boolean' ||
+    typeof dataControlsUrl !== 'string' ||
+    typeof model !== 'string' ||
+    model.trim().length === 0
+  ) {
+    return null
+  }
+
+  const expectedBilling =
+    id === 'openai-api'
+      ? 'platform-api'
+      : id === 'codex-chatgpt'
+        ? 'chatgpt-workspace'
+        : 'local-compute'
+
+  let parsedDataControlsUrl: URL
+  try {
+    parsedDataControlsUrl = new URL(dataControlsUrl)
+  } catch {
+    return null
+  }
+  const validDataControlsUrl =
+    parsedDataControlsUrl.protocol === 'https:' &&
+    parsedDataControlsUrl.username.length === 0 &&
+    parsedDataControlsUrl.password.length === 0
+
+  if (
+    billing !== expectedBilling ||
+    (id === 'openai-api' && localOnly) ||
+    (id === 'openai-api' && webSearch !== 'disabled') ||
+    (id === 'codex-chatgpt' && !localOnly) ||
+    (id === 'ollama' && !localOnly) ||
+    (id === 'ollama' && webSearch !== 'disabled') ||
+    !validDataControlsUrl
+  ) {
+    return null
+  }
+
+  return {
+    id,
+    label: label.trim(),
+    billing,
+    localOnly,
+    dataControlsUrl,
+    model: model.trim(),
+    webSearch,
+  }
+}
+
 function parseSession(value: unknown): WebChessSession {
   if (!value || typeof value !== 'object') {
     throw new Error('The access service returned an incomplete response.')
@@ -45,12 +137,14 @@ function parseSession(value: unknown): WebChessSession {
     return { authenticated: false }
   }
 
+  const provider = parseProvider(payload.provider)
   if (
     payload.authenticated !== true ||
     typeof payload.csrfToken !== 'string' ||
     payload.csrfToken.length === 0 ||
     typeof payload.expiresAt !== 'string' ||
-    !Number.isFinite(Date.parse(payload.expiresAt))
+    !Number.isFinite(Date.parse(payload.expiresAt)) ||
+    !provider
   ) {
     throw new Error('The access service returned an incomplete session.')
   }
@@ -59,6 +153,7 @@ function parseSession(value: unknown): WebChessSession {
     authenticated: true,
     csrfToken: payload.csrfToken,
     expiresAt: payload.expiresAt,
+    provider,
   }
 }
 

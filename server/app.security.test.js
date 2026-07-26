@@ -6,7 +6,10 @@ import { once } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { DIVISION_QUALITY_FIXTURES } from '../evals/division-quality-fixtures.mjs'
-import { createWebChessApp } from './app.mjs'
+import {
+  createWebChessApp,
+  resolveUpstreamTimeoutMs,
+} from './app.mjs'
 
 const ACCESS_CODE = 'correct horse battery staple'
 const SESSION_SECRET = 'a-test-only-session-secret-with-at-least-32-bytes'
@@ -114,12 +117,36 @@ async function serve(options = {}) {
   const { port } = server.address()
   const origin = `http://127.0.0.1:${port}`
   return {
+    app,
     origin,
     server,
     async request(path, init = {}) {
       return fetch(`${origin}${path}`, init)
     },
   }
+}
+
+function rawJsonRequest(service, path, headers, value) {
+  const body = JSON.stringify(value)
+  return new Promise((resolve, reject) => {
+    const request = http.request(new URL(path, service.origin), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        ...headers,
+      },
+    }, (response) => {
+      const chunks = []
+      response.on('data', (chunk) => chunks.push(chunk))
+      response.once('end', () => resolve({
+        body: JSON.parse(Buffer.concat(chunks).toString('utf8')),
+        status: response.statusCode,
+      }))
+    })
+    request.once('error', reject)
+    request.end(body)
+  })
 }
 
 async function stop(server) {
@@ -175,6 +202,7 @@ function configuredOptions(overrides = {}) {
     accessCode: ACCESS_CODE,
     sessionSecret: SESSION_SECRET,
     secureCookies: false,
+    environment: {},
     client,
     ...overrides,
   }
@@ -188,6 +216,9 @@ describe('WebChess API security boundary', () => {
     const health = await service.request('/api/health')
     expect(health.status).toBe(200)
     expect(await health.json()).toEqual({ ok: true })
+    expect(health.headers.get('content-security-policy')).toBe("frame-ancestors 'none'")
+    expect(health.headers.get('x-frame-options')).toBe('DENY')
+    expect(health.headers.get('x-content-type-options')).toBe('nosniff')
 
     const ready = await service.request('/api/ready')
     expect(ready.status).toBe(503)
@@ -298,6 +329,10 @@ describe('WebChess API security boundary', () => {
       body: JSON.stringify({ problem: PROBLEM }),
     })
     expect(wrongCsrf.status).toBe(403)
+    expect(await wrongCsrf.json()).toEqual({
+      error: 'The request security token is invalid.',
+      code: 'csrf',
+    })
 
     const freshSession = await login(service)
     const crossedCsrf = await service.request('/api/divide', {
@@ -311,6 +346,10 @@ describe('WebChess API security boundary', () => {
       body: JSON.stringify({ problem: PROBLEM }),
     })
     expect(crossedCsrf.status).toBe(403)
+    expect(await crossedCsrf.json()).toEqual({
+      error: 'The request security token is invalid.',
+      code: 'csrf',
+    })
 
     const accepted = await divide(service, session)
     expect(accepted.status).toBe(200)
@@ -359,6 +398,26 @@ describe('WebChess API security boundary', () => {
     expect(session.setCookie).toContain('Secure')
   })
 
+  it('keeps direct loopback Codex cookies usable in browsers during local production mode', async () => {
+    const { client } = clientWithParse()
+    const service = await serve({
+      accessCode: ACCESS_CODE,
+      sessionSecret: SESSION_SECRET,
+      environment: {
+        NODE_ENV: 'production',
+        WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt',
+      },
+      host: '127.0.0.1',
+      client,
+    })
+
+    const session = await login(service)
+    expect(session.response.status).toBe(200)
+    expect(session.setCookie).toContain('HttpOnly')
+    expect(session.setCookie).toContain('SameSite=Strict')
+    expect(session.setCookie).not.toContain('Secure')
+  })
+
   it('rate-limits access attempts and model calls with JSON retry metadata', async () => {
     const { client } = clientWithParse()
     const service = await serve(configuredOptions({
@@ -387,6 +446,91 @@ describe('WebChess API security boundary', () => {
     expect(limited.status).toBe(429)
     expect(limited.headers.get('retry-after')).toBe('60')
     expect(await limited.json()).toMatchObject({ retryAfter: 60 })
+  })
+
+  it('does not reserve model capacity for an unknown API subpath', async () => {
+    const { client, parse } = clientWithParse()
+    const service = await serve(configuredOptions({
+      client,
+      apiRateLimit: { limit: 1, windowMs: 60_000 },
+      globalQuota: { limit: 1, windowMs: 60_000 },
+      maxConcurrentRequests: 1,
+    }))
+    const session = await login(service)
+
+    const unknown = await service.request('/api/divide/extra', {
+      method: 'POST',
+      headers: paidHeaders(service, session),
+      body: JSON.stringify({ problem: PROBLEM }),
+    })
+    expect(unknown.status).toBe(404)
+    expect(parse).not.toHaveBeenCalled()
+
+    expect((await divide(service, session)).status).toBe(200)
+    expect(parse).toHaveBeenCalledOnce()
+  })
+
+  it('applies division limits to the accepted trailing-slash route', async () => {
+    const { client, parse } = clientWithParse()
+    const service = await serve(configuredOptions({
+      client,
+      apiRateLimit: { limit: 1, windowMs: 60_000 },
+    }))
+    const session = await login(service)
+
+    const first = await service.request('/api/divide/', {
+      method: 'POST',
+      headers: paidHeaders(service, session),
+      body: JSON.stringify({ problem: PROBLEM }),
+    })
+    expect(first.status).toBe(200)
+
+    expect((await divide(service, session)).status).toBe(429)
+    expect(parse).toHaveBeenCalledOnce()
+  })
+
+  it('ignores forwarded client addresses unless a proxy source is trusted', async () => {
+    const service = await serve(configuredOptions({
+      loginRateLimit: { limit: 1, windowMs: 60_000 },
+    }))
+
+    const first = await rawJsonRequest(service, '/api/session', {
+      Origin: service.origin,
+      'X-Forwarded-For': '198.51.100.10',
+    }, { accessCode: 'wrong-access-code-one' })
+    const second = await rawJsonRequest(service, '/api/session', {
+      Origin: service.origin,
+      'X-Forwarded-For': '198.51.100.11',
+    }, { accessCode: 'wrong-access-code-two' })
+
+    expect(first.status).toBe(401)
+    expect(second.status).toBe(429)
+  })
+
+  it('rate-limits by the first untrusted hop behind an allowlisted proxy', async () => {
+    const service = await serve(configuredOptions({
+      environment: {
+        WEBCHESS_TRUST_PROXY: '127.0.0.1/32',
+      },
+      loginRateLimit: { limit: 1, windowMs: 60_000 },
+    }))
+
+    const first = await rawJsonRequest(service, '/api/session', {
+      Origin: service.origin,
+      'X-Forwarded-For': '198.51.100.10, 203.0.113.20',
+    }, { accessCode: 'wrong-access-code-one' })
+    const spoofedLeftmost = await rawJsonRequest(service, '/api/session', {
+      Origin: service.origin,
+      'X-Forwarded-For': '198.51.100.11, 203.0.113.20',
+    }, { accessCode: 'wrong-access-code-two' })
+    const differentClientHop = await rawJsonRequest(service, '/api/session', {
+      Origin: service.origin,
+      'X-Forwarded-For': '198.51.100.12, 203.0.113.21',
+    }, { accessCode: 'wrong-access-code-three' })
+
+    expect(first.status).toBe(401)
+    expect(spoofedLeftmost.status).toBe(429)
+    expect(differentClientHop.status).toBe(401)
   })
 
   it('does not let a fresh session reset the process-global inference quota', async () => {
@@ -419,7 +563,9 @@ describe('WebChess API security boundary', () => {
     const { client } = clientWithParse(parse)
     const service = await serve(configuredOptions({
       client,
-      maxConcurrentRequests: 1,
+      environment: { WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt' },
+      host: '127.0.0.1',
+      maxConcurrentRequests: 9,
     }))
     const session = await login(service)
 
@@ -539,6 +685,33 @@ describe('WebChess API security boundary', () => {
       error: 'Request body must be valid JSON.',
     })
 
+    const unsupportedCharset = await service.request('/api/session', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=koi8-r',
+        Origin: service.origin,
+      },
+      body: JSON.stringify({ accessCode: ACCESS_CODE }),
+    })
+    expect(unsupportedCharset.status).toBe(415)
+    expect(await unsupportedCharset.json()).toEqual({
+      error: 'Request body encoding is not supported.',
+    })
+
+    const malformedCompression = await service.request('/api/session', {
+      method: 'POST',
+      headers: {
+        'Content-Encoding': 'br',
+        'Content-Type': 'application/json',
+        Origin: service.origin,
+      },
+      body: JSON.stringify({ accessCode: ACCESS_CODE }),
+    })
+    expect(malformedCompression.status).toBe(400)
+    expect(await malformedCompression.json()).toEqual({
+      error: 'Compressed request body could not be read.',
+    })
+
     const oversized = await service.request('/api/session', {
       method: 'POST',
       headers: {
@@ -579,5 +752,584 @@ describe('WebChess API security boundary', () => {
       answer: expect.stringContaining('Choose one reversible step now.'),
       model: 'gpt-5.6-sol',
     })
+  })
+})
+
+describe('model provider selection', () => {
+  it.each([
+    [undefined, 120_000],
+    ['600000', 600_000],
+    [25, 25],
+  ])('normalizes upstream timeout %j to %d ms', (value, expected) => {
+    expect(resolveUpstreamTimeoutMs(value)).toBe(expected)
+  })
+
+  it.each(['', 'slow', '0', '-1', '3600001', 1.5])(
+    'rejects invalid upstream timeout %j',
+    (value) => {
+      expect(() => resolveUpstreamTimeoutMs(value)).toThrow(
+        /WEBCHESS_UPSTREAM_TIMEOUT_MS/u,
+      )
+    },
+  )
+
+  it('keeps OpenAI API as the default and publishes only public provider metadata', async () => {
+    const service = await serve(configuredOptions())
+    const ready = await service.request('/api/ready')
+    const readyBody = await ready.json()
+
+    expect(ready.status).toBe(200)
+    expect(readyBody.provider).toMatchObject({
+      id: 'openai-api',
+      label: expect.any(String),
+      billing: 'platform-api',
+      localOnly: false,
+      dataControlsUrl: expect.stringMatching(/^https:\/\//u),
+      model: 'gpt-5.6-sol',
+      webSearch: 'disabled',
+    })
+    expect(Object.keys(readyBody.provider).sort()).toEqual([
+      'billing',
+      'dataControlsUrl',
+      'id',
+      'label',
+      'localOnly',
+      'model',
+      'webSearch',
+    ])
+    expect(service.app.locals.webChessProvider).toEqual(readyBody.provider)
+
+    const session = await login(service)
+    expect(session.body.provider).toEqual(readyBody.provider)
+  })
+
+  it('constructs the default OpenAI API client with bounded transport settings', async () => {
+    const { client } = clientWithParse()
+    const createOpenAIClient = vi.fn().mockReturnValue(client)
+    const service = await serve({
+      accessCode: ACCESS_CODE,
+      sessionSecret: SESSION_SECRET,
+      secureCookies: false,
+      environment: { OPENAI_API_KEY: 'server-side-test-key' },
+      createOpenAIClient,
+    })
+
+    expect(createOpenAIClient).toHaveBeenCalledOnce()
+    expect(createOpenAIClient).toHaveBeenCalledWith({
+      apiKey: 'server-side-test-key',
+      maxRetries: 0,
+      timeout: 120_000,
+    })
+    expect((await service.request('/api/ready')).status).toBe(200)
+  })
+
+  it('constructs a loopback Ollama client with local-only provenance', async () => {
+    const { client } = clientWithParse()
+    const createOllamaClient = vi.fn().mockReturnValue(client)
+    const service = await serve({
+      accessCode: ACCESS_CODE,
+      sessionSecret: SESSION_SECRET,
+      environment: {
+        WEBCHESS_MODEL_PROVIDER: 'ollama',
+        WEBCHESS_OLLAMA_BASE_URL: 'http://127.0.0.1:11434/v1',
+        WEBCHESS_UPSTREAM_TIMEOUT_MS: '600000',
+        OPENAI_MODEL: 'qwen3.6:27b',
+      },
+      host: '127.0.0.1',
+      createOllamaClient,
+    })
+
+    expect(createOllamaClient).toHaveBeenCalledOnce()
+    expect(createOllamaClient).toHaveBeenCalledWith({
+      baseURL: 'http://127.0.0.1:11434/v1',
+      maxRetries: 0,
+      timeout: 600_000,
+    })
+
+    const ready = await service.request('/api/ready')
+    const body = await ready.json()
+    expect(ready.status).toBe(200)
+    expect(body.provider).toMatchObject({
+      id: 'ollama',
+      label: 'Ollama',
+      billing: 'local-compute',
+      localOnly: true,
+      model: 'qwen3.6:27b',
+      webSearch: 'disabled',
+    })
+
+    const session = await login(service)
+    expect(session.response.status).toBe(200)
+    expect(session.setCookie).not.toMatch(/;\s*Secure(?:;|$)/iu)
+    expect(session.body.provider).toEqual(body.provider)
+  })
+
+  it('uses an injected ChatGPT Codex client without probing or falling back', async () => {
+    const { client } = clientWithParse()
+    const probe = vi.fn(() => {
+      throw new Error('The probe must not run for an injected client.')
+    })
+    const service = await serve(configuredOptions({
+      client,
+      environment: {
+        WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt',
+        WEBCHESS_CODEX_WEB_SEARCH: 'live',
+        OPENAI_API_KEY: 'must-be-ignored',
+      },
+      host: '127.0.0.1',
+      probeCodexChatGpt: probe,
+    }))
+
+    const ready = await service.request('/api/ready')
+    const body = await ready.json()
+    expect(ready.status).toBe(200)
+    expect(body.provider).toMatchObject({
+      id: 'codex-chatgpt',
+      billing: 'chatgpt-workspace',
+      localOnly: true,
+      model: 'gpt-5.6-sol',
+      webSearch: 'live',
+    })
+    expect(probe).not.toHaveBeenCalled()
+
+    const session = await login(service)
+    expect(session.body.provider).toEqual(body.provider)
+    expect(session.body.provider).not.toHaveProperty('identity')
+    expect(session.body.provider).not.toHaveProperty('executable')
+    expect(session.body.provider).not.toHaveProperty('version')
+  })
+
+  it('requires a new sign-in after the configured provider changes', async () => {
+    const apiService = await serve(configuredOptions())
+    const apiSession = await login(apiService)
+    expect(apiSession.response.status).toBe(200)
+
+    const codexService = await serve(configuredOptions({
+      environment: { WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt' },
+      host: '127.0.0.1',
+    }))
+    const crossedSession = await codexService.request('/api/session', {
+      headers: { Cookie: apiSession.cookie },
+    })
+    expect(crossedSession.status).toBe(200)
+    expect(await crossedSession.json()).toEqual({ authenticated: false })
+
+    const crossedPaidRoute = await codexService.request('/api/divide', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: apiSession.cookie,
+        Origin: codexService.origin,
+        'X-WebChess-CSRF': apiSession.body.csrfToken,
+      },
+      body: JSON.stringify({ problem: PROBLEM }),
+    })
+    expect(crossedPaidRoute.status).toBe(401)
+
+    const codexSession = await login(codexService)
+    expect(codexSession.response.status).toBe(200)
+    expect(codexSession.body.provider).toMatchObject({ id: 'codex-chatgpt' })
+  })
+
+  it('probes and creates the ChatGPT adapter synchronously when it is ready', async () => {
+    const { client } = clientWithParse()
+    const environment = {
+      WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt',
+      WEBCHESS_CODEX_WEB_SEARCH: 'live',
+      WEBCHESS_BWRAP_PATH: '/configured/bwrap',
+      WEBCHESS_CA_BUNDLE_PATH: '/configured/ca-bundle.crt',
+      WEBCHESS_CODEX_PATH: '/configured/codex',
+      WEBCHESS_CODEX_HOME: '/configured/codex-home',
+      WEBCHESS_CODEX_SHA256: 'a'.repeat(64),
+      OPENAI_API_KEY: 'must-not-be-used-as-a-fallback',
+    }
+    const probe = vi.fn().mockReturnValue({
+      ok: true,
+      bwrapPath: '/resolved/bwrap',
+      caBundlePath: '/resolved/ca-bundle.crt',
+      executable: '/resolved/codex',
+      codexHome: '/resolved/codex-home',
+      codexSha256: 'b'.repeat(64),
+      hostsPath: '/resolved/hosts',
+      resolverPath: '/resolved/resolv.conf',
+      version: 'codex-cli test',
+    })
+    const createClient = vi.fn().mockReturnValue(client)
+    const service = await serve({
+      accessCode: ACCESS_CODE,
+      sessionSecret: SESSION_SECRET,
+      secureCookies: false,
+      environment,
+      host: 'localhost',
+      hostsPath: '/configured/hosts',
+      resolverPath: '/configured/resolv.conf',
+      probeCodexChatGpt: probe,
+      createCodexChatGptClient: createClient,
+    })
+
+    expect(probe).toHaveBeenCalledWith({
+      environment,
+      bwrapPath: '/configured/bwrap',
+      caBundlePath: '/configured/ca-bundle.crt',
+      codexPath: '/configured/codex',
+      codexHome: '/configured/codex-home',
+      codexSha256: 'a'.repeat(64),
+      hostsPath: '/configured/hosts',
+      resolverPath: '/configured/resolv.conf',
+      timeoutMs: undefined,
+      webSearchMode: 'live',
+    })
+    expect(createClient).toHaveBeenCalledWith({
+      environment,
+      bwrapPath: '/resolved/bwrap',
+      caBundlePath: '/resolved/ca-bundle.crt',
+      codexPath: '/resolved/codex',
+      codexHome: '/resolved/codex-home',
+      codexSha256: 'b'.repeat(64),
+      hostsPath: '/resolved/hosts',
+      resolverPath: '/resolved/resolv.conf',
+      timeoutMs: 120_000,
+      webSearchMode: 'live',
+    })
+    const ready = await service.request('/api/ready')
+    expect(ready.status).toBe(200)
+    expect(await ready.json()).toMatchObject({
+      ok: true,
+      provider: { id: 'codex-chatgpt', localOnly: true },
+    })
+  })
+
+  it('does not use an available API key when the selected ChatGPT probe fails', async () => {
+    const probe = vi.fn().mockReturnValue({
+      ok: false,
+      reason: 'Authentication failed for private@example.test in /home/operator.',
+    })
+    const createClient = vi.fn()
+    const createOpenAIClient = vi.fn()
+    const service = await serve({
+      accessCode: ACCESS_CODE,
+      sessionSecret: SESSION_SECRET,
+      secureCookies: false,
+      environment: {
+        WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt',
+        OPENAI_API_KEY: 'available-but-forbidden',
+      },
+      host: '127.0.0.1',
+      probeCodexChatGpt: probe,
+      createCodexChatGptClient: createClient,
+      createOpenAIClient,
+    })
+
+    const ready = await service.request('/api/ready')
+    const body = await ready.json()
+    expect(ready.status).toBe(503)
+    expect(body).toMatchObject({
+      ok: false,
+      upstream: 'not-configured',
+      provider: { id: 'codex-chatgpt', localOnly: true },
+      reason: 'The selected model provider needs a local sign-in.',
+    })
+    expect(JSON.stringify(body)).not.toMatch(/private@|\/home\/|available-but-forbidden/u)
+    expect(createClient).not.toHaveBeenCalled()
+    expect(createOpenAIClient).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      label: 'non-loopback bind',
+      host: '0.0.0.0',
+      allowedOrigins: undefined,
+      expected: /loopback host/i,
+    },
+    {
+      label: 'non-loopback browser origin',
+      host: '127.0.0.1',
+      allowedOrigins: ['https://webchess.example'],
+      expected: /non-loopback browser origins/i,
+    },
+    {
+      label: 'trusted proxy configuration',
+      host: '127.0.0.1',
+      trustProxy: '127.0.0.1/32',
+      expected: /trusted proxy/i,
+    },
+  ])('fails ChatGPT Codex readiness for a $label', async ({
+    allowedOrigins,
+    expected,
+    host,
+    trustProxy,
+  }) => {
+    const { client } = clientWithParse()
+    const service = await serve(configuredOptions({
+      client,
+      environment: {
+        WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt',
+        ...(allowedOrigins
+          ? { WEBCHESS_ALLOWED_ORIGINS: allowedOrigins.join(',') }
+          : {}),
+        ...(trustProxy ? { WEBCHESS_TRUST_PROXY: trustProxy } : {}),
+      },
+      host,
+    }))
+
+    const ready = await service.request('/api/ready')
+    const body = await ready.json()
+    expect(ready.status).toBe(503)
+    expect(body.reason).toMatch(expected)
+    expect(body.provider).toMatchObject({
+      id: 'codex-chatgpt',
+      localOnly: true,
+    })
+  })
+
+  it('rejects a reverse-proxied public origin even when same-origin headers agree', async () => {
+    const { client } = clientWithParse()
+    const service = await serve(configuredOptions({
+      client,
+      environment: { WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt' },
+      host: '127.0.0.1',
+    }))
+
+    const result = await rawJsonRequest(service, '/api/session', {
+      Host: 'webchess.example',
+      Origin: 'https://webchess.example',
+    }, { accessCode: ACCESS_CODE })
+
+    expect(result.status).toBe(403)
+    expect(result.body).toEqual({
+      error: 'The local model provider accepts only loopback requests.',
+    })
+  })
+
+  it('blocks valid paid credentials when a public reverse proxy forwards them', async () => {
+    const { client, parse } = clientWithParse()
+    const service = await serve(configuredOptions({
+      client,
+      environment: { WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt' },
+      host: '127.0.0.1',
+    }))
+    const session = await login(service)
+
+    const result = await rawJsonRequest(service, '/api/divide', {
+      Cookie: session.cookie,
+      Host: 'webchess.example',
+      Origin: 'https://webchess.example',
+      'X-WebChess-CSRF': session.body.csrfToken,
+    }, { problem: PROBLEM })
+
+    expect(result.status).toBe(403)
+    expect(result.body).toEqual({
+      error: 'The local model provider accepts only loopback requests.',
+    })
+    expect(parse).not.toHaveBeenCalled()
+  })
+
+  it('keeps Ollama requests on the loopback browser origin', async () => {
+    const { client } = clientWithParse()
+    const service = await serve(configuredOptions({
+      client,
+      environment: { WEBCHESS_MODEL_PROVIDER: 'ollama' },
+      host: '127.0.0.1',
+    }))
+
+    const result = await rawJsonRequest(service, '/api/session', {
+      Host: 'webchess.example',
+      Origin: 'https://webchess.example',
+    }, { accessCode: ACCESS_CODE })
+
+    expect(result.status).toBe(403)
+    expect(result.body).toEqual({
+      error: 'The local model provider accepts only loopback requests.',
+    })
+  })
+
+  it('streams content-free model activity before a validated division result', async () => {
+    const privateReasoning = 'PRIVATE reasoning must never cross the app boundary'
+    const unvalidatedDraft = '{"private":"unfinished provider output"}'
+    const finalResponse = vi.fn().mockResolvedValue(divisionResult())
+    const stream = vi.fn(() => ({
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: 'response.reasoning_summary_text.delta',
+          delta: privateReasoning,
+        }
+        yield {
+          type: 'response.output_text.delta',
+          delta: unvalidatedDraft,
+        }
+        yield {
+          type: 'response.completed',
+          response: { privateReasoning, unvalidatedDraft },
+        }
+      },
+      finalResponse,
+    }))
+    const parse = vi.fn()
+    const service = await serve(configuredOptions({
+      client: { responses: { parse, stream } },
+      modelActivityHeartbeatMs: 0,
+    }))
+    const session = await login(service)
+
+    const unauthenticated = await service.request('/api/divide', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/x-ndjson, application/json',
+        'Content-Type': 'application/json',
+        Origin: service.origin,
+      },
+      body: JSON.stringify({ problem: PROBLEM }),
+    })
+    expect(unauthenticated.status).toBe(401)
+    expect(unauthenticated.headers.get('content-type')).toMatch(/application\/json/u)
+
+    const response = await service.request('/api/divide', {
+      method: 'POST',
+      headers: {
+        ...paidHeaders(service, session),
+        Accept: 'application/x-ndjson, application/json',
+      },
+      body: JSON.stringify({ problem: PROBLEM }),
+    })
+    const text = await response.text()
+    const events = text.trim().split('\n').map((line) => JSON.parse(line))
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toMatch(/application\/x-ndjson/u)
+    expect(events.filter(({ type }) => type === 'phase').map(({ phase }) => phase))
+      .toEqual([
+        'request-accepted',
+        'preparing-input',
+        'awaiting-model',
+        'thinking',
+        'drafting',
+        'validating-output',
+        'complete',
+      ])
+    expect(events.filter(({ type }) => type === 'provider_activity')).toHaveLength(2)
+    expect(events.at(-1)).toMatchObject({
+      type: 'result',
+      data: {
+        model: 'gpt-5.6-sol',
+        facets: expect.arrayContaining([
+          expect.objectContaining({ id: 1 }),
+        ]),
+      },
+    })
+    expect(text).not.toContain(privateReasoning)
+    expect(text).not.toContain(unvalidatedDraft)
+    expect(stream).toHaveBeenCalledOnce()
+    expect(parse).not.toHaveBeenCalled()
+    expect(finalResponse).toHaveBeenCalledOnce()
+  })
+
+  it('streams only validated public Qwen rationale before the Ollama division', async () => {
+    const privateReasoning = 'PRIVATE Qwen reasoning must never cross the boundary'
+    const unfinishedDraft = '{"private":"unfinished primary output"}'
+    const publicNote =
+      'Check which standards make the work recognizably yours before expanding its reach.'
+    const completedDivision = {
+      status: 'completed',
+      incomplete_details: null,
+      model: 'qwen3.6:27b',
+      output: [{
+        type: 'message',
+        content: [{
+          type: 'output_text',
+          text: JSON.stringify({ facets: facets() }),
+        }],
+      }],
+    }
+    const create = vi.fn()
+      .mockResolvedValueOnce({
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: 'response.reasoning_summary_text.delta',
+            delta: privateReasoning,
+          }
+          yield {
+            type: 'response.output_text.delta',
+            delta: `NOTE: ${publicNote}\n`,
+          }
+          yield {
+            type: 'response.completed',
+            response: {
+              status: 'completed',
+              incomplete_details: null,
+            },
+          }
+        },
+      })
+      .mockResolvedValueOnce({
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: 'response.reasoning_summary_text.delta',
+            delta: privateReasoning,
+          }
+          yield {
+            type: 'response.output_text.delta',
+            delta: unfinishedDraft,
+          }
+          yield {
+            type: 'response.completed',
+            response: completedDivision,
+          }
+        },
+      })
+    const parse = vi.fn()
+    const stream = vi.fn()
+    const service = await serve(configuredOptions({
+      client: { responses: { create, parse, stream } },
+      environment: { WEBCHESS_MODEL_PROVIDER: 'ollama' },
+      host: '127.0.0.1',
+      model: 'qwen3.6:27b',
+      modelActivityHeartbeatMs: 0,
+      seedFactory: () => 'public-rationale-seed',
+    }))
+    const session = await login(service)
+
+    const response = await service.request('/api/divide', {
+      method: 'POST',
+      headers: {
+        ...paidHeaders(service, session),
+        Accept: 'application/x-ndjson, application/json',
+      },
+      body: JSON.stringify({ problem: PROBLEM }),
+    })
+    const text = await response.text()
+    const events = text.trim().split('\n').map((line) => JSON.parse(line))
+
+    expect(response.status).toBe(200)
+    expect(events.filter(({ type }) => type === 'phase').map(({ phase }) => phase))
+      .toEqual([
+        'request-accepted',
+        'preparing-input',
+        'writing-rationale',
+        'awaiting-model',
+        'thinking',
+        'drafting',
+        'validating-output',
+        'complete',
+      ])
+    expect(events.filter(({ type }) => type === 'rationale')).toEqual([
+      { type: 'rationale', text: publicNote },
+    ])
+    expect(events.findIndex(({ type }) => type === 'rationale'))
+      .toBeLessThan(events.findIndex(({ type }) => type === 'result'))
+    expect(events.at(-1)).toMatchObject({
+      type: 'result',
+      data: {
+        seed: 'public-rationale-seed',
+        model: 'qwen3.6:27b',
+        facets: expect.arrayContaining([
+          expect.objectContaining({ id: 1 }),
+        ]),
+      },
+    })
+    expect(text).not.toContain(privateReasoning)
+    expect(text).not.toContain(unfinishedDraft)
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(stream).not.toHaveBeenCalled()
+    expect(parse).not.toHaveBeenCalled()
   })
 })

@@ -88,6 +88,9 @@ describe('production HTTP routing', () => {
     expect(response.status).toBe(200)
     expect(response.headers.get('content-type')).toMatch(/^text\/html/)
     expect(response.headers.get('cache-control')).toBe('no-cache')
+    expect(response.headers.get('content-security-policy')).toBe("frame-ancestors 'none'")
+    expect(response.headers.get('x-frame-options')).toBe('DENY')
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
     expect(await response.text()).toContain(INDEX_MARKER)
   })
 

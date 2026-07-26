@@ -1,7 +1,13 @@
 import type { CaptureRecord, GameOutcome, GeneratedAnswer } from '../types'
+import {
+  modelActivityAcceptHeader,
+  readModelActivityPayload,
+} from './model-activity'
+import type { ModelActivityEvent } from './model-activity'
 import { SessionRequiredError } from './session'
 
 interface ErrorPayload {
+  code?: string
   error?: string
   message?: string
   prompt?: string
@@ -54,12 +60,13 @@ export async function requestWebChessAnswer(
   captures: readonly CaptureRecord[],
   signal?: AbortSignal,
   csrfToken?: string,
+  onActivity?: (event: ModelActivityEvent) => void,
 ): Promise<GeneratedAnswer> {
   const response = await fetch('/api/answer', {
     method: 'POST',
     credentials: 'same-origin',
     headers: {
-      Accept: 'application/json',
+      Accept: onActivity ? modelActivityAcceptHeader() : 'application/json',
       'Content-Type': 'application/json',
       ...(csrfToken ? { 'X-WebChess-CSRF': csrfToken } : {}),
     },
@@ -67,12 +74,16 @@ export async function requestWebChessAnswer(
     signal,
   })
 
-  const payload = await response.json().catch(() => ({})) as Partial<GeneratedAnswer> & ErrorPayload
+  const payload = await readModelActivityPayload(response, onActivity) as
+    Partial<GeneratedAnswer> & ErrorPayload
   if (!response.ok) {
     const message =
       payload.error ?? payload.message ?? 'The answer service did not respond. Please try again.'
+    const sessionInvalid =
+      response.status === 401 ||
+      (response.status === 403 && payload.code === 'csrf')
     const failure = (
-      response.status === 401 ? new SessionRequiredError(message) : new Error(message)
+      sessionInvalid ? new SessionRequiredError(message) : new Error(message)
     ) as Error & { prompt?: string }
     failure.prompt = payload.prompt
     throw failure
@@ -80,15 +91,18 @@ export async function requestWebChessAnswer(
 
   if (
     typeof payload.answer !== 'string' ||
+    payload.answer.trim().length === 0 ||
     typeof payload.model !== 'string' ||
-    typeof payload.prompt !== 'string'
+    payload.model.trim().length === 0 ||
+    typeof payload.prompt !== 'string' ||
+    payload.prompt.trim().length === 0
   ) {
     throw new Error('The answer service returned an incomplete response. Please try again.')
   }
 
   return {
     answer: payload.answer,
-    model: payload.model,
+    model: payload.model.trim(),
     prompt: payload.prompt,
   }
 }

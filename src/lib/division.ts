@@ -6,11 +6,17 @@ import {
   PROBLEM_DIMENSIONS,
   PROBLEM_MOVEMENTS,
 } from './problem'
+import {
+  modelActivityAcceptHeader,
+  readModelActivityPayload,
+} from './model-activity'
+import type { ModelActivityEvent } from './model-activity'
 import { SessionRequiredError } from './session'
 
 const FACET_COUNT = 64
 
 interface DivisionErrorPayload {
+  code?: string
   error?: string
   message?: string
   prompt?: string
@@ -35,7 +41,7 @@ function cleanFacetString(value: unknown, field: string, id: number): string {
 function parseFacets(value: unknown): ProblemFacet[] {
   if (!Array.isArray(value) || value.length !== FACET_COUNT) {
     const count = Array.isArray(value) ? value.length : 0
-    throw new Error(`Sol returned ${count} facets; WebChess requires exactly 64.`)
+    throw new Error(`The model returned ${count} facets; WebChess requires exactly 64.`)
   }
 
   const facets = value.map((candidate, index): ProblemFacet => {
@@ -58,7 +64,7 @@ function parseFacets(value: unknown): ProblemFacet[] {
   })
 
   if (new Set(facets.map((facet) => facet.id)).size !== FACET_COUNT) {
-    throw new Error('Sol must return each facet id from 1 through 64 exactly once.')
+    throw new Error('The model must return each facet id from 1 through 64 exactly once.')
   }
 
   return facets
@@ -129,12 +135,13 @@ export async function requestProblemDivision(
   problem: string,
   signal?: AbortSignal,
   csrfToken?: string,
+  onActivity?: (event: ModelActivityEvent) => void,
 ): Promise<DivisionAnalysis> {
   const response = await fetch('/api/divide', {
     method: 'POST',
     credentials: 'same-origin',
     headers: {
-      Accept: 'application/json',
+      Accept: onActivity ? modelActivityAcceptHeader() : 'application/json',
       'Content-Type': 'application/json',
       ...(csrfToken ? { 'X-WebChess-CSRF': csrfToken } : {}),
     },
@@ -142,12 +149,16 @@ export async function requestProblemDivision(
     signal,
   })
 
-  const payload = await response.json().catch(() => ({})) as Record<string, unknown> & DivisionErrorPayload
+  const payload = await readModelActivityPayload(response, onActivity) as
+    Record<string, unknown> & DivisionErrorPayload
   if (!response.ok) {
     const message =
-      payload.error ?? payload.message ?? 'Sol could not divide this problem. Please try again.'
+      payload.error ?? payload.message ?? 'The model could not divide this problem. Please try again.'
+    const sessionInvalid =
+      response.status === 401 ||
+      (response.status === 403 && payload.code === 'csrf')
     const failure = (
-      response.status === 401 ? new SessionRequiredError(message) : new Error(message)
+      sessionInvalid ? new SessionRequiredError(message) : new Error(message)
     ) as Error & { prompt?: string }
     failure.prompt = payload.prompt
     throw failure

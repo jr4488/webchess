@@ -8,6 +8,15 @@ const ACTIVE_SESSION = {
   authenticated: true,
   csrfToken: 'test-csrf-token',
   expiresAt: '2099-01-01T00:00:00.000Z',
+  provider: {
+    id: 'openai-api',
+    label: 'OpenAI API',
+    billing: 'platform-api',
+    localOnly: false,
+    dataControlsUrl: 'https://developers.openai.com/api/docs/guides/your-data',
+    model: 'gpt-5.6-sol',
+    webSearch: 'disabled',
+  },
 }
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -65,6 +74,7 @@ describe('WebChess flow', () => {
       body: JSON.stringify({ accessCode: 'private-access-code' }),
     }))
     expect(screen.getByLabelText(/what are you trying to understand/i)).toBeInTheDocument()
+    expect(screen.getByText(/Platform API billing for the configured project/i)).toBeInTheDocument()
     expect(screen.queryByDisplayValue('private-access-code')).not.toBeInTheDocument()
   })
 
@@ -87,7 +97,8 @@ describe('WebChess flow', () => {
     render(<App />)
 
     await submitProblem('How should thoughtful plan 0 move into its next useful phase?')
-    expect(screen.getAllByText(/64 sol facets received/i).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/64 model facets received/i).length).toBeGreaterThan(0)
+    expect(screen.getByText(/gpt-5\.6-sol · OpenAI API · semantic division/i)).toBeInTheDocument()
 
     await act(() => vi.advanceTimersByTimeAsync(800))
     expect(screen.getAllByText(/problem facets independently shuffled/i).length).toBeGreaterThan(0)
@@ -134,7 +145,9 @@ describe('WebChess flow', () => {
 
     expect(screen.getByRole('region', { name: /final webchess answer/i })).toBeInTheDocument()
     expect(screen.getByText(/protect the purpose, then test/i)).toBeInTheDocument()
-    expect(screen.getByText(/gpt-5\.6-sol · answer from \d+ captured signals/i)).toBeInTheDocument()
+    expect(screen.getByText(
+      /gpt-5\.6-sol · OpenAI API · answer from \d+ captured signals/i,
+    )).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(3)
 
     const answerRequest = fetchMock.mock.calls.find(([url]) => url === '/api/answer')
@@ -167,7 +180,7 @@ describe('WebChess flow', () => {
     render(<App />)
 
     await submitProblem('What is the clearest next step for this difficult decision?')
-    expect(screen.getAllByText(/sol analyzing 64 candidate facets/i).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/model analyzing 64 candidate facets/i).length).toBeGreaterThan(0)
     expect(screen.queryByLabelText(/facets mapped/i)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeDisabled()
 
@@ -190,16 +203,28 @@ describe('WebChess flow', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
-  it('keeps the completed-game prompt visible when the answer service is not configured', async () => {
+  it('shows only the prompt returned for the current answer attempt', async () => {
     vi.useFakeTimers()
     const division = makeDivisionAnalysis('answer-error-seed')
+    let answerAttempts = 0
     vi.stubGlobal('fetch', vi.fn().mockImplementation((input: string) => {
       if (input === '/api/session') return Promise.resolve(jsonResponse(ACTIVE_SESSION))
       if (input === '/api/divide') return Promise.resolve(jsonResponse(division))
-      return Promise.resolve(jsonResponse({
-        error: 'Set OPENAI_API_KEY on the WebChess server, then try again.',
-        prompt: 'The complete prompt is ready for gpt-5.6-sol.',
-      }, 503))
+      if (input === '/api/answer') {
+        answerAttempts += 1
+        return Promise.resolve(jsonResponse(
+          answerAttempts === 1
+            ? {
+                error: 'The configured model provider could not answer.',
+                prompt: 'The complete prompt used for the first attempt.',
+              }
+            : {
+                error: 'The retry lost its connection.',
+              },
+          503,
+        ))
+      }
+      throw new Error(`Unexpected request: ${input}`)
     }))
     render(<App />)
 
@@ -215,9 +240,18 @@ describe('WebChess flow', () => {
     await act(() => vi.advanceTimersByTimeAsync(1_200))
     await act(async () => {})
 
-    expect(screen.getByText(/set openai_api_key/i)).toBeInTheDocument()
+    expect(screen.getByText(/configured model provider could not answer/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /try the answer again/i })).toBeInTheDocument()
-    expect(screen.getByText(/see the prompt waiting to be sent/i)).toBeInTheDocument()
+    expect(screen.getByText(/see the prompt used for this attempt/i)).toBeInTheDocument()
+    expect(screen.getByText(/complete prompt used for the first attempt/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /try the answer again/i }))
+    await act(async () => {})
+
+    expect(answerAttempts).toBe(2)
+    expect(screen.getByText(/retry lost its connection/i)).toBeInTheDocument()
+    expect(screen.queryByText(/see the prompt used for this attempt/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/complete prompt used for the first attempt/i)).not.toBeInTheDocument()
   })
 
   it('returns to the access gate when a paid request reports an expired session', async () => {
@@ -241,6 +275,59 @@ describe('WebChess flow', () => {
       credentials: 'same-origin',
       headers: expect.objectContaining({ 'X-WebChess-CSRF': 'test-csrf-token' }),
     }))
+  })
+
+  it('clears model-derived state before adopting a replacement session and provider', async () => {
+    vi.useFakeTimers()
+    const expiringSession = {
+      ...ACTIVE_SESSION,
+      expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    }
+    const replacementSession = {
+      ...ACTIVE_SESSION,
+      csrfToken: 'replacement-csrf-token',
+      provider: {
+        id: 'codex-chatgpt',
+        label: 'ChatGPT Codex',
+        billing: 'chatgpt-workspace',
+        localOnly: true,
+        dataControlsUrl: 'https://help.openai.com/en/articles/7730893-data-controls-faq',
+        model: 'gpt-5.6-sol',
+        webSearch: 'live',
+      },
+    }
+    const division = makeDivisionAnalysis('replacement-session-seed')
+    const fetchMock = vi.fn().mockImplementation((input: string, init?: RequestInit) => {
+      if (input === '/api/session' && init?.method === 'POST') {
+        return Promise.resolve(jsonResponse(replacementSession))
+      }
+      if (input === '/api/session') return Promise.resolve(jsonResponse(expiringSession))
+      if (input === '/api/divide') return Promise.resolve(jsonResponse(division))
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+
+    await submitProblem('How should this plan change without losing its purpose?')
+    expect(screen.getByRole('region', {
+      name: /dividing your problem into 64 facets/i,
+    })).toBeInTheDocument()
+    expect(screen.getByText(/gpt-5\.6-sol · OpenAI API · semantic division/i)).toBeInTheDocument()
+
+    await act(() => vi.advanceTimersByTimeAsync(1_100))
+    expect(screen.getByLabelText(/access code/i)).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/access code/i), {
+      target: { value: 'replacement-access-code' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /enter webchess/i }))
+    await act(async () => {})
+
+    expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
+    expect(screen.getByText(/sent through ChatGPT Codex/i)).toBeInTheDocument()
+    expect(screen.queryByRole('region', {
+      name: /dividing your problem into 64 facets/i,
+    })).not.toBeInTheDocument()
   })
 
   it('ends the server session with CSRF protection before clearing the client', async () => {

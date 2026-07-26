@@ -5,6 +5,8 @@ import { zodTextFormat } from 'openai/helpers/zod'
 import { z } from 'zod'
 
 import { assessDivisionQuality } from './division-quality.mjs'
+import { runParsedModelResponse } from './model-response.mjs'
+import { streamPublicRationale } from './public-rationale.mjs'
 
 export const DEFAULT_DIVISION_MODEL = 'gpt-5.6-sol'
 export const DIVISION_MAX_OUTPUT_TOKENS = 20_000
@@ -310,16 +312,35 @@ export async function divideProblemSemantically(value, options = {}) {
 
   try {
     const client = suppliedClient ?? new OpenAI({ apiKey })
-    const result = await client.responses.parse({
-      model,
-      reasoning: { effort: 'medium' },
-      instructions,
-      input,
-      text: {
-        format: zodTextFormat(DivisionOutputSchema, 'webchess_semantic_division'),
+    if (options.onRationale) {
+      try {
+        await streamPublicRationale({
+          client,
+          model,
+          operation: 'division',
+          subject: input,
+          onRationale: options.onRationale,
+          onProgress: options.onProgress,
+        })
+      } catch {
+        // Public display notes are optional and must never prevent the
+        // authoritative 64-facet analysis from running.
+      }
+    }
+    const result = await runParsedModelResponse({
+      client,
+      onProgress: options.onProgress,
+      input: {
+        model,
+        reasoning: { effort: 'medium' },
+        instructions,
+        input,
+        text: {
+          format: zodTextFormat(DivisionOutputSchema, 'webchess_semantic_division'),
+        },
+        max_output_tokens: DIVISION_MAX_OUTPUT_TOKENS,
+        store: false,
       },
-      max_output_tokens: DIVISION_MAX_OUTPUT_TOKENS,
-      store: false,
     })
     const facets = parseDivisionResponse(result, { problem: request.problem })
     const seed = (options.seedFactory ?? createShuffleSeed)()

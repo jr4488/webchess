@@ -71,6 +71,43 @@ describe('answer request', () => {
     }))
   })
 
+  it.each([
+    [
+      'answer',
+      {
+        answer: '   ',
+        model: 'gpt-5.6-sol',
+        prompt: 'A canonical prompt.',
+      },
+    ],
+    [
+      'model',
+      {
+        answer: 'Take the reversible step first.',
+        model: '\n\t',
+        prompt: 'A canonical prompt.',
+      },
+    ],
+    [
+      'prompt',
+      {
+        answer: 'Take the reversible step first.',
+        model: 'gpt-5.6-sol',
+        prompt: '',
+      },
+    ],
+  ])('rejects a blank %s instead of marking the response successful', async (_field, payload) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(payload), { status: 200 }),
+    ))
+
+    await expect(requestWebChessAnswer(
+      'How should this decision move forward?',
+      outcome,
+      [capture],
+    )).rejects.toThrow(/incomplete response/i)
+  })
+
   it('preserves the canonical prompt when the server reports an error', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       error: 'API key missing.',
@@ -97,6 +134,37 @@ describe('answer request', () => {
       name: 'SessionRequiredError',
       status: 401,
       message: 'Your access session has expired.',
+    })
+  })
+
+  it('requires a fresh session for a specifically identified stale CSRF token', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: 'The request security token is invalid.',
+      code: 'csrf',
+    }), { status: 403 })))
+
+    await expect(requestWebChessAnswer(
+      'How should this decision move forward?',
+      outcome,
+      [capture],
+    )).rejects.toMatchObject({
+      name: 'SessionRequiredError',
+      message: 'The request security token is invalid.',
+    })
+  })
+
+  it('does not mistake an origin rejection for an expired session', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: 'Request origin is not allowed.',
+    }), { status: 403 })))
+
+    await expect(requestWebChessAnswer(
+      'How should this decision move forward?',
+      outcome,
+      [capture],
+    )).rejects.toMatchObject({
+      name: 'Error',
+      message: 'Request origin is not allowed.',
     })
   })
 })

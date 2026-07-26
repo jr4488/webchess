@@ -22,6 +22,11 @@ import {
 import { normalizeProblemInput, problemPartAt } from './lib/problem'
 import { PIECE_METAPHORS, synthesizeReading } from './lib/reading'
 import {
+  beginModelActivity,
+  updateModelActivity,
+} from './lib/model-activity'
+import type { ModelActivityEvent } from './lib/model-activity'
+import {
   createWebChessSession,
   deleteWebChessSession,
   getWebChessSession,
@@ -36,6 +41,7 @@ import type {
   DivisionStatus,
   GameOutcome,
   LastMove,
+  ModelActivityState,
   Piece,
   ProblemPart,
   Side,
@@ -96,19 +102,71 @@ export function App() {
   const [divisionModel, setDivisionModel] = useState('')
   const [divisionPrompt, setDivisionPrompt] = useState('')
   const [divisionError, setDivisionError] = useState('')
+  const [divisionActivity, setDivisionActivity] = useState<ModelActivityState | null>(null)
   const [autoPlaying, setAutoPlaying] = useState(false)
   const [notice, setNotice] = useState('Choose a white piece. Its possible paths will appear.')
   const [answerStatus, setAnswerStatus] = useState<AnswerStatus>('idle')
   const [answer, setAnswer] = useState('')
-  const [answerModel, setAnswerModel] = useState('gpt-5.6-sol')
+  const [answerModel, setAnswerModel] = useState('')
   const [answerPrompt, setAnswerPrompt] = useState('')
   const [answerError, setAnswerError] = useState('')
+  const [answerActivity, setAnswerActivity] = useState<ModelActivityState | null>(null)
   const sessionRequestRef = useRef<AbortController | null>(null)
   const divisionRequestRef = useRef<AbortController | null>(null)
   const answerRequestRef = useRef<AbortController | null>(null)
+  const lastAuthenticatedSessionRef = useRef<AuthenticatedSession | null>(null)
   const sessionActive = accessState.status === 'authenticated'
   const csrfToken = sessionActive ? accessState.session.csrfToken : ''
   const gameFinishing = outcome !== null && stage === 'playing'
+
+  const resetGameState = useCallback(() => {
+    divisionRequestRef.current?.abort()
+    divisionRequestRef.current = null
+    answerRequestRef.current?.abort()
+    answerRequestRef.current = null
+    setStage('question')
+    setProblem('')
+    setParts([])
+    setPieces([])
+    setTurn('white')
+    setTurnNumber(1)
+    setQuietPlies(0)
+    setCaptures([])
+    setOutcome(null)
+    setSelectedPieceId(null)
+    setFocusedCell(null)
+    setLastMove(null)
+    setMappingProgress(0)
+    setDivisionStatus('idle')
+    setDivisionPhase('analyzing')
+    setDivisionModel('')
+    setDivisionPrompt('')
+    setDivisionError('')
+    setDivisionActivity(null)
+    setAutoPlaying(false)
+    setAnswerStatus('idle')
+    setAnswer('')
+    setAnswerModel('')
+    setAnswerPrompt('')
+    setAnswerError('')
+    setAnswerActivity(null)
+    setNotice('Choose a white piece. Its possible paths will appear.')
+  }, [])
+
+  const adoptAuthenticatedSession = useCallback((session: AuthenticatedSession) => {
+    const previous = lastAuthenticatedSessionRef.current
+    if (
+      previous &&
+      (
+        previous.csrfToken !== session.csrfToken ||
+        previous.provider.id !== session.provider.id ||
+        previous.provider.model !== session.provider.model
+      )
+    ) {
+      resetGameState()
+    }
+    lastAuthenticatedSessionRef.current = session
+  }, [resetGameState])
 
   const requireSession = useCallback((message?: string) => {
     const explanation =
@@ -120,6 +178,12 @@ export function App() {
     setAnswerStatus((current) => current === 'loading' ? 'error' : current)
     setDivisionError(explanation)
     setAnswerError(explanation)
+    setDivisionActivity((current) => current
+      ? { ...current, status: 'error', lastHeartbeatAt: Date.now() }
+      : current)
+    setAnswerActivity((current) => current
+      ? { ...current, status: 'error', lastHeartbeatAt: Date.now() }
+      : current)
     setAccessState({
       status: 'unauthenticated',
       message: explanation,
@@ -136,6 +200,9 @@ export function App() {
       .then((session) => {
         if (controller.signal.aborted || sessionRequestRef.current !== controller) return
         setSessionActionError('')
+        if (session.authenticated) {
+          adoptAuthenticatedSession(session)
+        }
         setAccessState(
           session.authenticated
             ? { status: 'authenticated', session }
@@ -151,7 +218,7 @@ export function App() {
             : 'WebChess could not check access right now.',
         })
       })
-  }, [])
+  }, [adoptAuthenticatedSession])
 
   const authenticate = useCallback(async (accessCode: string) => {
     sessionRequestRef.current?.abort()
@@ -160,9 +227,10 @@ export function App() {
     const session = await createWebChessSession(accessCode, controller.signal)
     if (controller.signal.aborted || sessionRequestRef.current !== controller) return
 
+    adoptAuthenticatedSession(session)
     setSessionActionError('')
     setAccessState({ status: 'authenticated', session })
-  }, [])
+  }, [adoptAuthenticatedSession])
 
   const selectedPiece = useMemo(
     () => pieces.find((piece) => piece.id === selectedPieceId) ?? null,
@@ -197,6 +265,9 @@ export function App() {
     void getWebChessSession(controller.signal)
       .then((session) => {
         if (controller.signal.aborted || sessionRequestRef.current !== controller) return
+        if (session.authenticated) {
+          adoptAuthenticatedSession(session)
+        }
         setAccessState(
           session.authenticated
             ? { status: 'authenticated', session }
@@ -214,7 +285,7 @@ export function App() {
       })
 
     return () => controller.abort()
-  }, [])
+  }, [adoptAuthenticatedSession])
 
   useEffect(() => {
     if (accessState.status !== 'authenticated') return
@@ -413,6 +484,7 @@ export function App() {
     if (!sessionActive || stage !== 'playing' || !outcome) return
 
     const revealTimer = window.setTimeout(() => {
+      setAnswerActivity(beginModelActivity('answer'))
       setAnswerStatus('loading')
       setStage('reading')
     }, 1_100)
@@ -432,12 +504,19 @@ export function App() {
     answerRequestRef.current = controller
     const generateAnswer = async () => {
       try {
+        const onActivity = (event: ModelActivityEvent) => {
+          if (controller.signal.aborted || answerRequestRef.current !== controller) return
+          setAnswerActivity((current) =>
+            updateModelActivity(current ?? beginModelActivity('answer'), event),
+          )
+        }
         const generated = await requestWebChessAnswer(
           problem,
           outcome,
           captures,
           controller.signal,
           csrfToken,
+          onActivity,
         )
         if (controller.signal.aborted || answerRequestRef.current !== controller) return
         setAnswer(generated.answer)
@@ -445,12 +524,18 @@ export function App() {
         setAnswerPrompt(generated.prompt)
         setAnswerError('')
         setAnswerStatus('success')
+        setAnswerActivity((current) => current
+          ? updateModelActivity(current, { type: 'phase', phase: 'complete' })
+          : current)
       } catch (error) {
         if (controller.signal.aborted) return
         const failure = error as Error & { prompt?: string }
         setAnswerError(failure.message)
-        if (failure.prompt) setAnswerPrompt(failure.prompt)
+        setAnswerPrompt(failure.prompt ?? '')
         setAnswerStatus('error')
+        setAnswerActivity((current) => current
+          ? { ...current, status: 'error', lastHeartbeatAt: Date.now() }
+          : current)
         if (isSessionRequiredError(failure)) {
           requireSession(failure.message)
         }
@@ -479,9 +564,10 @@ export function App() {
     answerRequestRef.current = null
     setAnswerStatus('idle')
     setAnswer('')
-    setAnswerModel('gpt-5.6-sol')
+    setAnswerModel('')
     setAnswerPrompt('')
     setAnswerError('')
+    setAnswerActivity(null)
   }
 
   const analyzeProblem = async (subject: string) => {
@@ -501,9 +587,21 @@ export function App() {
     setDivisionModel('')
     setDivisionPrompt('')
     setDivisionError('')
+    setDivisionActivity(beginModelActivity('division'))
 
     try {
-      const analysis = await requestProblemDivision(subject, controller.signal, csrfToken)
+      const onActivity = (event: ModelActivityEvent) => {
+        if (controller.signal.aborted || divisionRequestRef.current !== controller) return
+        setDivisionActivity((current) =>
+          updateModelActivity(current ?? beginModelActivity('division'), event),
+        )
+      }
+      const analysis = await requestProblemDivision(
+        subject,
+        controller.signal,
+        csrfToken,
+        onActivity,
+      )
       const composedParts = composeProblemParts(analysis.facets, analysis.seed)
       if (controller.signal.aborted || divisionRequestRef.current !== controller) return
 
@@ -512,6 +610,9 @@ export function App() {
       setDivisionPrompt(analysis.prompt)
       setDivisionStatus('success')
       setDivisionPhase('facets-received')
+      setDivisionActivity((current) => current
+        ? updateModelActivity(current, { type: 'phase', phase: 'complete' })
+        : current)
     } catch (error) {
       if (controller.signal.aborted || divisionRequestRef.current !== controller) return
       const failure = error as Error & { prompt?: string }
@@ -520,6 +621,9 @@ export function App() {
       setDivisionPrompt(failure.prompt ?? '')
       setDivisionError(failure.message)
       setDivisionStatus('error')
+      setDivisionActivity((current) => current
+        ? { ...current, status: 'error', lastHeartbeatAt: Date.now() }
+        : current)
       if (isSessionRequiredError(failure)) {
         requireSession(failure.message)
       }
@@ -612,7 +716,9 @@ export function App() {
       return
     }
     setAnswer('')
+    setAnswerPrompt('')
     setAnswerError('')
+    setAnswerActivity(beginModelActivity('answer'))
     setAnswerStatus('loading')
   }
 
@@ -633,30 +739,8 @@ export function App() {
   }
 
   const reset = () => {
-    divisionRequestRef.current?.abort()
-    divisionRequestRef.current = null
-    setStage('question')
-    setProblem('')
-    setParts([])
-    setPieces([])
-    setTurn('white')
-    setTurnNumber(1)
-    setQuietPlies(0)
-    setCaptures([])
-    setOutcome(null)
-    setSelectedPieceId(null)
-    setFocusedCell(null)
-    setLastMove(null)
-    setMappingProgress(0)
-    setDivisionStatus('idle')
-    setDivisionPhase('analyzing')
-    setDivisionModel('')
-    setDivisionPrompt('')
-    setDivisionError('')
-    setAutoPlaying(false)
+    resetGameState()
     setSessionActionError('')
-    clearAnswer()
-    setNotice('Choose a white piece. Its possible paths will appear.')
   }
 
   const endSession = async () => {
@@ -667,6 +751,7 @@ export function App() {
     try {
       await deleteWebChessSession(accessState.session.csrfToken)
       reset()
+      lastAuthenticatedSessionRef.current = null
       setAccessState({
         status: 'unauthenticated',
         message: 'Your access session has ended.',
@@ -698,6 +783,7 @@ export function App() {
         ) : stage === 'question' ? (
           <QuestionStage
             problem={problem}
+            provider={accessState.session.provider}
             setProblem={setProblem}
             onSubmit={beginMapping}
           />
@@ -706,6 +792,7 @@ export function App() {
         {sessionActive && stage === 'mapping' && (
           <MappingStage
             problem={problem}
+            provider={accessState.session.provider}
             parts={parts}
             progress={mappingProgress}
             divisionStatus={divisionStatus}
@@ -713,6 +800,7 @@ export function App() {
             divisionModel={divisionModel}
             divisionPrompt={divisionPrompt}
             divisionError={divisionError}
+            divisionActivity={divisionActivity}
             onBegin={beginPlay}
             onRetry={retryDivision}
           />
@@ -746,6 +834,7 @@ export function App() {
         {sessionActive && stage === 'reading' && outcome && (
           <ReadingStage
             problem={problem}
+            provider={accessState.session.provider}
             parts={parts}
             pieces={pieces}
             captures={captures}
@@ -757,6 +846,7 @@ export function App() {
             answerModel={answerModel}
             answerPrompt={answerPrompt}
             answerError={answerError}
+            answerActivity={answerActivity}
             captureKeys={captureKeys}
             onRetryAnswer={retryAnswer}
             onReplay={replayProblem}

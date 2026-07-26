@@ -7,6 +7,26 @@ import {
   isSessionRequiredError,
 } from './session'
 
+const API_PROVIDER = {
+  id: 'openai-api',
+  label: 'OpenAI API',
+  billing: 'platform-api',
+  localOnly: false,
+  dataControlsUrl: 'https://developers.openai.com/api/docs/guides/your-data',
+  model: 'gpt-5.6-sol',
+  webSearch: 'disabled',
+} as const
+
+const OLLAMA_PROVIDER = {
+  id: 'ollama',
+  label: 'Ollama',
+  billing: 'local-compute',
+  localOnly: true,
+  dataControlsUrl: 'https://docs.ollama.com/faq',
+  model: 'qwen3.6:27b',
+  webSearch: 'disabled',
+} as const
+
 function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -35,6 +55,7 @@ describe('access sessions', () => {
       authenticated: true,
       csrfToken: 'csrf-token',
       expiresAt,
+      provider: API_PROVIDER,
     }))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -42,12 +63,111 @@ describe('access sessions', () => {
       authenticated: true,
       csrfToken: 'csrf-token',
       expiresAt,
+      provider: API_PROVIDER,
     })
     expect(fetchMock).toHaveBeenCalledWith('/api/session', expect.objectContaining({
       method: 'POST',
       credentials: 'same-origin',
       body: JSON.stringify({ accessCode: 'one-use-code' }),
     }))
+  })
+
+  it('requires complete, internally consistent provider provenance', async () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        authenticated: true,
+        csrfToken: 'csrf-token',
+        expiresAt,
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        authenticated: true,
+        csrfToken: 'csrf-token',
+        expiresAt,
+        provider: {
+          id: 'codex-chatgpt',
+          label: 'ChatGPT Codex',
+          billing: 'platform-api',
+          localOnly: false,
+          dataControlsUrl: 'javascript:alert(1)',
+          model: 'gpt-5.6-sol',
+          webSearch: 'live',
+        },
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(getWebChessSession()).rejects.toThrow(/incomplete session/i)
+    await expect(getWebChessSession()).rejects.toThrow(/incomplete session/i)
+  })
+
+  it('parses local ChatGPT Codex provenance without account details', async () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString()
+    const provider = {
+      id: 'codex-chatgpt',
+      label: 'ChatGPT Codex',
+      billing: 'chatgpt-workspace',
+      localOnly: true,
+      dataControlsUrl: 'https://help.openai.com/en/articles/7730893-data-controls-faq',
+      model: 'gpt-5.6-sol',
+      webSearch: 'live',
+    } as const
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      authenticated: true,
+      csrfToken: 'csrf-token',
+      expiresAt,
+      provider,
+    })))
+
+    await expect(getWebChessSession()).resolves.toEqual({
+      authenticated: true,
+      csrfToken: 'csrf-token',
+      expiresAt,
+      provider,
+    })
+  })
+
+  it('parses loopback-only Ollama provenance without API billing', async () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      authenticated: true,
+      csrfToken: 'csrf-token',
+      expiresAt,
+      provider: OLLAMA_PROVIDER,
+    })))
+
+    await expect(getWebChessSession()).resolves.toEqual({
+      authenticated: true,
+      csrfToken: 'csrf-token',
+      expiresAt,
+      provider: OLLAMA_PROVIDER,
+    })
+  })
+
+  it('rejects unsupported or inconsistent web-search metadata', async () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        authenticated: true,
+        csrfToken: 'csrf-token',
+        expiresAt,
+        provider: {
+          ...API_PROVIDER,
+          webSearch: 'automatic',
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        authenticated: true,
+        csrfToken: 'csrf-token',
+        expiresAt,
+        provider: {
+          ...API_PROVIDER,
+          webSearch: 'live',
+        },
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(getWebChessSession()).rejects.toThrow(/incomplete session/i)
+    await expect(getWebChessSession()).rejects.toThrow(/incomplete session/i)
   })
 
   it('recognizes an invalid or expired session without retaining the code', async () => {

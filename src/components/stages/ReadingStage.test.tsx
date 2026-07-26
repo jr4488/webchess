@@ -5,6 +5,16 @@ import { makeProblemParts } from '../../test/fixtures'
 import type { CaptureRecord, FinalReading, GameOutcome, Piece } from '../../types'
 import { ReadingStage } from './ReadingStage'
 
+const API_PROVIDER = {
+  id: 'openai-api',
+  label: 'OpenAI API',
+  billing: 'platform-api',
+  localOnly: false,
+  dataControlsUrl: 'https://developers.openai.com/api/docs/guides/your-data',
+  model: 'gpt-5.6-sol',
+  webSearch: 'disabled',
+} as const
+
 vi.mock('../ProcessGraphic', () => ({
   ProcessGraphic: ({
     headline,
@@ -133,6 +143,7 @@ function renderReading(overrides: Partial<React.ComponentProps<typeof ReadingSta
   return render(
     <ReadingStage
       problem="How should this plan move into its next useful phase?"
+      provider={API_PROVIDER}
       parts={parts}
       pieces={[whiteQueen, blackKnight, whiteRook, blackKing]}
       captures={captures}
@@ -144,6 +155,7 @@ function renderReading(overrides: Partial<React.ComponentProps<typeof ReadingSta
       answerModel="gpt-5.6-sol"
       answerPrompt="Canonical answer prompt containing only captured signals."
       answerError=""
+      answerActivity={null}
       captureKeys={new Set(['2:3', '1:5'])}
       onRetryAnswer={vi.fn()}
       onReplay={vi.fn()}
@@ -185,17 +197,19 @@ describe('ReadingStage final answer', () => {
 
     expect(answer.getByText('reversible checkpoint').tagName).toBe('STRONG')
     expect(answerText?.querySelector('br')).toBeInTheDocument()
+    expect(screen.getByText(/gpt-5\.6-sol · OpenAI API · answer from 2 captured signals/i)).toBeInTheDocument()
   })
 
-  it('describes only the captured signals and uses generic loading copy when no model is known', () => {
+  it('describes the complete final payload and uses configured model provenance while loading', () => {
     renderReading({
       answerStatus: 'loading',
       answer: '',
       answerModel: '',
     })
 
-    expect(screen.getByText('Asking the answer service')).toBeInTheDocument()
-    expect(screen.getByText(/only the captured facet signals/i)).toBeInTheDocument()
+    expect(screen.getByText('Asking gpt-5.6-sol via OpenAI API')).toBeInTheDocument()
+    expect(screen.getByText(/original question, outcome, game totals and polarities/i)).toBeInTheDocument()
+    expect(screen.getByText(/uncaptured facets were not/i)).toBeInTheDocument()
     expect(screen.getByText((_, element) => (
       element?.tagName === 'SPAN' && element.textContent === '2 captured signals sent'
     ))).toBeInTheDocument()
@@ -203,7 +217,38 @@ describe('ReadingStage final answer', () => {
       element?.tagName === 'SPAN' && element.textContent === '2 unique facets'
     ))).toBeInTheDocument()
     expect(screen.getByText('Captured signals: 2')).toBeInTheDocument()
-    expect(screen.queryByText(/gpt-5\.6-sol|sol is composing/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/sol is composing/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/whole board|complete game/i)).not.toBeInTheDocument()
+  })
+
+  it('labels a returned failure prompt as the prompt used for that attempt', () => {
+    renderReading({
+      answerStatus: 'error',
+      answer: '',
+      answerPrompt: 'Canonical prompt returned with the failed attempt.',
+      answerError: 'The model provider could not complete this answer.',
+    })
+
+    expect(screen.getByText(/see the prompt used for this attempt/i)).toBeInTheDocument()
+    expect(screen.queryByText(/waiting to be sent/i)).not.toBeInTheDocument()
+  })
+
+  it('identifies the model and local ChatGPT Codex provider together', () => {
+    renderReading({
+      provider: {
+        id: 'codex-chatgpt',
+        label: 'ChatGPT Codex',
+        billing: 'chatgpt-workspace',
+        localOnly: true,
+        dataControlsUrl: 'https://help.openai.com/en/articles/7730893-data-controls-faq',
+        model: 'gpt-5.6-sol',
+        webSearch: 'live',
+      },
+      answerModel: 'gpt-5.6-sol',
+    })
+
+    expect(screen.getByText(
+      /gpt-5\.6-sol · ChatGPT Codex · answer from 2 captured signals/i,
+    )).toBeInTheDocument()
   })
 })

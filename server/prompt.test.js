@@ -332,11 +332,24 @@ describe('machine-enforced final-answer contract', () => {
 })
 
 describe('answer API integration', () => {
-  it('keeps the canonical prompt available when the API key is missing', async () => {
+  it('keeps the canonical prompt available when model access is not configured', async () => {
     const response = await answerCompletedGame(gamePayload(), { apiKey: '' })
 
     expect(response.status).toBe(503)
-    expect(response.body.error).toMatch(/OPENAI_API_KEY/)
+    expect(response.body.error).toMatch(/model provider is not configured/i)
+    expect(response.body.prompt).toContain('GAME EVIDENCE')
+  })
+
+  it('does not treat an API key as fallback access in ChatGPT Codex mode', async () => {
+    const response = await answerCompletedGame(gamePayload(), {
+      environment: {
+        WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt',
+        OPENAI_API_KEY: 'must-be-ignored',
+      },
+    })
+
+    expect(response.status).toBe(503)
+    expect(response.body.error).toMatch(/model provider is not configured/i)
     expect(response.body.prompt).toContain('GAME EVIDENCE')
   })
 
@@ -367,6 +380,26 @@ describe('answer API integration', () => {
       },
       store: false,
     }))
+  })
+
+  it('continues the authoritative answer when public rationale is unavailable', async () => {
+    const sections = answerSectionsWithRenderedWordCount(500)
+    const parse = vi.fn().mockResolvedValue(completedResponse(sections))
+    const create = vi.fn().mockRejectedValue(
+      new Error('optional public rationale failed'),
+    )
+    const onRationale = vi.fn()
+
+    const response = await answerCompletedGame(gamePayload(), {
+      client: { responses: { create, parse } },
+      onRationale,
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.body.answer).toBe(formatWebChessAnswer(sections))
+    expect(create).toHaveBeenCalledOnce()
+    expect(parse).toHaveBeenCalledOnce()
+    expect(onRationale).not.toHaveBeenCalled()
   })
 
   it('rejects malformed game data before building or sending a prompt', async () => {

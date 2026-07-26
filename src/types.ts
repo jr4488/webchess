@@ -18,6 +18,39 @@ export type DivisionPhase =
   | 'paired'
   | 'casting'
 
+export type ModelActivityOperation = 'division' | 'answer'
+
+export type ModelActivityPhase =
+  | 'request-accepted'
+  | 'preparing-input'
+  | 'awaiting-model'
+  | 'thinking'
+  | 'writing-rationale'
+  | 'drafting'
+  | 'validating-output'
+  | 'complete'
+
+export interface ModelActivityHistoryEntry {
+  phase: ModelActivityPhase
+  at: number
+}
+
+export interface ModelActivityRationaleNote {
+  text: string
+  at: number
+}
+
+export interface ModelActivityState {
+  operation: ModelActivityOperation
+  status: 'active' | 'complete' | 'error'
+  phase: ModelActivityPhase
+  startedAt: number
+  lastHeartbeatAt: number
+  lastProviderActivityAt?: number
+  history: ModelActivityHistoryEntry[]
+  rationaleNotes: ModelActivityRationaleNote[]
+}
+
 export interface CellCoord {
   ring: number
   sector: number

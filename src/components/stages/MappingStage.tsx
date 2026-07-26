@@ -2,7 +2,14 @@ import type { CSSProperties } from 'react'
 import { ArrowRight, Bot, CircleAlert, RefreshCw } from 'lucide-react'
 
 import { PROBLEM_DIMENSIONS } from '../../lib/problem'
-import type { DivisionPhase, DivisionStatus, ProblemPart } from '../../types'
+import type { SessionProvider } from '../../lib/session'
+import type {
+  DivisionPhase,
+  DivisionStatus,
+  ModelActivityState,
+  ProblemPart,
+} from '../../types'
+import { ModelActivityPanel } from '../ModelActivityPanel'
 import { ProcessGraphic } from '../ProcessGraphic'
 import { RadialBoard } from '../RadialBoard'
 
@@ -10,6 +17,7 @@ type AnimationStyle = CSSProperties & { '--delay'?: string; '--progress'?: numbe
 
 interface MappingStageProps {
   problem: string
+  provider: SessionProvider
   parts: readonly ProblemPart[]
   progress: number
   divisionStatus: DivisionStatus
@@ -17,13 +25,14 @@ interface MappingStageProps {
   divisionModel: string
   divisionPrompt: string
   divisionError: string
+  divisionActivity: ModelActivityState | null
   onBegin: () => void
   onRetry: () => void
 }
 
 const PIPELINE_PHASES: ReadonlyArray<{ id: DivisionPhase; label: string }> = [
-  { id: 'analyzing', label: 'Sol analyzing 64 candidate facets' },
-  { id: 'facets-received', label: '64 Sol facets received' },
+  { id: 'analyzing', label: 'Model analyzing 64 candidate facets' },
+  { id: 'facets-received', label: '64 model facets received' },
   { id: 'facets-permuted', label: 'Problem facets independently shuffled' },
   { id: 'hexagrams-permuted', label: 'I Ching lenses independently shuffled' },
   { id: 'paired', label: 'Facets paired with hexagrams' },
@@ -32,6 +41,7 @@ const PIPELINE_PHASES: ReadonlyArray<{ id: DivisionPhase; label: string }> = [
 
 export function MappingStage({
   problem,
+  provider,
   parts,
   progress,
   divisionStatus,
@@ -39,6 +49,7 @@ export function MappingStage({
   divisionModel,
   divisionPrompt,
   divisionError,
+  divisionActivity,
   onBegin,
   onRetry,
 }: MappingStageProps) {
@@ -53,7 +64,7 @@ export function MappingStage({
     ? 0
     : Math.max(0, PIPELINE_PHASES.findIndex((phase) => phase.id === divisionPhase))
   const activeLabel = isError
-    ? 'Sol could not complete the 64-facet analysis'
+    ? 'The model could not complete the 64-facet analysis'
     : mappingReady
       ? 'The 64-part board is complete'
       : PIPELINE_PHASES[currentPhaseIndex].label
@@ -65,6 +76,7 @@ export function MappingStage({
     { label: 'Pairs', value: pairsReady ? '64 joined' : 'Waiting' },
     { label: 'Board', value: mappingReady ? 'Complete' : isCasting ? `${progress}/64 cast` : 'Open' },
   ]
+  const modelAndProvider = `${divisionModel || provider.model} · ${provider.label}`
 
   return (
     <section className="board-layout stage-enter" data-stage-root tabIndex={-1} aria-label="Dividing your problem into 64 facets">
@@ -85,7 +97,7 @@ export function MappingStage({
           {isLoading && (
             <div className="division-board-status" aria-hidden="true">
               <div className="division-orbit"><span /><span /><Bot size={22} /></div>
-              <strong>Sol is finding the 64 facets</strong>
+              <strong>{provider.label} is finding the 64 facets</strong>
             </div>
           )}
         </div>
@@ -109,8 +121,8 @@ export function MappingStage({
             <div className="division-error">
               <CircleAlert size={24} />
               <div>
-                <small>Analysis paused</small>
-                <strong>Sol could not divide this problem.</strong>
+                <small>Analysis paused · {modelAndProvider}</small>
+                <strong>The model could not divide this problem.</strong>
                 <p>{divisionError}</p>
                 <button className="secondary-button division-retry" type="button" onClick={onRetry}>
                   <RefreshCw size={15} /> Try the division again
@@ -128,13 +140,27 @@ export function MappingStage({
               <div className="division-headline">
                 <div className="division-orbit" aria-hidden="true"><span /><span /><Bot size={21} /></div>
                 <div>
-                  <small>{divisionModel ? `${divisionModel} · semantic division` : 'Sol · semantic division'}</small>
+                  <small>{modelAndProvider} · semantic division</small>
                   <strong>{activeLabel}</strong>
                   <p>{isLoading
-                    ? 'The wait is intentionally indeterminate while Sol proposes concrete, problem-specific perspectives.'
+                    ? `The wait is intentionally indeterminate while ${provider.label} proposes concrete, problem-specific perspectives.`
                     : 'Only process milestones are shown here; private model reasoning is never displayed.'}</p>
                 </div>
               </div>
+
+              {divisionActivity && (
+                <ModelActivityPanel
+                  activity={divisionActivity}
+                  modelLabel={divisionModel || provider.model}
+                  providerLabel={provider.label}
+                  summary="Looking across purpose, people, resources, timing, risks, values, evidence, and possibilities before arranging exactly 64 distinct facets."
+                  metrics={[
+                    { label: 'Facets', value: parts.length === 64 ? '64 ready' : '64 requested' },
+                    { label: 'Output', value: 'Strict structure' },
+                    { label: 'Runtime', value: provider.localOnly ? 'Local' : 'Provider' },
+                  ]}
+                />
+              )}
 
               <ProcessGraphic
                 key={mappingReady ? 'complete' : divisionPhase}
