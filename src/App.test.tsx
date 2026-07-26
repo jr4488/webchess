@@ -2,7 +2,26 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
+import type { AutoPlayEngine, EngineResult } from './lib/auto-play'
+import type { EngineOptions } from './lib/engine'
 import { makeDivisionAnalysis } from './test/fixtures'
+import type { Piece, Side } from './types'
+
+interface DeferredEngineRequest {
+  pieces: readonly Piece[]
+  side: Side
+  seed: string | number
+  options: EngineOptions | undefined
+  resolve: (result: EngineResult) => void
+}
+
+const engineHarness = vi.hoisted(() => ({
+  deferred: false,
+  pending: [] as DeferredEngineRequest[],
+  chooseMove: vi.fn<AutoPlayEngine['chooseMove']>(),
+  reset: vi.fn<AutoPlayEngine['reset']>(),
+  dispose: vi.fn<AutoPlayEngine['dispose']>(),
+}))
 
 /**
  * These tests play whole games to check the app's staging, so they use the real
@@ -12,15 +31,24 @@ import { makeDivisionAnalysis } from './test/fixtures'
 vi.mock('./lib/auto-play', async () => {
   const { findBestMove } = await import('./lib/engine')
 
+  engineHarness.chooseMove.mockImplementation((pieces, side, seed, options) => {
+    if (engineHarness.deferred) {
+      return new Promise<EngineResult>((resolve) => {
+        engineHarness.pending.push({ pieces, side, seed, options, resolve })
+      })
+    }
+
+    return Promise.resolve({
+      status: 'ok',
+      move: findBestMove(pieces, side, seed, { ...(options ?? {}), depth: 1 }),
+    })
+  })
+
   return {
     createAutoPlayEngine: () => ({
-      chooseMove: (
-        pieces: Parameters<typeof findBestMove>[0],
-        side: Parameters<typeof findBestMove>[1],
-        seed: Parameters<typeof findBestMove>[2],
-      ) => Promise.resolve({ status: 'ok', move: findBestMove(pieces, side, seed, { depth: 1 }) }),
-      reset: () => {},
-      dispose: () => {},
+      chooseMove: engineHarness.chooseMove,
+      reset: engineHarness.reset,
+      dispose: engineHarness.dispose,
     }),
   }
 })
@@ -63,8 +91,28 @@ async function finishMapping(): Promise<void> {
   await act(() => vi.advanceTimersByTimeAsync(6_500))
 }
 
+async function beginDeferredGame(): Promise<void> {
+  const division = makeDivisionAnalysis('deferred-engine-seed')
+  vi.stubGlobal('fetch', vi.fn().mockImplementation((input: string) => {
+    if (input === '/api/session') return Promise.resolve(jsonResponse(ACTIVE_SESSION))
+    if (input === '/api/divide') return Promise.resolve(jsonResponse(division))
+    throw new Error(`Unexpected request: ${input}`)
+  }))
+
+  render(<App />)
+  await submitProblem('How should this position move toward a useful next step?')
+  await finishMapping()
+  fireEvent.click(screen.getByRole('button', { name: /set the pieces in motion/i }))
+  engineHarness.deferred = true
+}
+
 describe('WebChess flow', () => {
   afterEach(() => {
+    engineHarness.deferred = false
+    engineHarness.pending.splice(0)
+    engineHarness.chooseMove.mockClear()
+    engineHarness.reset.mockClear()
+    engineHarness.dispose.mockClear()
     vi.useRealTimers()
     vi.unstubAllGlobals()
   })
@@ -186,6 +234,99 @@ describe('WebChess flow', () => {
     expect(body.captures[0].part.focus).toMatch(/Concrete focus/i)
     expect(['king-captured', 'no-progress', 'move-limit']).toContain(body.outcome.reason)
     expect(body.outcome.completedTurn).toBe(terminalMove)
+  }, 30_000)
+
+  it('cancels an autoplay search on pause and ignores its stale completion', async () => {
+    vi.useFakeTimers()
+    await beginDeferredGame()
+
+    fireEvent.click(screen.getByRole('button', { name: /auto-play to the end/i }))
+    await act(() => vi.advanceTimersByTimeAsync(321))
+
+    expect(engineHarness.pending).toHaveLength(1)
+    expect(engineHarness.chooseMove).toHaveBeenCalledWith(
+      expect.any(Array),
+      'white',
+      expect.any(String),
+      { completedPlies: 0, quietPlies: 0 },
+    )
+    expect(screen.getByRole('button', { name: /pause auto-play/i })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: /pause auto-play/i }))
+
+    expect(engineHarness.reset).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: /auto-play to the end/i })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /play one turn/i })).toBeEnabled()
+
+    await act(async () => {
+      engineHarness.pending[0]?.resolve({
+        status: 'ok',
+        move: {
+          pieceId: 'white-pawn-1',
+          from: { ring: 6, sector: 0 },
+          to: { ring: 5, sector: 0 },
+          score: 0,
+        },
+      })
+    })
+
+    expect(document.querySelector('.turn-header .eyebrow')).toHaveTextContent('Move 01')
+    expect(screen.getAllByText(/auto-play paused\. choose a white piece/i)).toHaveLength(2)
+  })
+
+  it('blocks autoplay during a manual search and rejects completion after reset', async () => {
+    vi.useFakeTimers()
+    await beginDeferredGame()
+
+    fireEvent.click(screen.getByRole('button', { name: /play one turn/i }))
+
+    expect(engineHarness.pending).toHaveLength(1)
+    expect(screen.getByRole('button', { name: /auto-play to the end/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /searching/i })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: /new question/i }))
+
+    expect(engineHarness.reset).toHaveBeenCalledTimes(1)
+    expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
+
+    await act(async () => {
+      engineHarness.pending[0]?.resolve({
+        status: 'ok',
+        move: {
+          pieceId: 'white-pawn-1',
+          from: { ring: 6, sector: 0 },
+          to: { ring: 5, sector: 0 },
+          score: 0,
+        },
+      })
+    })
+
+    expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
+    expect(screen.queryByRole('region', { name: /play the problem/i })).not.toBeInTheDocument()
+  })
+
+  it('stops autoplay cleanly when the engine returns an inapplicable move', async () => {
+    vi.useFakeTimers()
+    await beginDeferredGame()
+
+    fireEvent.click(screen.getByRole('button', { name: /auto-play to the end/i }))
+    await act(() => vi.advanceTimersByTimeAsync(321))
+
+    await act(async () => {
+      engineHarness.pending[0]?.resolve({
+        status: 'ok',
+        move: {
+          pieceId: 'missing-piece',
+          from: { ring: 6, sector: 0 },
+          to: { ring: 5, sector: 0 },
+          score: 0,
+        },
+      })
+    })
+
+    expect(screen.getByRole('button', { name: /auto-play to the end/i })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /play one turn/i })).toBeEnabled()
+    expect(screen.getAllByText(/move engine returned a move that no longer fits/i)).toHaveLength(2)
   })
 
   it('keeps the mapped board when an expired session is renewed for the same model', async () => {
@@ -320,7 +461,7 @@ describe('WebChess flow', () => {
     expect(screen.getByText(/retry lost its connection/i)).toBeInTheDocument()
     expect(screen.queryByText(/see the prompt used for this attempt/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/complete prompt used for the first attempt/i)).not.toBeInTheDocument()
-  })
+  }, 30_000)
 
   it('returns to the access gate when a paid request reports an expired session', async () => {
     const fetchMock = vi.fn().mockImplementation((input: string) => {

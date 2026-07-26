@@ -14,6 +14,17 @@ import { BOARD_RING_COUNT, BOARD_SECTOR_COUNT, problemPartAt } from './problem'
 import { captureNarration } from './reading'
 import { findBestMove } from './engine'
 import type { EngineOptions } from './engine'
+import { MAX_MOVES, generateMoves } from './engine/movegen'
+import {
+  BLACK,
+  WHITE,
+  moveFrom,
+  moveTo,
+  positionFromPieces,
+  ringOf,
+  sectorOf,
+  squareOf,
+} from './engine/position'
 
 export { PIECE_METAPHORS } from './reading'
 
@@ -106,124 +117,8 @@ export function createInitialPieces(): Piece[] {
   return [...createSide('black', 0, 1), ...createSide('white', 7, 6)]
 }
 
-function occupancyFor(pieces: readonly Piece[]): Map<string, Piece> {
-  return new Map(pieces.map((piece) => [coordKey(piece.position), piece]))
-}
-
-function addStep(
-  results: Map<string, CellCoord>,
-  occupancy: ReadonlyMap<string, Piece>,
-  movingPiece: Piece,
-  ring: number,
-  sector: number,
-): void {
-  const coord = { ring, sector: normalizeSector(sector) }
-
-  if (!isValidCoord(coord)) {
-    return
-  }
-
-  const occupant = occupancy.get(coordKey(coord))
-  if (!occupant || occupant.side !== movingPiece.side) {
-    results.set(coordKey(coord), coord)
-  }
-}
-
-function traceRay(
-  results: Map<string, CellCoord>,
-  occupancy: ReadonlyMap<string, Piece>,
-  movingPiece: Piece,
-  ringStep: number,
-  sectorStep: number,
-  maximumSteps: number,
-): void {
-  for (let distance = 1; distance <= maximumSteps; distance += 1) {
-    const coord = {
-      ring: movingPiece.position.ring + ringStep * distance,
-      sector: normalizeSector(movingPiece.position.sector + sectorStep * distance),
-    }
-
-    if (!isValidCoord(coord) || isSameCoord(coord, movingPiece.position)) {
-      break
-    }
-
-    const occupant = occupancy.get(coordKey(coord))
-    if (!occupant) {
-      results.set(coordKey(coord), coord)
-      continue
-    }
-
-    if (occupant.side !== movingPiece.side) {
-      results.set(coordKey(coord), coord)
-    }
-    break
-  }
-}
-
-function addRookMoves(
-  results: Map<string, CellCoord>,
-  occupancy: ReadonlyMap<string, Piece>,
-  piece: Piece,
-): void {
-  traceRay(results, occupancy, piece, 1, 0, BOARD_RINGS - 1)
-  traceRay(results, occupancy, piece, -1, 0, BOARD_RINGS - 1)
-  traceRay(results, occupancy, piece, 0, 1, BOARD_SECTORS - 1)
-  traceRay(results, occupancy, piece, 0, -1, BOARD_SECTORS - 1)
-}
-
-function addBishopMoves(
-  results: Map<string, CellCoord>,
-  occupancy: ReadonlyMap<string, Piece>,
-  piece: Piece,
-): void {
-  traceRay(results, occupancy, piece, 1, 1, BOARD_RINGS - 1)
-  traceRay(results, occupancy, piece, 1, -1, BOARD_RINGS - 1)
-  traceRay(results, occupancy, piece, -1, 1, BOARD_RINGS - 1)
-  traceRay(results, occupancy, piece, -1, -1, BOARD_RINGS - 1)
-}
-
-function addPawnMoves(
-  results: Map<string, CellCoord>,
-  occupancy: ReadonlyMap<string, Piece>,
-  piece: Piece,
-): void {
-  const direction = piece.side === 'black' ? 1 : -1
-  const startRing = piece.side === 'black' ? 1 : 6
-  const forward = {
-    ring: piece.position.ring + direction,
-    sector: normalizeSector(piece.position.sector),
-  }
-
-  if (isValidCoord(forward) && !occupancy.has(coordKey(forward))) {
-    results.set(coordKey(forward), forward)
-
-    const doubleForward = {
-      ring: piece.position.ring + direction * 2,
-      sector: normalizeSector(piece.position.sector),
-    }
-    if (
-      !piece.moved &&
-      piece.position.ring === startRing &&
-      isValidCoord(doubleForward) &&
-      !occupancy.has(coordKey(doubleForward))
-    ) {
-      results.set(coordKey(doubleForward), doubleForward)
-    }
-  }
-
-  for (const sectorStep of [-1, 1]) {
-    const captureCoord = {
-      ring: piece.position.ring + direction,
-      sector: normalizeSector(piece.position.sector + sectorStep),
-    }
-    if (!isValidCoord(captureCoord)) {
-      continue
-    }
-    const occupant = occupancy.get(coordKey(captureCoord))
-    if (occupant && occupant.side !== piece.side) {
-      results.set(coordKey(captureCoord), captureCoord)
-    }
-  }
+function engineSide(side: Side): number {
+  return side === 'white' ? WHITE : BLACK
 }
 
 /**
@@ -236,70 +131,34 @@ export function getLegalMoves(piece: Piece, pieces: readonly Piece[]): CellCoord
     return []
   }
 
-  const occupancy = occupancyFor(pieces)
-  const results = new Map<string, CellCoord>()
+  // Put the requested piece on the packed board last. This preserves the
+  // public helper's long-standing ability to inspect a piece supplied as a
+  // structural copy (or before it has been inserted into the caller's list).
+  const position = positionFromPieces([...pieces, piece], piece.side)
+  const moves = new Int32Array(MAX_MOVES)
+  const count = generateMoves(position, engineSide(piece.side), moves, 'all')
+  const origin = squareOf(piece.position.ring, piece.position.sector)
+  const results: CellCoord[] = []
 
-  switch (piece.kind) {
-    case 'rook':
-      addRookMoves(results, occupancy, piece)
-      break
-    case 'bishop':
-      addBishopMoves(results, occupancy, piece)
-      break
-    case 'queen':
-      addRookMoves(results, occupancy, piece)
-      addBishopMoves(results, occupancy, piece)
-      break
-    case 'king':
-      for (let ringStep = -1; ringStep <= 1; ringStep += 1) {
-        for (let sectorStep = -1; sectorStep <= 1; sectorStep += 1) {
-          if (ringStep !== 0 || sectorStep !== 0) {
-            addStep(
-              results,
-              occupancy,
-              piece,
-              piece.position.ring + ringStep,
-              piece.position.sector + sectorStep,
-            )
-          }
-        }
-      }
-      break
-    case 'knight': {
-      const offsets: ReadonlyArray<readonly [number, number]> = [
-        [-2, -1],
-        [-2, 1],
-        [-1, -2],
-        [-1, 2],
-        [1, -2],
-        [1, 2],
-        [2, -1],
-        [2, 1],
-      ]
-      for (const [ringStep, sectorStep] of offsets) {
-        addStep(
-          results,
-          occupancy,
-          piece,
-          piece.position.ring + ringStep,
-          piece.position.sector + sectorStep,
-        )
-      }
-      break
-    }
-    case 'pawn':
-      addPawnMoves(results, occupancy, piece)
-      break
+  for (let index = 0; index < count; index += 1) {
+    const move = moves[index]!
+    if (moveFrom(move) !== origin) continue
+
+    const destination = moveTo(move)
+    results.push({
+      ring: ringOf(destination),
+      sector: sectorOf(destination),
+    })
   }
 
-  return [...results.values()]
+  return results
 }
 
 /** Whether a side has any legal move available on the current board. */
 export function hasLegalMove(pieces: readonly Piece[], side: Side): boolean {
-  return pieces.some(
-    (piece) => piece.side === side && getLegalMoves(piece, pieces).length > 0,
-  )
+  const position = positionFromPieces(pieces, side)
+  const moves = new Int32Array(MAX_MOVES)
+  return generateMoves(position, engineSide(side), moves, 'all') > 0
 }
 
 /**

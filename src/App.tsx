@@ -65,6 +65,13 @@ type AccessState =
       session: AuthenticatedSession
     }
 
+type EngineSearchMode = 'manual' | 'autoplay'
+
+interface ActiveEngineRequest {
+  generation: number
+  mode: EngineSearchMode
+}
+
 function otherSide(side: Side): Side {
   return side === 'white' ? 'black' : 'white'
 }
@@ -114,7 +121,7 @@ export function App() {
   const [answerPrompt, setAnswerPrompt] = useState('')
   const [answerError, setAnswerError] = useState('')
   const [answerActivity, setAnswerActivity] = useState<ModelActivityState | null>(null)
-  const [thinking, setThinking] = useState(false)
+  const [engineSearchMode, setEngineSearchMode] = useState<EngineSearchMode | null>(null)
   const sessionRequestRef = useRef<AbortController | null>(null)
   const divisionRequestRef = useRef<AbortController | null>(null)
   const answerRequestRef = useRef<AbortController | null>(null)
@@ -126,6 +133,7 @@ export function App() {
   const sessionActive = accessState.status === 'authenticated'
   const csrfToken = sessionActive ? accessState.session.csrfToken : ''
   const gameFinishing = outcome !== null && stage === 'playing'
+  const thinking = engineSearchMode !== null
 
   useEffect(() => {
     divisionStatusRef.current = divisionStatus
@@ -136,13 +144,27 @@ export function App() {
   // state: unmounting disposes it, and under StrictMode's remount a disposed
   // engine would linger and refuse every later search.
   const engineRef = useRef<AutoPlayEngine | null>(null)
+  const engineRequestGenerationRef = useRef(0)
+  const activeEngineRequestRef = useRef<ActiveEngineRequest | null>(null)
   const getEngine = useCallback(() => {
     engineRef.current ??= createAutoPlayEngine()
     return engineRef.current
   }, [])
 
+  const invalidateEngineRequest = useCallback((alwaysResetEngine = false) => {
+    const hadActiveRequest = activeEngineRequestRef.current !== null
+    engineRequestGenerationRef.current += 1
+    activeEngineRequestRef.current = null
+    if (alwaysResetEngine || hadActiveRequest) {
+      engineRef.current?.reset()
+    }
+    setEngineSearchMode(null)
+  }, [])
+
   useEffect(
     () => () => {
+      engineRequestGenerationRef.current += 1
+      activeEngineRequestRef.current = null
       engineRef.current?.dispose()
       engineRef.current = null
     },
@@ -154,8 +176,7 @@ export function App() {
     divisionRequestRef.current = null
     answerRequestRef.current?.abort()
     answerRequestRef.current = null
-    engineRef.current?.reset()
-    setThinking(false)
+    invalidateEngineRequest(true)
     setStage('question')
     setProblem('')
     setParts([])
@@ -183,7 +204,7 @@ export function App() {
     setAnswerError('')
     setAnswerActivity(null)
     setNotice('Choose a white piece. Its possible paths will appear.')
-  }, [])
+  }, [invalidateEngineRequest])
 
   /**
    * Keep the board when a session is renewed, and discard it only when the
@@ -224,6 +245,7 @@ export function App() {
 
     divisionRequestRef.current?.abort()
     answerRequestRef.current?.abort()
+    invalidateEngineRequest(true)
     setAutoPlaying(false)
 
     if (divisionInterrupted) {
@@ -244,7 +266,7 @@ export function App() {
       status: 'unauthenticated',
       message: explanation,
     })
-  }, [])
+  }, [invalidateEngineRequest])
 
   const loadSession = useCallback((controller: AbortController) => {
     void getWebChessSession(controller.signal)
@@ -423,11 +445,12 @@ export function App() {
   }, [sessionActive, stage])
 
   const finishGame = useCallback((finished: GameOutcome) => {
+    invalidateEngineRequest(true)
     setOutcome(finished)
     setAutoPlaying(false)
     setSelectedPieceId(null)
     setNotice(outcomeNotice(finished))
-  }, [])
+  }, [invalidateEngineRequest])
 
   const movePiece = useCallback(
     (pieceId: string, destination: CellCoord) => {
@@ -451,6 +474,7 @@ export function App() {
             }
           : null
 
+        invalidateEngineRequest()
         setPieces(result.pieces)
         setLastMove({ from: movingPiece.position, to: destination })
         setFocusedCell(destination)
@@ -506,20 +530,51 @@ export function App() {
         return false
       }
     },
-    [finishGame, outcome, parts, pieces, quietPlies, turn, turnNumber],
+    [
+      finishGame,
+      invalidateEngineRequest,
+      outcome,
+      parts,
+      pieces,
+      quietPlies,
+      turn,
+      turnNumber,
+    ],
   )
 
-  const playOneTurn = useCallback(async () => {
-    if (outcome) return
+  const playOneTurn = useCallback(async (mode: EngineSearchMode) => {
+    if (
+      !sessionActive ||
+      stage !== 'playing' ||
+      outcome ||
+      activeEngineRequestRef.current ||
+      (mode === 'manual' && autoPlaying) ||
+      (mode === 'autoplay' && !autoPlaying)
+    ) return
 
-    setThinking(true)
+    const generation = engineRequestGenerationRef.current + 1
+    engineRequestGenerationRef.current = generation
+    activeEngineRequestRef.current = { generation, mode }
+    setEngineSearchMode(mode)
     const result = await getEngine().chooseMove(pieces, turn, `${problem}/${turnNumber}`, {
-      ply: turnNumber,
+      completedPlies: Math.max(0, turnNumber - 1),
       quietPlies,
     })
-    if (result.status === 'superseded') return
 
-    setThinking(false)
+    const activeRequest = activeEngineRequestRef.current
+    if (
+      engineRequestGenerationRef.current !== generation ||
+      activeRequest?.generation !== generation ||
+      activeRequest.mode !== mode
+    ) return
+
+    activeEngineRequestRef.current = null
+    setEngineSearchMode(null)
+
+    if (result.status === 'superseded') {
+      if (mode === 'autoplay') setAutoPlaying(false)
+      return
+    }
 
     if (result.status === 'failed') {
       setAutoPlaying(false)
@@ -549,6 +604,7 @@ export function App() {
         return
       }
 
+      invalidateEngineRequest()
       setQuietPlies(nextQuietPlies)
       setTurn(nextSide)
       setTurnNumber((current) => current + 1)
@@ -556,15 +612,32 @@ export function App() {
       return
     }
 
-    movePiece(choice.pieceId, choice.to)
-  }, [finishGame, getEngine, movePiece, outcome, pieces, problem, quietPlies, turn, turnNumber])
+    if (!movePiece(choice.pieceId, choice.to)) {
+      setAutoPlaying(false)
+      setNotice('The move engine returned a move that no longer fits this position. Choose a piece yourself to continue.')
+    }
+  }, [
+    autoPlaying,
+    finishGame,
+    getEngine,
+    invalidateEngineRequest,
+    movePiece,
+    outcome,
+    pieces,
+    problem,
+    quietPlies,
+    sessionActive,
+    stage,
+    turn,
+    turnNumber,
+  ])
 
   useEffect(() => {
     if (!sessionActive || !autoPlaying || stage !== 'playing' || outcome) return
 
     // The search itself takes a moment, so the pause before it only has to keep
     // a quick reply from erasing the move the viewer just watched land.
-    const timer = window.setTimeout(() => void playOneTurn(), 320)
+    const timer = window.setTimeout(() => void playOneTurn('autoplay'), 320)
     return () => window.clearTimeout(timer)
   }, [autoPlaying, outcome, playOneTurn, sessionActive, stage])
 
@@ -731,6 +804,7 @@ export function App() {
     const cleaned = normalizeProblemInput(problem)
     if (cleaned.length < 12) return
 
+    invalidateEngineRequest(true)
     setProblem(cleaned)
     setStage('mapping')
     void analyzeProblem(cleaned)
@@ -747,6 +821,7 @@ export function App() {
       divisionStatus !== 'success' ||
       mappingProgress < 64
     ) return
+    invalidateEngineRequest(true)
     setPieces(createInitialPieces())
     setTurn('white')
     setTurnNumber(1)
@@ -792,14 +867,19 @@ export function App() {
 
   const toggleAutoPlay = () => {
     if (gameFinishing) return
-    const shouldPlay = !autoPlaying
+    if (!autoPlaying && activeEngineRequestRef.current?.mode === 'manual') return
+
+    if (autoPlaying) {
+      invalidateEngineRequest(true)
+      setSelectedPieceId(null)
+      setAutoPlaying(false)
+      setNotice(`Auto-play paused. Choose a ${turn === 'white' ? 'White' : 'Black'} piece or play one turn.`)
+      return
+    }
+
     setSelectedPieceId(null)
-    setAutoPlaying(shouldPlay)
-    setNotice(
-      shouldPlay
-        ? 'The players are weighing pressure, safety, and purpose as they play to the end.'
-        : `Auto-play paused. Choose a ${turn === 'white' ? 'White' : 'Black'} piece or play one turn.`,
-    )
+    setAutoPlaying(true)
+    setNotice('The players are weighing pressure, safety, and purpose as they play to the end.')
   }
 
   const retryAnswer = () => {
@@ -815,6 +895,7 @@ export function App() {
   }
 
   const replayProblem = () => {
+    invalidateEngineRequest(true)
     setPieces(createInitialPieces())
     setTurn('white')
     setTurnNumber(1)
@@ -838,6 +919,8 @@ export function App() {
   const endSession = async () => {
     if (accessState.status !== 'authenticated' || endingSession) return
 
+    invalidateEngineRequest(true)
+    setAutoPlaying(false)
     setEndingSession(true)
     setSessionActionError('')
     try {
@@ -915,12 +998,12 @@ export function App() {
             captureKeys={captureKeys}
             lastMove={lastMove}
             autoPlaying={autoPlaying}
-            thinking={thinking}
+            searchMode={engineSearchMode}
             gameFinishing={gameFinishing}
             notice={notice}
             onPieceSelect={selectPiece}
             onCellSelect={selectCell}
-            onStep={() => void playOneTurn()}
+            onStep={() => void playOneTurn('manual')}
             onToggleAuto={toggleAutoPlay}
           />
         )}

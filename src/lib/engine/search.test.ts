@@ -1,9 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { Piece } from '../../types'
-import { createInitialPieces } from '../game'
+import { forcedPassPieces } from '../../test/engine-fixtures'
+import { createInitialPieces, getLegalMoves } from '../game'
 import { MATE_SCORE } from './evaluate'
 import { findBestMove, searchBestMove } from './index'
+import type { SearchOutcome } from './index'
+import { encodeMove, positionFromPieces, squareOf } from './position'
+import { Search } from './search'
 
 function at(
   id: string,
@@ -13,6 +17,18 @@ function at(
   sector: number,
 ): Piece {
   return { id, side, kind, position: { ring, sector }, moved: true }
+}
+
+function deterministicFields(outcome: SearchOutcome): Omit<SearchOutcome, 'elapsedMs' | 'nps'> {
+  return {
+    move: outcome.move,
+    nodes: outcome.nodes,
+    depth: outcome.depth,
+    score: outcome.score,
+    ttHits: outcome.ttHits,
+    principalVariation: outcome.principalVariation,
+    stopReason: outcome.stopReason,
+  }
 }
 
 describe('search results', () => {
@@ -99,18 +115,52 @@ describe('node budget', () => {
   }, BUDGET_TIMEOUT)
 
   it('still returns a move on a budget too small to deepen at all', () => {
-    const outcome = searchBestMove(pieces, 'white', 'tiny', { nodeBudget: 1 })
+    const first = searchBestMove(pieces, 'white', 'tiny', { nodeBudget: 1 })
+    const second = searchBestMove(pieces, 'white', 'tiny', { nodeBudget: 1 })
+    const mover = pieces.find((piece) => piece.id === first.move?.pieceId)
 
-    expect(outcome.move).not.toBeNull()
-    expect(outcome.depth).toBe(2)
+    expect(first).toMatchObject({
+      depth: 0,
+      nodes: 1,
+      stopReason: 'nodes',
+    })
+    expect(first.move).not.toBeNull()
+    expect(mover).toBeDefined()
+    expect(getLegalMoves(mover!, pieces)).toContainEqual(first.move!.to)
+    expect(first.principalVariation[0]).toEqual({
+      from: first.move!.from,
+      to: first.move!.to,
+    })
+    expect(deterministicFields(second)).toEqual(deterministicFields(first))
   })
 
   it('picks the same depth every time, so a replay repeats the game', () => {
     const first = searchBestMove(pieces, 'white', 'stable', { nodeBudget: 40_000 })
     const second = searchBestMove(pieces, 'white', 'stable', { nodeBudget: 40_000 })
 
-    expect(second).toEqual(first)
+    expect(deterministicFields(second)).toEqual(deterministicFields(first))
   }, BUDGET_TIMEOUT)
+
+  it('reports a wall-clock stop separately from a node stop', () => {
+    let now = 0
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now++)
+
+    try {
+      const outcome = searchBestMove(pieces, 'white', 'timed', {
+        depth: 3,
+        timeLimitMs: 1,
+      })
+
+      expect(outcome).toMatchObject({
+        depth: 0,
+        nodes: 1,
+        stopReason: 'time',
+      })
+      expect(outcome.move).not.toBeNull()
+    } finally {
+      clock.mockRestore()
+    }
+  })
 })
 
 describe('draw awareness', () => {
@@ -126,5 +176,131 @@ describe('draw awareness', () => {
 
     expect(winning?.score).toBeGreaterThan(0)
     expect(Math.abs(exhausted!.score)).toBe(0)
+  })
+
+  it('searches the opponent reply on action 256, then stops before action 257', () => {
+    const pieces = [
+      at('wk', 'white', 'king', 4, 0),
+      at('wr', 'white', 'rook', 4, 1),
+      at('wp', 'white', 'pawn', 4, 7),
+      at('bk', 'black', 'king', 0, 4),
+      at('br', 'black', 'rook', 4, 3),
+    ]
+    const unsafe = encodeMove(squareOf(4, 1), squareOf(3, 1), 0, false)
+    const safe = encodeMove(squareOf(4, 0), squareOf(3, 0), 0, false)
+    const candidates = Int32Array.of(unsafe, safe)
+
+    const beforeAction255 = new Search(positionFromPieces(pieces, 'white'), {
+      depth: 2,
+      completedPlies: 254,
+      startQuietPlies: 0,
+    })
+    const action255 = beforeAction255.searchRoot(
+      candidates,
+      candidates.length,
+      2,
+      -MATE_SCORE,
+      MATE_SCORE,
+      unsafe,
+    )
+
+    // Moving the rook exposes White's King to a Black rook capture on action
+    // 256. A search that stops one ply too early incorrectly treats both
+    // candidates as draws and keeps the preferred unsafe move.
+    expect(action255).toMatchObject({ move: safe, score: 0 })
+
+    const beforeAction256 = searchBestMove(pieces, 'white', 'last-action', {
+      depth: 2,
+      completedPlies: 255,
+    })
+    const afterAction256 = searchBestMove(pieces, 'white', 'last-action', {
+      depth: 2,
+      completedPlies: 256,
+    })
+
+    expect(beforeAction256.stopReason).toBe('depth')
+    expect(Math.abs(beforeAction256.score)).toBe(0)
+    expect(beforeAction256.move).not.toBeNull()
+    expect(afterAction256).toMatchObject({
+      move: null,
+      nodes: 0,
+      depth: 0,
+      score: 0,
+      stopReason: 'game-over',
+    })
+  })
+
+  it('lets a King capture on action 256 override the move-limit draw', () => {
+    const pieces = [
+      at('wr', 'white', 'rook', 4, 0),
+      at('wk', 'white', 'king', 7, 4),
+      at('bk', 'black', 'king', 4, 3),
+    ]
+
+    const outcome = searchBestMove(pieces, 'white', 'last-capture', {
+      depth: 2,
+      completedPlies: 255,
+    })
+
+    expect(outcome.move?.captured?.kind).toBe('king')
+    expect(outcome.score).toBe(MATE_SCORE)
+  })
+
+  it('keeps the principal variation intact across a forced pass', () => {
+    const pieces = forcedPassPieces()
+    const position = positionFromPieces(pieces, 'black')
+    const boardBefore = position.board.slice()
+    const movedBefore = position.moved.slice()
+    const hashBefore = [position.hashLow, position.hashHigh]
+    const outcome = searchBestMove(pieces, 'black', 'pass-pv', { depth: 3 })
+
+    // White is caged throughout: Black moves, White passes, then Black moves
+    // again. Pass is an internal PV action, so the public coordinate line has
+    // two Black moves rather than being truncated at White's turn.
+    expect(outcome.principalVariation).toHaveLength(2)
+
+    const search = new Search(position, {
+      depth: 3,
+      completedPlies: 0,
+      startQuietPlies: 0,
+    })
+    const rootMove = encodeMove(squareOf(4, 4), squareOf(4, 3), 0, false)
+    search.searchRoot(Int32Array.of(rootMove), 1, 3, -MATE_SCORE, MATE_SCORE)
+    search.principalVariation(3)
+
+    expect(position.board).toEqual(boardBefore)
+    expect(position.moved).toEqual(movedBefore)
+    expect([position.hashLow, position.hashHigh]).toEqual(hashBefore)
+  })
+})
+
+describe('quiescence', () => {
+  it('extends a quiet promotion instead of evaluating the pawn one move early', () => {
+    const scoreAfterForcedKingMove = (blackPawnRing: number): number => {
+      const pieces = [
+        at('wk', 'white', 'king', 4, 0),
+        at('wr', 'white', 'rook', 3, 6),
+        at('bk', 'black', 'king', 0, 4),
+        at('bp', 'black', 'pawn', blackPawnRing, 3),
+      ]
+      const forcedMove = encodeMove(squareOf(4, 0), squareOf(4, 1), 0, false)
+      const search = new Search(positionFromPieces(pieces, 'white'), {
+        depth: 1,
+        completedPlies: 0,
+        startQuietPlies: 0,
+      })
+
+      return search.searchRoot(
+        Int32Array.of(forcedMove),
+        1,
+        1,
+        -MATE_SCORE,
+        MATE_SCORE,
+        forcedMove,
+      ).score
+    }
+
+    expect(scoreAfterForcedKingMove(6)).toBeLessThan(0)
+    expect(scoreAfterForcedKingMove(5)).toBeGreaterThan(0)
   })
 })

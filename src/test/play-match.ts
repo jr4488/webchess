@@ -12,6 +12,7 @@ export type MoveChooser = (
 
 export interface MatchResult {
   outcome: GameOutcome
+  /** Total completed plies, including any opening supplied by the caller. */
   plies: number
   captures: number
   /** Material left on the board for each side, in classic piece points. */
@@ -43,41 +44,68 @@ export function playMatch(options: {
   seed: string
   maxPlies?: number
   startingPieces?: readonly Piece[]
+  startingSide?: Side
+  startingCompletedPlies?: number
+  startingQuietPlies?: number
 }): MatchResult {
   const parts = makeProblemParts(options.seed)
   let pieces: readonly Piece[] = options.startingPieces ?? createInitialPieces()
-  let turn: Side = 'white'
-  let ply = 1
-  let quietPlies = 0
+  let turn: Side = options.startingSide ?? 'white'
+  let completedPlies = options.startingCompletedPlies ?? 0
+  let quietPlies = options.startingQuietPlies ?? 0
   let captures = 0
   const maxPlies = options.maxPlies ?? 220
 
-  for (; ply <= maxPlies; ply += 1) {
+  const startingOutcome = getGameOutcome(pieces, { quietPlies, ply: completedPlies })
+  if (startingOutcome) return finish(pieces, startingOutcome, completedPlies, captures)
+
+  while (completedPlies < maxPlies) {
+    const ply = completedPlies + 1
     const chooser = turn === 'white' ? options.white : options.black
     const move = chooser(pieces, turn, `${options.seed}/${ply}`, ply, quietPlies)
 
     if (!move) {
+      if (hasLegalMove(pieces, turn)) {
+        throw new Error(`${turn} chooser returned no move from a position with a legal move.`)
+      }
+
       const opponent: Side = turn === 'white' ? 'black' : 'white'
       if (!hasLegalMove(pieces, opponent)) {
-        return finish(pieces, { winner: null, reason: 'no-moves', completedTurn: ply }, ply, captures)
+        return finish(
+          pieces,
+          { winner: null, reason: 'no-moves', completedTurn: completedPlies },
+          completedPlies,
+          captures,
+        )
       }
+
+      completedPlies = ply
       quietPlies += 1
+      const outcome = getGameOutcome(pieces, { quietPlies, ply: completedPlies })
+      if (outcome) return finish(pieces, outcome, completedPlies, captures)
+
       turn = opponent
       continue
     }
 
     const result = applyMove(pieces, move.pieceId, move.to, parts, ply)
     pieces = result.pieces
+    completedPlies = ply
     quietPlies = result.capture ? 0 : quietPlies + 1
     if (result.capture) captures += 1
 
-    const outcome = getGameOutcome(pieces, { quietPlies, ply })
-    if (outcome) return finish(pieces, outcome, ply, captures)
+    const outcome = getGameOutcome(pieces, { quietPlies, ply: completedPlies })
+    if (outcome) return finish(pieces, outcome, completedPlies, captures)
 
     turn = turn === 'white' ? 'black' : 'white'
   }
 
-  return finish(pieces, { winner: null, reason: 'move-limit', completedTurn: ply }, ply, captures)
+  return finish(
+    pieces,
+    { winner: null, reason: 'move-limit', completedTurn: completedPlies },
+    completedPlies,
+    captures,
+  )
 }
 
 function finish(
