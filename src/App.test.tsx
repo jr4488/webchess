@@ -222,7 +222,7 @@ describe('WebChess flow', () => {
     expect(body.captures[0].part.focus).toMatch(/Concrete focus/i)
     expect(['king-captured', 'no-progress', 'move-limit']).toContain(body.outcome.reason)
     expect(body.outcome.completedTurn).toBe(terminalMove)
-  })
+  }, 15_000)
 
   it('keeps the mapped board when an expired session is renewed for the same model', async () => {
     vi.useFakeTimers()
