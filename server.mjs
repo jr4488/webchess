@@ -57,7 +57,14 @@ export async function createRuntimeApp(options = {}) {
       vite = await createViteServer({
         root: rootDirectory,
         appType: 'spa',
-        server: { middlewareMode: true },
+        server: {
+          middlewareMode: true,
+          // In middleware mode Vite opens its own hot-reload socket on a fixed
+          // default port. Two instances on different ports, one per provider,
+          // then share one socket: the second fails to bind and its pages take
+          // reload commands from the first. Tie the socket to the app's port.
+          hmr: { port: port + 20_000 },
+        },
       })
       app.use(vite.middlewares)
     }

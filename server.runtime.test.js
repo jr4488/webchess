@@ -121,9 +121,11 @@ describe('executable server boundary', () => {
       id: 'openai-api',
       localOnly: false,
     })
+    // The hot-reload socket is derived from the app port so that two instances
+    // on different ports do not fight over one default socket.
     expect(createViteServer).toHaveBeenCalledWith(expect.objectContaining({
       appType: 'spa',
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: { port: 24_321 } },
     }))
   })
 
