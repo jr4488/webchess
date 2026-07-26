@@ -3,6 +3,11 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    // The HTML coverage report lands inside the project, so a `npm run verify`
+    // run against a live dev server reloaded the open page hundreds of times.
+    watch: { ignored: ['**/coverage/**'] },
+  },
   test: {
     environment: 'jsdom',
     globals: true,
