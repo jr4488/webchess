@@ -103,11 +103,31 @@ What could change the answer
 ${sections.what_could_change_the_answer}`
 }
 
+// Spread across the prose sections rather than piling into one. A real answer
+// distributes, and the per-section character bound is deliberately too small to
+// hold the whole word budget in a single field.
+const PROSE_SECTIONS = [
+  'answer',
+  'what_the_conflicts_emphasized',
+  'the_tension_to_hold',
+  'what_could_change_the_answer',
+]
+
 function answerSectionsWithRenderedWordCount(target) {
   const sections = baseAnswerSections()
   const current = countAnswerWords(renderFixture(sections))
   if (target < current) throw new Error(`target ${target} is below fixture base ${current}`)
-  sections.answer = `${sections.answer}\n\n${longText('filler', target - current)}`
+
+  let remaining = target - current
+  PROSE_SECTIONS.forEach((section, index) => {
+    const share = index === PROSE_SECTIONS.length - 1
+      ? remaining
+      : Math.floor((target - current) / PROSE_SECTIONS.length)
+    if (share <= 0) return
+    remaining -= share
+    sections[section] = `${sections[section]}\n\n${longText('filler', share)}`
+  })
+
   expect(countAnswerWords(renderFixture(sections))).toBe(target)
   return sections
 }
@@ -250,6 +270,21 @@ describe('machine-enforced final-answer contract', () => {
     })
     expect(format.schema.properties.three_next_moves)
       .toMatchObject({ minItems: 3, maxItems: 3 })
+  })
+
+  it('keeps every length bound compilable as a local llama.cpp grammar', () => {
+    // llama.cpp turns each maxLength into a char{min,max} repetition and
+    // refuses to parse one above MAX_REPETITION_THRESHOLD. Ollama compiles the
+    // grammar only after reasoning ends, so exceeding this does not fail the
+    // request: the stream stops with no completion event and no useful error.
+    const LLAMA_CPP_MAX_REPETITIONS = 2_000
+    const bounds = [...JSON.stringify(webChessAnswerTextFormat())
+      .matchAll(/"maxLength":(\d+)/gu)].map(([, value]) => Number(value))
+
+    expect(bounds.length).toBeGreaterThan(0)
+    for (const bound of bounds) {
+      expect(bound).toBeLessThan(LLAMA_CPP_MAX_REPETITIONS)
+    }
   })
 
   it.each([

@@ -10,18 +10,33 @@ const MAX_QUIET_PLIES = 100
 export const FINAL_ANSWER_MIN_WORDS = 450
 export const FINAL_ANSWER_MAX_WORDS = 750
 
+/**
+ * Longest a single answer section may be.
+ *
+ * A local llama.cpp runtime compiles this schema into a GBNF grammar, turning
+ * every `maxLength` into a `char{min,max}` repetition that it refuses to parse
+ * above 2000. Qwen-style models only compile that grammar once reasoning ends
+ * and structured output begins, so an over-limit bound does not fail the
+ * request: the stream simply stops with no completion event.
+ *
+ * The real contract is the 450-750 word total below, and four sections at this
+ * bound already exceed it, so this can never be what rejects a valid answer.
+ */
+const SECTION_MAX_CHARS = 1_500
+const ACTION_MAX_CHARS = 1_500
+
 export const WebChessAnswerSchema = z.strictObject({
-  answer: z.string().min(80).max(4_000)
+  answer: z.string().min(80).max(SECTION_MAX_CHARS)
     .describe('A direct two-to-three-sentence answer, followed by concise supporting context.'),
-  what_the_conflicts_emphasized: z.string().min(80).max(4_000)
+  what_the_conflicts_emphasized: z.string().min(80).max(SECTION_MAX_CHARS)
     .describe('A synthesis of the most important captured facets and repeated tensions.'),
-  the_tension_to_hold: z.string().min(80).max(4_000)
+  the_tension_to_hold: z.string().min(80).max(SECTION_MAX_CHARS)
     .describe('The central tradeoff to keep visible without pretending certainty.'),
   three_next_moves: z.array(
-    z.string().min(30).max(1_500)
+    z.string().min(30).max(ACTION_MAX_CHARS)
       .describe('One concrete, reversible action, written without a numeric prefix.'),
   ).length(3),
-  what_could_change_the_answer: z.string().min(80).max(4_000)
+  what_could_change_the_answer: z.string().min(80).max(SECTION_MAX_CHARS)
     .describe('Specific evidence or changed conditions that should trigger reconsideration.'),
 })
 

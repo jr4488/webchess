@@ -92,6 +92,14 @@ WebChess, and keep the endpoint, WebChess listener, and browser origin on
 loopback. WebChess rejects endpoint credentials, non-HTTP schemes, non-loopback
 hosts, and paths other than `/v1`. `OPENAI_API_KEY` is ignored.
 
+A local runtime enforces structured output by compiling the JSON Schema into a
+GBNF grammar, and llama.cpp refuses to parse a character repetition above 2000.
+WebChess therefore keeps every schema length bound below that. Note the failure
+mode if you extend the schema: a reasoning model compiles the grammar only after
+it stops thinking, so an over-limit bound does not return an error. The response
+stream simply ends with no completion event, and WebChess reports that the
+provider could not be reached. The runtime logs `failed to parse grammar`.
+
 The initial 64-facet generation is much larger than a normal chat response.
 `WEBCHESS_UPSTREAM_TIMEOUT_MS` accepts 1–3600000 milliseconds and defaults to
 120000; 600000 is a practical starting point for a 27B local model. Ollama must
