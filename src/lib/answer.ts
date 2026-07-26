@@ -5,6 +5,7 @@ import {
 } from './model-activity'
 import type { ModelActivityEvent } from './model-activity'
 import { SessionRequiredError } from './session'
+import { describeTransportFailure } from './transport'
 
 interface ErrorPayload {
   code?: string
@@ -62,20 +63,26 @@ export async function requestWebChessAnswer(
   csrfToken?: string,
   onActivity?: (event: ModelActivityEvent) => void,
 ): Promise<GeneratedAnswer> {
-  const response = await fetch('/api/answer', {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: {
-      Accept: onActivity ? modelActivityAcceptHeader() : 'application/json',
-      'Content-Type': 'application/json',
-      ...(csrfToken ? { 'X-WebChess-CSRF': csrfToken } : {}),
-    },
-    body: JSON.stringify(buildAnswerPayload(problem, outcome, captures)),
-    signal,
-  })
+  let response: Response
+  let payload: Partial<GeneratedAnswer> & ErrorPayload
+  try {
+    response = await fetch('/api/answer', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        Accept: onActivity ? modelActivityAcceptHeader() : 'application/json',
+        'Content-Type': 'application/json',
+        ...(csrfToken ? { 'X-WebChess-CSRF': csrfToken } : {}),
+      },
+      body: JSON.stringify(buildAnswerPayload(problem, outcome, captures)),
+      signal,
+    })
+    payload = await readModelActivityPayload(response, onActivity) as
+      Partial<GeneratedAnswer> & ErrorPayload
+  } catch (error) {
+    throw describeTransportFailure(error, 'answer')
+  }
 
-  const payload = await readModelActivityPayload(response, onActivity) as
-    Partial<GeneratedAnswer> & ErrorPayload
   if (!response.ok) {
     const message =
       payload.error ?? payload.message ?? 'The answer service did not respond. Please try again.'

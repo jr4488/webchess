@@ -113,6 +113,37 @@ describe('semantic problem division', () => {
     })
   })
 
+  it('explains an interrupted connection instead of repeating the browser wording', async () => {
+    // What a browser throws when it cannot reach the server at all.
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    await expect(requestProblemDivision('How should this plan change?')).rejects.toThrow(
+      /connection to WebChess was interrupted before the division finished/iu,
+    )
+  })
+
+  it('explains a response stream that stops partway through', async () => {
+    // What a browser throws when an accepted NDJSON response stops arriving,
+    // which is how a server restart mid-run presents to the client.
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"type":"phase","phase":"thinking"}\n'))
+        controller.error(new TypeError('network error'))
+      },
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'application/x-ndjson' },
+    })))
+
+    await expect(requestProblemDivision(
+      'How should this plan change?',
+      undefined,
+      undefined,
+      () => {},
+    )).rejects.toThrow(/connection to WebChess was interrupted/iu)
+  })
+
   it('requires a fresh session for a specifically identified stale CSRF token', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       error: 'The request security token is invalid.',

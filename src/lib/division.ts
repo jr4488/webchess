@@ -12,6 +12,7 @@ import {
 } from './model-activity'
 import type { ModelActivityEvent } from './model-activity'
 import { SessionRequiredError } from './session'
+import { describeTransportFailure } from './transport'
 
 const FACET_COUNT = 64
 
@@ -137,20 +138,26 @@ export async function requestProblemDivision(
   csrfToken?: string,
   onActivity?: (event: ModelActivityEvent) => void,
 ): Promise<DivisionAnalysis> {
-  const response = await fetch('/api/divide', {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: {
-      Accept: onActivity ? modelActivityAcceptHeader() : 'application/json',
-      'Content-Type': 'application/json',
-      ...(csrfToken ? { 'X-WebChess-CSRF': csrfToken } : {}),
-    },
-    body: JSON.stringify({ problem }),
-    signal,
-  })
+  let response: Response
+  let payload: Record<string, unknown> & DivisionErrorPayload
+  try {
+    response = await fetch('/api/divide', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        Accept: onActivity ? modelActivityAcceptHeader() : 'application/json',
+        'Content-Type': 'application/json',
+        ...(csrfToken ? { 'X-WebChess-CSRF': csrfToken } : {}),
+      },
+      body: JSON.stringify({ problem }),
+      signal,
+    })
+    payload = await readModelActivityPayload(response, onActivity) as
+      Record<string, unknown> & DivisionErrorPayload
+  } catch (error) {
+    throw describeTransportFailure(error, 'division')
+  }
 
-  const payload = await readModelActivityPayload(response, onActivity) as
-    Record<string, unknown> & DivisionErrorPayload
   if (!response.ok) {
     const message =
       payload.error ?? payload.message ?? 'The model could not divide this problem. Please try again.'
