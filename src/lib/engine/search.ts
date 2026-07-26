@@ -86,10 +86,9 @@ export class Search {
       return 0
     }
 
-    if (quietPlies >= MAX_QUIET_PLIES) return 0
-    if (this.limits.startPly + ply >= MAX_GAME_PLIES) return 0
+    if (this.reachedDrawHorizon(ply, quietPlies)) return 0
 
-    if (depth <= 0) return this.quiesce(alpha, beta, ply, 0)
+    if (depth <= 0) return this.quiesce(alpha, beta, ply, quietPlies, 0)
 
     const side = this.position.sideToMove
     const frame = this.frames[ply]!
@@ -152,12 +151,20 @@ export class Search {
    * middle of an exchange. Standing pat is allowed because the side to move is
    * not obliged to capture.
    */
-  private quiesce(alpha: number, beta: number, ply: number, extension: number): number {
+  private quiesce(
+    alpha: number,
+    beta: number,
+    ply: number,
+    quietPlies: number,
+    extension: number,
+  ): number {
     this.nodes += 1
     if (this.nodes >= this.nodeLimit) {
       this.aborted = true
       return 0
     }
+
+    if (this.reachedDrawHorizon(ply, quietPlies)) return 0
 
     const side = this.position.sideToMove
     const standPat = side === WHITE ? evaluateBoard(this.position.board) : -evaluateBoard(this.position.board)
@@ -186,7 +193,13 @@ export class Search {
       if (frame.scores[index]! < 0) continue
 
       this.position.make(move)
-      const score = -this.quiesce(-beta, -alpha, ply + 1, extension + 1)
+      const score = -this.quiesce(
+        -beta,
+        -alpha,
+        ply + 1,
+        nextQuietPlies(quietPlies, move),
+        extension + 1,
+      )
       this.position.unmake()
 
       if (score > best) best = score
@@ -195,6 +208,13 @@ export class Search {
     }
 
     return best
+  }
+
+  private reachedDrawHorizon(ply: number, quietPlies: number): boolean {
+    return (
+      quietPlies >= MAX_QUIET_PLIES ||
+      this.limits.startPly + ply >= MAX_GAME_PLIES
+    )
   }
 
   private orderMoves(frame: Frame, count: number): void {

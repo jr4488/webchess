@@ -8,8 +8,13 @@ import { findBestMove } from './index'
 const SEARCH_DEPTH = 3
 
 function engineChooser(depth = SEARCH_DEPTH) {
-  return (pieces: readonly Piece[], side: Side, seed: string | number, ply: number, quiet: number) =>
-    findBestMove(pieces, side, seed, { depth, ply, quietPlies: quiet })
+  return (
+    pieces: readonly Piece[],
+    side: Side,
+    seed: string | number,
+    completedPlies: number,
+    quiet: number,
+  ) => findBestMove(pieces, side, seed, { depth, ply: completedPlies, quietPlies: quiet })
 }
 
 const greedyChooser = (

@@ -6,6 +6,7 @@ import {
   chmodSync,
   existsSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
   statSync,
@@ -16,7 +17,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   CODEX_CHATGPT_PROVIDER,
@@ -58,9 +59,20 @@ const ROOT_HELP = [
   '--strict-config',
 ].join('\n')
 const temporaryCodexHomes = new Set()
+const hostPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+
+function setTestPlatform(value) {
+  Object.defineProperty(process, 'platform', {
+    configurable: true,
+    enumerable: true,
+    value,
+  })
+}
 
 function isolatedCodexHome() {
-  const directory = mkdtempSync(path.join(tmpdir(), 'webchess-codex-home-test-'))
+  const directory = mkdtempSync(
+    path.join(realpathSync.native(tmpdir()), 'webchess-codex-home-test-'),
+  )
   const authPath = path.join(directory, 'auth.json')
   writeFileSync(authPath, '{}', { mode: 0o600 })
   chmodSync(authPath, 0o600)
@@ -68,7 +80,17 @@ function isolatedCodexHome() {
   return directory
 }
 
+beforeEach(() => {
+  // The adapter is intentionally Linux-only, while most tests exercise its
+  // injected process and filesystem boundaries rather than the host kernel.
+  // Simulate the production platform so those unit tests remain portable.
+  setTestPlatform('linux')
+})
+
 afterEach(() => {
+  if (hostPlatformDescriptor) {
+    Object.defineProperty(process, 'platform', hostPlatformDescriptor)
+  }
   for (const directory of temporaryCodexHomes) {
     rmSync(directory, { recursive: true, force: true })
   }
@@ -380,6 +402,19 @@ describe('ChatGPT Codex readiness probe', () => {
     }
   }
 
+  it('fails closed before probing on a non-Linux host', () => {
+    setTestPlatform('darwin')
+    const { result, spawnSyncImpl } = probeWith({
+      '--version': 'codex-cli 0.145.0',
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'The ChatGPT Codex sandbox requires Linux.',
+    })
+    expect(spawnSyncImpl).not.toHaveBeenCalled()
+  })
+
   it('accepts only the pinned capability surface and ChatGPT login', () => {
     const { result, spawnSyncImpl } = probeWith({
       '--version': 'codex-cli 0.145.0',
@@ -560,7 +595,7 @@ describe('ChatGPT Codex readiness probe', () => {
     expect(result.ok).toBe(true)
     for (const [, args] of spawnSyncImpl.mock.calls) {
       expect(bindSource(args, '/etc/ssl/certs/ca-certificates.crt')).toBe(
-        '/etc/hosts',
+        realpathSync.native('/etc/hosts'),
       )
     }
   })
@@ -1301,6 +1336,38 @@ describe('ChatGPT Codex structured-output adapter', () => {
 })
 
 describe('real bubblewrap boundary', () => {
+  function kernelSetting(name) {
+    try {
+      return readFileSync(`/proc/sys/${name.replaceAll('.', '/')}`, 'utf8').trim()
+    } catch {
+      return 'unavailable'
+    }
+  }
+
+  function boundedDiagnostic(value) {
+    const text = String(value ?? '').trim()
+    return text.length > 2_000 ? `${text.slice(0, 2_000)}…` : text
+  }
+
+  function spawnDiagnostics(result) {
+    const error = result.error instanceof Error
+      ? `${result.error.name}: ${result.error.message}`
+      : result.error
+    return [
+      `status=${String(result.status)}`,
+      `signal=${String(result.signal)}`,
+      `error=${JSON.stringify(boundedDiagnostic(error))}`,
+      `stdout=${JSON.stringify(boundedDiagnostic(result.stdout))}`,
+      `stderr=${JSON.stringify(boundedDiagnostic(result.stderr))}`,
+      `kernel.unprivileged_userns_clone=${
+        kernelSetting('kernel.unprivileged_userns_clone')
+      }`,
+      `kernel.apparmor_restrict_unprivileged_userns=${
+        kernelSetting('kernel.apparmor_restrict_unprivileged_userns')
+      }`,
+    ].join(', ')
+  }
+
   it('hides host paths, mounts work read-only, scrubs env, and tears down the child', async (context) => {
     const integrationRequired =
       process.env.WEBCHESS_REQUIRE_BWRAP_INTEGRATION === '1'
@@ -1309,7 +1376,12 @@ describe('real bubblewrap boundary', () => {
       !existsSync('/usr/bin/bwrap')
     ) {
       if (integrationRequired) {
-        throw new Error('Required bubblewrap integration prerequisites are missing.')
+        throw new Error(
+          'Required bubblewrap integration prerequisites are missing: ' +
+          `platform=${process.platform}, /usr/bin/bwrap=${
+            existsSync('/usr/bin/bwrap') ? 'present' : 'missing'
+          }.`,
+        )
       }
       context.skip()
       return
@@ -1321,7 +1393,10 @@ describe('real bubblewrap boundary', () => {
     )
     if (smoke.status !== 0 || smoke.signal || smoke.error) {
       if (integrationRequired) {
-        throw new Error('Required bubblewrap integration smoke test failed.')
+        throw new Error(
+          `Required bubblewrap integration smoke test failed: ${spawnDiagnostics(smoke)}.`,
+          { cause: smoke.error },
+        )
       }
       context.skip()
       return
@@ -1454,7 +1529,12 @@ int main(void) {
     )
     if (compilation.status !== 0 || compilation.signal || compilation.error) {
       if (integrationRequired) {
-        throw new Error('A working static C compiler is required for this test.')
+        throw new Error(
+          `A working static C compiler is required for this test: ${
+            spawnDiagnostics(compilation)
+          }.`,
+          { cause: compilation.error },
+        )
       }
       context.skip()
       return

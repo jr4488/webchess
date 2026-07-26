@@ -140,6 +140,10 @@ export function App() {
     engineRef.current ??= createAutoPlayEngine()
     return engineRef.current
   }, [])
+  const cancelEngineSearch = useCallback(() => {
+    engineRef.current?.reset()
+    setThinking(false)
+  }, [])
 
   useEffect(
     () => () => {
@@ -154,8 +158,7 @@ export function App() {
     divisionRequestRef.current = null
     answerRequestRef.current?.abort()
     answerRequestRef.current = null
-    engineRef.current?.reset()
-    setThinking(false)
+    cancelEngineSearch()
     setStage('question')
     setProblem('')
     setParts([])
@@ -183,7 +186,7 @@ export function App() {
     setAnswerError('')
     setAnswerActivity(null)
     setNotice('Choose a white piece. Its possible paths will appear.')
-  }, [])
+  }, [cancelEngineSearch])
 
   /**
    * Keep the board when a session is renewed, and discard it only when the
@@ -224,6 +227,7 @@ export function App() {
 
     divisionRequestRef.current?.abort()
     answerRequestRef.current?.abort()
+    cancelEngineSearch()
     setAutoPlaying(false)
 
     if (divisionInterrupted) {
@@ -244,7 +248,7 @@ export function App() {
       status: 'unauthenticated',
       message: explanation,
     })
-  }, [])
+  }, [cancelEngineSearch])
 
   const loadSession = useCallback((controller: AbortController) => {
     void getWebChessSession(controller.signal)
@@ -514,7 +518,7 @@ export function App() {
 
     setThinking(true)
     const result = await getEngine().chooseMove(pieces, turn, `${problem}/${turnNumber}`, {
-      ply: turnNumber,
+      ply: Math.max(0, turnNumber - 1),
       quietPlies,
     })
     if (result.status === 'superseded') return
@@ -793,6 +797,7 @@ export function App() {
   const toggleAutoPlay = () => {
     if (gameFinishing) return
     const shouldPlay = !autoPlaying
+    if (!shouldPlay) cancelEngineSearch()
     setSelectedPieceId(null)
     setAutoPlaying(shouldPlay)
     setNotice(
@@ -838,6 +843,8 @@ export function App() {
   const endSession = async () => {
     if (accessState.status !== 'authenticated' || endingSession) return
 
+    cancelEngineSearch()
+    setAutoPlaying(false)
     setEndingSession(true)
     setSessionActionError('')
     try {

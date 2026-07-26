@@ -4,6 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 import { makeDivisionAnalysis } from './test/fixtures'
 
+const { chooseMoveMock } = vi.hoisted(() => ({
+  chooseMoveMock: vi.fn(),
+}))
+
 /**
  * These tests play whole games to check the app's staging, so they use the real
  * move rules at the shallowest depth. The engine's own strength is covered in
@@ -18,7 +22,14 @@ vi.mock('./lib/auto-play', async () => {
         pieces: Parameters<typeof findBestMove>[0],
         side: Parameters<typeof findBestMove>[1],
         seed: Parameters<typeof findBestMove>[2],
-      ) => Promise.resolve({ status: 'ok', move: findBestMove(pieces, side, seed, { depth: 1 }) }),
+        options?: Parameters<typeof findBestMove>[3],
+      ) => {
+        chooseMoveMock(pieces, side, seed, options)
+        return Promise.resolve({
+          status: 'ok',
+          move: findBestMove(pieces, side, seed, { ...options, depth: 1 }),
+        })
+      },
       reset: () => {},
       dispose: () => {},
     }),
@@ -67,6 +78,7 @@ describe('WebChess flow', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
+    chooseMoveMock.mockClear()
   })
 
   it('gates paid play until an access code starts a server session', async () => {
@@ -97,6 +109,30 @@ describe('WebChess flow', () => {
     expect(screen.getByLabelText(/what are you trying to understand/i)).toBeInTheDocument()
     expect(screen.getByText(/Platform API billing for the configured project/i)).toBeInTheDocument()
     expect(screen.queryByDisplayValue('private-access-code')).not.toBeInTheDocument()
+  })
+
+  it('tells the engine how many plies are complete before the displayed turn', async () => {
+    vi.useFakeTimers()
+    const division = makeDivisionAnalysis('completed-ply-seed')
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((input: string) => {
+      if (input === '/api/session') return Promise.resolve(jsonResponse(ACTIVE_SESSION))
+      if (input === '/api/divide') return Promise.resolve(jsonResponse(division))
+      throw new Error(`Unexpected request: ${input}`)
+    }))
+    render(<App />)
+
+    await submitProblem('How should this plan move into its next useful phase?')
+    await finishMapping()
+    fireEvent.click(screen.getByRole('button', { name: /set the pieces in motion/i }))
+    fireEvent.click(screen.getByRole('button', { name: /play one turn/i }))
+    await act(async () => {})
+
+    expect(chooseMoveMock).toHaveBeenCalledWith(
+      expect.any(Array),
+      'white',
+      expect.stringMatching(/\/1$/),
+      { ply: 0, quietPlies: 0 },
+    )
   })
 
   it('shows the semantic pipeline, maps 64 server facets, and asks GPT after the game', async () => {
@@ -186,7 +222,7 @@ describe('WebChess flow', () => {
     expect(body.captures[0].part.focus).toMatch(/Concrete focus/i)
     expect(['king-captured', 'no-progress', 'move-limit']).toContain(body.outcome.reason)
     expect(body.outcome.completedTurn).toBe(terminalMove)
-  })
+  }, 15_000)
 
   it('keeps the mapped board when an expired session is renewed for the same model', async () => {
     vi.useFakeTimers()

@@ -10,7 +10,7 @@ permissions:
 jobs:
   verify:
     name: Node ${{ matrix.node }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       OPENAI_API_KEY: ''
@@ -45,7 +45,29 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            bubblewrap ca-certificates gcc libc6-dev
+            apparmor apparmor-profiles bubblewrap ca-certificates gcc libc6-dev
+
+      - name: Enable Bubblewrap user namespaces under AppArmor
+        run: |
+          profile_source=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          profile_target=/etc/apparmor.d/bwrap-userns-restrict
+
+          if [[ ! -r "$profile_source" ]]; then
+            printf '::error::Ubuntu did not provide the Bubblewrap AppArmor profile at %s\n' \
+              "$profile_source"
+            exit 1
+          fi
+
+          sudo install --owner=root --group=root --mode=0644 \
+            "$profile_source" "$profile_target"
+          sudo apparmor_parser --replace "$profile_target"
+
+          uname --kernel-name --kernel-release --machine
+          /usr/bin/bwrap --version
+          stat --format='bwrap mode=%A owner=%U:%G path=%n' /usr/bin/bwrap
+          sysctl kernel.unprivileged_userns_clone
+          sysctl kernel.apparmor_restrict_unprivileged_userns
+          /usr/bin/bwrap --ro-bind / / -- /bin/true
 
       - name: Install locked dependencies
         run: npm ci

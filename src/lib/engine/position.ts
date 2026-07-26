@@ -92,6 +92,7 @@ export function moveIsPromotion(move: number): boolean {
 interface UndoRecord {
   move: number
   movedFlagWasSet: boolean
+  capturedMovedFlagWasSet: boolean
 }
 
 /**
@@ -116,7 +117,11 @@ export class Position {
     const to = moveTo(move)
     const code = this.board[from]!
 
-    this.undoStack.push({ move, movedFlagWasSet: this.moved[from] === 1 })
+    this.undoStack.push({
+      move,
+      movedFlagWasSet: this.moved[from] === 1,
+      capturedMovedFlagWasSet: this.moved[to] === 1,
+    })
 
     this.board[from] = EMPTY
     this.moved[from] = 0
@@ -138,7 +143,7 @@ export class Position {
     this.board[from] = moveIsPromotion(move) ? encodePiece(codeSide(code), PAWN) : code
     this.moved[from] = record.movedFlagWasSet ? 1 : 0
     this.board[to] = captured
-    this.moved[to] = captured === EMPTY ? 0 : 1
+    this.moved[to] = record.capturedMovedFlagWasSet ? 1 : 0
     this.sideToMove = this.sideToMove === WHITE ? BLACK : WHITE
   }
 
