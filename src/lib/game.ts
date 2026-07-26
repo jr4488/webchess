@@ -303,9 +303,19 @@ export function getLegalMoves(piece: Piece, pieces: readonly Piece[]): CellCoord
   return [...results.values()]
 }
 
+/** Whether a side has any legal move available on the current board. */
+export function hasLegalMove(pieces: readonly Piece[], side: Side): boolean {
+  return pieces.some(
+    (piece) => piece.side === side && getLegalMoves(piece, pieces).length > 0,
+  )
+}
+
 /**
  * Resolves the complete-game boundary. A captured King is decisive in this
  * reflective variant; standstill and progress limits ensure every game ends.
+ *
+ * A side with no legal move does not end the game on its own: the turn passes
+ * to the other side. Only a board where neither side can move is an ending.
  */
 export function getGameOutcome(
   pieces: readonly Piece[],
@@ -322,10 +332,7 @@ export function getGameOutcome(
     }
   }
 
-  const canMove = (side: Side) => pieces.some(
-    (piece) => piece.side === side && getLegalMoves(piece, pieces).length > 0,
-  )
-  if (!canMove('white') && !canMove('black')) {
+  if (!hasLegalMove(pieces, 'white') && !hasLegalMove(pieces, 'black')) {
     return {
       winner: null,
       reason: 'no-moves',

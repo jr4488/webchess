@@ -167,6 +167,53 @@ describe('WebChess flow', () => {
     expect(body.outcome.completedTurn).toBe(terminalMove)
   })
 
+  it('keeps the mapped board when an expired session is renewed for the same model', async () => {
+    vi.useFakeTimers()
+    const division = makeDivisionAnalysis('re-auth-seed')
+    const expiring = {
+      ...ACTIVE_SESSION,
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
+    }
+    const renewed = {
+      ...ACTIVE_SESSION,
+      csrfToken: 'rotated-csrf-token',
+      expiresAt: new Date(Date.now() + 8 * 3_600_000).toISOString(),
+    }
+    let authenticated = true
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((input: string, init?: RequestInit) => {
+      if (input === '/api/session' && init?.method === 'POST') {
+        authenticated = true
+        return Promise.resolve(jsonResponse(renewed))
+      }
+      if (input === '/api/session') {
+        return Promise.resolve(jsonResponse(authenticated ? expiring : { authenticated: false }))
+      }
+      if (input === '/api/divide') return Promise.resolve(jsonResponse(division))
+      throw new Error(`Unexpected request: ${input}`)
+    }))
+    render(<App />)
+
+    await submitProblem('How should thoughtful plan 0 move into its next useful phase?')
+    await finishMapping()
+    expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
+
+    authenticated = false
+    await act(() => vi.advanceTimersByTimeAsync(31_000))
+    expect(screen.getByLabelText(/access code/i)).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/access code/i), {
+      target: { value: 'private-access-code' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /enter webchess/i }))
+    await act(async () => {})
+
+    // The facets belong to the model, not to the session token, so a renewed
+    // session returns to the same board rather than an empty question form.
+    expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
+    expect(screen.getAllByText(/sol facet/i).length).toBeGreaterThan(0)
+    expect(screen.queryByLabelText(/what are you trying to understand/i)).not.toBeInTheDocument()
+  })
+
   it('does not reveal a local fallback while semantic analysis is pending or failed', async () => {
     vi.useFakeTimers()
     let resolveDivision: ((response: Response) => void) | undefined

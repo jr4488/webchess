@@ -1353,7 +1353,18 @@ describe('model provider selection', () => {
         }
         yield {
           type: 'response.completed',
-          response: completedDivision,
+          response: {
+            status: 'completed',
+            incomplete_details: null,
+            model: 'gpt-5.6-sol',
+            output: [{
+              type: 'message',
+              content: [{
+                type: 'output_text',
+                text: JSON.stringify({ facets: facets() }),
+              }],
+            }],
+          },
         }
       },
     })

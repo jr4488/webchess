@@ -26,6 +26,91 @@ function activityResponse(lines: string[], splitAt: number[] = []): Response {
   })
 }
 
+describe('model reasoning stream', () => {
+  it('accumulates reasoning deltas into one labelled trace', () => {
+    const initial = beginModelActivity('answer', 1_000)
+    const started = updateModelActivity(
+      initial,
+      { type: 'reasoning', source: 'summary', text: 'Weighing the capacity ' },
+      2_000,
+    )
+    const continued = updateModelActivity(
+      started,
+      { type: 'reasoning', source: 'summary', text: 'against the people.' },
+      2_500,
+    )
+
+    expect(initial.reasoning).toBeNull()
+    expect(continued.reasoning).toEqual({
+      source: 'summary',
+      text: 'Weighing the capacity against the people.',
+      updatedAt: 2_500,
+    })
+    expect(continued.lastProviderActivityAt).toBe(2_500)
+  })
+
+  it('restarts the trace when the source changes rather than blending the two', () => {
+    const summarised = updateModelActivity(
+      beginModelActivity('division', 1_000),
+      { type: 'reasoning', source: 'summary', text: 'A provider summary.' },
+      2_000,
+    )
+    const switched = updateModelActivity(
+      summarised,
+      { type: 'reasoning', source: 'raw', text: 'Local model thinking.' },
+      3_000,
+    )
+
+    expect(switched.reasoning).toEqual({
+      source: 'raw',
+      text: 'Local model thinking.',
+      updatedAt: 3_000,
+    })
+  })
+
+  it('reads reasoning frames and rejects an unknown source', async () => {
+    const events: unknown[] = []
+    await readModelActivityPayload(
+      activityResponse([
+        JSON.stringify({ type: 'reasoning', source: 'raw', text: 'thinking aloud' }),
+        JSON.stringify({ type: 'result', data: { ok: true } }),
+      ]),
+      (event) => { events.push(event) },
+    )
+    expect(events).toContainEqual({
+      type: 'reasoning',
+      source: 'raw',
+      text: 'thinking aloud',
+    })
+
+    await expect(readModelActivityPayload(
+      activityResponse([
+        JSON.stringify({ type: 'reasoning', source: 'invented', text: 'nope' }),
+        JSON.stringify({ type: 'result', data: { ok: true } }),
+      ]),
+      () => {},
+    )).rejects.toThrow(/unknown reasoning source/i)
+  })
+
+  it('strips directional overrides that could reorder surrounding text', async () => {
+    const events: Array<{ type: string; text?: string }> = []
+    await readModelActivityPayload(
+      activityResponse([
+        JSON.stringify({
+          type: 'reasoning',
+          source: 'summary',
+          text: 'safe\u202etext\u0007here\r\nnext',
+        }),
+        JSON.stringify({ type: 'result', data: { ok: true } }),
+      ]),
+      (event) => { events.push(event as { type: string; text?: string }) },
+    )
+
+    const reasoning = events.find(({ type }) => type === 'reasoning')
+    expect(reasoning?.text).toBe('safetexthere\nnext')
+  })
+})
+
 describe('model activity state', () => {
   it('tracks phases, heartbeats, provider activity, and completion without duplicates', () => {
     const initial = beginModelActivity('division', 1_000)

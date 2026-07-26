@@ -17,6 +17,7 @@ import {
   createInitialPieces,
   getGameOutcome,
   getLegalMoves,
+  hasLegalMove,
   isSameCoord,
 } from './lib/game'
 import { normalizeProblemInput, problemPartAt } from './lib/problem'
@@ -115,9 +116,18 @@ export function App() {
   const divisionRequestRef = useRef<AbortController | null>(null)
   const answerRequestRef = useRef<AbortController | null>(null)
   const lastAuthenticatedSessionRef = useRef<AuthenticatedSession | null>(null)
+  // Mirrors of request status, so session expiry can tell which work it
+  // interrupted without making its own identity depend on that status.
+  const divisionStatusRef = useRef<DivisionStatus>('idle')
+  const answerStatusRef = useRef<AnswerStatus>('idle')
   const sessionActive = accessState.status === 'authenticated'
   const csrfToken = sessionActive ? accessState.session.csrfToken : ''
   const gameFinishing = outcome !== null && stage === 'playing'
+
+  useEffect(() => {
+    divisionStatusRef.current = divisionStatus
+    answerStatusRef.current = answerStatus
+  }, [answerStatus, divisionStatus])
 
   const resetGameState = useCallback(() => {
     divisionRequestRef.current?.abort()
@@ -153,12 +163,20 @@ export function App() {
     setNotice('Choose a white piece. Its possible paths will appear.')
   }, [])
 
+  /**
+   * Keep the board when a session is renewed, and discard it only when the
+   * model behind it changes.
+   *
+   * The 64 facets, the captures, and any written answer all belong to one
+   * model. A fresh CSRF token does not: signing back in after the eight-hour
+   * expiry is the same person continuing the same question, so resetting on
+   * token change silently destroyed finished work.
+   */
   const adoptAuthenticatedSession = useCallback((session: AuthenticatedSession) => {
     const previous = lastAuthenticatedSessionRef.current
     if (
       previous &&
       (
-        previous.csrfToken !== session.csrfToken ||
         previous.provider.id !== session.provider.id ||
         previous.provider.model !== session.provider.model
       )
@@ -168,34 +186,45 @@ export function App() {
     lastAuthenticatedSessionRef.current = session
   }, [resetGameState])
 
+  /**
+   * Surface an expired session, failing only the work it actually interrupted.
+   *
+   * Marking both requests failed put an expiry banner on the division stage
+   * when only the answer was running, so a completed 64-facet map appeared to
+   * have failed.
+   */
   const requireSession = useCallback((message?: string) => {
     const explanation =
       message || 'Your access session has expired. Enter the access code to continue.'
+    const failedAt = Date.now()
+    const divisionInterrupted = divisionStatusRef.current === 'loading'
+    const answerInterrupted = answerStatusRef.current === 'loading'
+
     divisionRequestRef.current?.abort()
     answerRequestRef.current?.abort()
     setAutoPlaying(false)
-    setDivisionStatus((current) => current === 'loading' ? 'error' : current)
-    setAnswerStatus((current) => current === 'loading' ? 'error' : current)
-    setDivisionError(explanation)
-    setAnswerError(explanation)
-    setDivisionActivity((current) => current
-      ? { ...current, status: 'error', lastHeartbeatAt: Date.now() }
-      : current)
-    setAnswerActivity((current) => current
-      ? { ...current, status: 'error', lastHeartbeatAt: Date.now() }
-      : current)
+
+    if (divisionInterrupted) {
+      setDivisionStatus('error')
+      setDivisionError(explanation)
+      setDivisionActivity((current) => current
+        ? { ...current, status: 'error', lastHeartbeatAt: failedAt }
+        : current)
+    }
+    if (answerInterrupted) {
+      setAnswerStatus('error')
+      setAnswerError(explanation)
+      setAnswerActivity((current) => current
+        ? { ...current, status: 'error', lastHeartbeatAt: failedAt }
+        : current)
+    }
     setAccessState({
       status: 'unauthenticated',
       message: explanation,
     })
   }, [])
 
-  const checkAccess = useCallback(() => {
-    sessionRequestRef.current?.abort()
-    const controller = new AbortController()
-    sessionRequestRef.current = controller
-    setAccessState({ status: 'checking' })
-
+  const loadSession = useCallback((controller: AbortController) => {
     void getWebChessSession(controller.signal)
       .then((session) => {
         if (controller.signal.aborted || sessionRequestRef.current !== controller) return
@@ -220,12 +249,29 @@ export function App() {
       })
   }, [adoptAuthenticatedSession])
 
+  const checkAccess = useCallback(() => {
+    sessionRequestRef.current?.abort()
+    const controller = new AbortController()
+    sessionRequestRef.current = controller
+    setAccessState({ status: 'checking' })
+    loadSession(controller)
+  }, [loadSession])
+
   const authenticate = useCallback(async (accessCode: string) => {
     sessionRequestRef.current?.abort()
     const controller = new AbortController()
     sessionRequestRef.current = controller
-    const session = await createWebChessSession(accessCode, controller.signal)
-    if (controller.signal.aborted || sessionRequestRef.current !== controller) return
+
+    let session: AuthenticatedSession
+    try {
+      session = await createWebChessSession(accessCode, controller.signal)
+    } catch (error) {
+      // A superseded or unmounted attempt is not a failed access code, so it
+      // must not reach the gate as a rejected sign-in.
+      if (controller.signal.aborted) return
+      throw error
+    }
+    if (sessionRequestRef.current !== controller) return
 
     adoptAuthenticatedSession(session)
     setSessionActionError('')
@@ -258,34 +304,14 @@ export function App() {
     [focusedCell],
   )
 
+  // The initial state is already `checking`, so the bootstrap reuses the shared
+  // loader rather than re-announcing the status it is already showing.
   useEffect(() => {
     const controller = new AbortController()
     sessionRequestRef.current = controller
-
-    void getWebChessSession(controller.signal)
-      .then((session) => {
-        if (controller.signal.aborted || sessionRequestRef.current !== controller) return
-        if (session.authenticated) {
-          adoptAuthenticatedSession(session)
-        }
-        setAccessState(
-          session.authenticated
-            ? { status: 'authenticated', session }
-            : { status: 'unauthenticated' },
-        )
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted || sessionRequestRef.current !== controller) return
-        setAccessState({
-          status: 'error',
-          message: error instanceof Error
-            ? error.message
-            : 'WebChess could not check access right now.',
-        })
-      })
-
+    loadSession(controller)
     return () => controller.abort()
-  }, [adoptAuthenticatedSession])
+  }, [loadSession])
 
   useEffect(() => {
     if (accessState.status !== 'authenticated') return
@@ -407,7 +433,6 @@ export function App() {
         setLastMove({ from: movingPiece.position, to: destination })
         setFocusedCell(destination)
         setSelectedPieceId(null)
-        setQuietPlies(nextQuietPlies)
 
         if (result.capture) {
           setCaptures((current) => [...current, result.capture!])
@@ -415,18 +440,43 @@ export function App() {
 
         if (completed) {
           finishGame(completed)
-        } else {
-          setTurn(nextSide)
-          setTurnNumber((current) => current + 1)
-          const nextTurn = `${nextSide === 'white' ? 'White' : 'Black'} moves next.`
-          if (result.capture) {
-            setNotice(`${result.capture.narration} ${nextTurn}`)
-          } else if (result.promoted) {
-            setNotice(`A pawn crossed the whole question and became agency: a new queen. ${nextTurn}`)
-          } else {
-            const part = problemPartAt(parts, destination)
-            setNotice(`${movingPiece.kind} moved through ${part.dimension.toLowerCase()}: ${part.keyword}. ${nextTurn}`)
+          return true
+        }
+
+        // The opponent may have no reply even though the game continues.
+        // Handing them the turn anyway would stall the board on a side that
+        // cannot move, so the turn passes straight back.
+        const opponentCanReply = hasLegalMove(result.pieces, nextSide)
+        const passedQuietPlies = opponentCanReply
+          ? nextQuietPlies
+          : nextQuietPlies + 1
+        if (!opponentCanReply) {
+          const stalled = getGameOutcome(result.pieces, {
+            quietPlies: passedQuietPlies,
+            ply: turnNumber + 1,
+          })
+          if (stalled) {
+            finishGame(stalled)
+            return true
           }
+        }
+
+        const continuingSide = opponentCanReply ? nextSide : turn
+        setQuietPlies(passedQuietPlies)
+        setTurn(continuingSide)
+        setTurnNumber((current) => current + (opponentCanReply ? 1 : 2))
+
+        const sideLabel = (side: Side) => (side === 'white' ? 'White' : 'Black')
+        const nextTurn = opponentCanReply
+          ? `${sideLabel(nextSide)} moves next.`
+          : `${sideLabel(nextSide)} has no open path and passes. ${sideLabel(turn)} moves again.`
+        if (result.capture) {
+          setNotice(`${result.capture.narration} ${nextTurn}`)
+        } else if (result.promoted) {
+          setNotice(`A pawn crossed the whole question and became agency: a new queen. ${nextTurn}`)
+        } else {
+          const part = problemPartAt(parts, destination)
+          setNotice(`${movingPiece.kind} moved through ${part.dimension.toLowerCase()}: ${part.keyword}. ${nextTurn}`)
         }
         return true
       } catch (error) {
@@ -626,6 +676,10 @@ export function App() {
         : current)
       if (isSessionRequiredError(failure)) {
         requireSession(failure.message)
+      }
+    } finally {
+      if (divisionRequestRef.current === controller) {
+        divisionRequestRef.current = null
       }
     }
   }
