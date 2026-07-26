@@ -65,7 +65,7 @@ const PHASE_LABELS: Record<ModelActivityPhase, string> = {
 const DIVISION_PHASE_DETAILS: Record<ModelActivityPhase, string> = {
   'request-accepted': 'WebChess has opened the live division request.',
   'preparing-input': 'The question and 64-facet structure are being prepared.',
-  'awaiting-model': 'The local model has the question and is beginning the division.',
+  'awaiting-model': 'The model has the question and is beginning the division.',
   thinking: 'The model is reasoning through the 64 facets.',
   'writing-rationale': 'The local model is writing a short rationale specifically for this display.',
   drafting: 'The model is forming the structured 64-facet response.',
@@ -76,7 +76,7 @@ const DIVISION_PHASE_DETAILS: Record<ModelActivityPhase, string> = {
 const ANSWER_PHASE_DETAILS: Record<ModelActivityPhase, string> = {
   'request-accepted': 'WebChess has opened the live answer request.',
   'preparing-input': 'The outcome and captured game signals are being prepared.',
-  'awaiting-model': 'The local model has the game reading and is beginning the answer.',
+  'awaiting-model': 'The model has the game reading and is beginning the answer.',
   thinking: 'The model is reasoning about the captured signals.',
   'writing-rationale': 'The local model is writing a short rationale specifically for this display.',
   drafting: 'The model is forming the structured final response.',
