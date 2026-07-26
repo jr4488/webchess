@@ -4,6 +4,7 @@ import { App } from './App'
 import { HomePage } from './components/HomePage'
 import './styles.css'
 import './site.css'
+import './theme-dark.css'
 
 const normalizedPath = window.location.pathname.replace(/\/+$/, '') || '/'
 const isPlayPath = normalizedPath === '/play'

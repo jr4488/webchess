@@ -1,15 +1,42 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   BrainCircuit,
   CircleCheck,
+  Cpu,
   MessageSquareQuote,
   Radio,
   Sparkles,
 } from 'lucide-react'
 
-import type { ModelActivityPhase, ModelActivityState } from '../types'
+import type {
+  ModelActivityPhase,
+  ModelActivityState,
+  ReasoningSource,
+} from '../types'
 
 const HEARTBEAT_STALE_MS = 25_000
+const SCROLL_LOCK_SLACK_PX = 24
+
+const REASONING_LABELS: Record<ReasoningSource, {
+  title: string
+  caption: string
+  boundary: string
+}> = {
+  summary: {
+    title: 'Reasoning summary',
+    caption: 'Written by the provider for display',
+    boundary:
+      'The provider summarises its own reasoning for end users. It reflects the ' +
+      'model’s process but is not a literal transcript of it.',
+  },
+  raw: {
+    title: 'Model thinking',
+    caption: 'Live from the model on this machine',
+    boundary:
+      'This is the local model’s own thinking, streamed as it works. It never ' +
+      'leaves this machine, and it is working text rather than a final answer.',
+  },
+}
 
 export interface ModelActivityMetric {
   label: string
@@ -39,7 +66,7 @@ const DIVISION_PHASE_DETAILS: Record<ModelActivityPhase, string> = {
   'request-accepted': 'WebChess has opened the live division request.',
   'preparing-input': 'The question and 64-facet structure are being prepared.',
   'awaiting-model': 'The local model has the question and is beginning the division.',
-  thinking: 'The model is working without exposing its private reasoning text.',
+  thinking: 'The model is reasoning through the 64 facets.',
   'writing-rationale': 'The local model is writing a short rationale specifically for this display.',
   drafting: 'The model is forming the structured 64-facet response.',
   'validating-output': 'WebChess is checking IDs, uniqueness, and completeness.',
@@ -50,7 +77,7 @@ const ANSWER_PHASE_DETAILS: Record<ModelActivityPhase, string> = {
   'request-accepted': 'WebChess has opened the live answer request.',
   'preparing-input': 'The outcome and captured game signals are being prepared.',
   'awaiting-model': 'The local model has the game reading and is beginning the answer.',
-  thinking: 'The model is working without exposing its private reasoning text.',
+  thinking: 'The model is reasoning about the captured signals.',
   'writing-rationale': 'The local model is writing a short rationale specifically for this display.',
   drafting: 'The model is forming the structured final response.',
   'validating-output': 'WebChess is checking the final answer contract.',
@@ -81,6 +108,32 @@ function operationPhaseDetail(
   return operation === 'division'
     ? DIVISION_PHASE_DETAILS[phase]
     : ANSWER_PHASE_DETAILS[phase]
+}
+
+/**
+ * Follow streaming reasoning, unless the reader has scrolled up to re-read
+ * something. Yanking them back to the bottom on every delta makes the panel
+ * unusable while the model is still working.
+ */
+function useFollowingScroll(dependency: string | undefined) {
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const followRef = useRef(true)
+
+  const onScroll = useCallback(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    const distanceFromBottom =
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+    followRef.current = distanceFromBottom <= SCROLL_LOCK_SLACK_PX
+  }, [])
+
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport || !followRef.current) return
+    viewport.scrollTop = viewport.scrollHeight
+  }, [dependency])
+
+  return { viewportRef, onScroll }
 }
 
 function latestPhaseTime(
@@ -146,6 +199,9 @@ export function ModelActivityPanel({
       : [{ phase: activity.phase, at: activity.startedAt }],
     [activity.history, activity.phase, activity.startedAt],
   )
+  const reasoning = activity.reasoning ?? null
+  const reasoningCopy = reasoning ? REASONING_LABELS[reasoning.source] : null
+  const { viewportRef, onScroll } = useFollowingScroll(reasoning?.text)
   const rationaleNotes = activity.rationaleNotes ?? []
   const featuredRationale = rationaleNotes.at(-1)
   const earlierRationales = rationaleNotes.slice(0, -1).reverse()
@@ -207,6 +263,46 @@ export function ModelActivityPanel({
         <p>{phaseDetail}</p>
         <p className="model-activity-panel__summary">{summary}</p>
       </div>
+
+      {reasoning && reasoningCopy && (
+        <section
+          className={`reasoning-stream is-${reasoning.source}${active ? ' is-live' : ''}`}
+          aria-label={reasoningCopy.title}
+          data-reasoning-source={reasoning.source}
+        >
+          <header className="reasoning-stream__header">
+            <span className="reasoning-stream__icon" aria-hidden="true">
+              {reasoning.source === 'raw' ? <Cpu size={16} /> : <BrainCircuit size={16} />}
+            </span>
+            <div>
+              <h4>{reasoningCopy.title}</h4>
+              <small>{reasoningCopy.caption}</small>
+            </div>
+            {active && (
+              <span className="reasoning-stream__pulse" aria-hidden="true">
+                <i /><i /><i />
+              </span>
+            )}
+          </header>
+
+          <p className="reasoning-stream__boundary">{reasoningCopy.boundary}</p>
+
+          <div
+            className="reasoning-stream__viewport"
+            ref={viewportRef}
+            onScroll={onScroll}
+            tabIndex={0}
+            role="log"
+            aria-live="off"
+            aria-label={`${reasoningCopy.title} text`}
+          >
+            <p className="reasoning-stream__text">
+              {reasoning.text}
+              {active && <span className="reasoning-stream__caret" aria-hidden="true" />}
+            </p>
+          </div>
+        </section>
+      )}
 
       {showRationale && (
         <section
@@ -311,7 +407,11 @@ export function ModelActivityPanel({
       </ol>
 
       <p className="model-activity-panel__privacy-note">
-        These are live progress summaries. Private chain-of-thought is not displayed.
+        {reasoning
+          ? reasoning.source === 'raw'
+            ? 'Thinking is streamed from the model running on this machine. Draft output is never shown before it is validated.'
+            : 'Reasoning summaries come from the provider and are written for display. Draft output is never shown before it is validated.'
+          : 'These are live progress summaries. Draft output is never shown before it is validated.'}
       </p>
     </section>
   )

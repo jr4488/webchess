@@ -14,6 +14,7 @@ import {
 import { PIECE_GLYPHS, PIECE_ORDER } from '../constants'
 import { PROBLEM_DIMENSIONS, PROBLEM_MOVEMENTS } from '../lib/problem'
 import { PIECE_METAPHORS } from '../lib/reading'
+import { CosmicBackdrop } from './CosmicBackdrop'
 import { PublicHeader } from './PublicHeader'
 import { RadialBoard } from './RadialBoard'
 
@@ -113,6 +114,7 @@ function pieceName(kind: (typeof PIECE_ORDER)[number]): string {
 export function HomePage() {
   return (
     <div className="public-shell">
+      <CosmicBackdrop />
       <div className="paper-noise" aria-hidden="true" />
       <a className="public-skip-link" href="#public-main">Skip to content</a>
       <PublicHeader />

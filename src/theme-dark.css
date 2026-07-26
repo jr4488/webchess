@@ -1,0 +1,320 @@
+/**
+ * Dark theme corrections.
+ *
+ * The base stylesheets were written for ink on paper, and most of them survive
+ * the palette flip untouched because they draw in tokens. This file fixes the
+ * places where a token carried two meanings that only agree on a light
+ * background — chiefly `--ink`, which was both the reading colour and the
+ * colour of solid "inverted" surfaces. Those diverge on a dark background:
+ * reading text must stay light, while a solid surface must not.
+ *
+ * Loaded last so it wins on order rather than on specificity hacks.
+ */
+
+/* --------------------------------------------------------------------------
+   Shells: the starfield supplies the background, so the shells stop painting
+   their own.
+   -------------------------------------------------------------------------- */
+
+.public-shell,
+.app-shell {
+  background: transparent;
+}
+
+/* Sitting the backdrop below the flow means content needs no stacking rules of
+   its own, which keeps positioned descendants such as the skip link working. */
+.cosmos {
+  z-index: -1;
+}
+
+/* --------------------------------------------------------------------------
+   Inverted surfaces that used the reading colour as a fill.
+   -------------------------------------------------------------------------- */
+
+.primary-button,
+.auto-button,
+.public-header__cta,
+a.primary-button {
+  position: relative;
+  overflow: hidden;
+  color: var(--void) !important;
+  background: linear-gradient(135deg, var(--gold) 0%, #ffab5e 55%, var(--gold-pale) 100%);
+  box-shadow:
+    0 10px 28px rgba(var(--gold-rgb), 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+
+/* A sheen that crosses the button on hover, rather than a constant animation
+   competing with the starfield for attention. */
+.primary-button::after,
+.auto-button::after,
+.public-header__cta::after {
+  position: absolute;
+  top: 0;
+  left: -60%;
+  width: 45%;
+  height: 100%;
+  content: '';
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  transform: skewX(-18deg);
+  opacity: 0;
+}
+
+.primary-button:hover:not(:disabled)::after,
+.auto-button:hover:not(:disabled)::after,
+.public-header__cta:hover::after {
+  opacity: 1;
+  animation: button-sheen 720ms ease-out;
+}
+
+@keyframes button-sheen {
+  from { left: -60%; }
+  to { left: 130%; }
+}
+
+.primary-button:hover:not(:disabled),
+.auto-button:hover:not(:disabled),
+.public-header__cta:hover {
+  background: linear-gradient(135deg, var(--gold-pale) 0%, var(--gold) 55%, #ffab5e 100%);
+  box-shadow:
+    0 14px 34px rgba(var(--gold-rgb), 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  transform: translateY(-2px);
+}
+
+.auto-button.is-active {
+  background: linear-gradient(135deg, var(--vermillion) 0%, #ff8fa8 100%);
+  box-shadow: 0 12px 30px rgba(var(--vermillion-rgb), 0.4);
+}
+
+.secondary-button,
+.reading-button,
+.step-button {
+  color: var(--ink);
+  background: rgba(var(--ink-rgb), 0.07);
+  box-shadow: inset 0 0 0 1px rgba(var(--ink-rgb), 0.18);
+}
+
+.secondary-button:hover:not(:disabled),
+.reading-button:hover:not(:disabled),
+.step-button:hover:not(:disabled) {
+  background: rgba(var(--ink-rgb), 0.13);
+  box-shadow: inset 0 0 0 1px rgba(var(--gold-rgb), 0.45);
+}
+
+/* Panels that used the reading colour as a dark backing. */
+.process-graphic--autoplay,
+.process-graphic--finishing,
+.process-graphic--answering,
+.ai-answer-card.is-loading,
+.process-graphic__core {
+  background: rgba(var(--paper-deep-rgb), 0.9);
+}
+
+/* The rationale note was cream text on an ink fill, which inverts to unreadable
+   pale-on-pale. Only the fill needs to change; the text was already light. */
+.model-activity-panel__rationale {
+  background:
+    linear-gradient(112deg, rgba(var(--gold-rgb), 0.12), transparent 48%),
+    rgba(var(--void), 0.85),
+    var(--paper-deep);
+  box-shadow:
+    inset 3px 0 0 var(--vermillion),
+    0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+.division-board-status {
+  color: var(--ink);
+  background: rgba(var(--paper-rgb), 0.82);
+  backdrop-filter: blur(12px);
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(var(--gold-rgb), 0.22);
+}
+
+.division-pipeline li.is-complete > span {
+  color: var(--void);
+  background: var(--jade);
+  box-shadow: var(--glow-jade);
+}
+
+/* --------------------------------------------------------------------------
+   Game pieces: the black side stays dark, so on a dark board it needs its own
+   edge rather than borrowing the background.
+   -------------------------------------------------------------------------- */
+
+.black-dot,
+.turn-stone--black {
+  background: #0b0f1e;
+  box-shadow: inset 0 0 0 1px rgba(var(--ink-rgb), 0.55);
+}
+
+.white-dot,
+.turn-stone--white {
+  box-shadow: 0 0 10px rgba(var(--cream-rgb), 0.5);
+}
+
+/* --------------------------------------------------------------------------
+   The board as an orbital instrument.
+   -------------------------------------------------------------------------- */
+
+.radial-board__canvas {
+  filter: drop-shadow(0 0 40px rgba(var(--vermillion-rgb), 0.2));
+}
+
+.radial-board__cell-shape {
+  stroke: rgba(var(--ink-rgb), 0.2);
+}
+
+.radial-board__cell.is-light .radial-board__cell-shape {
+  fill: rgba(var(--ink-rgb), 0.19);
+}
+
+.radial-board__cell.is-dark .radial-board__cell-shape {
+  fill: rgba(var(--gold-rgb), 0.09);
+}
+
+.radial-board[data-stage='question'] .radial-board__cell-shape {
+  opacity: 0.9;
+}
+
+.radial-board[data-stage='question'] .radial-board__cell:nth-child(3n) .radial-board__cell-shape {
+  fill: rgba(var(--gold-rgb), 0.16);
+}
+
+/* A slow sweep of light around the board, so an idle board still reads as an
+   instrument that is powered on. */
+.board-card,
+.public-board-card {
+  position: relative;
+  isolation: isolate;
+}
+
+.board-card::before,
+.public-board-card::before {
+  position: absolute;
+  z-index: -1;
+  inset: -8%;
+  content: '';
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(var(--gold-rgb), 0.16) 40deg,
+    rgba(var(--vermillion-rgb), 0.2) 90deg,
+    transparent 150deg,
+    transparent 360deg
+  );
+  filter: blur(38px);
+  animation: board-halo 26s linear infinite;
+}
+
+@keyframes board-halo {
+  to { transform: rotate(360deg); }
+}
+
+.radial-board__cell.is-unmapped .radial-board__cell-shape {
+  fill: rgba(var(--ink-rgb), 0.04);
+}
+
+.radial-board__cell:hover .radial-board__cell-shape,
+.radial-board__cell:focus-visible .radial-board__cell-shape,
+.radial-board__cell.is-highlighted .radial-board__cell-shape {
+  fill: rgba(var(--gold-rgb), 0.55);
+  stroke: var(--gold-pale);
+  filter: drop-shadow(0 0 10px rgba(var(--gold-rgb), 0.65));
+}
+
+.radial-board__cell.is-legal .radial-board__cell-shape {
+  stroke: var(--jade);
+  filter: drop-shadow(0 0 6px rgba(var(--jade-rgb), 0.55));
+}
+
+/* Captured squares keep a slow pulse so the trail of the game stays legible
+   after the pieces have moved on. */
+.radial-board__cell.is-captured .radial-board__cell-shape {
+  fill: rgba(var(--vermillion-rgb), 0.42);
+  stroke: var(--vermillion);
+  animation: cell-captured-pulse 3.4s ease-in-out infinite;
+}
+
+@keyframes cell-captured-pulse {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(var(--vermillion-rgb), 0.35)); }
+  50% { filter: drop-shadow(0 0 13px rgba(var(--vermillion-rgb), 0.75)); }
+}
+
+/* --------------------------------------------------------------------------
+   Panels and cards: frosted glass over the starfield.
+   -------------------------------------------------------------------------- */
+
+.model-activity-panel,
+.ai-answer-card,
+.question-card,
+.mapping-card,
+.reading-card,
+.access-card,
+.public-card,
+.turn-header,
+.notice-bar {
+  border: 1px solid rgba(var(--ink-rgb), 0.12);
+  background: rgba(var(--paper-rgb), 0.55);
+  backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow:
+    0 22px 60px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(var(--cream-rgb), 0.07);
+}
+
+/* --------------------------------------------------------------------------
+   Entrance motion. Each stage arrives rather than snapping in.
+   -------------------------------------------------------------------------- */
+
+[data-stage-root] {
+  animation: stage-enter 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes stage-enter {
+  from { opacity: 0; transform: translateY(18px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.public-hero__copy > * {
+  animation: rise-in 760ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.public-hero__copy > *:nth-child(2) { animation-delay: 90ms; }
+.public-hero__copy > *:nth-child(3) { animation-delay: 180ms; }
+.public-hero__copy > *:nth-child(4) { animation-delay: 270ms; }
+.public-hero__copy > *:nth-child(5) { animation-delay: 360ms; }
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(22px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Focus rings have to read against the starfield, not against paper. */
+button:focus-visible,
+textarea:focus-visible,
+a:focus-visible,
+[tabindex='0']:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 3px;
+}
+
+::selection {
+  color: var(--void);
+  background: var(--gold);
+}
+
+/* Form fields sit on glass rather than on paper. */
+textarea,
+input[type='text'],
+input[type='password'] {
+  color: var(--ink);
+  background: rgba(var(--paper-deep-rgb), 0.65);
+  border-color: rgba(var(--ink-rgb), 0.2);
+}
+
+textarea::placeholder,
+input::placeholder {
+  color: rgba(var(--ink-rgb), 0.42);
+}

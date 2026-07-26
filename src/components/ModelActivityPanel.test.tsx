@@ -150,9 +150,42 @@ describe('ModelActivityPanel', () => {
       'The outcome and captured game signals are being prepared.',
     )).toBeInTheDocument()
     expect(screen.getByText(
-      'These are live progress summaries. Private chain-of-thought is not displayed.',
+      'These are live progress summaries. Draft output is never shown before it is validated.',
     )).toBeInTheDocument()
-    expect(screen.queryByText(/raw reasoning|reasoning token/i)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/reasoning summary|model thinking/i)).not.toBeInTheDocument()
+  })
+
+  it('labels a provider summary and a local model’s own thinking differently', () => {
+    const { unmount } = renderPanel(activeActivity({
+      reasoning: {
+        source: 'summary',
+        text: 'Weighing capacity against the people who make the work good.',
+        updatedAt: STARTED_AT + 9_000,
+      },
+    }))
+
+    const summaryPanel = screen.getByLabelText('Reasoning summary')
+    expect(within(summaryPanel).getByText(/written by the provider for display/i))
+      .toBeInTheDocument()
+    expect(within(summaryPanel).getByText(/not a literal transcript/i)).toBeInTheDocument()
+    expect(within(summaryPanel).getByText(/weighing capacity against the people/i))
+      .toBeInTheDocument()
+    unmount()
+
+    renderPanel(activeActivity({
+      reasoning: {
+        source: 'raw',
+        text: 'First I should check whether capacity is really the constraint.',
+        updatedAt: STARTED_AT + 9_000,
+      },
+    }))
+
+    const rawPanel = screen.getByLabelText('Model thinking')
+    expect(within(rawPanel).getByText(/live from the model on this machine/i))
+      .toBeInTheDocument()
+    expect(within(rawPanel).getByText(/never leaves this machine/i)).toBeInTheDocument()
+    expect(screen.getByText(/thinking is streamed from the model running on this machine/i))
+      .toBeInTheDocument()
   })
 
   it('features the newest Qwen rationale and keeps earlier display notes available', () => {

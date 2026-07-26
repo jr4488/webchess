@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 
 import { AccessGate } from './components/AccessGate'
 import type { AccessGateStatus } from './components/AccessGate'
+import { CosmicBackdrop } from './components/CosmicBackdrop'
 import { Header } from './components/Header'
 import { MappingStage } from './components/stages/MappingStage'
 import { PlayingStage } from './components/stages/PlayingStage'
@@ -823,6 +824,7 @@ export function App() {
 
   return (
     <div className={`app-shell stage-${visibleStage}`}>
+      <CosmicBackdrop />
       <div className="paper-noise" aria-hidden="true" />
       <Header stage={visibleStage} onReset={reset} />
 
