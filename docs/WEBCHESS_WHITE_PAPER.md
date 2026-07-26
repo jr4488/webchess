@@ -240,7 +240,9 @@ WebChess treats animation as a state-communication layer. During division, the i
 
 The mapping view uses a 64-cell progress measure during the final cast. The board then awakens cell by cell, pieces enter, moves show direction, capture targets pulse, and a capture flare marks the activated facet. During play, a persistent process graphic reports turn/ply count, captured signals, and a seven-capture reflection-depth marker that is neither evidence nor an ending condition. During final synthesis, the graphic changes to an answering state, and the resolved answer enters as visible sections.
 
-These displays communicate public process state. They do not claim to visualize private model reasoning. The distinction matters: an elapsed timer or moving graphic proves only that a request or transition is active, not that the model has reached a particular insight.
+These displays communicate public process state. An elapsed timer or moving graphic proves only that a request or transition is active, not that the model has reached a particular insight.
+
+The activity panel can also stream reasoning text, and what it shows is provider-dependent and explicitly labelled. Direct API mode shows OpenAI reasoning summaries, which are generated descriptions written for a reader rather than the literal internal state. Local Ollama mode shows the model's raw thinking events, which are literal but stay on the operator's machine. Local Codex mode shows none, because the adapter pins reasoning summaries off. Displayed reasoning is process evidence, not a correctness argument: a fluent account of an approach can accompany a wrong answer, so the evaluation targets in section 4 still apply to the final output rather than to the narration of it.
 
 ---
 
@@ -618,7 +620,7 @@ The final call uses a strict Zod Structured Output with one field for each secti
 
 The configurable default final model is **gpt-5.6-sol**. Direct API mode uses pro reasoning mode with medium effort, has a 12,000-output-token ceiling, and disables Responses application-state storage with <code>store: false</code>. Local Codex mode maps the medium reasoning effort but cannot set the API-specific pro mode or enforce its token field; its structured result is bounded by the schema and parser, a 2 MiB standard-output cap, and a 120-second timeout, and it follows the signed-in ChatGPT workspace's data controls. OpenAI’s [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) recommends matching effort and mode to task difficulty and validating the choice with representative evaluations.
 
-The interface displays process milestones and the inspectable prompt, not private chain-of-thought. Reasoning tokens are not user-visible, and they should not be presented as proof of quality. What can be evaluated is the output, its cited evidence, its calibration, its consistency, and the consequences of acting on it.
+The interface displays process milestones, the inspectable prompt, and provider-dependent reasoning text as described in section 4. Direct API mode surfaces reasoning summaries rather than raw reasoning tokens; local Ollama mode surfaces raw thinking that never leaves the machine. Neither should be presented as proof of quality. What can be evaluated is the output, its cited evidence, its calibration, its consistency, and the consequences of acting on it.
 
 ### 10.4 Privacy and security boundary
 
@@ -991,7 +993,7 @@ The matrix supports a program of research, not a marketing claim of established 
 
 **Mitigations:**
 
-- animate state transitions, not private reasoning;
+- animate state transitions, and label streamed reasoning text by its provider-dependent source rather than animating an impression of thought;
 - provide reduced-motion and no-motion modes;
 - keep text and provenance visible after motion ends;
 - never use indeterminate animation when the process has failed;
@@ -1362,7 +1364,7 @@ The proper claim is therefore neither mystical nor dismissive:
 
 | Component | Current setting |
 |---|---|
-| Model provider | <code>openai-api</code> by default; optional <code>codex-chatgpt</code> for single-owner loopback use |
+| Model provider | <code>openai-api</code> by default; optional <code>ollama</code> and <code>codex-chatgpt</code> for single-owner loopback use |
 | Problem length | 12–240 normalized characters |
 | Division model | <code>gpt-5.6-sol</code> by default; server-configurable |
 | Division reasoning | Medium effort |
@@ -1387,7 +1389,10 @@ The proper claim is therefore neither mystical nor dismissive:
 | Final output bound | API mode: 12,000 output tokens; local Codex: schema/parser, 2 MiB standard-output cap, and 120-second timeout |
 | Final answer request | Strict five-section Structured Output, exactly three actions, two-to-three-sentence opening, and 450–750 rendered words |
 | Codex web search | Native Responses <code>web_search</code>; <code>disabled</code> by default, optionally <code>cached</code>, <code>indexed</code>, or <code>live</code>; shell, browser, and standalone search remain disabled |
-| Provider data controls | API mode sends both calls with <code>store: false</code>; local Codex mode uses signed-in ChatGPT workspace controls |
+| Reasoning display | API mode streams labelled reasoning summaries; <code>ollama</code> streams labelled raw thinking; local Codex streams none; draft output text is never streamed |
+| Rationale notes | <code>ollama</code> only: one preliminary run per stage returning six bounded <code>NOTE:</code> lines of display copy; failures are swallowed |
+| Runs per new game | Two in API and local Codex modes; four in <code>ollama</code> mode |
+| Provider data controls | API mode sends both calls with <code>store: false</code>; local Codex mode uses signed-in ChatGPT workspace controls; <code>ollama</code> keeps all traffic on the local machine |
 | Paid-route access | Signed HttpOnly session, same-origin and CSRF checks |
 | Spend controls | Per-session rate limit and process-global daily quota; concurrency four in API mode and one in local Codex mode; process-local only |
 

@@ -33,8 +33,10 @@ After the ending, the server turns the original question, outcome, turn and conf
 WebChess shows an error instead of silently substituting a fallback provider or
 generic template when the selected provider cannot run or its bounded quality
 checks fail. One new game normally makes two model runs: the initial structured
-division and the final answer. Replaying the current board reuses its existing
-division.
+division and the final answer. In `ollama` mode each of those is preceded by a
+short display-copy run, for four in total; see
+[Waiting-room rationale notes](#waiting-room-rationale-notes). Replaying the
+current board reuses its existing division.
 
 ## Model providers
 
@@ -241,6 +243,44 @@ Keep `HOST=127.0.0.1`. Never expose it to a LAN or the internet, put it behind a
 reverse proxy, run it as a shared service, or give other users access. Use
 `openai-api` for a properly secured server deployment. Restart WebChess after
 changing the provider, Codex path, dedicated login, model, or web-search mode.
+
+## What the interface shows while a model runs
+
+Both model stages stream progress to the browser as newline-delimited JSON.
+Alongside phase milestones and elapsed time, the activity panel can show text
+the model produced on its way to an answer. What is available depends entirely
+on the provider, and the panel always labels which of the two it is showing.
+
+### Reasoning stream
+
+| Provider | Shown | Source |
+| --- | --- | --- |
+| `openai-api` | Reasoning summaries | The Responses API `summary: 'detailed'` stream |
+| `ollama` | Raw thinking | The local model's own reasoning events |
+| `codex-chatgpt` | Nothing | The adapter pins `model_reasoning_summary="none"` |
+
+An OpenAI reasoning summary is written for a reader and is not the model's
+literal internal state. Ollama's raw thinking is literal, and it is shown only
+because a local model runs inside the same trust boundary as the request that
+started it: nothing leaves the machine. Neither is evidence that the answer is
+correct. Draft output text is never streamed in either mode; only the
+schema-validated final result is displayed.
+
+The server caps total streamed reasoning per run and buffers deltas before
+flushing them, so a long run cannot grow the response without bound.
+
+### Waiting-room rationale notes
+
+`ollama` mode additionally makes a short preliminary run before each main
+stage, which returns six one-sentence notes covering assumptions, tensions,
+evidence, people, risks, and alternatives. These are deliberate display copy
+generated under a separate instruction set, not chain-of-thought, and the
+parser accepts only complete `NOTE:` lines from output text. A failure in this
+run is swallowed: it can never prevent the division or the final answer.
+
+This is why `ollama` mode makes four model runs per new game rather than two.
+The extra runs are local compute only, but they are serial, so they do add to
+the wait before each stage begins.
 
 ## Production
 

@@ -423,8 +423,10 @@ export function HomePage() {
               <li><span>02</span><div><strong>After the ending</strong><p>The problem, outcome, capture trail, weights, metaphors, and captured lenses become the final answer prompt.</p></div></li>
             </ol>
             <p className="transparency-card__note">
-              The app displays process milestones and the exact inspectable prompts. Private model
-              reasoning is never displayed. Uncaptured facets are not declared unimportant.
+              The app displays process milestones, the exact inspectable prompts, and the model’s
+              reasoning as it works — a provider-written summary for hosted models, or the model’s
+              own thinking when it runs on your machine. Draft output is withheld until it passes
+              validation. Uncaptured facets are not declared unimportant.
             </p>
           </div>
         </section>

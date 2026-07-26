@@ -89,6 +89,38 @@ function cellCenter(cell: CellCoord) {
   return polarPoint(radius, angle)
 }
 
+/**
+ * The board's geometry never changes, so the 64 sector paths and centres are
+ * computed once at module load rather than on every render. Auto-play
+ * re-renders this component on every ply, and the trigonometry was being
+ * repeated in full each time.
+ */
+const BOARD_CELLS = Array.from({ length: RINGS * SECTORS }, (_, index) => {
+  const coordinate: CellCoord = {
+    ring: Math.floor(index / SECTORS),
+    sector: index % SECTORS,
+  }
+  return {
+    index,
+    coordinate,
+    key: cellKey(coordinate),
+    path: annularSectorPath(coordinate.ring, coordinate.sector),
+    center: cellCenter(coordinate),
+    shade: (coordinate.ring + coordinate.sector) % 2 === 0 ? 'is-light' : 'is-dark',
+  }
+})
+
+const SECTOR_LABEL_POINTS = SECTOR_LABELS.map((label, sector) => ({
+  label,
+  sector,
+  point: polarPoint(OUTER_RADIUS + 14, sector * SECTOR_ANGLE),
+}))
+
+const RING_LABEL_POINTS = Array.from({ length: RINGS }, (_, ring) => ({
+  ring,
+  point: polarPoint(INNER_RADIUS + (ring + 0.5) * RING_WIDTH, -10),
+}))
+
 function toKeySet(keys: ReadonlySet<string> | readonly string[] | undefined) {
   if (!keys) return new Set<string>()
   return keys instanceof Set ? keys : new Set(keys)
@@ -152,19 +184,27 @@ export function RadialBoard({
 }: RadialBoardProps) {
   const hubGlowId = useId().replaceAll(':', '')
   const instructionsId = useId()
+  const boardRef = useRef<HTMLElement>(null)
   const cellsRef = useRef<SVGGElement>(null)
+  // Whether the last interaction came from the keyboard. Selecting a piece with
+  // a pointer must not pull focus into the board and scroll the page.
+  const keyboardIntentRef = useRef(false)
   const [rovingCellKey, setRovingCellKey] = useState<string>(cellKey({ ring: 0, sector: 0 }))
   const legalMoveKeys = useMemo(
     () => new Set(legalMoves.filter(isValidCell).map(cellKey)),
     [legalMoves],
   )
-  const capturedKeys = toKeySet(capturedCellKeys)
-  const highlightedKeys = toKeySet(highlightedCellKeys)
+  const capturedKeys = useMemo(() => toKeySet(capturedCellKeys), [capturedCellKeys])
+  const highlightedKeys = useMemo(() => toKeySet(highlightedCellKeys), [highlightedCellKeys])
+  // One pass over the pieces instead of a scan of every piece for all 64 cells.
+  const pieceByCell = useMemo(() => {
+    const occupants = new Map<string, Piece>()
+    for (const piece of pieces) {
+      if (isValidCell(piece.position)) occupants.set(cellKey(piece.position), piece)
+    }
+    return occupants
+  }, [pieces])
   const mappedCount = Math.max(0, Math.min(64, Math.floor(mappingProgress)))
-  const boardCells = Array.from({ length: RINGS * SECTORS }, (_, index) => {
-    const coordinate = { ring: Math.floor(index / SECTORS), sector: index % SECTORS }
-    return { coordinate, index, part: parts[index] }
-  })
   const isInteractive = !disabled && Boolean(onCellSelect)
   const isReadOnlyBoard = disabled && stage !== 'question'
 
@@ -201,8 +241,12 @@ export function RadialBoard({
     const frame = window.requestAnimationFrame(() => {
       const destination = cellsRef.current?.querySelector<SVGGElement>('.radial-board__cell.is-legal')
       if (!destination) return
+      // Always move the tab stop, so tabbing into the board lands on a move
+      // that is actually available.
       setRovingCellKey(destination.dataset.cell ?? cellKey({ ring: 0, sector: 0 }))
-      destination.focus()
+      // Only take focus for a player already navigating by keyboard. Doing it
+      // after a click moved focus away from whatever the player was using.
+      if (keyboardIntentRef.current) destination.focus()
     })
     return () => window.cancelAnimationFrame(frame)
   }, [disabled, legalMoveKeys, selectedPieceId])
@@ -213,6 +257,9 @@ export function RadialBoard({
       data-stage={stage}
       data-interactive={isInteractive || undefined}
       aria-label="WebChess circular board"
+      ref={boardRef}
+      onKeyDownCapture={() => { keyboardIntentRef.current = true }}
+      onPointerDownCapture={() => { keyboardIntentRef.current = false }}
     >
       {isInteractive && (
         <p className="sr-only" id={instructionsId}>
@@ -251,13 +298,13 @@ export function RadialBoard({
             role={isReadOnlyBoard ? 'list' : undefined}
             aria-label={isReadOnlyBoard ? 'Board cells' : undefined}
           >
-            {boardCells.map(({ coordinate, index, part }) => {
-              const key = cellKey(coordinate)
+            {BOARD_CELLS.map(({ coordinate, index, key, path, center, shade }) => {
+              const part = parts[index]
               const isLegal = legalMoveKeys.has(key)
               const isCaptured = capturedKeys.has(key)
               const isHighlighted = highlightedKeys.has(key)
               const isLastMove = sameCell(lastMove?.from, coordinate) || sameCell(lastMove?.to, coordinate)
-              const occupant = pieces.find((piece) => sameCell(piece.position, coordinate))
+              const occupant = pieceByCell.get(key)
               const isMapped = stage !== 'question' && (stage !== 'mapping' || index < mappedCount)
               const showPart = isMapped && (revealParts || stage === 'reading')
               const label = [
@@ -276,7 +323,7 @@ export function RadialBoard({
 
               const cellClasses = [
                 'radial-board__cell',
-                (coordinate.ring + coordinate.sector) % 2 === 0 ? 'is-light' : 'is-dark',
+                shade,
                 isMapped ? 'is-mapped' : 'is-unmapped',
                 isLegal ? 'is-legal' : '',
                 isCaptured ? 'is-captured' : '',
@@ -307,12 +354,12 @@ export function RadialBoard({
                   style={{ '--cell-index': index, '--mapping-order': index } as BoardStyle}
                 >
                   <title>{label}</title>
-                  <path className="radial-board__cell-shape" d={annularSectorPath(coordinate.ring, coordinate.sector)} />
+                  <path className="radial-board__cell-shape" d={path} />
                   {isLegal && (
                     <circle
                       className="radial-board__move-marker"
-                      cx={cellCenter(coordinate).x}
-                      cy={cellCenter(coordinate).y}
+                      cx={center.x}
+                      cy={center.y}
                       r="7"
                       aria-hidden="true"
                     />
@@ -320,8 +367,8 @@ export function RadialBoard({
                   {showPart && part && (
                     <text
                       className="radial-board__part-label"
-                      x={cellCenter(coordinate).x}
-                      y={cellCenter(coordinate).y}
+                      x={center.x}
+                      y={center.y}
                       textAnchor="middle"
                       dominantBaseline="middle"
                       aria-hidden="true"
@@ -348,29 +395,23 @@ export function RadialBoard({
           </g>
 
           <g className="radial-board__labels" aria-hidden="true">
-            {SECTOR_LABELS.map((label, sector) => {
-              const point = polarPoint(OUTER_RADIUS + 14, sector * SECTOR_ANGLE)
-              return (
-                <text key={label} x={point.x} y={point.y} textAnchor="middle" dominantBaseline="middle">
-                  {sector + 1}
-                </text>
-              )
-            })}
-            {Array.from({ length: RINGS }, (_, ring) => {
-              const point = polarPoint(INNER_RADIUS + (ring + 0.5) * RING_WIDTH, -10)
-              return (
-                <text
-                  className="radial-board__ring-label"
-                  key={ring}
-                  x={point.x}
-                  y={point.y}
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                >
-                  {ring + 1}
-                </text>
-              )
-            })}
+            {SECTOR_LABEL_POINTS.map(({ label, sector, point }) => (
+              <text key={label} x={point.x} y={point.y} textAnchor="middle" dominantBaseline="middle">
+                {sector + 1}
+              </text>
+            ))}
+            {RING_LABEL_POINTS.map(({ ring, point }) => (
+              <text
+                className="radial-board__ring-label"
+                key={ring}
+                x={point.x}
+                y={point.y}
+                textAnchor="middle"
+                dominantBaseline="middle"
+              >
+                {ring + 1}
+              </text>
+            ))}
           </g>
         </svg>
 

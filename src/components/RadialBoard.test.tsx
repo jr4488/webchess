@@ -56,22 +56,55 @@ describe('RadialBoard interaction', () => {
     expect(onPieceSelect).not.toHaveBeenCalledWith('black-pawn')
   })
 
-  it('hands keyboard focus to a legal destination after piece selection', async () => {
-    render(
+  it('hands keyboard focus to a legal destination after a keyboard piece selection', async () => {
+    const board = (selectedPieceId: string | null) => (
       <RadialBoard
         parts={[]}
         pieces={pieces}
-        selectedPieceId="white-rook"
-        legalMoves={[{ ring: 3, sector: 2 }]}
+        selectedPieceId={selectedPieceId}
+        legalMoves={selectedPieceId ? [{ ring: 3, sector: 2 }] : []}
         onCellSelect={vi.fn()}
         onPieceSelect={vi.fn()}
-      />,
+      />
     )
+    const { rerender } = render(board(null))
+
+    fireEvent.keyDown(screen.getByRole('button', { name: /^ring 1, north$/i }), {
+      key: 'ArrowRight',
+    })
+    rerender(board('white-rook'))
 
     const destination = screen.getByRole('button', {
       name: /ring 4, east.*occupied by black pawn.*legal move/i,
     })
     await waitFor(() => expect(destination).toHaveFocus())
+  })
+
+  it('moves the tab stop but not focus when a piece is selected by pointer', async () => {
+    const board = (selectedPieceId: string | null) => (
+      <RadialBoard
+        parts={[]}
+        pieces={pieces}
+        selectedPieceId={selectedPieceId}
+        legalMoves={selectedPieceId ? [{ ring: 3, sector: 2 }] : []}
+        onCellSelect={vi.fn()}
+        onPieceSelect={vi.fn()}
+      />
+    )
+    const { rerender } = render(board(null))
+
+    fireEvent.pointerDown(
+      screen.getByRole('button', { name: /^ring 4, north, occupied by white rook$/i }),
+    )
+    rerender(board('white-rook'))
+
+    const destination = screen.getByRole('button', {
+      name: /ring 4, east.*occupied by black pawn.*legal move/i,
+    })
+    // The tab stop follows the available move, so keyboard users can still
+    // reach it, but a pointer user is not yanked into the board.
+    await waitFor(() => expect(destination).toHaveAttribute('tabindex', '0'))
+    expect(destination).not.toHaveFocus()
   })
 
   it('uses one roving cell tab stop with coordinate, Home, End, and activation keys', () => {

@@ -252,7 +252,7 @@ export function ModelActivityPanel({
           <BrainCircuit size={14} aria-hidden="true" />
           <span>
             <strong>{providerActivityLabel}</strong>
-            <small>The structured result stays hidden; public display notes may appear below</small>
+            <small>Reasoning appears below as it streams; the structured result waits for validation</small>
           </span>
         </div>
       </div>

@@ -144,7 +144,7 @@ export function MappingStage({
                   <strong>{activeLabel}</strong>
                   <p>{isLoading
                     ? `The wait is intentionally indeterminate while ${provider.label} proposes concrete, problem-specific perspectives.`
-                    : 'Only process milestones are shown here; private model reasoning is never displayed.'}</p>
+                    : 'Process milestones and the model’s reasoning are shown here; draft output is not, until it passes validation.'}</p>
                 </div>
               </div>
 
