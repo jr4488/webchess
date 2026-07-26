@@ -2,9 +2,9 @@
 
 ## A research and technical white paper on problem decomposition, constrained play, symbolic reframing, and AI-assisted synthesis
 
-**Version:** 1.1  
-**Date:** July 24, 2026  
-**Status:** Design description and research agenda  
+**Version:** 1.2<br>
+**Date:** July 26, 2026<br>
+**Status:** Design description and research agenda<br>
 **Project:** WebChess 0.1.0
 
 ## Contents
@@ -396,22 +396,24 @@ Captures identify items for inspection. The game provides a coherent path and st
 
 The interface supports three modes: the user may move pieces manually, request one guided turn, or enable autoplay. Autoplay begins disabled; once enabled, it repeatedly chooses guided moves until an ending. A manual session therefore reaches the end only if the user continues play or turns autoplay on.
 
-For each guided turn, the player searches ahead with negamax and alpha-beta pruning, extending the search over captures so that no position is scored in the middle of an exchange. Equal scores are broken by a deterministic hash derived from the normalized problem, turn number, side, piece, and destination. The cast’s random division seed does **not** affect move choice. Consequently, different casts of the same problem place different semantic material under what is otherwise the same guided trajectory, unless the player makes a move or another part of the board state differs.
+For each guided turn, the purpose-built WebChess engine uses iterative deepening, principal-variation alpha-beta search, aspiration windows, and a transposition table keyed by a deterministic dual-word position hash plus the two draw counters. Killer and history heuristics, the preceding principal variation, static exchange scores, and a seeded root-only bias order candidate moves. The seed resolves otherwise equal root values; it does not alter evaluation below the root. Consequently, different casts of the same normalized problem place different semantic material under what is otherwise the same guided trajectory, unless the player makes a move or another part of the board state differs.
 
-The search accounts for two rules specific to this variant. There is no check: a King is captured outright, and the search treats that as terminal, which is what makes the player defend its own King rather than trading it for material. A side with no legal move passes rather than losing, so the search models a pass and treats a board where neither side can move as drawn.
+The search models the rules specific to this variant rather than importing orthodox check semantics. A King is captured outright; an attacked side may make any pseudo-legal reply, although ignoring the attack usually allows a decisive capture on the following action. A side with no legal move passes rather than losing, and the pass consumes both a total ply and a quiet ply. The engine also models the 100-quiet-ply and 256-total-ply boundaries inside normal and tactical search. Action 256 remains legal, and a King capture on that action takes precedence over the draw.
 
-The position evaluation is deliberately small, because the search rather than the scoring function is expected to do the work:
+The position evaluation remains deliberately explainable:
 
 - material, in conventional centipawn values;
-- pawn advance in the side’s assigned direction, accelerating toward promotion;
-- a slight preference for the middle rings, where sliding pieces keep more directions;
-- once a side is clearly ahead, a term for driving the opposing King toward an inner or outer ring and covering its escape squares, since a wrapping board has no corners to trap it in.
+- pawn advance, blocked or clear promotion runways, and whose turn controls an immediate promotion race;
+- local activity and a slight preference for the middle rings, where sliding pieces keep more directions;
+- immediate King danger and the number of safer neighboring cells;
+- once a side is clearly ahead, a term for driving the opposing King toward an inner or outer ring and covering its escape squares, since a wrapping board has no corners to trap it in;
+- a small side-to-move tempo term.
 
-Candidate moves are ordered by static exchange evaluation, which plays out the whole sequence of captures on a square using the cheapest available attacker. This both improves pruning and lets the player distinguish a defended capture from a free one.
+Candidate captures are ordered by static exchange evaluation, which plays out the whole sequence of captures on a square using the cheapest available attacker, including a pawn that promotes during a later recapture. Quiescence search follows captures and quiet promotions; when a King is immediately threatened it considers every pseudo-legal reply, because WebChess has no check-evasion restriction.
 
-Depth is not fixed. The player deepens repeatedly until it has spent a fixed budget of search nodes, keeping the last depth it completed. Counting nodes rather than seconds means the depth chosen depends only on the position, so the same problem replays identically on a slow machine and a fast one. In practice this reaches depth four to six, at roughly two seconds a move, and the search runs in a worker thread so the board stays responsive.
+Depth is not fixed. The player deepens repeatedly until it has spent a deterministic 150,000-node default budget, keeping only the last fully completed depth, score, move, and principal variation. From the initial position this completes depth five in about 3–4 seconds on the reference development host; later positions vary. The search runs in a worker so the board stays responsive. Pause, reset, session expiry, and superseding requests terminate that worker and invalidate the result generation before a stale move can be applied. Environments without a usable worker receive a deliberately bounded 20,000-node fallback.
 
-The advantage over the previous one-ply scorer is measured rather than asserted: the repository plays full games between the two and requires the search to win or draw all of them, and separately requires a deeper search to finish with more material than a shallower one. The policy nevertheless remains semantically blind. The move evaluator does not read the facet, its evidence quality, the hexagram theme, or the user’s domain. “Better move” means “better under the game evaluation,” not “better analysis of the real problem.”
+The advantage over the previous one-ply scorer is measured rather than asserted. The repository includes canonical perft fixtures, a versioned tactical corpus, deterministic legal openings, and a paired-color arena against a pinned legacy policy, in addition to depth and material comparisons. These tests are regression evidence, not an Elo estimate. The policy nevertheless remains semantically blind. The move evaluator does not read the facet, its evidence quality, the hexagram theme, or the user’s domain. “Better move” means “better under the game evaluation,” not “better analysis of the real problem.”
 
 ### 7.4 Completion
 
@@ -1377,7 +1379,7 @@ The proper claim is therefore neither mystical nor dismissive:
 | First turn | White |
 | Play modes | Manual moves, one guided turn, or autoplay; autoplay initially off |
 | Special rules | Direct King capture; initial clear two-ring pawn advance; pawn promotion; no check, castling, or en passant |
-| Move policy | Alpha-beta search with a capture extension, deepened to a fixed node budget; equal scores use a problem-and-turn-derived hash |
+| Move policy | Purpose-built iterative PVS with dual-word hashed transpositions, aspiration windows, rules-aware quiescence, move ordering, and a deterministic 150,000-node default; equal root values use a problem-and-turn-derived hash |
 | Attention weight | Captured role, active role, and middle-ring meeting bonus |
 | Local leading signals | Up to 3 facet groups, with modest recurrence lift |
 | Ending | King capture, mutual immobility, 100 quiet plies, or 256 total plies; a one-sided immobility causes a counted pass |

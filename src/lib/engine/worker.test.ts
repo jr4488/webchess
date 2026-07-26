@@ -43,6 +43,15 @@ describe('engine worker', () => {
     expect(posted).toHaveLength(1)
     expect(posted[0]!.id).toBe(7)
     expect(posted[0]!.move?.pieceId).toBeTruthy()
+    expect(posted[0]!.analysis).toMatchObject({
+      depth: 1,
+      score: expect.any(Number),
+      elapsedMs: expect.any(Number),
+      nps: expect.any(Number),
+      ttHits: expect.any(Number),
+      principalVariation: expect.any(Array),
+      stopReason: 'depth',
+    })
     expect(posted[0]!.error).toBeUndefined()
   })
 
@@ -51,7 +60,11 @@ describe('engine worker', () => {
 
     onMessage({ data: { id: 2, pieces: [], side: 'black', seed: 0, options: { depth: 1 } } })
 
-    expect(posted[0]).toEqual({ id: 2, move: null })
+    expect(posted[0]).toMatchObject({
+      id: 2,
+      move: null,
+      analysis: { nodes: 0, depth: 0 },
+    })
   })
 
   it('returns the failure instead of letting the worker die', async () => {

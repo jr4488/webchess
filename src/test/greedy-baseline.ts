@@ -15,6 +15,7 @@ import { hashString } from '../lib/problem'
  * opponent so changes to the engine can be measured against a stable baseline
  * rather than against an assertion about what a good move looks like.
  */
+export const GREEDY_BASELINE_ID = 'legacy-greedy-v1'
 
 function occupancyFor(pieces: readonly Piece[]): Map<string, Piece> {
   return new Map(pieces.map((piece) => [coordKey(piece.position), piece]))

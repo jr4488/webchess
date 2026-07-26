@@ -31,7 +31,7 @@ interface PlayingStageProps {
   captureKeys: ReadonlySet<string>
   lastMove: LastMove | null
   autoPlaying: boolean
-  thinking: boolean
+  searchMode: 'manual' | 'autoplay' | null
   gameFinishing: boolean
   notice: string
   onPieceSelect: (pieceId: string) => void
@@ -55,7 +55,7 @@ export function PlayingStage({
   captureKeys,
   lastMove,
   autoPlaying,
-  thinking,
+  searchMode,
   gameFinishing,
   notice,
   onPieceSelect,
@@ -63,6 +63,8 @@ export function PlayingStage({
   onStep,
   onToggleAuto,
 }: PlayingStageProps) {
+  const thinking = searchMode !== null
+  const manualSearchInFlight = searchMode === 'manual'
   const latestCaptures = [...captures].reverse().slice(0, 4)
   const activeCaptureIndices = captures.map((capture) => capture.cell.ring * 8 + capture.cell.sector)
   const processMode = gameFinishing ? 'finishing' : autoPlaying ? 'autoplay' : 'paused'
@@ -166,7 +168,13 @@ export function PlayingStage({
         />
 
         <div className="control-row">
-          <button className={`auto-button ${autoPlaying ? 'is-active' : ''}`} type="button" onClick={onToggleAuto} disabled={gameFinishing} aria-pressed={autoPlaying}>
+          <button
+            className={`auto-button ${autoPlaying ? 'is-active' : ''}`}
+            type="button"
+            onClick={onToggleAuto}
+            disabled={gameFinishing || (!autoPlaying && manualSearchInFlight)}
+            aria-pressed={autoPlaying}
+          >
             {autoPlaying ? <Pause size={17} /> : <Play size={17} />}
             {autoPlaying ? 'Pause auto-play' : 'Auto-play to the end'}
           </button>

@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Piece, Side } from '../../types'
-import { chooseGreedyMove } from '../../test/greedy-baseline'
+import {
+  formatArenaResult,
+  generateLegalOpening,
+  runPairedArena,
+} from '../../test/engine-arena'
+import {
+  GREEDY_BASELINE_ID,
+  chooseGreedyMove,
+} from '../../test/greedy-baseline'
 import { playMatch } from '../../test/play-match'
 import { findBestMove } from './index'
 
@@ -9,7 +17,11 @@ const SEARCH_DEPTH = 3
 
 function engineChooser(depth = SEARCH_DEPTH) {
   return (pieces: readonly Piece[], side: Side, seed: string | number, ply: number, quiet: number) =>
-    findBestMove(pieces, side, seed, { depth, ply, quietPlies: quiet })
+    findBestMove(pieces, side, seed, {
+      depth,
+      completedPlies: Math.max(0, ply - 1),
+      quietPlies: quiet,
+    })
 }
 
 const greedyChooser = (
@@ -22,37 +34,38 @@ const greedyChooser = (
 const MATCH_TIMEOUT = 240_000
 
 describe('engine strength against the previous one-ply scorer', () => {
-  it('wins or draws every game from both colours', () => {
-    const seeds = ['clarity', 'tempo', 'risk']
-    const results: string[] = []
-    let enginePoints = 0
+  it('scores at least 75% in paired colors from varied legal openings', () => {
+    const openings = ['clarity', 'tempo', 'risk'].map((seed) =>
+      generateLegalOpening(seed, 6),
+    )
+    const result = runPairedArena({
+      candidateId: 'webchess-engine-v2-depth-3',
+      candidate: engineChooser(),
+      baselineId: GREEDY_BASELINE_ID,
+      baseline: greedyChooser,
+      openings,
+    })
 
-    for (const seed of seeds) {
-      const asWhite = playMatch({
-        white: engineChooser(),
-        black: greedyChooser,
-        seed: `${seed}/white`,
-      })
-      const asBlack = playMatch({
-        white: greedyChooser,
-        black: engineChooser(),
-        seed: `${seed}/black`,
-      })
-
-      enginePoints += asWhite.outcome.winner === 'white' ? 1 : asWhite.outcome.winner ? 0 : 0.5
-      enginePoints += asBlack.outcome.winner === 'black' ? 1 : asBlack.outcome.winner ? 0 : 0.5
-
-      results.push(
-        `${seed}: engine as White -> ${describe_(asWhite.outcome.winner)} in ${asWhite.plies} plies ` +
-          `(material ${asWhite.material.white} vs ${asWhite.material.black}); ` +
-          `engine as Black -> ${describe_(asBlack.outcome.winner)} in ${asBlack.plies} plies ` +
-          `(material ${asBlack.material.black} vs ${asBlack.material.white})`,
-      )
-    }
-
-    console.log(results.join('\n'))
-    expect(enginePoints).toBeGreaterThanOrEqual(seeds.length * 2 * 0.75)
+    console.log(formatArenaResult(result))
+    expect(result.baselineId).toBe('legacy-greedy-v1')
+    expect(result.legs).toHaveLength(openings.length * 2)
+    expect(result.points).toBeGreaterThanOrEqual(result.legs.length * 0.75)
   }, MATCH_TIMEOUT)
+
+  it('pins the legacy baseline on the arena opening corpus', () => {
+    const choices = ['clarity', 'tempo', 'risk'].map((seed) => {
+      const opening = generateLegalOpening(seed, 6)
+      const move = chooseGreedyMove(opening.pieces, opening.sideToMove, 'baseline-pin')
+      return `${move?.pieceId}>${move?.to.ring}:${move?.to.sector}`
+    })
+
+    expect(GREEDY_BASELINE_ID).toBe('legacy-greedy-v1')
+    expect(choices).toEqual([
+      'white-bishop-2>1:3',
+      'white-queen-1>4:1',
+      'white-bishop-2>1:3',
+    ])
+  })
 
   it('ends with more material than the one-ply scorer on average', () => {
     let engineMaterial = 0
@@ -102,7 +115,3 @@ describe('king safety', () => {
     expect(findBestMove(pieces, 'white', 'exposed', { depth: 2 })?.captured?.kind).not.toBe('queen')
   })
 })
-
-function describe_(winner: Side | null): string {
-  return winner === null ? 'draw' : `${winner} wins`
-}

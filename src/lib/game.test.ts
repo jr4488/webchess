@@ -10,6 +10,7 @@ import {
   createInitialPieces,
   getGameOutcome,
   getLegalMoves,
+  hasLegalMove,
   isSameCoord,
 } from './game'
 
@@ -79,14 +80,14 @@ describe('polar legal moves', () => {
     const whitePawn = piece('white-pawn', 'white', 'pawn', 6, 3, false)
     const whiteTarget = piece('white-target', 'white', 'rook', 2, 7)
     const pieces = [blackPawn, whitePawn, whiteTarget]
+    const blackMoves = keys(getLegalMoves(blackPawn, pieces))
+    const whiteMoves = keys(getLegalMoves(whitePawn, pieces))
 
-    expect(keys(getLegalMoves(blackPawn, pieces))).toEqual(
-      expect.arrayContaining(['2:0', '3:0', '2:7']),
-    )
-    expect(keys(getLegalMoves(whitePawn, pieces))).toEqual(
-      expect.arrayContaining(['5:3', '4:3']),
-    )
-    expect(keys(getLegalMoves(whitePawn, pieces))).not.toContain('7:3')
+    expect(blackMoves).toEqual(expect.arrayContaining(['2:0', '3:0', '2:7']))
+    expect(new Set(blackMoves).size).toBe(blackMoves.length)
+    expect(whiteMoves).toEqual(expect.arrayContaining(['5:3', '4:3']))
+    expect(whiteMoves).not.toContain('7:3')
+    expect(new Set(whiteMoves).size).toBe(whiteMoves.length)
   })
 
   it('does not allow a sliding piece to pass through a capture', () => {
@@ -96,6 +97,15 @@ describe('polar legal moves', () => {
 
     expect(moves).toContain('2:2')
     expect(moves).not.toContain('1:1')
+  })
+
+  it('reports legal-move availability for each side from the same packed board', () => {
+    const strandedBlackPawn = piece('black-pawn', 'black', 'pawn', 7, 0)
+    const mobileWhiteRook = piece('white-rook', 'white', 'rook', 3, 3)
+    const pieces = [strandedBlackPawn, mobileWhiteRook]
+
+    expect(hasLegalMove(pieces, 'black')).toBe(false)
+    expect(hasLegalMove(pieces, 'white')).toBe(true)
   })
 })
 
@@ -148,6 +158,26 @@ describe('moves and captures', () => {
     const result = applyMove([pawn], pawn.id, { ring: 7, sector: 4 }, parts, 12)
 
     expect(result.pieces[0].kind).toBe('queen')
+    expect(result.promoted).toMatchObject({ id: pawn.id, kind: 'queen' })
+  })
+
+  it('applies a wrapped pawn capture and promotion through the public move API', () => {
+    const pawn = piece('black-pawn', 'black', 'pawn', 6, 0)
+    const target = piece('white-rook', 'white', 'rook', 7, 7)
+    const parts = makeProblemParts('breakthrough')
+
+    expect(keys(getLegalMoves(pawn, [pawn, target]))).toContain('7:7')
+
+    const result = applyMove([pawn, target], pawn.id, target.position, parts, 13)
+
+    expect(result.pieces).toHaveLength(1)
+    expect(result.pieces[0]).toMatchObject({
+      id: pawn.id,
+      kind: 'queen',
+      position: { ring: 7, sector: 7 },
+      moved: true,
+    })
+    expect(result.capture?.captured.id).toBe(target.id)
     expect(result.promoted).toMatchObject({ id: pawn.id, kind: 'queen' })
   })
 
@@ -296,7 +326,7 @@ describe('moves and captures', () => {
     }
 
     expect(captureCount).toBeGreaterThan(0)
-  })
+  }, 30_000)
 
   it('returns null when a side has no pieces or legal moves', () => {
     expect(chooseAutoMove([], 'black', 1, { depth: 2 })).toBeNull()

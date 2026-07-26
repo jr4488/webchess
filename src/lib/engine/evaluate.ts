@@ -1,14 +1,18 @@
 import {
+  BISHOP,
   BLACK,
   EMPTY,
   KING,
+  KNIGHT,
   PAWN,
   QUEEN,
   RINGS,
+  ROOK,
   SQUARE_COUNT,
   WHITE,
   codeKind,
   codeSide,
+  encodePiece,
   moveCaptured,
   moveFrom,
   moveIsPromotion,
@@ -16,7 +20,13 @@ import {
   ringOf,
   sectorOf,
 } from './position'
-import { isAttacked, leastValuableAttacker, pawnStartRing } from './movegen'
+import {
+  isAttacked,
+  leastValuableAttacker,
+  pawnDirection,
+  pawnPromotionRing,
+  pawnStartRing,
+} from './movegen'
 
 /** Centipawn values indexed by kind. The king is priced out of exchanges. */
 export const VALUES: readonly number[] = [100, 320, 330, 500, 900, 30_000]
@@ -28,7 +38,17 @@ export const MATE_SCORE = 1_000_000
  * Rings are the direction of travel: White advances 7 to 0, Black 0 to 7. A
  * pawn one step from the far edge is nearly a queen, so the bonus accelerates.
  */
-const PAWN_ADVANCEMENT: readonly number[] = [0, 6, 16, 32, 62, 110, 190]
+const PAWN_ADVANCEMENT: readonly number[] = [0, 8, 22, 48, 96, 180, 180]
+
+/**
+ * A clear promotion run is worth much more than generic centrality. These
+ * bonuses stay below the guaranteed 800cp promotion gain because the opponent
+ * may still attack the pawn or occupy its runway.
+ */
+const PAWN_RUNWAY: readonly number[] = [0, 360, 150, 65, 28, 12, 4, 0]
+const BLOCKED_PAWN: readonly number[] = [0, 120, 50, 22, 10, 4, 0, 0]
+const PROMOTION_TEMPO = 90
+const TEMPO_BONUS = 10
 
 /**
  * The outer and inner rings are edges where sliding pieces lose a direction,
@@ -42,11 +62,53 @@ function pawnAdvancement(side: number, ring: number): number {
   return PAWN_ADVANCEMENT[Math.min(progress, PAWN_ADVANCEMENT.length - 1)]!
 }
 
+function pawnPlacement(
+  board: Int8Array,
+  square: number,
+  side: number,
+  sideToMove: number | undefined,
+): number {
+  const ring = ringOf(square)
+  const direction = pawnDirection(side)
+  const promotionRing = pawnPromotionRing(side)
+  const distance = Math.abs(promotionRing - ring)
+  let score = pawnAdvancement(side, ring)
+
+  if (distance <= 0) return score
+
+  const next = square + direction * 8
+  if (board[next] !== EMPTY) {
+    return score - BLOCKED_PAWN[Math.min(distance, BLOCKED_PAWN.length - 1)]!
+  }
+
+  let runwayClear = true
+  if (distance > 1) {
+    for (
+      let nextRing = ring + direction * 2;
+      ;
+      nextRing += direction
+    ) {
+      if (board[nextRing * 8 + sectorOf(square)] !== EMPTY) {
+        runwayClear = false
+        break
+      }
+      if (nextRing === promotionRing) break
+    }
+  }
+
+  if (runwayClear) {
+    score += PAWN_RUNWAY[Math.min(distance, PAWN_RUNWAY.length - 1)]!
+    if (distance === 1 && sideToMove === side) score += PROMOTION_TEMPO
+  }
+
+  return score
+}
+
 /**
  * Scores the position from White's point of view in centipawns. Tactics are
  * left to the search; this only has to rank quiet positions sensibly.
  */
-export function evaluateBoard(board: Int8Array): number {
+export function evaluateBoard(board: Int8Array, sideToMove?: number): number {
   let score = 0
   let whiteMaterial = 0
   let blackMaterial = 0
@@ -68,7 +130,10 @@ export function evaluateBoard(board: Int8Array): number {
     }
 
     const material = VALUES[kind]!
-    const placement = kind === PAWN ? pawnAdvancement(side, ring) : RING_CENTRALITY[ring]!
+    const placement =
+      kind === PAWN
+        ? pawnPlacement(board, square, side, sideToMove)
+        : RING_CENTRALITY[ring]! + localActivity(board, square, side, kind)
 
     if (side === WHITE) {
       whiteMaterial += material
@@ -79,7 +144,92 @@ export function evaluateBoard(board: Int8Array): number {
     }
   }
 
-  return score + mopUp(board, whiteKing, blackKing, whiteMaterial - blackMaterial)
+  let whiteSafe = KING_STEPS
+  let blackSafe = KING_STEPS
+  if (whiteKing >= 0 && blackKing >= 0) {
+    whiteSafe = safeKingSquares(board, whiteKing, BLACK)
+    blackSafe = safeKingSquares(board, blackKing, WHITE)
+    score +=
+      kingDanger(board, blackKing, BLACK, blackSafe, sideToMove) -
+      kingDanger(board, whiteKing, WHITE, whiteSafe, sideToMove)
+  }
+
+  if (sideToMove === WHITE) score += TEMPO_BONUS
+  else if (sideToMove === BLACK) score -= TEMPO_BONUS
+
+  return (
+    score +
+    mopUp(
+      whiteKing,
+      blackKing,
+      whiteMaterial - blackMaterial,
+      whiteSafe,
+      blackSafe,
+    )
+  )
+}
+
+const LOCAL_ORTHOGONAL: ReadonlyArray<readonly [number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+]
+
+const LOCAL_DIAGONAL: ReadonlyArray<readonly [number, number]> = [
+  [1, 1],
+  [1, -1],
+  [-1, 1],
+  [-1, -1],
+]
+
+const LOCAL_DIRECTIONS = [...LOCAL_ORTHOGONAL, ...LOCAL_DIAGONAL]
+
+const LOCAL_KNIGHT_STEPS: ReadonlyArray<readonly [number, number]> = [
+  [-2, -1],
+  [-2, 1],
+  [-1, -2],
+  [-1, 2],
+  [1, -2],
+  [1, 2],
+  [2, -1],
+  [2, 1],
+]
+
+/**
+ * Counts only immediately available directions (or jumps for a knight). It is
+ * a cheap activity signal, not full move generation, and strongly prefers
+ * developing a boxed piece without materially slowing leaf evaluation.
+ */
+function localActivity(
+  board: Int8Array,
+  square: number,
+  side: number,
+  kind: number,
+): number {
+  const directions =
+    kind === KNIGHT
+      ? LOCAL_KNIGHT_STEPS
+      : kind === ROOK
+        ? LOCAL_ORTHOGONAL
+        : kind === BISHOP
+          ? LOCAL_DIAGONAL
+          : LOCAL_DIRECTIONS
+  const ring = ringOf(square)
+  const sector = sectorOf(square)
+  let available = 0
+
+  for (const [ringStep, sectorStep] of directions) {
+    const targetRing = ring + ringStep
+    if (targetRing < 0 || targetRing >= RINGS) continue
+    const targetSector = ((sector + sectorStep) % 8 + 8) % 8
+    const occupant = board[targetRing * 8 + targetSector]!
+    if (occupant === EMPTY || codeSide(occupant) !== side) available += 1
+  }
+
+  if (kind === QUEEN) return available
+  if (kind === ROOK) return available * 2
+  return available * 3
 }
 
 /** Material edge, in centipawns, at which hunting the bare king is worthwhile. */
@@ -91,10 +241,11 @@ const MOP_UP_THRESHOLD = 400
  * wrap, so the only edges to drive a king toward are the inner and outer rings.
  */
 function mopUp(
-  board: Int8Array,
   whiteKing: number,
   blackKing: number,
   materialEdge: number,
+  whiteSafe: number,
+  blackSafe: number,
 ): number {
   if (whiteKing < 0 || blackKing < 0) return 0
   if (Math.abs(materialEdge) < MOP_UP_THRESHOLD) return 0
@@ -103,13 +254,38 @@ function mopUp(
   const losingKing = winning === WHITE ? blackKing : whiteKing
   const drivenToEdge = Math.abs(3.5 - ringOf(losingKing))
   const closingIn = MAX_POLAR_DISTANCE - polarDistance(whiteKing, blackKing)
-  const trapped = KING_STEPS - safeKingSquares(board, losingKing, winning)
+  const trapped = KING_STEPS - (winning === WHITE ? blackSafe : whiteSafe)
 
   const bonus = Math.round(14 * drivenToEdge + 6 * closingIn + 30 * trapped)
   return winning === WHITE ? bonus : -bonus
 }
 
 const KING_STEPS = 8
+const KING_CONSTRAINT: readonly number[] = [0, 2, 5, 9, 16, 26, 40, 60, 85]
+
+/**
+ * In this variant an attacked king is a capturable piece, not merely a check
+ * marker. Escape scarcity therefore matters in balanced positions too, while
+ * an attack by the side that moves next is especially urgent.
+ */
+function kingDanger(
+  board: Int8Array,
+  kingSquare: number,
+  defendingSide: number,
+  safeSquares: number,
+  sideToMove: number | undefined,
+): number {
+  const attacker = otherSideOf(defendingSide)
+  const constrained = Math.max(0, Math.min(KING_STEPS, KING_STEPS - safeSquares))
+  let danger = KING_CONSTRAINT[constrained]!
+
+  if (isAttacked(board, kingSquare, attacker)) {
+    danger += 160 + constrained * 16
+    if (sideToMove === attacker) danger += 180
+  }
+
+  return danger
+}
 
 /**
  * How many squares the hunted king can still step to without the winning side
@@ -175,7 +351,7 @@ export function staticExchange(board: Int8Array, move: number): number {
     seeGains[0]! += VALUES[QUEEN]! - VALUES[PAWN]!
   }
 
-  seeBoard[to] = seeBoard[from]!
+  seeBoard[to] = moveIsPromotion(move) ? encodePiece(side, QUEEN) : seeBoard[from]!
   seeBoard[from] = EMPTY
 
   for (;;) {
@@ -188,12 +364,19 @@ export function staticExchange(board: Int8Array, move: number): number {
 
     seeGains[depth] = onSquareValue - seeGains[depth - 1]!
 
+    const attackerCode = seeBoard[attacker]!
+    const promotes =
+      codeKind(attackerCode) === PAWN && ringOf(to) === pawnPromotionRing(side)
+    if (promotes) {
+      seeGains[depth]! += VALUES[QUEEN]! - VALUES[PAWN]!
+    }
+
     // Once a side is already losing the exchange it simply declines to
     // recapture, so there is no point extending the sequence further.
     if (Math.max(-seeGains[depth - 1]!, seeGains[depth]!) < 0) break
 
-    onSquareValue = VALUES[codeKind(seeBoard[attacker]!)]!
-    seeBoard[to] = seeBoard[attacker]!
+    onSquareValue = promotes ? VALUES[QUEEN]! : VALUES[codeKind(attackerCode)]!
+    seeBoard[to] = promotes ? encodePiece(side, QUEEN) : attackerCode
     seeBoard[attacker] = EMPTY
   }
 

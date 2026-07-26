@@ -5,10 +5,13 @@ import { coordKey, createInitialPieces, getLegalMoves } from '../game'
 import { hashString } from '../problem'
 import { MAX_MOVES, generateMoves, isAttacked } from './movegen'
 import {
+  EMPTY,
   RINGS,
   SECTORS,
   SQUARE_COUNT,
+  moveCaptured,
   moveFrom,
+  moveIsPromotion,
   moveTo,
   positionFromPieces,
   ringOf,
@@ -129,6 +132,97 @@ describe('engine move generation', () => {
         expect(actual, `position ${index} for ${side}`).toEqual(expected)
       }
     }
+  })
+
+  it('holds every move in the 257-move regression position', () => {
+    const pieces: Piece[] = [
+      ...[
+        [7, 2],
+        [5, 5],
+        [7, 4],
+        [6, 7],
+        [2, 6],
+        [3, 1],
+        [4, 3],
+        [1, 0],
+        [6, 0],
+      ].map(
+        ([ring, sector], index): Piece => ({
+          id: `white-queen-${index}`,
+          side: 'white',
+          kind: 'queen',
+          position: { ring: ring!, sector: sector! },
+          moved: true,
+        }),
+      ),
+      { id: 'white-rook-1', side: 'white', kind: 'rook', position: { ring: 0, sector: 2 }, moved: true },
+      { id: 'white-rook-2', side: 'white', kind: 'rook', position: { ring: 0, sector: 4 }, moved: true },
+      { id: 'white-bishop-1', side: 'white', kind: 'bishop', position: { ring: 0, sector: 3 }, moved: true },
+      { id: 'white-bishop-2', side: 'white', kind: 'bishop', position: { ring: 2, sector: 3 }, moved: true },
+      { id: 'white-knight', side: 'white', kind: 'knight', position: { ring: 1, sector: 3 }, moved: true },
+      { id: 'white-king', side: 'white', kind: 'king', position: { ring: 1, sector: 1 }, moved: true },
+      { id: 'black-king', side: 'black', kind: 'king', position: { ring: 7, sector: 3 }, moved: true },
+    ]
+    const position = positionFromPieces(pieces, 'white')
+    const moves = new Int32Array(MAX_MOVES)
+
+    expect(referenceMoveKeys(pieces, 'white')).toHaveLength(257)
+    expect(generateMoves(position, 0, moves)).toBe(257)
+    expect(engineMoveKeys(pieces, 'white')).toEqual(referenceMoveKeys(pieces, 'white'))
+    expect(() => generateMoves(position, 0, new Int32Array(256))).toThrow(
+      /Move buffer capacity 256 exceeded/,
+    )
+  })
+
+  it('generates captures plus quiet promotions in tactical mode', () => {
+    const pieces: Piece[] = [
+      {
+        id: 'white-pawn',
+        side: 'white',
+        kind: 'pawn',
+        position: { ring: 1, sector: 3 },
+        moved: true,
+      },
+      {
+        id: 'black-knight',
+        side: 'black',
+        kind: 'knight',
+        position: { ring: 0, sector: 2 },
+        moved: true,
+      },
+      {
+        id: 'white-rook',
+        side: 'white',
+        kind: 'rook',
+        position: { ring: 4, sector: 0 },
+        moved: true,
+      },
+    ]
+    const position = positionFromPieces(pieces, 'white')
+    const captures = new Int32Array(MAX_MOVES)
+    const tactical = new Int32Array(MAX_MOVES)
+    const captureCount = generateMoves(position, 0, captures, true)
+    const tacticalCount = generateMoves(position, 0, tactical, 'tactical')
+    const tacticalMoves = Array.from(tactical.slice(0, tacticalCount))
+
+    expect(captureCount).toBe(1)
+    expect(tacticalCount).toBe(2)
+    expect(
+      tacticalMoves.some(
+        (move) =>
+          moveTo(move) === squareOf(0, 3) &&
+          moveCaptured(move) === EMPTY &&
+          moveIsPromotion(move),
+      ),
+    ).toBe(true)
+    expect(
+      tacticalMoves.some(
+        (move) =>
+          moveTo(move) === squareOf(0, 2) &&
+          moveCaptured(move) !== EMPTY &&
+          moveIsPromotion(move),
+      ),
+    ).toBe(true)
   })
 })
 

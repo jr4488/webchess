@@ -21,8 +21,29 @@ import {
   squareOf,
 } from './position'
 
-/** Maximum moves generated for one side; a full board cannot approach this. */
-export const MAX_MOVES = 256
+/**
+ * Universal capacity for the packed move API. In one fixed position each move
+ * has a unique origin/destination pair, and no piece can move to its own square.
+ */
+export const MAX_MOVES = SQUARE_COUNT * (SQUARE_COUNT - 1)
+
+export type MoveGenerationMode = 'all' | 'captures' | 'tactical'
+
+function appendMove(out: Int32Array, count: number, move: number): number {
+  if (count >= out.length) {
+    throw new RangeError(
+      `Move buffer capacity ${out.length} exceeded; allocate MAX_MOVES (${MAX_MOVES}).`,
+    )
+  }
+  out[count] = move
+  return count + 1
+}
+
+function normalizeMode(mode: MoveGenerationMode | boolean): MoveGenerationMode {
+  if (mode === true) return 'captures'
+  if (mode === false) return 'all'
+  return mode
+}
 
 function normalizeSector(sector: number): number {
   return ((sector % SECTORS) + SECTORS) % SECTORS
@@ -145,16 +166,19 @@ export function pawnPromotionRing(side: number): number {
 
 /**
  * Writes every pseudo-legal move for `side` into `out` starting at index 0 and
- * returns the count. When `capturesOnly` is set the quiet moves are skipped,
- * which is what the quiescence search needs.
+ * returns the count. Boolean mode remains compatible with the original API:
+ * `true` means captures only and `false` means all moves. Tactical generation
+ * includes captures plus quiet promotions so quiescence cannot stop one step
+ * before a material-changing promotion.
  */
 export function generateMoves(
   position: Position,
   side: number,
   out: Int32Array,
-  capturesOnly = false,
+  requestedMode: MoveGenerationMode | boolean = 'all',
 ): number {
   const { board } = position
+  const mode = normalizeMode(requestedMode)
   let count = 0
 
   for (let from = 0; from < SQUARE_COUNT; from += 1) {
@@ -164,7 +188,7 @@ export function generateMoves(
     const kind = codeKind(code)
 
     if (kind === PAWN) {
-      count = addPawnMoves(position, side, from, out, count, capturesOnly)
+      count = addPawnMoves(position, side, from, out, count, mode)
       continue
     }
 
@@ -174,9 +198,8 @@ export function generateMoves(
         const to = targets[index]!
         const occupant = board[to]!
         if (occupant !== EMPTY && codeSide(occupant) === side) continue
-        if (capturesOnly && occupant === EMPTY) continue
-        out[count] = encodeMove(from, to, occupant, false)
-        count += 1
+        if (mode !== 'all' && occupant === EMPTY) continue
+        count = appendMove(out, count, encodeMove(from, to, occupant, false))
       }
       continue
     }
@@ -192,18 +215,16 @@ export function generateMoves(
         const occupant = board[to]!
 
         if (occupant === EMPTY) {
-          if (!capturesOnly && seen[to] !== stamp) {
+          if (mode === 'all' && seen[to] !== stamp) {
             seen[to] = stamp
-            out[count] = encodeMove(from, to, EMPTY, false)
-            count += 1
+            count = appendMove(out, count, encodeMove(from, to, EMPTY, false))
           }
           continue
         }
 
         if (codeSide(occupant) !== side && seen[to] !== stamp) {
           seen[to] = stamp
-          out[count] = encodeMove(from, to, occupant, false)
-          count += 1
+          count = appendMove(out, count, encodeMove(from, to, occupant, false))
         }
         break
       }
@@ -219,7 +240,7 @@ function addPawnMoves(
   from: number,
   out: Int32Array,
   startCount: number,
-  capturesOnly: boolean,
+  mode: MoveGenerationMode,
 ): number {
   const { board, moved } = position
   let count = startCount
@@ -231,11 +252,13 @@ function addPawnMoves(
   const forwardRing = ring + direction
 
   if (forwardRing >= 0 && forwardRing < RINGS) {
-    if (!capturesOnly) {
+    if (mode !== 'captures') {
       const forward = squareOf(forwardRing, sector)
       if (board[forward] === EMPTY) {
-        out[count] = encodeMove(from, forward, EMPTY, forwardRing === promotionRing)
-        count += 1
+        const promotion = forwardRing === promotionRing
+        if (mode === 'all' || promotion) {
+          count = appendMove(out, count, encodeMove(from, forward, EMPTY, promotion))
+        }
 
         const doubleRing = ring + direction * 2
         if (
@@ -246,8 +269,14 @@ function addPawnMoves(
         ) {
           const doubleForward = squareOf(doubleRing, sector)
           if (board[doubleForward] === EMPTY) {
-            out[count] = encodeMove(from, doubleForward, EMPTY, doubleRing === promotionRing)
-            count += 1
+            const doublePromotion = doubleRing === promotionRing
+            if (mode === 'all' || doublePromotion) {
+              count = appendMove(
+                out,
+                count,
+                encodeMove(from, doubleForward, EMPTY, doublePromotion),
+              )
+            }
           }
         }
       }
@@ -257,8 +286,11 @@ function addPawnMoves(
       const target = squareOf(forwardRing, normalizeSector(sector + sectorStep))
       const occupant = board[target]!
       if (occupant !== EMPTY && codeSide(occupant) !== side) {
-        out[count] = encodeMove(from, target, occupant, forwardRing === promotionRing)
-        count += 1
+        count = appendMove(
+          out,
+          count,
+          encodeMove(from, target, occupant, forwardRing === promotionRing),
+        )
       }
     }
   }
