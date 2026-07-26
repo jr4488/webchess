@@ -5,6 +5,7 @@ import { zodTextFormat } from 'openai/helpers/zod'
 import { z } from 'zod'
 
 import { assessDivisionQuality } from './division-quality.mjs'
+import { describeModelFailure, logModelFailure } from './model-failure.mjs'
 import { runParsedModelResponse } from './model-response.mjs'
 import { streamPublicRationale } from './public-rationale.mjs'
 
@@ -270,15 +271,25 @@ export function parseDivisionResponse(result, options = {}) {
   return normalizeDivisionFacets(result.output_parsed, options)
 }
 
-function serviceError(status, prompt) {
+const DIVISION_CONTRACT_MESSAGE =
+  'The model returned a 64-facet map that did not pass WebChess\u2019s structure and ' +
+  'distinctness checks. This is a model-quality result, not a configuration problem. ' +
+  'Try again, or select a stronger model.'
+
+const DIVISION_UNAVAILABLE_MESSAGE =
+  'The model provider could not be reached to divide this problem. Check that the ' +
+  'provider is running and reachable, then try again.'
+
+function divisionFailure(error, prompt, logger) {
+  const failure = describeModelFailure(error, {
+    contractError: DivisionResultError,
+    contractMessage: DIVISION_CONTRACT_MESSAGE,
+    unavailableMessage: DIVISION_UNAVAILABLE_MESSAGE,
+  })
+  logModelFailure(logger, 'division', failure, error)
   return {
-    status,
-    body: {
-      error: status === 429
-        ? 'The GPT service is busy right now. Wait a moment, then divide the problem again.'
-        : 'GPT could not produce a complete 64-part division. Check the server key and model access, then try again.',
-      prompt,
-    },
+    status: failure.status,
+    body: { error: failure.error, code: failure.code, prompt },
   }
 }
 
@@ -304,7 +315,8 @@ export async function divideProblemSemantically(value, options = {}) {
     return {
       status: 503,
       body: {
-        error: 'Set OPENAI_API_KEY on the WebChess server, then divide the problem again.',
+        error: 'The selected model provider is not configured on the WebChess server.',
+        code: 'provider_unconfigured',
         prompt,
       },
     }
@@ -330,9 +342,11 @@ export async function divideProblemSemantically(value, options = {}) {
     const result = await runParsedModelResponse({
       client,
       onProgress: options.onProgress,
+      onReasoning: options.onReasoning,
+      reasoningMode: options.reasoningMode,
       input: {
         model,
-        reasoning: { effort: 'medium' },
+        reasoning: options.reasoning ?? { effort: 'medium' },
         instructions,
         input,
         text: {
@@ -355,7 +369,6 @@ export async function divideProblemSemantically(value, options = {}) {
       },
     }
   } catch (error) {
-    const status = error && typeof error === 'object' && error.status === 429 ? 429 : 502
-    return serviceError(status, prompt)
+    return divisionFailure(error, prompt, options.logger)
   }
 }

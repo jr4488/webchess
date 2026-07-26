@@ -2,12 +2,15 @@ import type {
   ModelActivityOperation,
   ModelActivityPhase,
   ModelActivityState,
+  ReasoningSource,
 } from '../types'
 
 const ACTIVITY_CONTENT_TYPE = 'application/x-ndjson'
 const MAX_RATIONALE_NOTES = 6
 const MIN_RATIONALE_NOTE_LENGTH = 24
 const MAX_RATIONALE_NOTE_LENGTH = 220
+const MAX_REASONING_LENGTH = 32_000
+const REASONING_SOURCES = new Set<ReasoningSource>(['summary', 'raw'])
 const MAX_ACTIVITY_EVENTS = 2_048
 const MAX_NDJSON_LINE_CHARS = 512 * 1_024
 const MAX_ACTIVITY_STREAM_CHARS = 2 * 1_024 * 1_024
@@ -27,6 +30,7 @@ export type ModelActivityEvent =
   | { type: 'heartbeat' }
   | { type: 'provider_activity' }
   | { type: 'rationale'; text: string }
+  | { type: 'reasoning'; source: ReasoningSource; text: string }
   | { type: 'result'; data: unknown }
   | {
       type: 'error'
@@ -69,6 +73,7 @@ export function beginModelActivity(
     lastHeartbeatAt: now,
     history: [{ phase: 'request-accepted', at: now }],
     rationaleNotes: [],
+    reasoning: null,
   }
 }
 
@@ -88,6 +93,40 @@ function containsUnsafeRationaleControl(value: string): boolean {
     }
   }
   return false
+}
+
+/**
+ * Strip characters that could rewrite the surrounding layout, while keeping the
+ * line structure that makes streamed reasoning readable.
+ *
+ * Reasoning is model output rendered as a React text child, so it cannot inject
+ * markup. The remaining risk is bidirectional overrides and other invisible
+ * formatting characters reordering text around it.
+ */
+function normalizeReasoningText(value: string): string {
+  let cleaned = ''
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    const isLineBreak = codePoint === 0x0a || codePoint === 0x0d
+    const isTab = codePoint === 0x09
+    if (
+      !isLineBreak &&
+      !isTab &&
+      (
+        codePoint <= 0x08 ||
+        codePoint === 0x0b ||
+        codePoint === 0x0c ||
+        (codePoint >= 0x0e && codePoint <= 0x1f) ||
+        (codePoint >= 0x7f && codePoint <= 0x9f) ||
+        (codePoint >= 0x202a && codePoint <= 0x202e) ||
+        (codePoint >= 0x2066 && codePoint <= 0x2069)
+      )
+    ) {
+      continue
+    }
+    cleaned += isTab ? ' ' : character
+  }
+  return cleaned.replace(/\r\n?/gu, '\n').replace(/\n{3,}/gu, '\n\n')
 }
 
 function normalizeRationaleText(value: unknown): string {
@@ -135,6 +174,21 @@ export function updateModelActivity(
             ...current.rationaleNotes.slice(-(MAX_RATIONALE_NOTES - 1)),
             { text, at: now },
           ],
+    }
+  }
+  if (event.type === 'reasoning') {
+    const existing = current.reasoning?.source === event.source
+      ? current.reasoning.text
+      : ''
+    return {
+      ...current,
+      lastHeartbeatAt: now,
+      lastProviderActivityAt: now,
+      reasoning: {
+        source: event.source,
+        text: (existing + event.text).slice(0, MAX_REASONING_LENGTH),
+        updatedAt: now,
+      },
     }
   }
   if (event.type === 'error') {
@@ -185,6 +239,22 @@ function parseWireEvent(value: unknown): ModelActivityEvent | null {
     return {
       type: 'rationale',
       text: normalizeRationaleText(value.text),
+    }
+  }
+  if (value.type === 'reasoning') {
+    if (
+      typeof value.source !== 'string' ||
+      !REASONING_SOURCES.has(value.source as ReasoningSource)
+    ) {
+      throw new Error('The model activity stream returned an unknown reasoning source.')
+    }
+    if (typeof value.text !== 'string' || value.text.length === 0) {
+      throw new Error('The model activity stream returned empty reasoning.')
+    }
+    return {
+      type: 'reasoning',
+      source: value.source as ReasoningSource,
+      text: normalizeReasoningText(value.text),
     }
   }
   if (value.type === 'result') {

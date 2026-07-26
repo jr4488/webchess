@@ -40,6 +40,21 @@ export interface ModelActivityRationaleNote {
   at: number
 }
 
+/**
+ * Where displayed reasoning text came from.
+ *
+ * `summary` is a provider-authored summary written for end users. `raw` is a
+ * local model's own thinking, which only ever leaves a model running on this
+ * machine. The UI must keep these visibly distinct.
+ */
+export type ReasoningSource = 'summary' | 'raw'
+
+export interface ModelActivityReasoning {
+  source: ReasoningSource
+  text: string
+  updatedAt: number
+}
+
 export interface ModelActivityState {
   operation: ModelActivityOperation
   status: 'active' | 'complete' | 'error'
@@ -49,6 +64,7 @@ export interface ModelActivityState {
   lastProviderActivityAt?: number
   history: ModelActivityHistoryEntry[]
   rationaleNotes: ModelActivityRationaleNote[]
+  reasoning: ModelActivityReasoning | null
 }
 
 export interface CellCoord {

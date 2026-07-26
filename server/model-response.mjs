@@ -8,11 +8,32 @@ export const MODEL_RESPONSE_PHASES = Object.freeze([
 ])
 
 const DEFAULT_ACTIVITY_INTERVAL_MS = 1_000
+const DEFAULT_MAX_REASONING_CHARS = 32_000
 
-const THINKING_EVENT_TYPES = new Set([
-  'response.reasoning_summary_text.delta',
-  'response.reasoning_text.delta',
-])
+const SUMMARY_EVENT_TYPE = 'response.reasoning_summary_text.delta'
+const RAW_EVENT_TYPE = 'response.reasoning_text.delta'
+
+/**
+ * Which reasoning events may be displayed, and how they must be labelled.
+ *
+ * The label cannot be derived from the event name. OpenAI-compatible local
+ * servers emit their model's literal thinking under the `reasoning_summary`
+ * event name, so the same event means "provider-authored summary written for
+ * users" on the Platform and "the model's private thinking" on Ollama. Only
+ * the caller knows which provider is answering, so only the caller can say
+ * which of those two things the text actually is.
+ *
+ * - `summary`: OpenAI Platform reasoning summaries, intended for display.
+ * - `raw`: a model's own thinking, forwarded only from a local provider.
+ * - `off`: forward nothing.
+ */
+export const REASONING_EVENTS_BY_MODE = Object.freeze({
+  summary: new Set([SUMMARY_EVENT_TYPE]),
+  raw: new Set([SUMMARY_EVENT_TYPE, RAW_EVENT_TYPE]),
+  off: new Set(),
+})
+
+const THINKING_EVENT_TYPES = new Set([SUMMARY_EVENT_TYPE, RAW_EVENT_TYPE])
 
 const DRAFTING_EVENT_TYPES = new Set([
   'response.output_text.delta',
@@ -104,18 +125,22 @@ async function runRawResponseStream({
 }
 
 /**
- * Run one Responses API request while exposing only bounded activity metadata.
+ * Run one Responses API request, exposing bounded activity metadata and, when
+ * a caller opts in, the model's displayable reasoning text.
  *
- * Provider event payloads are intentionally never forwarded. In particular,
- * some compatible providers place raw private reasoning in fields whose event
- * names contain "reasoning_summary"; those fields must remain server-side.
+ * Reasoning is forwarded only through `onReasoning`, tagged with its source, and
+ * capped in total length. No other provider event payload is ever forwarded:
+ * everything else is reduced to a phase name and a counter.
  */
 export async function runParsedModelResponse({
   client,
   input,
   requestOptions,
   onProgress,
+  onReasoning,
+  reasoningMode = 'off',
   activityIntervalMs,
+  maxReasoningChars = DEFAULT_MAX_REASONING_CHARS,
   now = Date.now,
 } = {}) {
   const responses = responsesApi(client)
@@ -124,8 +149,18 @@ export async function runParsedModelResponse({
   if (typeof now !== 'function') {
     throw new TypeError('now must be a function.')
   }
+  if (!Number.isSafeInteger(maxReasoningChars) || maxReasoningChars < 0) {
+    throw new TypeError('maxReasoningChars must be a non-negative integer.')
+  }
+  const displayableEvents = REASONING_EVENTS_BY_MODE[reasoningMode]
+  if (!displayableEvents) {
+    throw new TypeError('reasoningMode must be summary, raw, or off.')
+  }
+  const reportReasoning = displayableEvents.size > 0
+    ? progressCallback(onReasoning)
+    : undefined
 
-  if (!report) {
+  if (!report && !reportReasoning) {
     return callWithRequestOptions(
       responses.parse.bind(responses),
       input,
@@ -139,6 +174,7 @@ export async function runParsedModelResponse({
   let lastActivityReportAt = Number.NEGATIVE_INFINITY
 
   const emit = async (phase, force = false) => {
+    if (!report) return
     const elapsedMs = monotonicElapsed(now, startedAt)
     const phaseChanged = phase !== currentPhase
     if (
@@ -157,6 +193,18 @@ export async function runParsedModelResponse({
     }))
   }
 
+  let reasoningChars = 0
+  const emitReasoning = async (event) => {
+    if (!reportReasoning || !displayableEvents.has(event?.type)) return
+    if (typeof event.delta !== 'string' || !event.delta) return
+
+    const remaining = maxReasoningChars - reasoningChars
+    if (remaining <= 0) return
+    const delta = event.delta.slice(0, remaining)
+    reasoningChars += delta.length
+    await reportReasoning(Object.freeze({ source: reasoningMode, delta }))
+  }
+
   await emit('connecting', true)
 
   if (typeof responses.stream !== 'function') {
@@ -171,6 +219,8 @@ export async function runParsedModelResponse({
 
   let validatingReported = false
   const handleEvent = async (providerEvent) => {
+    await emitReasoning(providerEvent)
+
     const phase = streamEventPhase(providerEvent)
     if (!phase) {
       return

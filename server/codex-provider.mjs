@@ -12,7 +12,6 @@ import {
   statSync,
 } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { isIP } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
@@ -229,20 +228,7 @@ export function resolveCodexWebSearchMode(value) {
   )
 }
 
-export function isLoopbackHost(value) {
-  if (typeof value !== 'string') return false
-  let host = value.trim().toLowerCase()
-  if (host.startsWith('[') && host.endsWith(']')) {
-    host = host.slice(1, -1)
-  }
-  if (host === 'localhost' || host === '::1' || host === '0:0:0:0:0:0:0:1') {
-    return true
-  }
-  if (host.startsWith('::ffff:')) {
-    host = host.slice('::ffff:'.length)
-  }
-  return isIP(host) === 4 && host.split('.')[0] === '127'
-}
+export { isLoopbackHost } from './loopback.mjs'
 
 function outerSandboxEnvironment() {
   return {

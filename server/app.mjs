@@ -11,13 +11,19 @@ import {
   resolveCodexWebSearchMode,
   resolveModelProviderName,
 } from './codex-provider.mjs'
-import { divideProblemSemantically, parseDivisionPayload } from './division.mjs'
+import {
+  divideProblemSemantically,
+  DivisionPayloadError,
+  parseDivisionPayload,
+} from './division.mjs'
+import { describeModelFailure, logModelFailure } from './model-failure.mjs'
 import {
   createOllamaClient,
   OLLAMA_PROVIDER,
 } from './ollama-provider.mjs'
 import { runParsedModelResponse } from './model-response.mjs'
 import {
+  AnswerResultError,
   buildWebChessInput,
   buildWebChessInstructions,
   buildWebChessPrompt,
@@ -45,6 +51,20 @@ export const DEFAULT_UPSTREAM_TIMEOUT_MS = 120_000
 export const MAX_UPSTREAM_TIMEOUT_MS = 60 * 60 * 1_000
 export const MODEL_ACTIVITY_CONTENT_TYPE = 'application/x-ndjson'
 export const MODEL_ACTIVITY_HEARTBEAT_MS = 5_000
+
+const ANSWER_CONTRACT_MESSAGE =
+  'The model wrote an answer that did not meet WebChess\u2019s five-section contract ' +
+  '(including its 450\u2013750 word range). This is a model-quality result, not a ' +
+  'configuration problem. Retrying usually succeeds.'
+
+const ANSWER_UNAVAILABLE_MESSAGE =
+  'The model provider could not be reached to write this answer. Check that the ' +
+  'provider is running and reachable, then try again.'
+
+// Reasoning arrives as many tiny deltas. Coalescing them into readable chunks
+// keeps the NDJSON channel from becoming one frame per token.
+const REASONING_FLUSH_MS = 220
+const REASONING_FLUSH_CHARS = 320
 
 export function resolveUpstreamTimeoutMs(value) {
   const candidate = value ?? DEFAULT_UPSTREAM_TIMEOUT_MS
@@ -149,6 +169,7 @@ export async function answerCompletedGame(value, options = {}) {
       status: 503,
       body: {
         error: 'The selected model provider is not configured.',
+        code: 'provider_unconfigured',
         prompt,
       },
     }
@@ -162,7 +183,7 @@ export async function answerCompletedGame(value, options = {}) {
     })
     const input = {
       model,
-      reasoning: { mode: 'pro', effort: 'medium' },
+      reasoning: options.reasoning ?? { mode: 'pro', effort: 'medium' },
       instructions,
       input: userInput,
       text: {
@@ -193,6 +214,8 @@ export async function answerCompletedGame(value, options = {}) {
       input,
       requestOptions: scopedRequestOptions,
       onProgress: options.onProgress,
+      onReasoning: options.onReasoning,
+      reasoningMode: options.reasoningMode,
     })
     const parsed = parseWebChessResponse(result)
 
@@ -207,15 +230,15 @@ export async function answerCompletedGame(value, options = {}) {
       },
     }
   } catch (error) {
-    const status = error && typeof error === 'object' && error.status === 429 ? 429 : 502
+    const failure = describeModelFailure(error, {
+      contractError: AnswerResultError,
+      contractMessage: ANSWER_CONTRACT_MESSAGE,
+      unavailableMessage: ANSWER_UNAVAILABLE_MESSAGE,
+    })
+    logModelFailure(options.logger, 'answer', failure, error)
     return {
-      status,
-      body: {
-        error: status === 429
-          ? 'The model provider is busy right now. Wait a moment, then try the answer again.'
-          : 'The model provider could not complete this answer. Check provider credentials and model access, then try again.',
-        prompt,
-      },
+      status: failure.status,
+      body: { error: failure.error, code: failure.code, prompt },
     }
   }
 }
@@ -272,9 +295,13 @@ function modelActivityPhase(phase) {
 
 function createModelActivityStream(response, options = {}) {
   const heartbeatMs = options.heartbeatMs ?? MODEL_ACTIVITY_HEARTBEAT_MS
+  const reasoningFlushMs = options.reasoningFlushMs ?? REASONING_FLUSH_MS
   let open = true
   let currentPhase
   let heartbeat
+  let reasoningBuffer = ''
+  let reasoningSource
+  let reasoningFlushAt = 0
 
   response.status(200)
   response.set({
@@ -297,8 +324,15 @@ function createModelActivityStream(response, options = {}) {
     if (heartbeat) clearInterval(heartbeat)
     heartbeat = undefined
   }
+  const flushReasoning = () => {
+    if (!reasoningBuffer || !reasoningSource) return
+    write({ type: 'reasoning', source: reasoningSource, text: reasoningBuffer })
+    reasoningBuffer = ''
+    reasoningFlushAt = Date.now()
+  }
   const close = () => {
     if (!open) return
+    flushReasoning()
     open = false
     stopHeartbeat()
     response.off('close', close)
@@ -325,13 +359,30 @@ function createModelActivityStream(response, options = {}) {
     rationale(text) {
       write({ type: 'rationale', text })
     },
+    reasoning({ source, delta } = {}) {
+      if (!delta) return
+      if (source !== reasoningSource) {
+        flushReasoning()
+        reasoningSource = source
+      }
+      reasoningBuffer += delta
+      const now = Date.now()
+      if (
+        reasoningBuffer.length >= REASONING_FLUSH_CHARS ||
+        now - reasoningFlushAt >= reasoningFlushMs
+      ) {
+        flushReasoning()
+      }
+    },
     result(data) {
+      flushReasoning()
       phase('complete')
       write({ type: 'result', data })
       close()
       if (!response.writableEnded) response.end()
     },
     error(message, details = {}) {
+      flushReasoning()
       write({
         type: 'error',
         message,
@@ -348,6 +399,39 @@ function createModelActivityStream(response, options = {}) {
 
 function noStore(response) {
   response.set('Cache-Control', 'no-store')
+}
+
+/**
+ * Build the reasoning request for one provider.
+ *
+ * `summary` and `mode` are OpenAI Platform features. Asking a local
+ * OpenAI-compatible endpoint for them risks failing the whole request over an
+ * unrecognized field, and local models expose their own thinking text anyway.
+ * Codex reads only `effort` and pins its own summary setting.
+ */
+function reasoningRequest(providerName, { pro = false } = {}) {
+  if (providerName !== OPENAI_API_PROVIDER) {
+    return { effort: 'medium' }
+  }
+  return {
+    ...(pro ? { mode: 'pro' } : {}),
+    effort: 'medium',
+    summary: 'detailed',
+  }
+}
+
+/**
+ * Decide what reasoning text this provider is allowed to show, and as what.
+ *
+ * Only the Platform produces summaries written for end users. Ollama runs on
+ * the operator's own machine, so its literal thinking stays within the same
+ * trust boundary as the request and is shown labelled as raw. Codex pins
+ * `model_reasoning_summary="none"` and emits none at all.
+ */
+function reasoningModeFor(providerName) {
+  if (providerName === OPENAI_API_PROVIDER) return 'summary'
+  if (providerName === OLLAMA_PROVIDER) return 'raw'
+  return 'off'
 }
 
 function providerNeutralResult(result) {
@@ -722,10 +806,18 @@ export function createWebChessApp(options = {}) {
 
       try {
         parsePayload(request.body)
-      } catch {
-        // Let the service return its field-specific 400 without spending rate,
-        // quota, or concurrency capacity on a request that cannot reach a provider.
-        next()
+      } catch (error) {
+        // Answer the field-specific 400 here instead of forwarding an ungated
+        // request. Without a security context the route would fall back to the
+        // unscoped client, reaching the provider with no rate limit, quota,
+        // concurrency slot, or abort signal.
+        jsonFailure(
+          response,
+          400,
+          error instanceof DivisionPayloadError || error instanceof GamePayloadError
+            ? error.message
+            : 'Request body could not be read.',
+        )
         return
       }
 
@@ -809,7 +901,10 @@ export function createWebChessApp(options = {}) {
         client: scopedClient,
         signal: context?.controller.signal,
         timeoutMs,
+        reasoning: reasoningRequest(providerName, { pro: true }),
+        reasoningMode: reasoningModeFor(providerName),
         onProgress: activity?.progress,
+        onReasoning: activity?.reasoning,
         onRationale: providerName === OLLAMA_PROVIDER
           ? activity?.rationale
           : undefined,
@@ -855,7 +950,10 @@ export function createWebChessApp(options = {}) {
         model,
         apiKey,
         client: scopedClient,
+        reasoning: reasoningRequest(providerName),
+        reasoningMode: reasoningModeFor(providerName),
         onProgress: activity?.progress,
+        onReasoning: activity?.reasoning,
         onRationale: providerName === OLLAMA_PROVIDER
           ? activity?.rationale
           : undefined,

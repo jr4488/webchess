@@ -23,6 +23,7 @@ function activeActivity(
       { phase: 'thinking', at: STARTED_AT + 8_000 },
     ],
     rationaleNotes: [],
+    reasoning: null,
     ...overrides,
   }
 }

@@ -228,7 +228,7 @@ describe('semantic division service', () => {
     const result = await divideProblemSemantically({ problem: PROBLEM }, { client, seedFactory })
 
     expect(result.status).toBe(502)
-    expect(result.body.error).toMatch(/complete 64-part division/)
+    expect(result.body.code).toBe('model_contract')
     expect(result.body).not.toHaveProperty('seed')
     expect(seedFactory).not.toHaveBeenCalled()
   })
@@ -270,22 +270,23 @@ describe('semantic division service', () => {
     expect(onRationale).not.toHaveBeenCalled()
   })
 
-  it('returns 503 with the inspectable prompt when the server key is absent', async () => {
+  it('returns 503 with the inspectable prompt when the provider is unconfigured', async () => {
     const result = await divideProblemSemantically(
       { problem: PROBLEM },
       { apiKey: '' },
     )
 
     expect(result.status).toBe(503)
-    expect(result.body.error).toMatch(/OPENAI_API_KEY/)
+    expect(result.body.code).toBe('provider_unconfigured')
     expect(result.body.prompt).toContain(PROBLEM)
     expect(result.body).not.toHaveProperty('seed')
   })
 
   it.each([
-    [429, 429, /busy/],
-    [500, 502, /could not produce/],
-  ])('maps an upstream %i failure to HTTP %i', async (upstream, expected, message) => {
+    [429, 429, 'provider_busy'],
+    [401, 502, 'provider_auth'],
+    [500, 502, 'provider_unavailable'],
+  ])('maps an upstream %i failure to HTTP %i', async (upstream, expected, code) => {
     const parse = vi.fn().mockRejectedValue(Object.assign(new Error('upstream'), { status: upstream }))
     const result = await divideProblemSemantically(
       { problem: PROBLEM },
@@ -293,9 +294,42 @@ describe('semantic division service', () => {
     )
 
     expect(result.status).toBe(expected)
-    expect(result.body.error).toMatch(message)
+    expect(result.body.code).toBe(code)
     expect(result.body.prompt).toContain(PROBLEM)
     expect(result.body).not.toHaveProperty('seed')
+  })
+
+  it('reports a quality rejection as a contract failure, not a credential problem', async () => {
+    const scaffold = Array.from({ length: 64 }, (_, index) => ({
+      id: index + 1,
+      title: `Facet ${index + 1}`,
+      focus: `Examine concrete aspect number ${index + 1} of the situation carefully.`,
+      question: `What does aspect ${index + 1} reveal?`,
+      keyword: `aspect ${index + 1}`,
+    }))
+    const parse = vi.fn().mockResolvedValue({
+      status: 'completed',
+      incomplete_details: null,
+      model: 'test-model',
+      output: [],
+      output_parsed: { facets: scaffold },
+    })
+    const warn = vi.fn()
+
+    const result = await divideProblemSemantically(
+      { problem: PROBLEM },
+      { client: { responses: { parse } }, logger: { warn } },
+    )
+
+    expect(result.status).toBe(502)
+    expect(result.body.code).toBe('model_contract')
+    expect(result.body.error).not.toMatch(/check .*(key|credential|model access)/i)
+    expect(result.body.error).toMatch(/model-quality/i)
+
+    // The operator-facing detail is logged and never sent to the client.
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0][0]).toMatch(/Division quality check failed/)
+    expect(JSON.stringify(result.body)).not.toMatch(/quality check failed/i)
   })
 
   it('mounts POST /api/divide without changing the answer service', async () => {

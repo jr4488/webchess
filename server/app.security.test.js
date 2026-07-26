@@ -1143,15 +1143,15 @@ describe('model provider selection', () => {
     })
   })
 
-  it('streams content-free model activity before a validated division result', async () => {
-    const privateReasoning = 'PRIVATE reasoning must never cross the app boundary'
+  it('streams the reasoning summary and no draft output before a validated division result', async () => {
+    const reasoningSummary = 'Weighing capacity against the people who make the work good'
     const unvalidatedDraft = '{"private":"unfinished provider output"}'
     const finalResponse = vi.fn().mockResolvedValue(divisionResult())
     const stream = vi.fn(() => ({
       async *[Symbol.asyncIterator]() {
         yield {
           type: 'response.reasoning_summary_text.delta',
-          delta: privateReasoning,
+          delta: reasoningSummary,
         }
         yield {
           type: 'response.output_text.delta',
@@ -1159,7 +1159,7 @@ describe('model provider selection', () => {
         }
         yield {
           type: 'response.completed',
-          response: { privateReasoning, unvalidatedDraft },
+          response: { reasoningSummary, unvalidatedDraft },
         }
       },
       finalResponse,
@@ -1216,7 +1216,11 @@ describe('model provider selection', () => {
         ]),
       },
     })
-    expect(text).not.toContain(privateReasoning)
+    // Platform reasoning summaries are written for display, so they are shown.
+    expect(events.filter(({ type }) => type === 'reasoning')).toEqual([
+      { type: 'reasoning', source: 'summary', text: reasoningSummary },
+    ])
+    // Unvalidated draft output still never reaches the browser.
     expect(text).not.toContain(unvalidatedDraft)
     expect(stream).toHaveBeenCalledOnce()
     expect(parse).not.toHaveBeenCalled()
@@ -1326,10 +1330,54 @@ describe('model provider selection', () => {
         ]),
       },
     })
-    expect(text).not.toContain(privateReasoning)
+    // A local model runs inside the operator's own trust boundary, so its
+    // thinking is displayed — but only ever labelled `raw`, never dressed up
+    // as a provider-authored summary.
+    expect(events.filter(({ type }) => type === 'reasoning')).toEqual([
+      { type: 'reasoning', source: 'raw', text: privateReasoning },
+    ])
+    // Partial output text is still never forwarded: only the validated result is.
     expect(text).not.toContain(unfinishedDraft)
     expect(create).toHaveBeenCalledTimes(2)
     expect(stream).not.toHaveBeenCalled()
     expect(parse).not.toHaveBeenCalled()
+  })
+
+  it('never forwards reasoning from a provider that has no displayable summary', async () => {
+    const privateReasoning = 'PRIVATE Codex reasoning must never cross the boundary'
+    const create = vi.fn().mockResolvedValue({
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: 'response.reasoning_summary_text.delta',
+          delta: privateReasoning,
+        }
+        yield {
+          type: 'response.completed',
+          response: completedDivision,
+        }
+      },
+    })
+    const service = await serve(configuredOptions({
+      client: { responses: { create, parse: vi.fn() } },
+      environment: { WEBCHESS_MODEL_PROVIDER: 'codex-chatgpt' },
+      host: '127.0.0.1',
+      modelActivityHeartbeatMs: 0,
+      seedFactory: () => 'codex-seed',
+    }))
+    const session = await login(service)
+
+    const response = await service.request('/api/divide', {
+      method: 'POST',
+      headers: {
+        ...paidHeaders(service, session),
+        Accept: 'application/x-ndjson, application/json',
+      },
+      body: JSON.stringify({ problem: PROBLEM }),
+    })
+    const text = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(text).not.toContain(privateReasoning)
+    expect(text).not.toContain('"type":"reasoning"')
   })
 })
