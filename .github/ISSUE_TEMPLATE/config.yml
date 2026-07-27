@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: WebChess support and questions
+    url: https://github.com/jr4488/webchess/discussions
+    about: Ask installation, usage, design, and research questions in Discussions.
+  - name: Report a security vulnerability
+    url: https://github.com/jr4488/webchess/security/advisories/new
+    about: Report credential, authentication, privacy, or execution-boundary issues privately.
