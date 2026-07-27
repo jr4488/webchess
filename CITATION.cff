@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use WebChess in research, please cite the software and its white paper."
+title: "WebChess"
+type: software
+authors:
+  - family-names: "Reynolds"
+    given-names: "Jack"
+license: Apache-2.0
+repository-code: "https://github.com/jr4488/webchess"
+url: "https://webchess.madness.chatgpt.site"
+version: 0.1.0
+date-released: 2026-07-26
