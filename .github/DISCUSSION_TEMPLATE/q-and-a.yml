@@ -1,0 +1,20 @@
+title: "[Question] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask for installation or usage help here. Never post credentials, private questions, or personal data.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Include version, environment, and non-sensitive output.
+    validations:
+      required: true
