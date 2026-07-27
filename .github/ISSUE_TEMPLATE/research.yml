@@ -1,0 +1,31 @@
+name: Research or evaluation result
+description: Report a reproducible evaluation finding about WebChess.
+title: "[Research]: "
+labels: ["research"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Research question
+      description: State the claim or construct you evaluated.
+    validations:
+      required: true
+  - type: textarea
+    id: method
+    attributes:
+      label: Method
+      description: Describe sample, comparison, measures, and analysis.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      description: Separate observations from interpretation and report uncertainty.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction materials
+      description: Link non-sensitive data, code, protocol, and exact revision.
