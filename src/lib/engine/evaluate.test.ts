@@ -8,6 +8,9 @@ import {
   PAWN,
   QUEEN,
   ROOK,
+  BLACK,
+  WHITE,
+  moveFrom,
   moveTo,
   positionFromPieces,
   squareOf,
@@ -27,13 +30,23 @@ function at(
   return { id, side, kind, position: { ring, sector }, moved: true }
 }
 
-function captureOf(pieces: Piece[], side: Piece['side'], target: number): number {
+function captureOf(
+  pieces: Piece[],
+  side: Piece['side'],
+  target: number,
+  origin?: number,
+): number {
   const position = positionFromPieces(pieces, side)
   const moves = new Int32Array(MAX_MOVES)
   const count = generateMoves(position, side === 'white' ? 0 : 1, moves)
 
   for (let index = 0; index < count; index += 1) {
-    if (moveTo(moves[index]!) === target) return moves[index]!
+    if (
+      moveTo(moves[index]!) === target &&
+      (origin === undefined || moveFrom(moves[index]!) === origin)
+    ) {
+      return moves[index]!
+    }
   }
   throw new Error('No capture reaches that square.')
 }
@@ -97,6 +110,35 @@ describe('static exchange evaluation', () => {
       VALUES[PAWN]! - VALUES[ROOK]! + VALUES[KNIGHT]!,
     )
   })
+
+  it('promotes a pawn that joins a later recapture sequence', () => {
+    const pieces = [
+      at('wq', 'white', 'queen', 3, 0),
+      at('wp', 'white', 'pawn', 1, 1),
+      at('wk', 'white', 'king', 7, 7),
+      at('bn', 'black', 'knight', 0, 0),
+      at('br', 'black', 'rook', 0, 4),
+      at('bk', 'black', 'king', 2, 7),
+    ]
+
+    // QxN RxQ PxR=Q leaves White far ahead, so Black should decline RxQ.
+    const move = captureOf(pieces, 'white', squareOf(0, 0), squareOf(3, 0))
+    expect(staticExchange(board(pieces), move)).toBe(VALUES[KNIGHT])
+  })
+
+  it('handles the mirrored Black promotion recapture identically', () => {
+    const pieces = [
+      at('bq', 'black', 'queen', 4, 0),
+      at('bp', 'black', 'pawn', 6, 1),
+      at('bk', 'black', 'king', 0, 7),
+      at('wn', 'white', 'knight', 7, 0),
+      at('wr', 'white', 'rook', 7, 4),
+      at('wk', 'white', 'king', 5, 7),
+    ]
+
+    const move = captureOf(pieces, 'black', squareOf(7, 0), squareOf(4, 0))
+    expect(staticExchange(board(pieces), move)).toBe(VALUES[KNIGHT])
+  })
 })
 
 describe('evaluation', () => {
@@ -117,6 +159,9 @@ describe('evaluation', () => {
     }))
 
     expect(evaluateBoard(board(white)) + evaluateBoard(board(mirrored))).toBe(0)
+    expect(
+      evaluateBoard(board(white), WHITE) + evaluateBoard(board(mirrored), BLACK),
+    ).toBe(0)
     expect(Math.abs(evaluateBoard(board(white)))).toBeGreaterThan(0)
   })
 
@@ -148,7 +193,7 @@ describe('evaluation', () => {
     expect(evaluateBoard(board(cornered))).toBeGreaterThan(evaluateBoard(board(centre)))
   })
 
-  it('leaves the hunting bonus off while material is level', () => {
+  it('values king escape safety even while material is level', () => {
     const level = [
       at('wk', 'white', 'king', 5, 0),
       at('wr', 'white', 'rook', 4, 4),
@@ -159,6 +204,36 @@ describe('evaluation', () => {
       piece.id === 'bk' ? { ...piece, position: { ring: 0, sector: 0 } } : piece,
     )
 
-    expect(evaluateBoard(board(level))).toBe(evaluateBoard(board(kingMovedToEdge)))
+    expect(evaluateBoard(board(kingMovedToEdge))).toBeGreaterThan(evaluateBoard(board(level)))
+  })
+
+  it('penalizes an attacked king with scarce escapes in a balanced position', () => {
+    const safe = [
+      at('wk', 'white', 'king', 7, 4),
+      at('wr', 'white', 'rook', 3, 0),
+      at('bk', 'black', 'king', 0, 4),
+      at('br', 'black', 'rook', 4, 2),
+    ]
+    const exposed = safe.map((piece) =>
+      piece.id === 'bk' ? { ...piece, position: { ring: 0, sector: 0 } } : piece,
+    )
+
+    expect(evaluateBoard(board(exposed), WHITE)).toBeGreaterThan(
+      evaluateBoard(board(safe), WHITE) + 200,
+    )
+  })
+
+  it('recognizes a clear pawn one move from promotion as a major asset', () => {
+    const near = [
+      at('wk', 'white', 'king', 7, 4),
+      at('wp', 'white', 'pawn', 1, 2),
+      at('bk', 'black', 'king', 0, 6),
+    ]
+    const farther = near.map((piece) =>
+      piece.id === 'wp' ? { ...piece, position: { ring: 2, sector: 2 } } : piece,
+    )
+
+    expect(evaluateBoard(board(near))).toBeGreaterThan(evaluateBoard(board(farther)) + 200)
+    expect(evaluateBoard(board(near), WHITE)).toBeGreaterThan(evaluateBoard(board(near), BLACK))
   })
 })

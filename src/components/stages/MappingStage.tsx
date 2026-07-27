@@ -1,8 +1,8 @@
 import type { CSSProperties } from 'react'
 import { ArrowRight, Bot, CircleAlert, RefreshCw } from 'lucide-react'
 
+import type { HostedProvider } from '../../lib/hosted-provider'
 import { PROBLEM_DIMENSIONS } from '../../lib/problem'
-import type { SessionProvider } from '../../lib/session'
 import type {
   DivisionPhase,
   DivisionStatus,
@@ -17,7 +17,7 @@ type AnimationStyle = CSSProperties & { '--delay'?: string; '--progress'?: numbe
 
 interface MappingStageProps {
   problem: string
-  provider: SessionProvider
+  provider: HostedProvider
   parts: readonly ProblemPart[]
   progress: number
   divisionStatus: DivisionStatus
@@ -26,6 +26,7 @@ interface MappingStageProps {
   divisionPrompt: string
   divisionError: string
   divisionActivity: ModelActivityState | null
+  beginDisabled: boolean
   onBegin: () => void
   onRetry: () => void
 }
@@ -50,6 +51,7 @@ export function MappingStage({
   divisionPrompt,
   divisionError,
   divisionActivity,
+  beginDisabled,
   onBegin,
   onRetry,
 }: MappingStageProps) {
@@ -144,7 +146,7 @@ export function MappingStage({
                   <strong>{activeLabel}</strong>
                   <p>{isLoading
                     ? `The wait is intentionally indeterminate while ${provider.label} proposes concrete, problem-specific perspectives.`
-                    : 'Process milestones and the model’s reasoning are shown here; draft output is not, until it passes validation.'}</p>
+                    : 'Server-side milestones are shown here; draft output remains hidden until it passes validation.'}</p>
                 </div>
               </div>
 
@@ -153,11 +155,11 @@ export function MappingStage({
                   activity={divisionActivity}
                   modelLabel={divisionModel || provider.model}
                   providerLabel={provider.label}
-                  summary="Looking across purpose, people, resources, timing, risks, values, evidence, and possibilities before arranging exactly 64 distinct facets."
+                  summary="Looking across purpose, people, resources, timing, risks, values, evidence, and possibilities before arranging exactly 64 candidate facets."
                   metrics={[
                     { label: 'Facets', value: parts.length === 64 ? '64 ready' : '64 requested' },
                     { label: 'Output', value: 'Strict structure' },
-                    { label: 'Runtime', value: provider.localOnly ? 'Local' : 'Provider' },
+                    { label: 'Runtime', value: 'Server route' },
                   ]}
                 />
               )}
@@ -228,7 +230,12 @@ export function MappingStage({
           ))}
         </div>
 
-        <button className="primary-button" type="button" disabled={!mappingReady} onClick={onBegin}>
+        <button
+          className="primary-button"
+          type="button"
+          disabled={!mappingReady || beginDisabled}
+          onClick={onBegin}
+        >
           Set the pieces in motion
           <ArrowRight size={18} />
         </button>

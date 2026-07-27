@@ -1,41 +1,38 @@
+'use client'
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 
-import { AccessGate } from './components/AccessGate'
-import type { AccessGateStatus } from './components/AccessGate'
-import { CosmicBackdrop } from './components/CosmicBackdrop'
 import { Header } from './components/Header'
 import { MappingStage } from './components/stages/MappingStage'
 import { PlayingStage } from './components/stages/PlayingStage'
 import { QuestionStage } from './components/stages/QuestionStage'
 import { ReadingStage } from './components/stages/ReadingStage'
-import { requestWebChessAnswer } from './lib/answer'
-import { composeProblemParts, requestProblemDivision } from './lib/division'
 import {
-  applyMove,
   coordKey,
-  createInitialPieces,
-  getGameOutcome,
   getLegalMoves,
-  hasLegalMove,
   isSameCoord,
 } from './lib/game'
 import { createAutoPlayEngine } from './lib/auto-play'
 import type { AutoPlayEngine } from './lib/auto-play'
+import { HOSTED_WEBCHESS_PROVIDER } from './lib/hosted-provider'
 import { normalizeProblemInput, problemPartAt } from './lib/problem'
 import { PIECE_METAPHORS, synthesizeReading } from './lib/reading'
+import { beginModelActivity } from './lib/model-activity'
 import {
-  beginModelActivity,
-  updateModelActivity,
-} from './lib/model-activity'
-import type { ModelActivityEvent } from './lib/model-activity'
-import {
-  createWebChessSession,
-  deleteWebChessSession,
-  getWebChessSession,
-  isSessionRequiredError,
-} from './lib/session'
-import type { AuthenticatedSession } from './lib/session'
+  abandonGame,
+  createIdempotencyKey,
+  divideProblem,
+  getCurrentGame,
+  getOwnedGame,
+  isWebChessApiError,
+  recoverDivisionIntent,
+  replayGame,
+  requestGameAnswer,
+  startGame,
+  submitMove,
+} from './lib/webchess-api'
+import type { DurableGame } from './lib/webchess-api'
 import type {
   AnswerStatus,
   CaptureRecord,
@@ -52,21 +49,32 @@ import type {
 } from './types'
 
 const EMPTY_SET = new Set<string>()
+const PLAY_SIGN_IN_PATH = '/sign-in?return_url=%2Fplay'
 const CAST_REVEAL_INTERVAL_MS = 90
 const DIVISION_PHASE_DURATION_MS = 780
 
-type AccessState =
-  | {
-      status: AccessGateStatus
-      message?: string
-    }
-  | {
-      status: 'authenticated'
-      session: AuthenticatedSession
-    }
+type EngineSearchMode = 'manual' | 'autoplay'
 
-function otherSide(side: Side): Side {
-  return side === 'white' ? 'black' : 'white'
+interface ActiveEngineRequest {
+  generation: number
+  mode: EngineSearchMode
+}
+
+type GameMutationMode = 'starting' | 'resetting'
+
+interface ActiveGameMutation {
+  mode: GameMutationMode
+}
+
+interface ActiveRestoreRequest {
+  controller: AbortController
+  silent: boolean
+}
+
+interface RevisionMutationIntent {
+  gameId: string
+  expectedRevision: number
+  key: string
 }
 
 function outcomeNotice(outcome: GameOutcome): string {
@@ -84,9 +92,10 @@ function outcomeNotice(outcome: GameOutcome): string {
 }
 
 export function App() {
-  const [accessState, setAccessState] = useState<AccessState>({ status: 'checking' })
-  const [endingSession, setEndingSession] = useState(false)
-  const [sessionActionError, setSessionActionError] = useState('')
+  const [game, setGame] = useState<DurableGame | null>(null)
+  const [restoring, setRestoring] = useState(true)
+  const [restoreError, setRestoreError] = useState('')
+  const [movePending, setMovePending] = useState(false)
   const [stage, setStage] = useState<Stage>('question')
   const [problem, setProblem] = useState('')
   const [parts, setParts] = useState<ProblemPart[]>([])
@@ -106,6 +115,7 @@ export function App() {
   const [divisionPrompt, setDivisionPrompt] = useState('')
   const [divisionError, setDivisionError] = useState('')
   const [divisionActivity, setDivisionActivity] = useState<ModelActivityState | null>(null)
+  const [divisionTargetUnresolved, setDivisionTargetUnresolved] = useState(false)
   const [autoPlaying, setAutoPlaying] = useState(false)
   const [notice, setNotice] = useState('Choose a white piece. Its possible paths will appear.')
   const [answerStatus, setAnswerStatus] = useState<AnswerStatus>('idle')
@@ -114,35 +124,57 @@ export function App() {
   const [answerPrompt, setAnswerPrompt] = useState('')
   const [answerError, setAnswerError] = useState('')
   const [answerActivity, setAnswerActivity] = useState<ModelActivityState | null>(null)
-  const [thinking, setThinking] = useState(false)
-  const sessionRequestRef = useRef<AbortController | null>(null)
+  const [engineSearchMode, setEngineSearchMode] = useState<EngineSearchMode | null>(null)
+  const [gameMutationMode, setGameMutationMode] = useState<GameMutationMode | null>(null)
+  const [replayPending, setReplayPending] = useState(false)
+  const [replayError, setReplayError] = useState('')
+  const [replayTargetUnresolved, setReplayTargetUnresolved] = useState(false)
+  const restoreRequestRef = useRef<ActiveRestoreRequest | null>(null)
+  const restoreRequestGenerationRef = useRef(0)
   const divisionRequestRef = useRef<AbortController | null>(null)
   const answerRequestRef = useRef<AbortController | null>(null)
-  const lastAuthenticatedSessionRef = useRef<AuthenticatedSession | null>(null)
-  // Mirrors of request status, so session expiry can tell which work it
-  // interrupted without making its own identity depend on that status.
-  const divisionStatusRef = useRef<DivisionStatus>('idle')
-  const answerStatusRef = useRef<AnswerStatus>('idle')
-  const sessionActive = accessState.status === 'authenticated'
-  const csrfToken = sessionActive ? accessState.session.csrfToken : ''
+  const movePendingRef = useRef(false)
+  const divisionIntentRef = useRef<{ problem: string; key: string } | null>(null)
+  const answerIntentRef = useRef<{ gameId: string; key: string } | null>(null)
+  const replayIntentRef = useRef<{ gameId: string; key: string } | null>(null)
+  const replayPendingRef = useRef(false)
+  const startIntentRef = useRef<RevisionMutationIntent | null>(null)
+  const resetIntentRef = useRef<RevisionMutationIntent | null>(null)
+  const activeGameMutationRef = useRef<ActiveGameMutation | null>(null)
   const gameFinishing = outcome !== null && stage === 'playing'
-
-  useEffect(() => {
-    divisionStatusRef.current = divisionStatus
-    answerStatusRef.current = answerStatus
-  }, [answerStatus, divisionStatus])
+  const thinking = engineSearchMode !== null || movePending
 
   // Built on first use and torn down on unmount. It is deliberately not held in
   // state: unmounting disposes it, and under StrictMode's remount a disposed
   // engine would linger and refuse every later search.
   const engineRef = useRef<AutoPlayEngine | null>(null)
+  const engineRequestGenerationRef = useRef(0)
+  const activeEngineRequestRef = useRef<ActiveEngineRequest | null>(null)
   const getEngine = useCallback(() => {
     engineRef.current ??= createAutoPlayEngine()
     return engineRef.current
   }, [])
 
+  const invalidateEngineRequest = useCallback((alwaysResetEngine = false) => {
+    const hadActiveRequest = activeEngineRequestRef.current !== null
+    engineRequestGenerationRef.current += 1
+    activeEngineRequestRef.current = null
+    if (alwaysResetEngine || hadActiveRequest) {
+      engineRef.current?.reset()
+    }
+    setEngineSearchMode(null)
+  }, [])
+
+  const invalidateRestoreRequest = useCallback(() => {
+    restoreRequestGenerationRef.current += 1
+    restoreRequestRef.current?.controller.abort()
+    restoreRequestRef.current = null
+  }, [])
+
   useEffect(
     () => () => {
+      engineRequestGenerationRef.current += 1
+      activeEngineRequestRef.current = null
       engineRef.current?.dispose()
       engineRef.current = null
     },
@@ -154,8 +186,14 @@ export function App() {
     divisionRequestRef.current = null
     answerRequestRef.current?.abort()
     answerRequestRef.current = null
-    engineRef.current?.reset()
-    setThinking(false)
+    divisionIntentRef.current = null
+    answerIntentRef.current = null
+    replayIntentRef.current = null
+    replayPendingRef.current = false
+    startIntentRef.current = null
+    resetIntentRef.current = null
+    movePendingRef.current = false
+    invalidateEngineRequest(true)
     setStage('question')
     setProblem('')
     setParts([])
@@ -175,6 +213,7 @@ export function App() {
     setDivisionPrompt('')
     setDivisionError('')
     setDivisionActivity(null)
+    setDivisionTargetUnresolved(false)
     setAutoPlaying(false)
     setAnswerStatus('idle')
     setAnswer('')
@@ -182,123 +221,134 @@ export function App() {
     setAnswerPrompt('')
     setAnswerError('')
     setAnswerActivity(null)
+    setMovePending(false)
+    setReplayPending(false)
+    setReplayError('')
+    setReplayTargetUnresolved(false)
     setNotice('Choose a white piece. Its possible paths will appear.')
-  }, [])
+  }, [invalidateEngineRequest])
 
-  /**
-   * Keep the board when a session is renewed, and discard it only when the
-   * model behind it changes.
-   *
-   * The 64 facets, the captures, and any written answer all belong to one
-   * model. A fresh CSRF token does not: signing back in after the eight-hour
-   * expiry is the same person continuing the same question, so resetting on
-   * token change silently destroyed finished work.
-   */
-  const adoptAuthenticatedSession = useCallback((session: AuthenticatedSession) => {
-    const previous = lastAuthenticatedSessionRef.current
-    if (
-      previous &&
-      (
-        previous.provider.id !== session.provider.id ||
-        previous.provider.model !== session.provider.model
-      )
-    ) {
-      resetGameState()
+  const applyDurableGame = useCallback((
+    nextGame: DurableGame,
+    options: { animateMapping?: boolean; preserveAutoPlay?: boolean } = {},
+  ) => {
+    const division = nextGame.division
+    const state = nextGame.state
+    const storedAnswer = nextGame.answer
+    const hasCompletedDivision = division?.parts.length === 64
+    const animateMapping = Boolean(options.animateMapping && hasCompletedDivision)
+
+    invalidateEngineRequest(true)
+    if (!options.preserveAutoPlay) setAutoPlaying(false)
+    setSelectedPieceId(null)
+    setGame(nextGame)
+    setDivisionTargetUnresolved(false)
+    if (nextGame.status !== 'dividing') {
+      divisionIntentRef.current = null
     }
-    lastAuthenticatedSessionRef.current = session
-  }, [resetGameState])
+    setProblem(nextGame.problem)
+    setParts(division ? [...division.parts] : [])
+    setDivisionModel(division?.model ?? '')
+    setDivisionPrompt(division?.prompt ?? '')
+    setDivisionError(
+      nextGame.status === 'division_failed'
+        ? 'The model could not complete a valid 64-facet division. Try again.'
+        : '',
+    )
+    setDivisionStatus(
+      nextGame.status === 'dividing'
+        ? 'loading'
+        : nextGame.status === 'division_failed'
+          ? 'error'
+          : hasCompletedDivision
+            ? 'success'
+            : 'idle',
+    )
+    setDivisionPhase(
+      animateMapping ? 'facets-received' : hasCompletedDivision ? 'casting' : 'analyzing',
+    )
+    setMappingProgress(animateMapping ? 0 : hasCompletedDivision ? 64 : 0)
+    setDivisionActivity(
+      nextGame.status === 'dividing'
+        ? beginModelActivity('division')
+        : null,
+    )
 
-  /**
-   * Surface an expired session, failing only the work it actually interrupted.
-   *
-   * Marking both requests failed put an expiry banner on the division stage
-   * when only the answer was running, so a completed 64-facet map appeared to
-   * have failed.
-   */
-  const requireSession = useCallback((message?: string) => {
-    const explanation =
-      message || 'Your access session has expired. Enter the access code to continue.'
-    const failedAt = Date.now()
-    const divisionInterrupted = divisionStatusRef.current === 'loading'
-    const answerInterrupted = answerStatusRef.current === 'loading'
-
-    divisionRequestRef.current?.abort()
-    answerRequestRef.current?.abort()
-    setAutoPlaying(false)
-
-    if (divisionInterrupted) {
-      setDivisionStatus('error')
-      setDivisionError(explanation)
-      setDivisionActivity((current) => current
-        ? { ...current, status: 'error', lastHeartbeatAt: failedAt }
-        : current)
-    }
-    if (answerInterrupted) {
-      setAnswerStatus('error')
-      setAnswerError(explanation)
-      setAnswerActivity((current) => current
-        ? { ...current, status: 'error', lastHeartbeatAt: failedAt }
-        : current)
-    }
-    setAccessState({
-      status: 'unauthenticated',
-      message: explanation,
-    })
-  }, [])
-
-  const loadSession = useCallback((controller: AbortController) => {
-    void getWebChessSession(controller.signal)
-      .then((session) => {
-        if (controller.signal.aborted || sessionRequestRef.current !== controller) return
-        setSessionActionError('')
-        if (session.authenticated) {
-          adoptAuthenticatedSession(session)
+    setPieces(state ? state.pieces.map((piece) => ({
+      ...piece,
+      position: { ...piece.position },
+    })) : [])
+    setTurn(state?.turn ?? 'white')
+    setTurnNumber((state?.completedPlies ?? 0) + 1)
+    setQuietPlies(state?.quietPlies ?? 0)
+    setCaptures(state ? state.captures.map((capture) => ({
+      ...capture,
+      attacker: { ...capture.attacker, position: { ...capture.attacker.position } },
+      captured: { ...capture.captured, position: { ...capture.captured.position } },
+      cell: { ...capture.cell },
+      part: { ...capture.part },
+    })) : [])
+    setOutcome(state?.outcome ?? null)
+    setLastMove(state?.lastMove
+      ? {
+          from: { ...state.lastMove.from },
+          to: { ...state.lastMove.to },
         }
-        setAccessState(
-          session.authenticated
-            ? { status: 'authenticated', session }
-            : { status: 'unauthenticated' },
-        )
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted || sessionRequestRef.current !== controller) return
-        setAccessState({
-          status: 'error',
-          message: error instanceof Error
-            ? error.message
-            : 'WebChess could not check access right now.',
-        })
-      })
-  }, [adoptAuthenticatedSession])
+      : null)
+    setFocusedCell(state?.lastMove?.to ?? null)
 
-  const checkAccess = useCallback(() => {
-    sessionRequestRef.current?.abort()
-    const controller = new AbortController()
-    sessionRequestRef.current = controller
-    setAccessState({ status: 'checking' })
-    loadSession(controller)
-  }, [loadSession])
+    setAnswer(storedAnswer?.answer ?? '')
+    setAnswerModel(storedAnswer?.model ?? '')
+    setAnswerPrompt(storedAnswer?.prompt ?? '')
+    setAnswerError(
+      nextGame.status === 'answer_failed'
+        ? 'The server replay is complete, but the model answer failed. You can try again.'
+        : '',
+    )
+    setAnswerStatus(
+      storedAnswer
+        ? 'success'
+        : nextGame.status === 'completed' || nextGame.status === 'answering'
+          ? 'loading'
+          : nextGame.status === 'answer_failed'
+            ? 'error'
+            : 'idle',
+    )
+    setAnswerActivity((current) => {
+      if (nextGame.status !== 'completed' && nextGame.status !== 'answering') {
+        return null
+      }
+      return current?.operation === 'answer' && current.status === 'active'
+        ? current
+        : beginModelActivity('answer')
+    })
 
-  const authenticate = useCallback(async (accessCode: string) => {
-    sessionRequestRef.current?.abort()
-    const controller = new AbortController()
-    sessionRequestRef.current = controller
-
-    let session: AuthenticatedSession
-    try {
-      session = await createWebChessSession(accessCode, controller.signal)
-    } catch (error) {
-      // A superseded or unmounted attempt is not a failed access code, so it
-      // must not reach the gate as a rejected sign-in.
-      if (controller.signal.aborted) return
-      throw error
+    if (nextGame.status === 'integrity_error') {
+      setRestoreError(
+        'This saved game could not be verified against the current circular-chess rules.',
+      )
+      setStage('question')
+    } else if (
+      nextGame.status === 'completed' ||
+      nextGame.status === 'answering' ||
+      nextGame.status === 'answer_failed' ||
+      nextGame.status === 'answered'
+    ) {
+      setRestoreError('')
+      setStage('reading')
+    } else if (nextGame.status === 'playing') {
+      setRestoreError('')
+      setNotice(
+        state?.completedPlies
+          ? `Saved at move ${state.completedPlies}. ${state.turn === 'white' ? 'White' : 'Black'} moves next.`
+          : 'White begins at the edge. Choose a piece, or let the board play to an ending.',
+      )
+      setStage('playing')
+    } else {
+      setRestoreError('')
+      setStage('mapping')
     }
-    if (sessionRequestRef.current !== controller) return
-
-    adoptAuthenticatedSession(session)
-    setSessionActionError('')
-    setAccessState({ status: 'authenticated', session })
-  }, [adoptAuthenticatedSession])
+  }, [invalidateEngineRequest])
 
   const selectedPiece = useMemo(
     () => pieces.find((piece) => piece.id === selectedPieceId) ?? null,
@@ -326,31 +376,101 @@ export function App() {
     [focusedCell],
   )
 
-  // The initial state is already `checking`, so the bootstrap reuses the shared
-  // loader rather than re-announcing the status it is already showing.
-  useEffect(() => {
+  const restoreCurrentGame = useCallback(async (
+    options: { silent?: boolean } = {},
+  ) => {
+    const silent = Boolean(options.silent)
+    if (
+      silent &&
+      restoreRequestRef.current &&
+      !restoreRequestRef.current.silent
+    ) {
+      return
+    }
+
+    invalidateRestoreRequest()
     const controller = new AbortController()
-    sessionRequestRef.current = controller
-    loadSession(controller)
-    return () => controller.abort()
-  }, [loadSession])
+    const generation = restoreRequestGenerationRef.current
+    const activeRequest: ActiveRestoreRequest = { controller, silent }
+    restoreRequestRef.current = activeRequest
+    if (!silent) {
+      setRestoring(true)
+      setRestoreError('')
+    }
+
+    try {
+      const current = await getCurrentGame({ signal: controller.signal })
+      if (
+        controller.signal.aborted ||
+        restoreRequestGenerationRef.current !== generation ||
+        restoreRequestRef.current !== activeRequest
+      ) return
+
+      if (current) {
+        applyDurableGame(current)
+      } else {
+        resetGameState()
+        setGame(null)
+      }
+    } catch (error) {
+      if (
+        controller.signal.aborted ||
+        restoreRequestGenerationRef.current !== generation ||
+        restoreRequestRef.current !== activeRequest
+      ) return
+      if (
+        isWebChessApiError(error) &&
+        error.kind === 'authentication-required'
+      ) {
+        window.location.assign(PLAY_SIGN_IN_PATH)
+        return
+      }
+      setRestoreError(
+        error instanceof Error
+          ? error.message
+          : 'WebChess could not restore your saved game.',
+      )
+    } finally {
+      if (
+        restoreRequestGenerationRef.current === generation &&
+        restoreRequestRef.current === activeRequest
+      ) {
+        restoreRequestRef.current = null
+        if (!silent) setRestoring(false)
+      }
+    }
+  }, [applyDurableGame, invalidateRestoreRequest, resetGameState])
 
   useEffect(() => {
-    if (accessState.status !== 'authenticated') return
+    const restoreTimer = window.setTimeout(() => void restoreCurrentGame(), 0)
+    return () => {
+      window.clearTimeout(restoreTimer)
+      invalidateRestoreRequest()
+    }
+  }, [invalidateRestoreRequest, restoreCurrentGame])
 
-    const remainingMs = Date.parse(accessState.session.expiresAt) - Date.now()
-    if (remainingMs > 2_147_483_647) return
+  useEffect(() => {
+    if (game?.status !== 'dividing' || gameMutationMode !== null) return
 
-    const timer = window.setTimeout(
-      () => requireSession('Your access session has expired. Enter the access code to continue.'),
-      Math.max(0, remainingMs),
-    )
-    return () => window.clearTimeout(timer)
-  }, [accessState, requireSession])
+    let cancelled = false
+    let pollTimer: number | null = null
+    const schedulePoll = () => {
+      pollTimer = window.setTimeout(() => {
+        void restoreCurrentGame({ silent: true }).finally(() => {
+          if (!cancelled) schedulePoll()
+        })
+      }, 1_500)
+    }
+    schedulePoll()
+
+    return () => {
+      cancelled = true
+      if (pollTimer !== null) window.clearTimeout(pollTimer)
+    }
+  }, [game?.status, gameMutationMode, restoreCurrentGame])
 
   useEffect(() => {
     if (
-      !sessionActive ||
       stage !== 'mapping' ||
       divisionStatus !== 'success' ||
       divisionPhase !== 'casting' ||
@@ -373,11 +493,10 @@ export function App() {
     }, CAST_REVEAL_INTERVAL_MS)
 
     return () => window.clearInterval(interval)
-  }, [divisionPhase, divisionStatus, parts.length, sessionActive, stage])
+  }, [divisionPhase, divisionStatus, parts.length, stage])
 
   useEffect(() => {
     if (
-      !sessionActive ||
       stage !== 'mapping' ||
       divisionStatus !== 'success' ||
       parts.length !== 64 ||
@@ -398,17 +517,15 @@ export function App() {
     const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
     const timer = window.setTimeout(() => setDivisionPhase(nextPhase), reduceMotion ? 0 : DIVISION_PHASE_DURATION_MS)
     return () => window.clearTimeout(timer)
-  }, [divisionPhase, divisionStatus, parts.length, sessionActive, stage])
+  }, [divisionPhase, divisionStatus, parts.length, stage])
 
   useEffect(() => () => {
-    sessionRequestRef.current?.abort()
+    invalidateRestoreRequest()
     divisionRequestRef.current?.abort()
     answerRequestRef.current?.abort()
-  }, [])
+  }, [invalidateRestoreRequest])
 
   useEffect(() => {
-    if (!sessionActive) return
-
     const frame = window.requestAnimationFrame(() => {
       if (stage === 'question') {
         document.getElementById('problem')?.focus()
@@ -420,106 +537,143 @@ export function App() {
       stageRoot?.scrollIntoView?.({ block: 'start' })
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [sessionActive, stage])
-
-  const finishGame = useCallback((finished: GameOutcome) => {
-    setOutcome(finished)
-    setAutoPlaying(false)
-    setSelectedPieceId(null)
-    setNotice(outcomeNotice(finished))
-  }, [])
+  }, [stage])
 
   const movePiece = useCallback(
-    (pieceId: string, destination: CellCoord) => {
+    async (pieceId: string, destination: CellCoord): Promise<boolean> => {
       const movingPiece = pieces.find((piece) => piece.id === pieceId)
-      if (!movingPiece || movingPiece.side !== turn || parts.length !== 64 || outcome) return false
+      if (
+        !game ||
+        game.status !== 'playing' ||
+        movePendingRef.current ||
+        !movingPiece ||
+        movingPiece.side !== turn ||
+        parts.length !== 64 ||
+        outcome
+      ) return false
 
+      movePendingRef.current = true
+      setMovePending(true)
       try {
-        const result = applyMove(pieces, pieceId, destination, parts, turnNumber)
-        const nextSide = otherSide(turn)
-        const nextQuietPlies = result.capture ? 0 : quietPlies + 1
-        const finished = getGameOutcome(result.pieces, {
-          quietPlies: nextQuietPlies,
-          ply: turnNumber,
+        const saved = await submitMove(game.id, {
+          expectedRevision: game.revision,
+          pieceId,
+          to: destination,
+        }, {
+          idempotencyKey: createIdempotencyKey(),
         })
-        const completed = finished
-          ? {
-              ...finished,
-              ...(result.capture?.captured.kind === 'king'
-                ? { terminalCapture: result.capture }
-                : {}),
-            }
+        const nextState = saved.state
+        if (!nextState) throw new Error('The server did not return the saved board.')
+
+        const newEvents = nextState.events.slice(game.state?.events.length ?? 0)
+        const forcedPass = newEvents.some((event) => event.type === 'forced-pass')
+        const newCapture = nextState.captures.length > captures.length
+          ? nextState.captures.at(-1)
           : null
+        const movedEvent = [...newEvents]
+          .reverse()
+          .find((event) => event.type === 'move')
+        const promoted = movedEvent?.type === 'move' && movedEvent.promotedTo === 'queen'
+        const nextSide = nextState.turn === 'white' ? 'White' : 'Black'
 
-        setPieces(result.pieces)
-        setLastMove({ from: movingPiece.position, to: destination })
-        setFocusedCell(destination)
-        setSelectedPieceId(null)
-
-        if (result.capture) {
-          setCaptures((current) => [...current, result.capture!])
-        }
-
-        if (completed) {
-          finishGame(completed)
-          return true
-        }
-
-        // The opponent may have no reply even though the game continues.
-        // Handing them the turn anyway would stall the board on a side that
-        // cannot move, so the turn passes straight back.
-        const opponentCanReply = hasLegalMove(result.pieces, nextSide)
-        const passedQuietPlies = opponentCanReply
-          ? nextQuietPlies
-          : nextQuietPlies + 1
-        if (!opponentCanReply) {
-          const stalled = getGameOutcome(result.pieces, {
-            quietPlies: passedQuietPlies,
-            ply: turnNumber + 1,
-          })
-          if (stalled) {
-            finishGame(stalled)
-            return true
-          }
-        }
-
-        const continuingSide = opponentCanReply ? nextSide : turn
-        setQuietPlies(passedQuietPlies)
-        setTurn(continuingSide)
-        setTurnNumber((current) => current + (opponentCanReply ? 1 : 2))
-
-        const sideLabel = (side: Side) => (side === 'white' ? 'White' : 'Black')
-        const nextTurn = opponentCanReply
-          ? `${sideLabel(nextSide)} moves next.`
-          : `${sideLabel(nextSide)} has no open path and passes. ${sideLabel(turn)} moves again.`
-        if (result.capture) {
-          setNotice(`${result.capture.narration} ${nextTurn}`)
-        } else if (result.promoted) {
-          setNotice(`A pawn crossed the whole question and became agency: a new queen. ${nextTurn}`)
+        applyDurableGame(saved, { preserveAutoPlay: autoPlaying })
+        if (nextState.outcome) {
+          setNotice(outcomeNotice(nextState.outcome))
+        } else if (newCapture) {
+          setNotice(
+            `${newCapture.narration} ${
+              forcedPass
+                ? `The opposing side has no open path and passes. ${nextSide} moves again.`
+                : `${nextSide} moves next.`
+            }`,
+          )
+        } else if (promoted) {
+          setNotice(
+            `A pawn crossed the whole question and became agency: a new queen. ${nextSide} moves next.`,
+          )
         } else {
           const part = problemPartAt(parts, destination)
-          setNotice(`${movingPiece.kind} moved through ${part.dimension.toLowerCase()}: ${part.keyword}. ${nextTurn}`)
+          setNotice(
+            `${movingPiece.kind} moved through ${part.dimension.toLowerCase()}: ${part.keyword}. ${
+              forcedPass
+                ? `The opposing side passes. ${nextSide} moves again.`
+                : `${nextSide} moves next.`
+            }`,
+          )
         }
         return true
       } catch (error) {
-        setNotice(error instanceof Error ? error.message : 'That path is closed.')
+        if (
+          isWebChessApiError(error) &&
+          error.kind === 'authentication-required'
+        ) {
+          window.location.assign(PLAY_SIGN_IN_PATH)
+          return false
+        }
+        if (
+          isWebChessApiError(error) &&
+          (error.kind === 'conflict' || error.kind === 'transport')
+        ) {
+          await restoreCurrentGame()
+        }
+        setAutoPlaying(false)
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : 'That move could not be saved. The board has been restored.',
+        )
         return false
+      } finally {
+        movePendingRef.current = false
+        setMovePending(false)
       }
     },
-    [finishGame, outcome, parts, pieces, quietPlies, turn, turnNumber],
+    [
+      applyDurableGame,
+      autoPlaying,
+      captures.length,
+      game,
+      outcome,
+      parts,
+      pieces,
+      restoreCurrentGame,
+      turn,
+    ],
   )
 
-  const playOneTurn = useCallback(async () => {
-    if (outcome) return
+  const playOneTurn = useCallback(async (mode: EngineSearchMode) => {
+    if (
+      stage !== 'playing' ||
+      outcome ||
+      movePendingRef.current ||
+      activeEngineRequestRef.current ||
+      (mode === 'manual' && autoPlaying) ||
+      (mode === 'autoplay' && !autoPlaying)
+    ) return
 
-    setThinking(true)
+    const generation = engineRequestGenerationRef.current + 1
+    engineRequestGenerationRef.current = generation
+    activeEngineRequestRef.current = { generation, mode }
+    setEngineSearchMode(mode)
     const result = await getEngine().chooseMove(pieces, turn, `${problem}/${turnNumber}`, {
-      ply: turnNumber,
+      completedPlies: Math.max(0, turnNumber - 1),
       quietPlies,
     })
-    if (result.status === 'superseded') return
 
-    setThinking(false)
+    const activeRequest = activeEngineRequestRef.current
+    if (
+      engineRequestGenerationRef.current !== generation ||
+      activeRequest?.generation !== generation ||
+      activeRequest.mode !== mode
+    ) return
+
+    activeEngineRequestRef.current = null
+    setEngineSearchMode(null)
+
+    if (result.status === 'superseded') {
+      if (mode === 'autoplay') setAutoPlaying(false)
+      return
+    }
 
     if (result.status === 'failed') {
       setAutoPlaying(false)
@@ -529,104 +683,111 @@ export function App() {
 
     const choice = result.move
     if (!choice) {
-      const nextSide = otherSide(turn)
-      if (!hasLegalMove(pieces, nextSide)) {
-        finishGame({
-          winner: null,
-          reason: 'no-moves',
-          completedTurn: Math.max(0, turnNumber - 1),
-        })
-        return
-      }
-
-      const nextQuietPlies = quietPlies + 1
-      const safetyEnding = getGameOutcome(pieces, {
-        quietPlies: nextQuietPlies,
-        ply: turnNumber,
-      })
-      if (safetyEnding) {
-        finishGame(safetyEnding)
-        return
-      }
-
-      setQuietPlies(nextQuietPlies)
-      setTurn(nextSide)
-      setTurnNumber((current) => current + 1)
-      setNotice(`${turn === 'white' ? 'White' : 'Black'} found no open path. ${nextSide === 'white' ? 'White' : 'Black'} responds.`)
+      setAutoPlaying(false)
+      setNotice(
+        'The move engine found no move in a server-verified active position. The saved board is being restored.',
+      )
+      await restoreCurrentGame()
       return
     }
 
-    movePiece(choice.pieceId, choice.to)
-  }, [finishGame, getEngine, movePiece, outcome, pieces, problem, quietPlies, turn, turnNumber])
+    if (!await movePiece(choice.pieceId, choice.to)) {
+      setAutoPlaying(false)
+      setNotice('The move engine returned a move that no longer fits this position. Choose a piece yourself to continue.')
+    }
+  }, [
+    autoPlaying,
+    getEngine,
+    movePiece,
+    outcome,
+    pieces,
+    problem,
+    quietPlies,
+    restoreCurrentGame,
+    stage,
+    turn,
+    turnNumber,
+  ])
 
   useEffect(() => {
-    if (!sessionActive || !autoPlaying || stage !== 'playing' || outcome) return
+    if (!autoPlaying || stage !== 'playing' || outcome || movePending) return
 
     // The search itself takes a moment, so the pause before it only has to keep
     // a quick reply from erasing the move the viewer just watched land.
-    const timer = window.setTimeout(() => void playOneTurn(), 320)
+    const timer = window.setTimeout(() => void playOneTurn('autoplay'), 320)
     return () => window.clearTimeout(timer)
-  }, [autoPlaying, outcome, playOneTurn, sessionActive, stage])
-
-  useEffect(() => {
-    if (!sessionActive || stage !== 'playing' || !outcome) return
-
-    const revealTimer = window.setTimeout(() => {
-      setAnswerActivity(beginModelActivity('answer'))
-      setAnswerStatus('loading')
-      setStage('reading')
-    }, 1_100)
-    return () => window.clearTimeout(revealTimer)
-  }, [outcome, sessionActive, stage])
+  }, [autoPlaying, movePending, outcome, playOneTurn, stage])
 
   useEffect(() => {
     if (
-      !sessionActive ||
-      !csrfToken ||
       stage !== 'reading' ||
       !outcome ||
-      answerStatus !== 'loading'
+      answerStatus !== 'loading' ||
+      !game
     ) return
+
+    if (game.status === 'answering') {
+      let cancelled = false
+      let pollTimer: number | null = null
+      const schedulePoll = () => {
+        pollTimer = window.setTimeout(() => {
+          void restoreCurrentGame({ silent: true }).finally(() => {
+            if (!cancelled) schedulePoll()
+          })
+        }, 1_500)
+      }
+      schedulePoll()
+
+      return () => {
+        cancelled = true
+        if (pollTimer !== null) window.clearTimeout(pollTimer)
+      }
+    }
+    if (game.status !== 'completed' && game.status !== 'answer_failed') return
 
     const controller = new AbortController()
     answerRequestRef.current = controller
     const generateAnswer = async () => {
       try {
-        const onActivity = (event: ModelActivityEvent) => {
-          if (controller.signal.aborted || answerRequestRef.current !== controller) return
-          setAnswerActivity((current) =>
-            updateModelActivity(current ?? beginModelActivity('answer'), event),
-          )
-        }
-        const generated = await requestWebChessAnswer(
-          problem,
-          outcome,
-          captures,
-          controller.signal,
-          csrfToken,
-          onActivity,
-        )
+        const existingIntent = answerIntentRef.current
+        const intent = existingIntent?.gameId === game.id
+          ? existingIntent
+          : { gameId: game.id, key: createIdempotencyKey() }
+        answerIntentRef.current = intent
+        const generated = await requestGameAnswer(game.id, {
+          expectedRevision: game.revision,
+        }, {
+          idempotencyKey: intent.key,
+          signal: controller.signal,
+        })
         if (controller.signal.aborted || answerRequestRef.current !== controller) return
-        setAnswer(generated.answer)
-        setAnswerModel(generated.model)
-        setAnswerPrompt(generated.prompt)
-        setAnswerError('')
-        setAnswerStatus('success')
-        setAnswerActivity((current) => current
-          ? updateModelActivity(current, { type: 'phase', phase: 'complete' })
-          : current)
+        answerIntentRef.current = null
+        applyDurableGame(generated.game)
       } catch (error) {
         if (controller.signal.aborted) return
-        const failure = error as Error & { prompt?: string }
-        setAnswerError(failure.message)
-        setAnswerPrompt(failure.prompt ?? '')
+        if (
+          isWebChessApiError(error) &&
+          error.kind === 'authentication-required'
+        ) {
+          window.location.assign(PLAY_SIGN_IN_PATH)
+          return
+        }
+        if (!isWebChessApiError(error) || error.kind !== 'transport') {
+          answerIntentRef.current = null
+        }
+        if (isWebChessApiError(error) && error.kind === 'conflict') {
+          await restoreCurrentGame()
+          return
+        }
+        setAnswerError(
+          error instanceof Error
+            ? error.message
+            : 'The model answer could not be completed.',
+        )
         setAnswerStatus('error')
         setAnswerActivity((current) => current
-          ? { ...current, status: 'error', lastHeartbeatAt: Date.now() }
+          ? { ...current, status: 'error', lastUpdatedAt: Date.now() }
           : current)
-        if (isSessionRequiredError(failure)) {
-          requireSession(failure.message)
-        }
       } finally {
         if (answerRequestRef.current === controller) {
           answerRequestRef.current = null
@@ -638,12 +799,10 @@ export function App() {
     return () => controller.abort()
   }, [
     answerStatus,
-    captures,
-    csrfToken,
+    applyDurableGame,
+    game,
     outcome,
-    problem,
-    requireSession,
-    sessionActive,
+    restoreCurrentGame,
     stage,
   ])
 
@@ -659,14 +818,15 @@ export function App() {
   }
 
   const analyzeProblem = async (subject: string) => {
-    if (!sessionActive || !csrfToken) {
-      requireSession()
-      return
-    }
-
     divisionRequestRef.current?.abort()
     const controller = new AbortController()
     divisionRequestRef.current = controller
+    const existingIntent = divisionIntentRef.current
+    const intent = existingIntent?.problem === subject
+      ? existingIntent
+      : { problem: subject, key: createIdempotencyKey() }
+    divisionIntentRef.current = intent
+    const activity = beginModelActivity('division')
 
     setParts([])
     setMappingProgress(0)
@@ -675,46 +835,92 @@ export function App() {
     setDivisionModel('')
     setDivisionPrompt('')
     setDivisionError('')
-    setDivisionActivity(beginModelActivity('division'))
+    setDivisionActivity(activity)
+    setDivisionTargetUnresolved(true)
 
     try {
-      const onActivity = (event: ModelActivityEvent) => {
-        if (controller.signal.aborted || divisionRequestRef.current !== controller) return
-        setDivisionActivity((current) =>
-          updateModelActivity(current ?? beginModelActivity('division'), event),
-        )
-      }
-      const analysis = await requestProblemDivision(
-        subject,
-        controller.signal,
-        csrfToken,
-        onActivity,
-      )
-      const composedParts = composeProblemParts(analysis.facets, analysis.seed)
+      const divided = await divideProblem(subject, {
+        idempotencyKey: intent.key,
+        signal: controller.signal,
+      })
       if (controller.signal.aborted || divisionRequestRef.current !== controller) return
 
-      setParts(composedParts)
-      setDivisionModel(analysis.model)
-      setDivisionPrompt(analysis.prompt)
-      setDivisionStatus('success')
-      setDivisionPhase('facets-received')
-      setDivisionActivity((current) => current
-        ? updateModelActivity(current, { type: 'phase', phase: 'complete' })
-        : current)
+      divisionIntentRef.current = null
+      applyDurableGame(divided, { animateMapping: true })
     } catch (error) {
       if (controller.signal.aborted || divisionRequestRef.current !== controller) return
-      const failure = error as Error & { prompt?: string }
+      if (
+        isWebChessApiError(error) &&
+        error.kind === 'authentication-required'
+      ) {
+        window.location.assign(PLAY_SIGN_IN_PATH)
+        return
+      }
+
+      const errorMessage = error instanceof Error
+        ? error.message
+        : 'The model could not divide this problem.'
+      let recoveryError: unknown
+
+      try {
+        const recovered = await recoverDivisionIntent(intent.key, {
+          signal: controller.signal,
+        })
+        if (controller.signal.aborted || divisionRequestRef.current !== controller) return
+
+        if (recovered.status === 'abandoned') {
+          resetGameState()
+          setGame(null)
+          setRestoreError('')
+          return
+        }
+
+        applyDurableGame(recovered, {
+          animateMapping: recovered.status === 'mapped',
+        })
+        if (recovered.status === 'division_failed') {
+          setDivisionError(errorMessage)
+          setDivisionStatus('error')
+          setDivisionActivity({
+            ...activity,
+            status: 'error',
+            lastUpdatedAt: Date.now(),
+          })
+        }
+        return
+      } catch (recoveryFailure) {
+        if (controller.signal.aborted || divisionRequestRef.current !== controller) return
+        if (
+          isWebChessApiError(recoveryFailure) &&
+          recoveryFailure.kind === 'authentication-required'
+        ) {
+          window.location.assign(PLAY_SIGN_IN_PATH)
+          return
+        }
+        recoveryError = recoveryFailure
+      }
+
+      const originalFailureWasDefinitive =
+        isWebChessApiError(error) &&
+        error.kind !== 'transport' &&
+        error.kind !== 'invalid-response'
+      const targetDefinitelyAbsent =
+        originalFailureWasDefinitive &&
+        isWebChessApiError(recoveryError) &&
+        recoveryError.kind === 'not-found'
+
+      setDivisionTargetUnresolved(!targetDefinitelyAbsent)
+      if (targetDefinitelyAbsent) divisionIntentRef.current = null
       setParts([])
       setMappingProgress(0)
-      setDivisionPrompt(failure.prompt ?? '')
-      setDivisionError(failure.message)
+      setDivisionPrompt('')
+      setDivisionError(errorMessage)
       setDivisionStatus('error')
-      setDivisionActivity((current) => current
-        ? { ...current, status: 'error', lastHeartbeatAt: Date.now() }
-        : current)
-      if (isSessionRequiredError(failure)) {
-        requireSession(failure.message)
-      }
+      setDivisionActivity({
+        ...activity,
+        status: 'error',
+        lastUpdatedAt: Date.now(),
+      })
     } finally {
       if (divisionRequestRef.current === controller) {
         divisionRequestRef.current = null
@@ -724,13 +930,10 @@ export function App() {
 
   const beginMapping = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!sessionActive) {
-      requireSession()
-      return
-    }
     const cleaned = normalizeProblemInput(problem)
     if (cleaned.length < 12) return
 
+    invalidateEngineRequest(true)
     setProblem(cleaned)
     setStage('mapping')
     void analyzeProblem(cleaned)
@@ -740,24 +943,71 @@ export function App() {
     void analyzeProblem(problem)
   }
 
-  const beginPlay = () => {
+  const beginPlay = async () => {
+    const current = game
     if (
-      !sessionActive ||
+      !current ||
       parts.length !== 64 ||
       divisionStatus !== 'success' ||
-      mappingProgress < 64
+      mappingProgress < 64 ||
+      activeGameMutationRef.current
     ) return
-    setPieces(createInitialPieces())
-    setTurn('white')
-    setTurnNumber(1)
-    setQuietPlies(0)
-    setCaptures([])
-    setOutcome(null)
-    setLastMove(null)
-    setFocusedCell(null)
-    clearAnswer()
-    setNotice('White begins at the edge. Choose a piece, or let the board play all the way to an ending.')
-    setStage('playing')
+
+    const mutation: ActiveGameMutation = { mode: 'starting' }
+    activeGameMutationRef.current = mutation
+    setGameMutationMode(mutation.mode)
+    const existingIntent = startIntentRef.current
+    const intent = (
+      existingIntent?.gameId === current.id &&
+      existingIntent.expectedRevision === current.revision
+    )
+      ? existingIntent
+      : {
+          gameId: current.id,
+          expectedRevision: current.revision,
+          key: createIdempotencyKey(),
+        }
+    startIntentRef.current = intent
+
+    try {
+      const started = await startGame(current.id, {
+        expectedRevision: current.revision,
+      }, {
+        idempotencyKey: intent.key,
+      })
+      if (activeGameMutationRef.current !== mutation) return
+      if (startIntentRef.current === intent) startIntentRef.current = null
+      clearAnswer()
+      applyDurableGame(started)
+      setNotice(
+        'White begins at the edge. Choose a piece, or let the board play all the way to an ending.',
+      )
+    } catch (error) {
+      if (
+        isWebChessApiError(error) &&
+        error.kind === 'authentication-required'
+      ) {
+        window.location.assign(PLAY_SIGN_IN_PATH)
+        return
+      }
+      if (!isWebChessApiError(error) || error.kind !== 'transport') {
+        if (startIntentRef.current === intent) startIntentRef.current = null
+      }
+      if (isWebChessApiError(error) && error.kind === 'conflict') {
+        await restoreCurrentGame()
+        return
+      }
+      setRestoreError(
+        error instanceof Error
+          ? error.message
+          : 'WebChess could not start the saved game.',
+      )
+    } finally {
+      if (activeGameMutationRef.current === mutation) {
+        activeGameMutationRef.current = null
+        setGameMutationMode(null)
+      }
+    }
   }
 
   const selectPiece = (pieceId: string) => {
@@ -782,7 +1032,7 @@ export function App() {
     if (!selectedPiece || autoPlaying || gameFinishing || thinking) return
 
     if (legalMoves.some((move) => isSameCoord(move, cell))) {
-      movePiece(selectedPiece.id, cell)
+      void movePiece(selectedPiece.id, cell)
       return
     }
 
@@ -792,21 +1042,23 @@ export function App() {
 
   const toggleAutoPlay = () => {
     if (gameFinishing) return
-    const shouldPlay = !autoPlaying
+    if (!autoPlaying && activeEngineRequestRef.current?.mode === 'manual') return
+
+    if (autoPlaying) {
+      invalidateEngineRequest(true)
+      setSelectedPieceId(null)
+      setAutoPlaying(false)
+      setNotice(`Auto-play paused. Choose a ${turn === 'white' ? 'White' : 'Black'} piece or play one turn.`)
+      return
+    }
+
     setSelectedPieceId(null)
-    setAutoPlaying(shouldPlay)
-    setNotice(
-      shouldPlay
-        ? 'The players are weighing pressure, safety, and purpose as they play to the end.'
-        : `Auto-play paused. Choose a ${turn === 'white' ? 'White' : 'Black'} piece or play one turn.`,
-    )
+    setAutoPlaying(true)
+    setNotice('The players are weighing pressure, safety, and purpose as they play to the end.')
   }
 
   const retryAnswer = () => {
-    if (!sessionActive) {
-      requireSession()
-      return
-    }
+    if (!game || !outcome) return
     setAnswer('')
     setAnswerPrompt('')
     setAnswerError('')
@@ -814,78 +1066,240 @@ export function App() {
     setAnswerStatus('loading')
   }
 
-  const replayProblem = () => {
-    setPieces(createInitialPieces())
-    setTurn('white')
-    setTurnNumber(1)
-    setQuietPlies(0)
-    setCaptures([])
-    setOutcome(null)
-    setSelectedPieceId(null)
-    setFocusedCell(null)
-    setLastMove(null)
-    setAutoPlaying(false)
-    clearAnswer()
-    setNotice('Replay preserves these 64 facets in the same places. Guided play follows the same path; your own moves can create another one.')
-    setStage('playing')
-  }
+  const replayProblem = async () => {
+    const current = game
+    if (
+      !current ||
+      replayPendingRef.current ||
+      activeGameMutationRef.current ||
+      answerStatus === 'loading'
+    ) return
 
-  const reset = () => {
-    resetGameState()
-    setSessionActionError('')
-  }
-
-  const endSession = async () => {
-    if (accessState.status !== 'authenticated' || endingSession) return
-
-    setEndingSession(true)
-    setSessionActionError('')
+    const existingIntent = replayIntentRef.current
+    const intent = existingIntent?.gameId === current.id
+      ? existingIntent
+      : { gameId: current.id, key: createIdempotencyKey() }
+    replayIntentRef.current = intent
+    replayPendingRef.current = true
+    setReplayPending(true)
+    setReplayError('')
     try {
-      await deleteWebChessSession(accessState.session.csrfToken)
-      reset()
-      lastAuthenticatedSessionRef.current = null
-      setAccessState({
-        status: 'unauthenticated',
-        message: 'Your access session has ended.',
+      const replayed = await replayGame(current.id, {
+        expectedRevision: current.revision,
+      }, {
+        idempotencyKey: intent.key,
       })
+      replayIntentRef.current = null
+      setReplayTargetUnresolved(false)
+      clearAnswer()
+      applyDurableGame(replayed)
+      setNotice(
+        'Replay preserves these 64 facets in the same places. Guided play follows the same path; your own moves can create another one.',
+      )
     } catch (error) {
-      setSessionActionError(
-        error instanceof Error ? error.message : 'WebChess could not end the access session.',
+      if (
+        isWebChessApiError(error) &&
+        error.kind === 'authentication-required'
+      ) {
+        window.location.assign(PLAY_SIGN_IN_PATH)
+        return
+      }
+
+      const ambiguous =
+        isWebChessApiError(error) &&
+        (
+          error.kind === 'transport' ||
+          error.kind === 'invalid-response'
+        )
+      if (ambiguous) {
+        try {
+          // Replay creation atomically uses its replay idempotency UUID as the
+          // child ID. Division recovery must use the separate intent endpoint
+          // because division games are identified by a server request UUID.
+          const recovered = await getOwnedGame(intent.key)
+          if (recovered.sourceGameId !== current.id) {
+            throw new Error(
+              'The recovered replay does not belong to this source game.',
+              { cause: error },
+            )
+          }
+
+          replayIntentRef.current = null
+          setReplayTargetUnresolved(false)
+          if (recovered.status === 'abandoned') {
+            await restoreCurrentGame()
+            return
+          }
+          clearAnswer()
+          applyDurableGame(recovered)
+          setNotice(
+            'Replay preserves these 64 facets in the same places. Guided play follows the same path; your own moves can create another one.',
+          )
+          return
+        } catch (recoveryError) {
+          if (
+            isWebChessApiError(recoveryError) &&
+            recoveryError.kind === 'authentication-required'
+          ) {
+            window.location.assign(PLAY_SIGN_IN_PATH)
+            return
+          }
+          setReplayTargetUnresolved(true)
+        }
+      } else {
+        replayIntentRef.current = null
+        setReplayTargetUnresolved(false)
+      }
+      if (isWebChessApiError(error) && error.kind === 'conflict') {
+        await restoreCurrentGame()
+        return
+      }
+      setReplayError(
+        error instanceof Error
+          ? error.message
+          : 'WebChess could not create a replay.',
       )
     } finally {
-      setEndingSession(false)
+      replayPendingRef.current = false
+      setReplayPending(false)
     }
   }
 
-  const visibleStage = sessionActive ? stage : 'question'
+  const reset = async () => {
+    if (
+      activeGameMutationRef.current ||
+      replayPendingRef.current ||
+      replayTargetUnresolved ||
+      movePendingRef.current ||
+      game?.status === 'dividing' ||
+      game?.status === 'answering' ||
+      answerStatus === 'loading' ||
+      divisionTargetUnresolved ||
+      (!game && divisionRequestRef.current)
+    ) return
+
+    const mutation: ActiveGameMutation = { mode: 'resetting' }
+    activeGameMutationRef.current = mutation
+    setGameMutationMode(mutation.mode)
+    const current = game
+
+    invalidateRestoreRequest()
+    divisionRequestRef.current?.abort()
+    divisionRequestRef.current = null
+    answerRequestRef.current?.abort()
+    answerRequestRef.current = null
+    invalidateEngineRequest(true)
+    setAutoPlaying(false)
+
+    try {
+      if (!current) {
+        resetGameState()
+        setGame(null)
+        setRestoreError('')
+        return
+      }
+
+      const existingIntent = resetIntentRef.current
+      const intent = (
+        existingIntent?.gameId === current.id &&
+        existingIntent.expectedRevision === current.revision
+      )
+        ? existingIntent
+        : {
+            gameId: current.id,
+            expectedRevision: current.revision,
+            key: createIdempotencyKey(),
+          }
+      resetIntentRef.current = intent
+
+      await abandonGame(current.id, {
+        expectedRevision: current.revision,
+      }, {
+        idempotencyKey: intent.key,
+      })
+      if (activeGameMutationRef.current !== mutation) return
+      if (resetIntentRef.current === intent) resetIntentRef.current = null
+      resetGameState()
+      setGame(null)
+      setRestoreError('')
+    } catch (error) {
+      if (!isWebChessApiError(error) || error.kind !== 'transport') {
+        resetIntentRef.current = null
+      }
+      if (isWebChessApiError(error) && error.kind === 'conflict') {
+        await restoreCurrentGame()
+        return
+      }
+      setRestoreError(
+        error instanceof Error
+          ? error.message
+          : 'WebChess could not close the saved game.',
+      )
+    } finally {
+      if (activeGameMutationRef.current === mutation) {
+        activeGameMutationRef.current = null
+        setGameMutationMode(null)
+      }
+    }
+  }
+
+  const visibleStage = stage
+  const sharedActionDisabled =
+    gameMutationMode !== null ||
+    replayPending ||
+    movePending ||
+    game?.status === 'dividing' ||
+    game?.status === 'answering' ||
+    answerStatus === 'loading' ||
+    divisionTargetUnresolved ||
+    (!game && divisionStatus === 'loading')
+  const resetDisabled = sharedActionDisabled || replayTargetUnresolved
+  const replayDisabled = sharedActionDisabled
 
   return (
     <div className={`app-shell stage-${visibleStage}`}>
-      <CosmicBackdrop />
-      <div className="paper-noise" aria-hidden="true" />
-      <Header stage={visibleStage} onReset={reset} />
+      <Header
+        stage={visibleStage}
+        resetDisabled={resetDisabled}
+        onReset={reset}
+      />
 
       <main className="main-content">
-        {!sessionActive ? (
-          <AccessGate
-            status={accessState.status}
-            message={accessState.message}
-            onAuthenticate={authenticate}
-            onRetryCheck={checkAccess}
-          />
+        {restoreError && (
+          <div className="session-banner" role="alert">
+            <span>{restoreError}</span>
+            <button type="button" className="text-button" onClick={() => void restoreCurrentGame()}>
+              Restore again
+            </button>
+          </div>
+        )}
+
+        {restoring ? (
+          <section
+            className="question-layout restore-layout"
+            aria-label="Restoring saved game"
+          >
+            <div className="question-copy">
+              <p className="eyebrow"><span /> Saved game</p>
+              <h1>Restoring your board…</h1>
+              <p className="lede" role="status">
+                WebChess is replaying the durable move log before play continues.
+              </p>
+            </div>
+          </section>
         ) : stage === 'question' ? (
           <QuestionStage
             problem={problem}
-            provider={accessState.session.provider}
+            provider={HOSTED_WEBCHESS_PROVIDER}
             setProblem={setProblem}
             onSubmit={beginMapping}
           />
         ) : null}
 
-        {sessionActive && stage === 'mapping' && (
+        {!restoring && stage === 'mapping' && (
           <MappingStage
             problem={problem}
-            provider={accessState.session.provider}
+            provider={HOSTED_WEBCHESS_PROVIDER}
             parts={parts}
             progress={mappingProgress}
             divisionStatus={divisionStatus}
@@ -894,12 +1308,13 @@ export function App() {
             divisionPrompt={divisionPrompt}
             divisionError={divisionError}
             divisionActivity={divisionActivity}
+            beginDisabled={gameMutationMode !== null}
             onBegin={beginPlay}
             onRetry={retryDivision}
           />
         )}
 
-        {sessionActive && stage === 'playing' && (
+        {!restoring && stage === 'playing' && (
           <PlayingStage
             problem={problem}
             parts={parts}
@@ -915,20 +1330,20 @@ export function App() {
             captureKeys={captureKeys}
             lastMove={lastMove}
             autoPlaying={autoPlaying}
-            thinking={thinking}
+            searchMode={movePending ? 'manual' : engineSearchMode}
             gameFinishing={gameFinishing}
             notice={notice}
             onPieceSelect={selectPiece}
             onCellSelect={selectCell}
-            onStep={() => void playOneTurn()}
+            onStep={() => void playOneTurn('manual')}
             onToggleAuto={toggleAutoPlay}
           />
         )}
 
-        {sessionActive && stage === 'reading' && outcome && (
+        {!restoring && stage === 'reading' && outcome && (
           <ReadingStage
             problem={problem}
-            provider={accessState.session.provider}
+            provider={HOSTED_WEBCHESS_PROVIDER}
             parts={parts}
             pieces={pieces}
             captures={captures}
@@ -941,7 +1356,10 @@ export function App() {
             answerPrompt={answerPrompt}
             answerError={answerError}
             answerActivity={answerActivity}
+            replayError={replayError}
             captureKeys={captureKeys}
+            replayDisabled={replayDisabled}
+            resetDisabled={resetDisabled}
             onRetryAnswer={retryAnswer}
             onReplay={replayProblem}
             onReset={reset}
@@ -952,17 +1370,7 @@ export function App() {
       <footer className="site-footer">
         <span>WebChess</span>
         <span>A thinking game inspired by change, not a prediction.</span>
-        {sessionActionError && <span role="alert">{sessionActionError}</span>}
-        {sessionActive && (
-          <button
-            className="text-button"
-            type="button"
-            onClick={() => void endSession()}
-            disabled={endingSession}
-          >
-            {endingSession ? 'Ending session…' : 'End session'}
-          </button>
-        )}
+        <a className="text-button" href="/account">Account and usage</a>
       </footer>
     </div>
   )

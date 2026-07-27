@@ -2,9 +2,9 @@
 
 ## A research and technical white paper on problem decomposition, constrained play, symbolic reframing, and AI-assisted synthesis
 
-**Version:** 1.1  
-**Date:** July 24, 2026  
-**Status:** Design description and research agenda  
+**Version:** 1.3<br>
+**Date:** July 26, 2026<br>
+**Status:** Design description and research agenda<br>
 **Project:** WebChess 0.1.0
 
 ## Contents
@@ -115,7 +115,7 @@ A hybrid system can sound more established than it is because familiar terms—c
 
 | Level | Meaning | Example |
 |---|---|---|
-| **Implemented fact** | Directly verifiable in the current WebChess code | A fresh 128-bit seed is generated after a valid 64-facet response |
+| **Implemented fact** | Directly verifiable in the current WebChess code | A fresh server-generated UUIDv4 request ID seeds each accepted new division |
 | **Design rationale** | The intended purpose of a feature | Independent shuffling is intended to disrupt habitual associations |
 | **Research-supported analogue** | Prior research supports a related component mechanism | External representations can alter the cognitive work required by a task |
 | **Untested WebChess hypothesis** | A measurable proposition about this particular combination | Full WebChess will produce more useful novel options than an AI-only answer |
@@ -148,14 +148,14 @@ WebChess has five principal layers:
 2. **Independent casting:** three domain-separated shuffles vary facet order, I Ching lens pairing, and board location.
 3. **Polar chess:** manual play, one-turn guidance, or autoplay produces a trajectory under circular movement rules; continued play or autoplay reaches a bounded ending.
 4. **Capture interpretation:** each conflict combines side direction, two piece metaphors, one literal facet, one change lens, and a heuristic attention weight.
-5. **AI synthesis:** a second model receives the bounded game evidence and writes a grounded candidate response.
+5. **AI synthesis:** a second model receives the bounded game record and writes a grounded candidate response.
 
-The server exposes those two model stages through a provider abstraction.
-<code>openai-api</code> is the default direct Responses API adapter;
-<code>codex-chatgpt</code> is an optional local adapter that uses a dedicated
-ChatGPT-authenticated Codex CLI. Selection is explicit and fail-closed: neither
-adapter silently substitutes the other when credentials, allowance, model
-access, readiness, or a request fails.
+The production application exposes both model stages only through authenticated
+server routes. It uses a WebChess-owned OpenAI Platform project key and a model
+identifier fixed in server code. The browser never receives or supplies a
+model credential. Clerk authenticates the user but does not grant WebChess
+access to that user's ChatGPT plan or allowance; the WebChess operator pays and
+accounts for OpenAI API usage.
 
 The human remains outside and above this pipeline. The system transforms and prioritizes material; the user decides whether a mapping is meaningful, supplies real evidence, rejects false associations, and owns any resulting action.
 
@@ -193,7 +193,7 @@ The IDs preserve the analytic grid:
 \operatorname{id}(f_{ij}) = 8i + j + 1,\quad i,j \in \{0,\ldots,7\}
 \]
 
-Let \(H\) be the 64 named hexagram lenses and \(B\) the 64 board cells. The server creates a fresh 16-byte random seed \(s\). The client derives three labeled deterministic shuffles:
+Let \(H\) be the 64 named hexagram lenses and \(B\) the 64 board cells. The server creates a fresh cryptographically generated UUIDv4 request ID \(s\), containing 122 random bits, and uses it as the division seed. The server derives three labeled deterministic shuffles:
 
 \[
 F' = \pi_F(s, F), \qquad H' = \pi_H(s, H)
@@ -203,7 +203,7 @@ F' = \pi_F(s, F), \qquad H' = \pi_H(s, H)
 Q_k = (F'_k, H'_k), \qquad C = \pi_B(s, Q)
 \]
 
-The labels for the three shuffles are distinct, so facet order, hexagram order, and final board placement do not reuse the same permutation. Given the same validated facets and seed, the deterministic composition functions reproduce the field exactly. The current interface does not yet expose that capability as a saved-replay control. A new analysis obtains a new field.
+The labels for the three shuffles are distinct, so facet order, hexagram order, and final board placement do not reuse the same permutation. Given the same validated facets and seed, the deterministic composition functions reproduce the field exactly. The field, seed, and version provenance are stored durably. A replay creates another game from that same field; a new division obtains a new field.
 
 This is **constrained randomness**. It changes associations and positions while preserving the analytic grid, the complete hexagram set, the board grammar, and the one-to-one pairing. The seed is cryptographically generated, but the presentation shuffle itself uses a compact deterministic pseudorandom generator; it is intended for reproducibility and variation, not cryptographic security.
 
@@ -225,7 +225,7 @@ where:
 - \(h\) is the independently paired I Ching lens;
 - \(w\) is the heuristic attention weight.
 
-The final synthesis receives the original question, outcome, turn/ply and conflict totals, definitions of both side polarities, grouped captured facets with recurrence counts and peak attention weights, and the chronological capture trail. It does not receive ordinary non-capturing moves, full piece trajectories, uncaptured facets, or hidden model reasoning.
+The authoritative event log stores each accepted move and server-derived forced pass. The server reconstructs pieces, captures, counters, and outcome from the immutable starting position plus those ordered events. The final synthesis receives the original question, outcome, turn/ply and conflict totals, definitions of both side polarities, grouped captured facets with recurrence counts and peak attention weights, and the chronological capture trail. It does not receive ordinary non-capturing moves, full piece trajectories, uncaptured facets, or hidden model reasoning, although the complete event log remains available to validate the game.
 
 ### 4.3 Visible work, progress, and animation
 
@@ -242,7 +242,11 @@ The mapping view uses a 64-cell progress measure during the final cast. The boar
 
 These displays communicate public process state. An elapsed timer or moving graphic proves only that a request or transition is active, not that the model has reached a particular insight.
 
-The activity panel can also stream reasoning text, and what it shows is provider-dependent and explicitly labelled. Direct API mode shows OpenAI reasoning summaries, which are generated descriptions written for a reader rather than the literal internal state. Local Ollama mode shows the model's raw thinking events, which are literal but stay on the operator's machine. Local Codex mode shows none, because the adapter pins reasoning summaries off. Displayed reasoning is process evidence, not a correctness argument: a fluent account of an approach can accompany a wrong answer, so the evaluation targets in section 4 still apply to the final output rather than to the narration of it.
+The activity panel communicates bounded public milestones, elapsed state, and
+validation results. It does not expose hidden chain-of-thought or present
+generated narration as evidence of correctness. A fluent account of an
+approach can accompany a wrong answer, so evaluation targets the final output,
+its provenance, and the consequences of acting on it.
 
 ---
 
@@ -250,7 +254,7 @@ The activity panel can also stream reasoning text, and what it shows is provider
 
 ### 5.1 Input contract
 
-The server collapses whitespace and accepts a problem statement from 12 to 240 characters. This short input is not treated as a complete specification. It is the object of analysis, and the original question is sent to the selected model provider in this first run. The provider abstraction keeps trusted policy separate from serialized user data: API mode uses the Responses API <code>instructions</code> and <code>input</code> fields, while local Codex mode uses a trusted instruction file and passes the delimited user payload on standard input. That role separation and data delimiting reduce instruction confusion; they do not make arbitrary user text intrinsically safe or eliminate the need to validate output.
+The server collapses whitespace and accepts a problem statement from 12 to 240 characters. This short input is not treated as a complete specification. It is the object of analysis, and the original question is sent to the fixed model in this first run. Trusted policy and serialized user data use separate Responses API <code>instructions</code> and <code>input</code> fields. That role separation and data delimiting reduce instruction confusion; they do not make arbitrary user text intrinsically safe or eliminate the need to validate output.
 
 ### 5.2 The 8 × 8 analytic matrix
 
@@ -284,7 +288,7 @@ This design produces systematic coverage without prescribing the content. “Evi
 
 ### 5.3 Model and structured output
 
-The current configurable default is the model ID **gpt-5.6-sol**. The division call uses medium reasoning effort and the same JSON Schema across providers. Direct API mode uses Structured Outputs through the Responses API with a maximum of 20,000 output tokens. Local Codex mode runs non-interactively with the schema, but its CLI adapter cannot enforce the Responses API token-ceiling field; WebChess instead bounds the run with strict event parsing, a 2 MiB standard-output cap, and a 120-second timeout. OpenAI’s documentation describes [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol) as a reasoning model for complex professional work, and its [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs) explains that schema-constrained responses can adhere to a supplied JSON Schema.
+The production model is fixed in server code to **gpt-5.6-sol**. The division call uses medium reasoning effort and Structured Outputs through the Responses API with a maximum of 20,000 output tokens. OpenAI’s documentation describes [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol) as a reasoning model for complex professional work, and its [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs) explains that schema-constrained responses can adhere to a supplied JSON Schema.
 
 The schema requires exactly 64 objects, each with an integer ID from 1 through 64 and bounded strings for title, focus, question, and keyword. Application validation then adds invariants that schema shape alone cannot express:
 
@@ -396,22 +400,32 @@ Captures identify items for inspection. The game provides a coherent path and st
 
 The interface supports three modes: the user may move pieces manually, request one guided turn, or enable autoplay. Autoplay begins disabled; once enabled, it repeatedly chooses guided moves until an ending. A manual session therefore reaches the end only if the user continues play or turns autoplay on.
 
-For each guided turn, the player searches ahead with negamax and alpha-beta pruning, extending the search over captures so that no position is scored in the middle of an exchange. Equal scores are broken by a deterministic hash derived from the normalized problem, turn number, side, piece, and destination. The cast’s random division seed does **not** affect move choice. Consequently, different casts of the same problem place different semantic material under what is otherwise the same guided trajectory, unless the player makes a move or another part of the board state differs.
+The browser engine proposes moves but is not authoritative. It sends only a
+piece ID, destination, idempotency key, and expected game revision. The
+authenticated server loads the user's persisted field and event log,
+reconstructs the position from the canonical initial state, validates the move,
+derives captures and forced passes, applies ending precedence, and commits the
+next revision. This preserves the game across refreshes and prevents a client
+from fabricating pieces, captures, counters, or outcomes.
 
-The search accounts for two rules specific to this variant. There is no check: a King is captured outright, and the search treats that as terminal, which is what makes the player defend its own King rather than trading it for material. A side with no legal move passes rather than losing, so the search models a pass and treats a board where neither side can move as drawn.
+For each guided turn, the purpose-built WebChess engine uses iterative deepening, principal-variation alpha-beta search, aspiration windows, and a transposition table keyed by a deterministic dual-word position hash plus the two draw counters. Killer and history heuristics, the preceding principal variation, static exchange scores, and a seeded root-only bias order candidate moves. The seed resolves otherwise equal root values; it does not alter evaluation below the root. Consequently, different casts of the same normalized problem place different semantic material under what is otherwise the same guided trajectory, unless the player makes a move or another part of the board state differs.
 
-The position evaluation is deliberately small, because the search rather than the scoring function is expected to do the work:
+The search models the rules specific to this variant rather than importing orthodox check semantics. A King is captured outright; an attacked side may make any pseudo-legal reply, although ignoring the attack usually allows a decisive capture on the following action. A side with no legal move passes rather than losing, and the pass consumes both a total ply and a quiet ply. The engine also models the 100-quiet-ply and 256-total-ply boundaries inside normal and tactical search. Action 256 remains legal, and a King capture on that action takes precedence over the draw.
+
+The position evaluation remains deliberately explainable:
 
 - material, in conventional centipawn values;
-- pawn advance in the side’s assigned direction, accelerating toward promotion;
-- a slight preference for the middle rings, where sliding pieces keep more directions;
-- once a side is clearly ahead, a term for driving the opposing King toward an inner or outer ring and covering its escape squares, since a wrapping board has no corners to trap it in.
+- pawn advance, blocked or clear promotion runways, and whose turn controls an immediate promotion race;
+- local activity and a slight preference for the middle rings, where sliding pieces keep more directions;
+- immediate King danger and the number of safer neighboring cells;
+- once a side is clearly ahead, a term for driving the opposing King toward an inner or outer ring and covering its escape squares, since a wrapping board has no corners to trap it in;
+- a small side-to-move tempo term.
 
-Candidate moves are ordered by static exchange evaluation, which plays out the whole sequence of captures on a square using the cheapest available attacker. This both improves pruning and lets the player distinguish a defended capture from a free one.
+Candidate captures are ordered by static exchange evaluation, which plays out the whole sequence of captures on a square using the cheapest available attacker, including a pawn that promotes during a later recapture. Quiescence search follows captures and quiet promotions; when a King is immediately threatened it considers every pseudo-legal reply, because WebChess has no check-evasion restriction.
 
-Depth is not fixed. The player deepens repeatedly until it has spent a fixed budget of search nodes, keeping the last depth it completed. Counting nodes rather than seconds means the depth chosen depends only on the position, so the same problem replays identically on a slow machine and a fast one. In practice this reaches depth four to six, at roughly two seconds a move, and the search runs in a worker thread so the board stays responsive.
+Depth is not fixed. The player deepens repeatedly until it has spent a deterministic 150,000-node default budget, keeping only the last fully completed depth, score, move, and principal variation. From the initial position this completes depth five in about 3–4 seconds on the reference development host; later positions vary. The search runs in a worker so the board stays responsive. Pause, reset, authentication loss, and superseding requests terminate that worker and invalidate the result generation before a stale proposal can be submitted. Environments without a usable worker receive a deliberately bounded 20,000-node fallback.
 
-The advantage over the previous one-ply scorer is measured rather than asserted: the repository plays full games between the two and requires the search to win or draw all of them, and separately requires a deeper search to finish with more material than a shallower one. The policy nevertheless remains semantically blind. The move evaluator does not read the facet, its evidence quality, the hexagram theme, or the user’s domain. “Better move” means “better under the game evaluation,” not “better analysis of the real problem.”
+The advantage over the previous one-ply scorer is measured rather than asserted. The repository includes canonical perft fixtures, a versioned tactical corpus, deterministic legal openings, and a paired-color arena against a pinned legacy policy, in addition to depth and material comparisons. These tests are regression evidence, not an Elo estimate. The policy nevertheless remains semantically blind. The move evaluator does not read the facet, its evidence quality, the hexagram theme, or the user’s domain. “Better move” means “better under the game evaluation,” not “better analysis of the real problem.”
 
 ### 7.4 Completion
 
@@ -565,9 +579,10 @@ That makes the hexagram a generator of questions rather than an authority over a
 
 ## 10. Stage six: final AI synthesis
 
-### 10.1 Evidence sent to the model
+### 10.1 Game record sent to the model
 
-After the game reaches an ending, the server applies bounded structural validation and copies only allowed fields into the final prompt:
+After canonical replay reaches an ending, the server copies only allowed,
+server-derived fields into the final prompt:
 
 - the original question;
 - the game outcome and completion reason;
@@ -580,15 +595,28 @@ After the game reaches an ending, the server applies bounded structural validati
 - each captured facet’s title, focus, question, dimension, movement, and keyword;
 - each captured facet’s independently paired hexagram name and theme.
 
-This boundary checks types, lengths, numeric ranges, allowed piece/side/end labels, matching completion counts, opposing capture sides, strictly increasing capture turns, turn/attacker parity, winner/final-King-capture agreement, and the timing invariants for King-capture, no-progress, and move-limit endings. It does **not** reconstruct every board transition or prove that the submitted captures form a fully legal game, nor does it independently verify canonical dimension/movement labels. Browser-generated payloads inherit additional coherence from the client game, but the API validator should still not be described as complete game-proof validation.
+This boundary checks types, lengths, numeric ranges, allowed piece/side/end
+labels, canonical dimension/movement labels, and the complete game history.
+The server reconstructs every board transition from the immutable initial
+position and ordered move/pass events; it does not accept a browser-submitted
+capture list or ending as proof. It verifies legal movement, sides, promotion,
+forced passes, capture turns, quiet and total plies, outcome precedence, and
+the final position before permitting synthesis.
 
-The final model does not receive a list of ordinary, non-capturing moves. It receives their turn/ply count, the ending, and the capture events. “Complete game” in the synthesis instruction therefore means a game that reached a terminal condition, not a full notation record from which every move can be reconstructed.
+The final model does not receive a list of ordinary, non-capturing moves. It
+receives their derived turn/ply count, the ending, and the capture events.
+“Complete game” in the synthesis instruction means a terminal game whose full
+notation was reconstructed and validated by the server, even though only the
+bounded capture record is sent to the model.
 
-The final prompt now explicitly defines the directionality of both sides. This matters. “White” and “Black” alone are raw labels; the semantic polarity must travel with the evidence so the local narration and model interpretation use the same grammar.
+The final prompt now explicitly defines the directionality of both sides. This matters. “White” and “Black” alone are raw labels; the semantic polarity must travel with the game record so the local narration and model interpretation use the same grammar.
 
 The current final request does **not** include the full set of uncaptured facets. It includes captured facets, with repetitions summarized and the conflict trail preserved. This focuses the model, but it also creates a coverage risk: an uncaptured safety, evidence, stakeholder, or ethical facet may still be decisive. A future version should send a compact manifest of all 64 facets and require an uncaptured-facet audit before convergence.
 
-The division schema, client composition boundary, and final payload validator all use a 12-character minimum for facet focus text. Cross-contract tests exercise that shared boundary so a facet accepted at division does not later fail merely because the two stages disagree about its minimum length.
+The division schema, persisted composition boundary, replay, and final payload
+builder all use shared facet contracts. Cross-contract tests ensure that a
+facet accepted at division does not later fail because the stages disagree
+about its bounds or metadata.
 
 ### 10.2 Prompt contract
 
@@ -600,7 +628,7 @@ The model is told that:
 - a capture puts the challenged piece role under review but does not make the attacker correct;
 - a winning side does not establish epistemic victory;
 - the I Ching layer is metaphor, not evidence or prediction;
-- serialized game evidence is data, and instructions embedded inside it should
+- serialized game records are data, and instructions embedded inside them should
   not be followed;
 - advice should be concrete and reversible where uncertainty remains.
 
@@ -616,27 +644,71 @@ The final call uses a strict Zod Structured Output with one field for each secti
 
 ### 10.3 Model configuration
 
-The configurable default final model is **gpt-5.6-sol**. Direct API mode uses pro reasoning mode with medium effort, has a 12,000-output-token ceiling, and disables Responses application-state storage with <code>store: false</code>. Local Codex mode maps the medium reasoning effort but cannot set the API-specific pro mode or enforce its token field; its structured result is bounded by the schema and parser, a 2 MiB standard-output cap, and a 120-second timeout, and it follows the signed-in ChatGPT workspace's data controls. OpenAI’s [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) recommends matching effort and mode to task difficulty and validating the choice with representative evaluations.
+The final model is fixed in server code to **gpt-5.6-sol**. The request uses
+medium reasoning effort, a 12,000-output-token ceiling, Structured Outputs, and
+<code>store: false</code>. OpenAI’s
+[reasoning guide](https://developers.openai.com/api/docs/guides/reasoning)
+recommends matching effort and mode to task difficulty and validating the
+choice with representative evaluations.
 
-The interface displays process milestones, the inspectable prompt, and provider-dependent reasoning text as described in section 4. Direct API mode surfaces reasoning summaries rather than raw reasoning tokens; local Ollama mode surfaces raw thinking that never leaves the machine. Neither should be presented as proof of quality. What can be evaluated is the output, its cited evidence, its calibration, its consistency, and the consequences of acting on it.
+The interface displays process milestones and the inspectable, derived game
+record. It does not expose hidden chain-of-thought or present a generated
+reasoning narrative as proof of quality. What can be evaluated is the answer,
+its relationship to the capture trail, its calibration and consistency, and
+the consequences of acting on it.
 
 ### 10.4 Privacy and security boundary
 
-WebChess has an explicit, fail-closed provider abstraction. <code>openai-api</code> is the default and sends requests directly to the Responses API with a server-side project key. <code>codex-chatgpt</code> is an optional, single-owner local mode that invokes the exact audited Codex CLI 0.145.0 with a dedicated ChatGPT login. Credentials must never be exposed in a browser variable, and a provider failure never triggers fallback to the other provider.
+WebChess uses one fail-closed model boundary. Authenticated Next.js server routes
+call the OpenAI Responses API with a WebChess-owned Platform project key stored
+as a Vercel secret. The browser never receives or supplies a key, model, or
+provider. Clerk sign-in establishes identity; it does not grant WebChess access
+to a person's ChatGPT account or spend that person's ChatGPT allowance.
 
-The Codex mode requires Linux, a safely root-owned Bubblewrap installation, the standalone static Linux ELF payload from Codex CLI 0.145.0, a separate absolute canonical <code>WEBCHESS_CODEX_HOME</code> owned by the WebChess user with mode <code>0700</code>, and file-backed credential storage. JavaScript launchers, shell wrappers, and dynamically linked Codex executables are rejected. It refuses the operator's shared <code>~/.codex</code> home and forbids configuration, hooks, rules, project instructions, skills, plugins, and memories in the dedicated home. Each non-interactive run is placed inside a required Bubblewrap filesystem boundary and a root-deny Codex permission profile; shell and browser tools, the separate <code>standalone_web_search</code> feature, collaboration, and normal session persistence are disabled. Native Responses <code>web_search</code> is a separate, explicit opt-in and defaults to disabled. <code>WEBCHESS_CODEX_SHA256</code> can pin the audited executable digest, while <code>WEBCHESS_BWRAP_PATH</code> and <code>WEBCHESS_CA_BUNDLE_PATH</code> support explicit safe system paths. WebChess neither reads nor copies the shared Codex credential. These controls narrow the local subprocess, but they do not make an agent runtime suitable for a public, remote, reverse-proxied, or multi-user service. Codex mode is restricted to one owner and loopback requests; replacement by another process running as that same owner is outside this threat model.
+Every protected route verifies the Clerk session and derives ownership from the
+verified user ID. The client cannot authorize itself by submitting a user ID.
+The server loads that user's persisted cast and append-only event log,
+reconstructs the complete game, and derives captures, passes, counters,
+outcomes, and final prompt data. Move commands use an idempotency key and an
+expected revision so retries do not duplicate a move and stale tabs cannot
+silently overwrite one another.
 
-<code>WEBCHESS_CODEX_WEB_SEARCH</code> accepts <code>disabled</code>, <code>cached</code>, <code>indexed</code>, or <code>live</code>. The tracked example and application default are <code>disabled</code>; a local ignored <code>.env</code> can opt this checkout into another mode. Cached mode uses an OpenAI-maintained pre-indexed cache, indexed mode gates external retrieval through the search index, and live mode fetches current web information. This native search tool does not enable browser control, shell tools, or general internet access for model-generated commands. OpenAI's [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) documents the four modes, while its [web-search guidance](https://learn.chatgpt.com/docs/web-search) says to treat every web result as untrusted input and notes that cached mode lowers but does not remove prompt-injection risk.
+Neon Postgres is authoritative for games, events, suspensions, model-request
+accounting, quota buckets, rate buckets, and expiring concurrency leases. The
+legacy Express prototype's in-memory sessions, revocations, counters, daily
+quota, and concurrency gate could reset or diverge across Vercel Functions;
+none remains an authority in the production design. Rate identifiers are
+purpose-separated HMAC digests, so raw client addresses are not stored in the
+rate table. The default product controls allow two game starts per user per
+day, 100 model operations per day, 20 per user per hour, 40 per source-address
+digest per hour, one active model request per user, and four globally, with
+durable overrides and a separate OpenAI project budget.
 
-Enabling search also expands the data boundary: queries derived from the original question and game context may leave the local process, and the query itself may reveal a sensitive subject even when all results are public. Workspace policy can still make search unavailable; when it is available, the native tool does not request approval for each search and may issue multiple queries during either model run. Retrieved pages or snippets can be false, stale, malicious, or crafted to redirect the model. Cached and indexed modes can reduce exposure to arbitrary live pages but cannot remove query-disclosure, misinformation, or prompt-injection risk. Consequential claims still require independent verification against primary sources, and users should avoid secrets or sensitive regulated information.
+Quota and concurrency are reserved in a short transaction before a model call.
+The transaction closes, the bounded OpenAI request runs, and a second short
+transaction records provider response and token provenance, settles usage, and
+releases the lease. An interrupted Function cannot hold a lease indefinitely.
+This avoids both long-lived database transactions and replica-local spending
+decisions.
 
-Paid routes fail closed unless a private access code and session-signing secret meet their minimum lengths. A successful login creates a signed, bounded-lifetime, <code>HttpOnly</code>, <code>SameSite=Strict</code> cookie scoped to <code>/api</code>. API-mode production cookies are also <code>Secure</code>. Direct loopback HTTP in local Codex mode omits <code>Secure</code> for cross-browser compatibility and therefore must never leave its enforced single-owner loopback boundary. Paid requests require an allowed origin, a valid provider-bound session, and the matching in-memory CSRF token. Login attempts and per-session model calls are rate-limited, while a process-global daily call ceiling and provider-specific concurrency gate bound aggregate work: four simultaneous model requests in API mode and one in local Codex mode. Upstream requests have a 120-second timeout, retries are disabled, and client disconnects propagate cancellation. JSON bodies are limited to 256 KB and errors remain JSON.
+Trusted policy and serialized user data use separate Responses API fields;
+payloads and parsed output are bounded; and both model calls use
+<code>store: false</code>. That setting disables normal storage of Responses
+application state; it does not by itself mean that no service-side retention
+can occur. OpenAI’s current
+[API data-controls documentation](https://developers.openai.com/api/docs/guides/your-data)
+distinguishes model-training use, abuse-monitoring logs, application state, and
+Zero Data Retention eligibility. Users should not submit secrets, sensitive
+regulated information, or third-party personal data.
 
-In direct API mode, trusted policy and serialized user data use separate Responses API fields, payloads and parsed output are bounded, and both model calls use <code>store: false</code>. That setting disables normal storage of Responses application state; it does not by itself mean that no service-side retention of any kind can occur. OpenAI’s current [API data-controls documentation](https://developers.openai.com/api/docs/guides/your-data) distinguishes model-training use, abuse-monitoring logs, application state, and Zero Data Retention eligibility; abuse-monitoring logs may be retained for up to 30 days by default unless different approved controls apply.
-
-Local Codex mode does not use the API project's <code>store: false</code> setting. Its requests are governed by the signed-in ChatGPT workspace's plan, permissions, retention, residency, and data-use controls. ChatGPT/Codex allowance and credits, workspace limits, rate limits, and model availability apply; the mode is not free or unlimited. The question form identifies the active provider and links to its applicable data controls before play. The official [Codex authentication guide](https://learn.chatgpt.com/docs/auth) describes ChatGPT sign-in, and the [ChatGPT data-controls FAQ](https://help.openai.com/en/articles/7730893-data-controls-faq) describes user-facing controls. Users should not submit secrets or sensitive regulated information unless the selected provider's contractual, organizational, and retention controls have been independently reviewed.
-
-Sessions are bound to a random process epoch, so every restart invalidates all prior cookies and requires a new access-code sign-in; a logged-out cookie cannot become valid again after restart. Rate limits, the daily ceiling, and the concurrency gate are process-local. They reset on restart and do not coordinate multiple replicas. A single-process deployment and an OpenAI project budget are therefore the current API-mode operational backstops unless those controls are moved to shared storage. Local Codex mode must remain a single loopback process, and its owner must monitor the signed-in workspace allowance and credits.
+Clerk, Neon, Vercel, and OpenAI each process the minimum data needed for their
+role under the deployed account configuration. Self-service export and
+deletion are available through the account area. Content deletion leaves a
+minimal suspended marker until a signed Clerk <code>user.deleted</code>
+webhook confirms identity deletion and removes that marker. This prevents a
+still-valid identity from returning with reset quotas. Logs must exclude
+prompts, answers, raw request bodies, secrets, cookies, and authentication
+artifacts.
 
 ---
 
@@ -991,7 +1063,8 @@ The matrix supports a program of research, not a marketing claim of established 
 
 **Mitigations:**
 
-- animate state transitions, and label streamed reasoning text by its provider-dependent source rather than animating an impression of thought;
+- animate only meaningful state transitions and show bounded public milestones
+  rather than an impression of hidden thought;
 - provide reduced-motion and no-motion modes;
 - keep text and provenance visible after motion ends;
 - never use indeterminate animation when the process has failed;
@@ -999,25 +1072,25 @@ The matrix supports a program of research, not a marketing claim of established 
 
 ### 15.12 Privacy, security, and sensitive decisions
 
-**Risk:** Problems may contain personal, strategic, health, legal, or confidential information. Prompt injection may be embedded in user text or retrieved web content. Search queries derived from the problem can disclose its sensitive subject. Credentials may be exposed if placed client-side.
+**Risk:** Problems may contain personal, strategic, health, legal, or confidential information. Prompt injection may be embedded in user or model-generated text. Credentials may be exposed if placed client-side, and replica-local cost controls may fail under serverless concurrency.
 
 **Mitigations:**
 
-- keep API keys and local credentials server-side;
+- keep the WebChess-owned API key only in a server-side Vercel secret and never
+  accept a visitor-supplied key;
 - bound and validate input and output;
 - separate trusted instructions from user and game data;
-- require signed sessions, same-origin/CSRF checks, rate limits, a global quota,
-  bounded concurrency, timeouts, and disconnect cancellation;
+- verify Clerk authentication in every protected route and derive ownership
+  from the verified user ID;
+- reconstruct moves, captures, passes, outcomes, and final prompt data from the
+  persisted canonical game rather than accepting client authority;
+- require same-origin checks, idempotency, revision comparison, durable rate
+  limits and quotas, leased concurrency, timeouts, and disconnect cancellation;
 - document retention accurately;
-- use an OpenAI project budget in API mode because process-local controls reset
-  and do not coordinate replicas;
-- restrict ChatGPT/Codex mode to one owner on loopback, use its dedicated
-  credential home and required Bubblewrap boundary, and monitor workspace
-  allowance and credits;
-- keep native Codex web search disabled by default, disclose the selected mode,
-  and treat retrieved content as untrusted;
-- minimize search-query disclosure and verify consequential web claims against
-  primary sources;
+- store game and usage authority in Neon rather than Vercel Function memory;
+- pseudonymize stored rate and safety identifiers with purpose-separated HMACs;
+- use an OpenAI project budget as a separate spend backstop;
+- treat all user and generated content as untrusted data;
 - redact or avoid sensitive information;
 - obtain appropriate organizational review;
 - do not deploy as an autonomous high-stakes decision maker.
@@ -1222,16 +1295,26 @@ Falsification is not a threat to the project. It is how the project learns which
 
 ## 18. Development roadmap
 
-### 18.1 Near-term epistemic safeguards
+### 18.1 Production foundations and near-term epistemic safeguards
 
 1. **All-facet audit.** Send a compact manifest of all 64 facets to the final synthesis and require one uncaptured counterpoint.
 2. **Evidence tagging.** Let users mark each facet statement as observed, sourced, assumed, valued, predicted, or unknown.
 3. **Analogy discipline.** Require mapping, break point, rival interpretation, and discriminating evidence.
 4. **Seed comparison.** Offer three casts and distinguish recurring from seed-dependent themes.
-5. **Provenance.** Save model ID, prompt version, software version, seed, facets, moves, and user edits.
+5. **Durable provenance.** The production rebuild stores model ID, prompt
+   version, software/rules/engine versions, seed, facets, moves, outcomes, and
+   token accounting with the game.
 6. **Accessible motion.** Add reduced-motion, pause, replay, and persistent text alternatives.
-7. **Full-game proof.** Record the full move history and reconstruct submitted game legality rather than validating only capture and ending invariants.
-8. **Shared operational controls.** Move revocations, rate limits, quotas, and concurrency accounting to shared storage before running multiple API replicas.
+7. **Full-game proof.** The production rebuild records the append-only move/pass
+   history and reconstructs legality server-side rather than validating only a
+   submitted capture summary.
+8. **Shared operational controls.** The production rebuild places user
+   controls, rate limits, quotas, model-request accounting, and expiring
+   concurrency leases in Neon before any multi-instance preview.
+
+These production foundations describe the implementation target in this
+repository, not evidence that a production deployment has been promoted. The
+full preview gate and owner inspection remain prerequisites.
 
 ### 18.2 Better move policies
 
@@ -1360,39 +1443,45 @@ The proper claim is therefore neither mystical nor dismissive:
 
 ## Appendix A. Current implementation specification
 
+This table records the repository's production-rebuild contract. It does not
+claim that a production Vercel deployment has been promoted.
+
 | Component | Current setting |
 |---|---|
-| Model provider | <code>openai-api</code> by default; optional <code>ollama</code> and <code>codex-chatgpt</code> for single-owner loopback use |
+| Runtime target | Next.js App Router on an independent Vercel project named <code>webchess</code> |
+| Authentication | Clerk Google, email, and passkey sign-in; authentication rechecked in every protected route |
+| Durable state | Neon Postgres games, append-only events, model ledger, quotas, rate buckets, and expiring concurrency leases |
+| Model access | Authenticated server routes only; one WebChess-owned OpenAI Platform project key; no visitor key or provider selector |
 | Problem length | 12–240 normalized characters |
-| Division model | <code>gpt-5.6-sol</code> by default; server-configurable |
+| Division model | <code>gpt-5.6-sol</code>, fixed in server code |
 | Division reasoning | Medium effort |
-| Division output bound | API mode: 20,000 output tokens; local Codex: schema/parser, 2 MiB standard-output cap, and 120-second timeout |
+| Division output bound | 20,000 output tokens plus strict Structured Output and application validation |
 | Division output | Exactly 64 schema-valid facets plus bounded template/overlap checks; semantic distinctness, relevance, and correctness are not proven |
 | Analytic grid | 8 dimensions × 8 movements |
-| Random seed | 16 cryptographically random bytes, encoded as 32 hexadecimal characters |
-| Permutations | Facets, hexagrams, then paired board placement |
+| Random seed | A server-generated cryptographically random UUIDv4 request ID, containing 122 random bits |
+| Permutations | Domain-separated facet, hexagram, and paired-board placement permutations; persisted with provenance |
 | Board | 8 bounded rings × 8 wrapping sectors |
 | Black direction | Inner rings outward; inside-out intent |
 | White direction | Outer rings inward; outside-in evidence |
 | First turn | White |
 | Play modes | Manual moves, one guided turn, or autoplay; autoplay initially off |
 | Special rules | Direct King capture; initial clear two-ring pawn advance; pawn promotion; no check, castling, or en passant |
-| Move policy | Alpha-beta search with a capture extension, deepened to a fixed node budget; equal scores use a problem-and-turn-derived hash |
+| Move policy | Purpose-built iterative PVS with dual-word hashed transpositions, aspiration windows, rules-aware quiescence, move ordering, and a deterministic 150,000-node default; equal root values use a problem-and-turn-derived hash |
+| Move authority | Browser proposes piece and destination; server replays the persisted event log, validates the move, derives forced passes and outcomes, and commits by idempotency key plus expected revision |
 | Attention weight | Captured role, active role, and middle-ring meeting bonus |
 | Local leading signals | Up to 3 facet groups, with modest recurrence lift |
 | Ending | King capture, mutual immobility, 100 quiet plies, or 256 total plies; a one-sided immobility causes a counted pass |
-| Final evidence | Original question, outcome, turn/conflict totals, polarities, grouped captured facets with recurrence counts and peak weights, and the capture trail; no non-capture move log or uncaptured-facet manifest |
-| Final model | <code>gpt-5.6-sol</code> by default; server-configurable |
-| Final reasoning | API mode: Pro mode with medium effort; local Codex: medium effort mapping only |
-| Final output bound | API mode: 12,000 output tokens; local Codex: schema/parser, 2 MiB standard-output cap, and 120-second timeout |
+| Final prompt inputs | Original question, server-derived outcome and totals, polarities, grouped captured facets with recurrence counts and peak weights, and capture trail; the full non-capture/pass log is retained for legality but is not sent to the answer model |
+| Final model | <code>gpt-5.6-sol</code>, fixed in server code |
+| Final reasoning | Medium effort |
+| Final output bound | 12,000 output tokens plus strict Structured Output and application validation |
 | Final answer request | Strict five-section Structured Output, exactly three actions, two-to-three-sentence opening, and 450–750 rendered words |
-| Codex web search | Native Responses <code>web_search</code>; <code>disabled</code> by default, optionally <code>cached</code>, <code>indexed</code>, or <code>live</code>; shell, browser, and standalone search remain disabled |
-| Reasoning display | API mode streams labelled reasoning summaries; <code>ollama</code> streams labelled raw thinking; local Codex streams none; draft output text is never streamed |
-| Rationale notes | <code>ollama</code> only: one preliminary run per stage returning six bounded <code>NOTE:</code> lines of display copy; failures are swallowed |
-| Runs per new game | Two in API and local Codex modes; four in <code>ollama</code> mode |
-| Provider data controls | API mode sends both calls with <code>store: false</code>; local Codex mode uses signed-in ChatGPT workspace controls; <code>ollama</code> keeps all traffic on the local machine |
-| Paid-route access | Signed HttpOnly session, same-origin and CSRF checks |
-| Spend controls | Per-session rate limit and process-global daily quota; concurrency four in API mode and one in local Codex mode; process-local only |
+| Reasoning display | Bounded public process milestones and validation state; no hidden chain-of-thought display |
+| Runs per new game | Two successful model operations: division and post-ending answer |
+| OpenAI data control | Both calls use <code>store: false</code>; broader project, abuse-monitoring, retention, and data-sharing policy still applies |
+| Protected-route access | Clerk session, per-route authentication, owner-scoped database access, origin/input validation, and idempotency |
+| Default spend controls | Two game starts per user/day; 100 model operations/day; 20/user/hour; 40/source digest/hour; one active model request/user; four globally; 180-second leases; durable accounting plus an OpenAI project budget |
+| Account data controls | Self-service export and content deletion; a suspended marker prevents quota reset until the signed Clerk deletion webhook removes the final account record |
 
 ## Appendix B. Glossary
 
@@ -1513,7 +1602,5 @@ The list includes sources cited directly in the paper and additional primary or 
 85. Wilhelm, R. (Trans.), & Baynes, C. F. (English trans.). (1967). *The I Ching or Book of Changes* (3rd ed.). Princeton University Press. [Berkeley Law Library record](https://lawcat.berkeley.edu/record/541043)
 86. Wouters, P., van Nimwegen, C., van Oostendorp, H., & van der Spek, E. D. (2013). A meta-analysis of the cognitive and motivational effects of serious games. *Journal of Educational Psychology, 105*(2), 249–265. [DOI](https://doi.org/10.1037/a0031311)
 87. Zhang, J., & Norman, D. A. (1994). Representations in distributed cognitive tasks. *Cognitive Science, 18*(1), 87–122. [DOI](https://doi.org/10.1207/s15516709cog1801_3)
-88. OpenAI. (n.d.). Codex authentication. Retrieved July 24, 2026. [Documentation](https://learn.chatgpt.com/docs/auth)
-89. OpenAI. (n.d.). Data Controls FAQ. Retrieved July 24, 2026. [Help Center](https://help.openai.com/en/articles/7730893-data-controls-faq)
-90. OpenAI. (n.d.). Codex configuration reference. Retrieved July 24, 2026. [Documentation](https://learn.chatgpt.com/docs/config-file/config-reference)
-91. OpenAI. (n.d.). Codex web search. Retrieved July 24, 2026. [Documentation](https://learn.chatgpt.com/docs/web-search)
+88. OpenAI. (n.d.). Migrate to the Responses API. Retrieved July 26, 2026. [Documentation](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+89. OpenAI. (n.d.). Data controls in the OpenAI platform. Retrieved July 26, 2026. [Documentation](https://developers.openai.com/api/docs/guides/your-data)

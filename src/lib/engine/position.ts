@@ -91,8 +91,46 @@ export function moveIsPromotion(move: number): boolean {
 
 interface UndoRecord {
   move: number
-  movedFlagWasSet: boolean
+  movingCode: number
+  capturedCode: number
+  fromMovedFlagWasSet: boolean
+  toMovedFlagWasSet: boolean
 }
+
+const PIECE_CODE_COUNT = 1 + 2 * 6
+
+/*
+ * These keys are generated once from a fixed seed. Keeping two independent
+ * 32-bit words avoids JavaScript's lossy integer range while giving the search
+ * a stable 64-bit position identity.
+ */
+let zobristState = 0x6d2b79f5
+
+function nextZobristWord(): number {
+  zobristState = (zobristState + 0x9e3779b9) >>> 0
+  let value = zobristState
+  value = Math.imul(value ^ (value >>> 16), 0x21f0aaad)
+  value = Math.imul(value ^ (value >>> 15), 0x735a2d97)
+  return (value ^ (value >>> 15)) >>> 0
+}
+
+const PIECE_HASH_LOW = new Uint32Array(PIECE_CODE_COUNT * SQUARE_COUNT)
+const PIECE_HASH_HIGH = new Uint32Array(PIECE_CODE_COUNT * SQUARE_COUNT)
+const MOVED_HASH_LOW = new Uint32Array(SQUARE_COUNT)
+const MOVED_HASH_HIGH = new Uint32Array(SQUARE_COUNT)
+
+for (let index = 0; index < PIECE_HASH_LOW.length; index += 1) {
+  PIECE_HASH_LOW[index] = nextZobristWord()
+  PIECE_HASH_HIGH[index] = nextZobristWord()
+}
+
+for (let square = 0; square < SQUARE_COUNT; square += 1) {
+  MOVED_HASH_LOW[square] = nextZobristWord()
+  MOVED_HASH_HIGH[square] = nextZobristWord()
+}
+
+const SIDE_HASH_LOW = nextZobristWord()
+const SIDE_HASH_HIGH = nextZobristWord()
 
 /**
  * A mutable board built for search. Piece identity is deliberately absent:
@@ -101,27 +139,100 @@ interface UndoRecord {
 export class Position {
   readonly board: Int8Array
   readonly moved: Uint8Array
-  sideToMove: number
+
+  private _sideToMove = WHITE
+  private _hashLow = 0
+  private _hashHigh = 0
 
   private readonly undoStack: UndoRecord[] = []
 
   constructor() {
     this.board = new Int8Array(SQUARE_COUNT)
     this.moved = new Uint8Array(SQUARE_COUNT)
-    this.sideToMove = WHITE
+  }
+
+  get sideToMove(): number {
+    return this._sideToMove
+  }
+
+  set sideToMove(side: number) {
+    if (side !== WHITE && side !== BLACK) {
+      throw new RangeError(`Invalid side to move: ${side}.`)
+    }
+    if (side === this._sideToMove) return
+
+    this._hashLow = (this._hashLow ^ SIDE_HASH_LOW) >>> 0
+    this._hashHigh = (this._hashHigh ^ SIDE_HASH_HIGH) >>> 0
+    this._sideToMove = side
+  }
+
+  /** Low and high words of the deterministic incremental position hash. */
+  get hashLow(): number {
+    return this._hashLow
+  }
+
+  get hashHigh(): number {
+    return this._hashHigh
+  }
+
+  /**
+   * Rebuilds the hash after setup code writes directly into `board` or
+   * `moved`. Search moves update it incrementally and do not call this method.
+   */
+  recomputeHash(): void {
+    let low = 0
+    let high = 0
+
+    for (let square = 0; square < SQUARE_COUNT; square += 1) {
+      const code = this.board[square]!
+      if (code !== EMPTY) {
+        const index = code * SQUARE_COUNT + square
+        low ^= PIECE_HASH_LOW[index]!
+        high ^= PIECE_HASH_HIGH[index]!
+      }
+      if (this.moved[square] === 1) {
+        low ^= MOVED_HASH_LOW[square]!
+        high ^= MOVED_HASH_HIGH[square]!
+      }
+    }
+
+    if (this._sideToMove === BLACK) {
+      low ^= SIDE_HASH_LOW
+      high ^= SIDE_HASH_HIGH
+    }
+
+    this._hashLow = low >>> 0
+    this._hashHigh = high >>> 0
   }
 
   make(move: number): void {
     const from = moveFrom(move)
     const to = moveTo(move)
     const code = this.board[from]!
+    const captured = this.board[to]!
+    const fromMovedFlagWasSet = this.moved[from] === 1
+    const toMovedFlagWasSet = this.moved[to] === 1
 
-    this.undoStack.push({ move, movedFlagWasSet: this.moved[from] === 1 })
+    this.undoStack.push({
+      move,
+      movingCode: code,
+      capturedCode: captured,
+      fromMovedFlagWasSet,
+      toMovedFlagWasSet,
+    })
+
+    this.xorPiece(from, code)
+    if (fromMovedFlagWasSet) this.xorMoved(from)
+    this.xorPiece(to, captured)
+    if (toMovedFlagWasSet) this.xorMoved(to)
 
     this.board[from] = EMPTY
     this.moved[from] = 0
-    this.board[to] = moveIsPromotion(move) ? encodePiece(codeSide(code), QUEEN) : code
+    const placedCode = moveIsPromotion(move) ? encodePiece(codeSide(code), QUEEN) : code
+    this.board[to] = placedCode
     this.moved[to] = 1
+    this.xorPiece(to, placedCode)
+    this.xorMoved(to)
     this.sideToMove = this.sideToMove === WHITE ? BLACK : WHITE
   }
 
@@ -129,16 +240,22 @@ export class Position {
     const record = this.undoStack.pop()
     if (!record) throw new Error('Nothing to unmake.')
 
-    const { move } = record
+    const { move, movingCode, capturedCode, fromMovedFlagWasSet, toMovedFlagWasSet } = record
     const from = moveFrom(move)
     const to = moveTo(move)
-    const code = this.board[to]!
-    const captured = moveCaptured(move)
 
-    this.board[from] = moveIsPromotion(move) ? encodePiece(codeSide(code), PAWN) : code
-    this.moved[from] = record.movedFlagWasSet ? 1 : 0
-    this.board[to] = captured
-    this.moved[to] = captured === EMPTY ? 0 : 1
+    this.xorPiece(to, this.board[to]!)
+    if (this.moved[to] === 1) this.xorMoved(to)
+
+    this.board[from] = movingCode
+    this.moved[from] = fromMovedFlagWasSet ? 1 : 0
+    this.board[to] = capturedCode
+    this.moved[to] = toMovedFlagWasSet ? 1 : 0
+
+    this.xorPiece(from, movingCode)
+    if (fromMovedFlagWasSet) this.xorMoved(from)
+    this.xorPiece(to, capturedCode)
+    if (toMovedFlagWasSet) this.xorMoved(to)
     this.sideToMove = this.sideToMove === WHITE ? BLACK : WHITE
   }
 
@@ -149,6 +266,18 @@ export class Position {
 
   unmakePass(): void {
     this.sideToMove = this.sideToMove === WHITE ? BLACK : WHITE
+  }
+
+  private xorPiece(square: number, code: number): void {
+    if (code === EMPTY) return
+    const index = code * SQUARE_COUNT + square
+    this._hashLow = (this._hashLow ^ PIECE_HASH_LOW[index]!) >>> 0
+    this._hashHigh = (this._hashHigh ^ PIECE_HASH_HIGH[index]!) >>> 0
+  }
+
+  private xorMoved(square: number): void {
+    this._hashLow = (this._hashLow ^ MOVED_HASH_LOW[square]!) >>> 0
+    this._hashHigh = (this._hashHigh ^ MOVED_HASH_HIGH[square]!) >>> 0
   }
 }
 
@@ -175,5 +304,6 @@ export function positionFromPieces(pieces: readonly Piece[], sideToMove: Side): 
     position.moved[square] = piece.moved ? 1 : 0
   }
 
+  position.recomputeHash()
   return position
 }

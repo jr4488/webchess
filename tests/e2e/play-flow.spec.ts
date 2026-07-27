@@ -1,0 +1,580 @@
+import type { Locator, Page, Route } from '@playwright/test'
+
+import type { ReplayState } from '../../src/lib/game-contract'
+import {
+  acceptMoveCommand,
+  createReplayState,
+  toGameView,
+} from '../../src/lib/game-replay'
+import type {
+  DurableGame,
+  MoveGameCommand,
+} from '../../src/lib/webchess-api'
+import {
+  makeProblemFacets,
+  makeProblemParts,
+} from '../../src/test/fixtures'
+import type { GeneratedAnswer } from '../../src/types'
+import { expect, expectWcagAA, test } from './fixtures/test'
+
+const problem =
+  'How should I test this idea without committing the whole organization?'
+const gameId = '00000000-0000-4000-8000-000000000001'
+const parts = makeProblemParts('browser-play-flow')
+const facets = makeProblemFacets('Browser facet')
+const answer: GeneratedAnswer = {
+  model: 'gpt-5.6-sol',
+  prompt: 'Server-derived answer prompt fixture.',
+  answer: [
+    'Answer',
+    'Run one bounded experiment before making a larger commitment.',
+    '',
+    'What the conflicts emphasized',
+    'The board emphasized reversibility, evidence, and a clear stopping rule.',
+    '',
+    'The tension to hold',
+    'Preserve the reason for acting while testing whether the method works.',
+    '',
+    'Three next moves',
+    '1. Write the smallest useful experiment.',
+    '2. Name one owner and one measurable result.',
+    '3. Set a date to stop, change, or expand the trial.',
+    '',
+    'What could change the answer',
+    'New evidence about safety, ownership, or feasibility should change the plan.',
+  ].join('\n'),
+}
+
+function game(
+  status: DurableGame['status'],
+  revision: number,
+  state: DurableGame['state'],
+  generatedAnswer: GeneratedAnswer | null = null,
+): DurableGame {
+  return {
+    id: gameId,
+    sourceGameId: null,
+    revision,
+    status,
+    problem,
+    division: {
+      seed: 'browser-play-flow',
+      facets,
+      parts,
+      model: 'gpt-5.6-sol',
+      prompt: 'Server-side division prompt fixture.',
+    },
+    state,
+    answer: generatedAnswer,
+  }
+}
+
+function nearTerminalState(): ReplayState {
+  return {
+    ...createReplayState(),
+    pieces: [
+      {
+        id: 'white-king',
+        side: 'white',
+        kind: 'king',
+        position: { ring: 7, sector: 4 },
+        moved: false,
+      },
+      {
+        id: 'white-rook',
+        side: 'white',
+        kind: 'rook',
+        position: { ring: 4, sector: 0 },
+        moved: true,
+      },
+      {
+        id: 'black-king',
+        side: 'black',
+        kind: 'king',
+        position: { ring: 2, sector: 0 },
+        moved: true,
+      },
+    ],
+    turn: 'white',
+    completedPlies: 255,
+    quietPlies: 99,
+    events: [],
+    captures: [],
+    lastMove: null,
+    outcome: null,
+  }
+}
+
+function requestBody<T>(route: Route): T {
+  const body = route.request().postDataJSON()
+  expect(body).toBeTruthy()
+  return body as T
+}
+
+function expectServerMutationBoundary(route: Route): void {
+  const request = route.request()
+  expect(request.method()).toBe('POST')
+  expect(request.headers()['idempotency-key']).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  )
+  expect(request.headers()).not.toHaveProperty('authorization')
+  expect(request.postData() ?? '').not.toMatch(
+    /api[_-]?key|openai_api_key|captures|outcome|provider|model/i,
+  )
+}
+
+async function json(route: Route, body: unknown): Promise<void> {
+  await route.fulfill({
+    status: 200,
+    contentType: 'application/json; charset=utf-8',
+    body: JSON.stringify(body),
+  })
+}
+
+async function expectRootFitsViewport(page: Page, stage: string): Promise<void> {
+  const dimensions = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: Math.max(
+      document.documentElement.scrollWidth,
+      document.body.scrollWidth,
+    ),
+  }))
+
+  expect(
+    dimensions.scrollWidth,
+    `${stage} must not create document-level horizontal scrolling.`,
+  ).toBeLessThanOrEqual(dimensions.clientWidth + 1)
+}
+
+async function expectReducedMotionApplied(
+  page: Page,
+  stage: string,
+): Promise<void> {
+  expect(
+    await page.evaluate(
+      () => window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    ),
+    `${stage} must receive the operating-system reduced-motion preference.`,
+  ).toBe(true)
+
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      }),
+  )
+  const longRunningAnimations = await page.evaluate(() =>
+    document
+      .getAnimations()
+      .filter((animation) => {
+        const duration = animation.effect?.getComputedTiming().duration
+        return (
+          animation.playState === 'running' &&
+          typeof duration === 'number' &&
+          duration > 10
+        )
+      })
+      .map((animation) => ({
+        currentTime: animation.currentTime,
+        duration: animation.effect?.getComputedTiming().duration,
+      })),
+  )
+
+  expect(
+    longRunningAnimations,
+    `${stage} must not leave decorative animations running in reduced-motion mode.`,
+  ).toEqual([])
+}
+
+async function expectAccessibleDynamicStage(
+  page: Page,
+  stage: string,
+): Promise<void> {
+  await expectRootFitsViewport(page, stage)
+  await expectReducedMotionApplied(page, stage)
+  await expectWcagAA(page)
+}
+
+async function tabTo(page: Page, target: Locator): Promise<void> {
+  let reachedTarget = await target.evaluate(
+    (element) => element === document.activeElement,
+  )
+  for (let step = 0; step < 20; step += 1) {
+    if (reachedTarget) break
+    await page.keyboard.press('Tab')
+    reachedTarget = await target.evaluate(
+      (element) => element === document.activeElement,
+    )
+  }
+
+  expect(reachedTarget, 'The play control must be reachable with Tab.').toBe(
+    true,
+  )
+}
+
+async function moveBoardFocus(
+  page: Page,
+  target: { ring: number; sector: number },
+): Promise<void> {
+  const focusedCell = page.locator('.radial-board__cell:focus')
+  await expect(focusedCell).toHaveCount(1)
+
+  let coordinate = await focusedCell.evaluate((element) => ({
+    ring: Number((element as HTMLElement).dataset.ring),
+    sector: Number((element as HTMLElement).dataset.sector),
+  }))
+
+  while (coordinate.ring > target.ring) {
+    await page.keyboard.press('ArrowUp')
+    coordinate = { ...coordinate, ring: coordinate.ring - 1 }
+  }
+  while (coordinate.ring < target.ring) {
+    await page.keyboard.press('ArrowDown')
+    coordinate = { ...coordinate, ring: coordinate.ring + 1 }
+  }
+
+  const clockwise = (target.sector - coordinate.sector + 8) % 8
+  const counterclockwise = (coordinate.sector - target.sector + 8) % 8
+  const key = clockwise <= counterclockwise ? 'ArrowRight' : 'ArrowLeft'
+  const steps = Math.min(clockwise, counterclockwise)
+  for (let step = 0; step < steps; step += 1) {
+    await page.keyboard.press(key)
+  }
+
+  await expect(page.locator('.radial-board__cell:focus')).toHaveAttribute(
+    'data-ring',
+    String(target.ring),
+  )
+  await expect(page.locator('.radial-board__cell:focus')).toHaveAttribute(
+    'data-sector',
+    String(target.sector),
+  )
+}
+
+test.describe('complete durable play flow', () => {
+  test.use({ contextOptions: { reducedMotion: 'reduce' } })
+
+  test('keyboard-divides, starts, plays, answers, and restores after refresh', async ({
+    page,
+  }, testInfo) => {
+    const startState = nearTerminalState()
+    let currentGame: DurableGame | null = null
+    const calls: string[] = []
+
+    await page.setExtraHTTPHeaders({
+      'x-webchess-e2e-auth':
+        process.env.WEBCHESS_E2E_AUTH ?? 'playwright-local',
+    })
+    await page.route('**/api/**', async (route) => {
+      const request = route.request()
+      const pathname = new URL(request.url()).pathname
+      calls.push(`${request.method()} ${pathname}`)
+
+      if (request.method() === 'GET' && pathname === '/api/games/current') {
+        await json(route, { game: currentGame })
+        return
+      }
+
+      if (pathname === '/api/divide') {
+        expectServerMutationBoundary(route)
+        expect(requestBody<{ problem: string }>(route)).toEqual({ problem })
+        currentGame = game('mapped', 1, null)
+        await json(route, { game: currentGame })
+        return
+      }
+
+      if (pathname === `/api/games/${gameId}/start`) {
+        expectServerMutationBoundary(route)
+        expect(requestBody<{ expectedRevision: number }>(route)).toEqual({
+          expectedRevision: 1,
+        })
+        currentGame = game('playing', 2, toGameView(startState))
+        await json(route, { game: currentGame })
+        return
+      }
+
+      if (pathname === `/api/games/${gameId}/moves`) {
+        expectServerMutationBoundary(route)
+        const command = requestBody<MoveGameCommand>(route)
+        expect(Object.keys(command).sort()).toEqual([
+          'expectedRevision',
+          'pieceId',
+          'to',
+        ])
+        expect(command.expectedRevision).toBe(2)
+        const accepted = acceptMoveCommand(
+          startState,
+          {
+            expectedPly: 256,
+            pieceId: command.pieceId,
+            to: command.to,
+          },
+          parts,
+        )
+        expect(accepted.state.outcome).not.toBeNull()
+        currentGame = game('completed', 3, toGameView(accepted.state))
+        await json(route, { game: currentGame })
+        return
+      }
+
+      if (pathname === `/api/games/${gameId}/answer`) {
+        expectServerMutationBoundary(route)
+        expect(requestBody<{ expectedRevision: number }>(route)).toEqual({
+          expectedRevision: 3,
+        })
+        expect(currentGame?.status).toBe('completed')
+        currentGame = game('answered', 4, currentGame?.state ?? null, answer)
+        await json(route, { game: currentGame, answer })
+        return
+      }
+
+      throw new Error(`Unexpected browser API request: ${request.method()} ${pathname}`)
+    })
+
+    await page.goto('/play', { waitUntil: 'domcontentloaded' })
+    await expect(
+      page.getByRole('heading', { name: /Bring a problem/i }),
+    ).toBeVisible()
+
+    const problemInput = page.getByLabel('What are you trying to understand?')
+    await tabTo(page, problemInput)
+    await problemInput.fill(problem)
+    await problemInput.press('Tab')
+    const divideButton = page.getByRole('button', {
+      name: /Divide the problem/i,
+    })
+    await expect(divideButton).toBeFocused()
+    await divideButton.press('Enter')
+
+    const startButton = page.getByRole('button', {
+      name: /Set the pieces in motion/i,
+    })
+    await expect(startButton).toBeEnabled()
+    await expect(
+      page.getByRole('progressbar', { name: /Facets cast onto the board/i }),
+    ).toHaveAttribute('aria-valuenow', '64')
+    await expectAccessibleDynamicStage(page, 'mapped play stage')
+    await expect(page.locator('[data-stage-root]')).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(startButton).toBeFocused()
+    await startButton.press('Enter')
+
+    await expect(
+      page.getByRole('region', {
+        name: /Play the problem on the circular board/i,
+      }),
+    ).toBeVisible()
+    await expectAccessibleDynamicStage(page, 'active play stage')
+    await expect(page.locator('[data-stage-root]')).toBeFocused()
+
+    if (testInfo.project.name === 'mobile') {
+      const boardScroller = page.locator('.board-card.is-live')
+      const boardDimensions = await boardScroller.evaluate((element) => ({
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+      }))
+      expect(boardDimensions.scrollWidth).toBeGreaterThan(
+        boardDimensions.clientWidth,
+      )
+      await boardScroller.evaluate((element) => {
+        element.scrollLeft = element.scrollWidth
+      })
+      expect(
+        await boardScroller.evaluate((element) => element.scrollLeft),
+      ).toBeGreaterThan(0)
+      await boardScroller.evaluate((element) => {
+        element.scrollLeft = 0
+      })
+    }
+
+    const rook = page.getByRole('button', {
+      name: /^white rook, ring 5, north$/i,
+    })
+    await tabTo(page, rook)
+    await page.keyboard.press('Enter')
+    await expect(page.locator('.radial-board__cell.is-legal:focus')).toHaveCount(
+      1,
+    )
+    await moveBoardFocus(page, { ring: 2, sector: 0 })
+    const captureCell = page.locator('.radial-board__cell:focus')
+    await expect(captureCell).toHaveAttribute('aria-label', /black king/i)
+    await expect(captureCell).toHaveClass(/is-legal/)
+    await page.keyboard.press('Enter')
+
+    await expect(
+      page.getByRole('heading', {
+        name: 'A direction from the captured signals',
+      }),
+    ).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByText(/Run one bounded experiment/)).toBeVisible()
+    await expectAccessibleDynamicStage(page, 'answered play stage')
+    await expect(page.locator('[data-stage-root]')).toBeFocused()
+
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(
+      page.getByRole('heading', {
+        name: 'A direction from the captured signals',
+      }),
+    ).toBeVisible()
+    await expect(page.getByText(/Run one bounded experiment/)).toBeVisible()
+    await expectRootFitsViewport(page, 'restored answer stage')
+    await expectReducedMotionApplied(page, 'restored answer stage')
+
+    expect(calls).toEqual([
+      'GET /api/games/current',
+      'POST /api/divide',
+      `POST /api/games/${gameId}/start`,
+      `POST /api/games/${gameId}/moves`,
+      `POST /api/games/${gameId}/answer`,
+      'GET /api/games/current',
+    ])
+  })
+
+  test('runs Engine V2 in a web worker and cancels outstanding autoplay on pause and reset', async ({
+    page,
+  }) => {
+    let replayState = createReplayState()
+    let revision = 2
+    let currentGame = game('playing', revision, toGameView(replayState))
+    const submittedMoves: MoveGameCommand[] = []
+    const browserErrors: string[] = []
+    let abandonCalls = 0
+
+    page.on('console', (message) => {
+      if (message.type() === 'error') browserErrors.push(message.text())
+    })
+    page.on('pageerror', (error) => {
+      browserErrors.push(error.message)
+    })
+
+    await page.setExtraHTTPHeaders({
+      'x-webchess-e2e-auth':
+        process.env.WEBCHESS_E2E_AUTH ?? 'playwright-local',
+    })
+    await page.route('**/api/**', async (route) => {
+      const request = route.request()
+      const pathname = new URL(request.url()).pathname
+
+      if (request.method() === 'GET' && pathname === '/api/games/current') {
+        await json(route, { game: currentGame })
+        return
+      }
+
+      if (pathname === `/api/games/${gameId}/moves`) {
+        expectServerMutationBoundary(route)
+        const command = requestBody<MoveGameCommand>(route)
+        expect(command.expectedRevision).toBe(revision)
+
+        const accepted = acceptMoveCommand(
+          replayState,
+          {
+            expectedPly: replayState.completedPlies + 1,
+            pieceId: command.pieceId,
+            to: command.to,
+          },
+          parts,
+        )
+        replayState = accepted.state
+        revision += 1
+        submittedMoves.push(command)
+        currentGame = game(
+          replayState.outcome ? 'completed' : 'playing',
+          revision,
+          toGameView(replayState),
+        )
+        await json(route, { game: currentGame })
+        return
+      }
+
+      if (pathname === `/api/games/${gameId}/abandon`) {
+        expectServerMutationBoundary(route)
+        expect(requestBody<{ expectedRevision: number }>(route)).toEqual({
+          expectedRevision: revision,
+        })
+        abandonCalls += 1
+        revision += 1
+        currentGame = game(
+          'abandoned',
+          revision,
+          toGameView(replayState),
+        )
+        await json(route, { game: currentGame })
+        return
+      }
+
+      throw new Error(
+        `Unexpected worker-flow API request: ${request.method()} ${pathname}`,
+      )
+    })
+
+    await page.goto('/play', { waitUntil: 'domcontentloaded' })
+    await expect(
+      page.getByRole('region', {
+        name: /Play the problem on the circular board/i,
+      }),
+    ).toBeVisible()
+
+    const firstWorkerPromise = page.waitForEvent('worker')
+    await page.getByRole('button', { name: /Play one turn/i }).click()
+    const firstWorker = await firstWorkerPromise
+    const firstWorkerClosed = firstWorker.waitForEvent('close')
+    const firstWorkerUrl = new URL(firstWorker.url())
+    expect(firstWorkerUrl.origin).toBe(new URL(page.url()).origin)
+    expect(firstWorkerUrl.pathname).toMatch(
+      /^\/_next\/static\/chunks\/.+\.js$/,
+    )
+
+    await expect
+      .poll(() => submittedMoves.length, { timeout: 20_000 })
+      .toBe(1)
+    await expect(
+      page.locator('.turn-header .eyebrow'),
+    ).toContainText('Move 02')
+    expect(replayState.completedPlies).toBe(1)
+    expect(replayState.outcome).toBeNull()
+    await firstWorkerClosed
+
+    const autoplayButton = page.getByRole('button', {
+      name: /Auto-play to the end/i,
+    })
+    const autoplayWorkerPromise = page.waitForEvent('worker')
+    await autoplayButton.click()
+    const autoplayWorker = await autoplayWorkerPromise
+    const autoplayWorkerClosed = autoplayWorker.waitForEvent('close')
+    await expect(
+      page.getByRole('button', { name: /Searching/i }),
+    ).toBeDisabled()
+    await page.getByRole('button', { name: /Pause auto-play/i }).click()
+    await autoplayWorkerClosed
+    await expect(
+      page.locator('.play-panel .board-message'),
+    ).toContainText(/Auto-play paused\. Choose a Black piece/i)
+    await page.waitForTimeout(500)
+    expect(submittedMoves).toHaveLength(1)
+
+    const replacementWorkerPromise = page.waitForEvent('worker')
+    await page.getByRole('button', { name: /Auto-play to the end/i }).click()
+    const replacementWorker = await replacementWorkerPromise
+    expect(replacementWorker).not.toBe(autoplayWorker)
+    const replacementWorkerUrl = new URL(replacementWorker.url())
+    expect(replacementWorkerUrl.origin).toBe(new URL(page.url()).origin)
+    expect(replacementWorkerUrl.pathname).toMatch(
+      /^\/_next\/static\/chunks\/.+\.js$/,
+    )
+    await expect(
+      page.getByRole('button', { name: /Searching/i }),
+    ).toBeDisabled()
+
+    const replacementWorkerClosed = replacementWorker.waitForEvent('close')
+    await page.getByRole('button', { name: /New question/i }).click()
+    await replacementWorkerClosed
+    await expect(
+      page.getByLabel('What are you trying to understand?'),
+    ).toBeVisible()
+    await page.waitForTimeout(500)
+
+    expect(abandonCalls).toBe(1)
+    expect(submittedMoves).toHaveLength(1)
+    expect(browserErrors).toEqual([])
+  })
+})

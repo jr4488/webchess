@@ -31,7 +31,7 @@ interface PlayingStageProps {
   captureKeys: ReadonlySet<string>
   lastMove: LastMove | null
   autoPlaying: boolean
-  thinking: boolean
+  searchMode: 'manual' | 'autoplay' | null
   gameFinishing: boolean
   notice: string
   onPieceSelect: (pieceId: string) => void
@@ -55,7 +55,7 @@ export function PlayingStage({
   captureKeys,
   lastMove,
   autoPlaying,
-  thinking,
+  searchMode,
   gameFinishing,
   notice,
   onPieceSelect,
@@ -63,6 +63,8 @@ export function PlayingStage({
   onStep,
   onToggleAuto,
 }: PlayingStageProps) {
+  const thinking = searchMode !== null
+  const manualSearchInFlight = searchMode === 'manual'
   const latestCaptures = [...captures].reverse().slice(0, 4)
   const activeCaptureIndices = captures.map((capture) => capture.cell.ring * 8 + capture.cell.sector)
   const processMode = gameFinishing ? 'finishing' : autoPlaying ? 'autoplay' : 'paused'
@@ -133,7 +135,7 @@ export function PlayingStage({
             <p className="eyebrow"><span /> Move {String(turnNumber).padStart(2, '0')}</p>
             <h2>{turn === 'white' ? 'Outside moves in.' : 'Inside moves out.'}</h2>
           </div>
-          <span className={`turn-stone turn-stone--${turn}`} aria-label={`${turn} to move`} />
+          <span className={`turn-stone turn-stone--${turn}`} aria-hidden="true" />
         </div>
         <p className="problem-reminder">{problem}</p>
 
@@ -166,7 +168,13 @@ export function PlayingStage({
         />
 
         <div className="control-row">
-          <button className={`auto-button ${autoPlaying ? 'is-active' : ''}`} type="button" onClick={onToggleAuto} disabled={gameFinishing} aria-pressed={autoPlaying}>
+          <button
+            className={`auto-button ${autoPlaying ? 'is-active' : ''}`}
+            type="button"
+            onClick={onToggleAuto}
+            disabled={gameFinishing || (!autoPlaying && manualSearchInFlight)}
+            aria-pressed={autoPlaying}
+          >
             {autoPlaying ? <Pause size={17} /> : <Play size={17} />}
             {autoPlaying ? 'Pause auto-play' : 'Auto-play to the end'}
           </button>
@@ -176,7 +184,7 @@ export function PlayingStage({
         </div>
         <p className="play-help">Choose a piece yourself, play one turn, or let WebChess continue to the end.</p>
 
-        <small className="end-rule">Seven captured signals mark reflection depth; they are not evidence and do not end the game. A Core Purpose capture or a full-board stopping rule ends play.</small>
+        <small className="end-rule">Seven captured signals mark reflection depth; they are not evidence and do not end the game. A Core Purpose capture wins; mutual immobility, 100 quiet plies, or 256 total plies draws.</small>
 
         {focusedPart ? (
           <article className="focus-card">

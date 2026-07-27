@@ -3,28 +3,44 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
-    name: Node ${{ matrix.node }}
+    name: Lint, test, build, and browser verification
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_DB: webchess_test
+          POSTGRES_PASSWORD: webchess_test
+          POSTGRES_USER: webchess_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=webchess_test --dbname=webchess_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
+      CI: 'true'
+      NEXT_TELEMETRY_DISABLED: '1'
       OPENAI_API_KEY: ''
-      CODEX_API_KEY: ''
-      CODEX_ACCESS_TOKEN: ''
-      WEBCHESS_REQUIRE_BWRAP_INTEGRATION: '1'
-      WEBCHESS_MODEL_PROVIDER: openai-api
-    strategy:
-      fail-fast: false
-      matrix:
-        node:
-          - 20.19.0
-          - 22.13.0
-          - 24.0.0
+      DATABASE_URL: ''
+      CLERK_SECRET_KEY: ''
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ''
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:3011
+      PLAYWRIGHT_WEB_SERVER_COMMAND: >-
+        npm run start -- --hostname 127.0.0.1 --port 3011
 
     steps:
       - name: Check out repository
@@ -35,23 +51,62 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 22.20.0
           cache: npm
 
       - name: Use the declared npm version
         run: npm install --global npm@11.14.1
 
-      - name: Install sandbox test prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            bubblewrap ca-certificates gcc libc6-dev
-
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Verify
-        run: npm run verify
+      - name: Install the Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit and PostgreSQL integration coverage
+        env:
+          DATABASE_URL: >-
+            postgresql://webchess_test:webchess_test@127.0.0.1:5432/webchess_test
+        run: npm run test:coverage
+
+      - name: Integration tests
+        env:
+          DATABASE_URL: >-
+            postgresql://webchess_test:webchess_test@127.0.0.1:5432/webchess_test
+        run: npm run test:integration
+
+      - name: Production build
+        run: npm run build
+
+      - name: Accessibility checks
+        run: npm run test:a11y
+
+      - name: Public routes, accessibility, links, and layouts
+        run: npm run test:e2e
+
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-report-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Audit the full dependency tree
         run: npm audit --audit-level=high
+
+      # Preview deployment is intentionally absent. Add it only after the
+      # independent Vercel project named "webchess" is provisioned and this
+      # complete verification job is a required successful dependency.

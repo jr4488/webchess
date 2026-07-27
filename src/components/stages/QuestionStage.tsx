@@ -1,8 +1,8 @@
 import type { FormEvent } from 'react'
 import { ArrowRight, ChevronRight, Eye, Layers, Target } from 'lucide-react'
 
+import type { HostedProvider } from '../../lib/hosted-provider'
 import { normalizeProblemInput } from '../../lib/problem'
-import type { SessionProvider } from '../../lib/session'
 import { RadialBoard } from '../RadialBoard'
 
 const EXAMPLE_PROBLEMS = [
@@ -13,7 +13,7 @@ const EXAMPLE_PROBLEMS = [
 
 interface QuestionStageProps {
   problem: string
-  provider: SessionProvider
+  provider: HostedProvider
   setProblem: (value: string) => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }
@@ -27,8 +27,6 @@ export function QuestionStage({
   const normalizedLength = normalizeProblemInput(problem).length
   const canBegin = normalizedLength >= 12 && normalizedLength <= 240
   const needsMoreDetail = problem.length > 0 && normalizedLength < 12
-  const codexWebSearchEnabled =
-    provider.id === 'codex-chatgpt' && provider.webSearch !== 'disabled'
 
   return (
     <section className="question-layout stage-enter" aria-label="Name your problem">
@@ -67,56 +65,14 @@ export function QuestionStage({
               : 'Use 12–240 characters.'}
           </p>
           <p className="form-data-note" id="problem-data-note">
-            {provider.id === 'openai-api' ? (
-              <>
-                Your question is sent through {provider.label} using {provider.model} to build the
-                64-part map. After play, the original question, outcome, game totals and polarities,
-                plus capture-derived facets, lenses, recurrence, weights, and trail are sent for the
-                answer; uncaptured facets are not. Usage follows Platform API billing for the
-                configured project. Platform API data controls apply; abuse-monitoring logs may
-                retain content for up to 30 days by default unless approved organization or project
-                controls change that.{' '}
-                <a href={provider.dataControlsUrl} target="_blank" rel="noreferrer">
-                  Platform API data controls
-                </a>
-              </>
-            ) : provider.id === 'ollama' ? (
-              <>
-                Your question stays on this machine and is sent over the loopback connection to{' '}
-                {provider.label} using {provider.model} to build the 64-part map. After play, the
-                original question, outcome, game totals and polarities, plus capture-derived facets,
-                lenses, recurrence, weights, and trail are sent to the same local model for the
-                answer; uncaptured facets are not. This uses local compute, has no Platform API
-                charge, and does not add Internet search. This mode is local-only and must not be
-                exposed as a public service.{' '}
-                <a href={provider.dataControlsUrl} target="_blank" rel="noreferrer">
-                  Ollama local runtime information
-                </a>
-              </>
-            ) : (
-              <>
-                Your question is sent through {provider.label} using {provider.model} for the
-                signed-in operator to build the 64-part map. After play, the original question,
-                outcome, game totals and polarities, plus capture-derived facets, lenses,
-                recurrence, weights, and trail are sent for the answer; uncaptured facets are not.
-                Usage draws from that operator&apos;s ChatGPT Codex allowance or workspace credits.
-                It is not free or unlimited, and availability varies by plan and workspace. ChatGPT
-                workspace data policies apply. This mode is local-only and must not be offered as a
-                public service.{' '}
-                {codexWebSearchEnabled && (
-                  <>
-                    Internet search is configured in {provider.webSearch} mode; workspace settings
-                    may still limit availability. During either model run, Codex may send search
-                    queries derived from your question or game context to retrieve public web
-                    information. It is instructed to generalize queries and exclude private
-                    details. Retrieved public pages are untrusted references, not instructions.{' '}
-                  </>
-                )}
-                <a href={provider.dataControlsUrl} target="_blank" rel="noreferrer">
-                  ChatGPT workspace data controls
-                </a>
-              </>
-            )}
+            Your question is saved to your WebChess account and sent from the server through{' '}
+            {provider.label} using {provider.model} to build the 64-part map. After play, the server
+            replays the saved move log and sends only the original question, verified ending, and
+            capture-derived record for the answer. WebChess supplies the provider credential;
+            your browser never sends an API key.{' '}
+            <a href={provider.dataControlsUrl} target="_blank" rel="noreferrer">
+              OpenAI Platform data controls
+            </a>
           </p>
         </form>
 

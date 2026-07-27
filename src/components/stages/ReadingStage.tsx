@@ -3,8 +3,8 @@ import { ArrowRight, CircleAlert, RefreshCw, RotateCcw, Shield, Sparkles } from 
 
 import { PIECE_GLYPHS } from '../../constants'
 import { cellKey } from '../../lib/board'
+import type { HostedProvider } from '../../lib/hosted-provider'
 import { PIECE_METAPHORS } from '../../lib/reading'
-import type { SessionProvider } from '../../lib/session'
 import type {
   CaptureRecord,
   AnswerStatus,
@@ -185,7 +185,7 @@ function AnswerText({ answer }: { answer: string }) {
 
 interface ReadingStageProps {
   problem: string
-  provider: SessionProvider
+  provider: HostedProvider
   parts: readonly ProblemPart[]
   pieces: readonly Piece[]
   captures: readonly CaptureRecord[]
@@ -198,7 +198,10 @@ interface ReadingStageProps {
   answerPrompt: string
   answerError: string
   answerActivity: ModelActivityState | null
+  replayError: string
   captureKeys: ReadonlySet<string>
+  replayDisabled: boolean
+  resetDisabled: boolean
   onRetryAnswer: () => void
   onReplay: () => void
   onReset: () => void
@@ -219,7 +222,10 @@ export function ReadingStage({
   answerPrompt,
   answerError,
   answerActivity,
+  replayError,
   captureKeys,
+  replayDisabled,
+  resetDisabled,
   onRetryAnswer,
   onReplay,
   onReset,
@@ -243,17 +249,17 @@ export function ReadingStage({
   const outcomeDetail = outcome.terminalCapture && endingPart
     ? `${attackerName}’s ${attackerKind} captured ${capturedSideName}’s King while the board held “${endingPart.title}”, paired with Hexagram ${endingPart.hexagram}: ${endingPart.hexagramName}.`
     : outcome.reason === 'no-progress'
-      ? 'Neither side found a meaningful conflict for 100 turns, so the gathered signals became the answer.'
+      ? 'The game reached 100 consecutive non-capturing plies. The captured signals now become inputs to a candidate answer.'
       : outcome.reason === 'move-limit'
-        ? 'The board completed its full arc without a decisive capture, so the gathered signals became the answer.'
-        : 'Neither side had an open path, so the gathered signals became the answer.'
+        ? 'The game reached its 256-ply limit without a decisive King capture. The captured signals now become inputs to a candidate answer.'
+        : 'Neither side had a legal move. The captured signals now become inputs to a candidate answer.'
   const activeCaptureIndices = captures.map((capture) => capture.cell.ring * 8 + capture.cell.sector)
 
   return (
     <section className={`reading-layout stage-enter${answerStatus === 'loading' ? ' is-answering' : ''}`} data-stage-root tabIndex={-1} aria-label="Final WebChess answer">
       <div className="reading-board-column">
         <p className="eyebrow"><span /> Game complete · Move {outcome.completedTurn}</p>
-        <h2>The game reached<br /><em>its answer.</em></h2>
+        <h2>The game reached<br /><em>its ending.</em></h2>
         <div className="board-card is-reading">
           <RadialBoard
             parts={parts}
@@ -406,11 +412,31 @@ export function ReadingStage({
           <div><small>Your next move</small><p>{reading.closing}</p></div>
         </div>
 
+        {replayError && (
+          <div className="replay-error" role="alert">
+            <CircleAlert size={20} />
+            <div>
+              <strong>The replay was not confirmed.</strong>
+              <p>{replayError} Retry this board to reconcile the same saved replay request. Starting another problem stays locked until its durable target is known.</p>
+            </div>
+          </div>
+        )}
+
         <div className="reading-actions">
-          <button className="secondary-button" type="button" onClick={onReplay}>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={replayDisabled}
+            onClick={onReplay}
+          >
             <RotateCcw size={16} /> Replay this board
           </button>
-          <button className="primary-button" type="button" onClick={onReset}>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={resetDisabled}
+            onClick={onReset}
+          >
             Bring another problem <ArrowRight size={17} />
           </button>
         </div>

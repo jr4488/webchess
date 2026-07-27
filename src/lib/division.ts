@@ -6,22 +6,8 @@ import {
   PROBLEM_DIMENSIONS,
   PROBLEM_MOVEMENTS,
 } from './problem'
-import {
-  modelActivityAcceptHeader,
-  readModelActivityPayload,
-} from './model-activity'
-import type { ModelActivityEvent } from './model-activity'
-import { SessionRequiredError } from './session'
-import { describeTransportFailure } from './transport'
 
 const FACET_COUNT = 64
-
-interface DivisionErrorPayload {
-  code?: string
-  error?: string
-  message?: string
-  prompt?: string
-}
 
 export type DivisionPermutation = 'facets' | 'hexagrams' | 'board'
 
@@ -71,33 +57,6 @@ function parseFacets(value: unknown): ProblemFacet[] {
   return facets
 }
 
-export function parseDivisionAnalysis(value: unknown): DivisionAnalysis {
-  if (!value || typeof value !== 'object') {
-    throw new Error('The division service returned an incomplete analysis.')
-  }
-  const payload = value as Record<string, unknown>
-  const seed = payload.seed
-  const validSeed =
-    (typeof seed === 'string' && seed.trim().length > 0) ||
-    (typeof seed === 'number' && Number.isFinite(seed))
-  if (!validSeed) {
-    throw new Error('The division service did not return a random seed.')
-  }
-  if (typeof payload.model !== 'string' || payload.model.trim().length === 0) {
-    throw new Error('The division service did not identify its model.')
-  }
-  if (typeof payload.prompt !== 'string') {
-    throw new Error('The division service did not return its canonical prompt.')
-  }
-
-  return {
-    facets: parseFacets(payload.facets),
-    seed,
-    model: payload.model.trim(),
-    prompt: payload.prompt,
-  }
-}
-
 export function composeProblemParts(
   facets: readonly ProblemFacet[],
   seed: DivisionAnalysis['seed'],
@@ -130,46 +89,4 @@ export function composeProblemParts(
   })
 
   return deterministicShuffle(paired, divisionSeed(seed, 'board'))
-}
-
-export async function requestProblemDivision(
-  problem: string,
-  signal?: AbortSignal,
-  csrfToken?: string,
-  onActivity?: (event: ModelActivityEvent) => void,
-): Promise<DivisionAnalysis> {
-  let response: Response
-  let payload: Record<string, unknown> & DivisionErrorPayload
-  try {
-    response = await fetch('/api/divide', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: {
-        Accept: onActivity ? modelActivityAcceptHeader() : 'application/json',
-        'Content-Type': 'application/json',
-        ...(csrfToken ? { 'X-WebChess-CSRF': csrfToken } : {}),
-      },
-      body: JSON.stringify({ problem }),
-      signal,
-    })
-    payload = await readModelActivityPayload(response, onActivity) as
-      Record<string, unknown> & DivisionErrorPayload
-  } catch (error) {
-    throw describeTransportFailure(error, 'division')
-  }
-
-  if (!response.ok) {
-    const message =
-      payload.error ?? payload.message ?? 'The model could not divide this problem. Please try again.'
-    const sessionInvalid =
-      response.status === 401 ||
-      (response.status === 403 && payload.code === 'csrf')
-    const failure = (
-      sessionInvalid ? new SessionRequiredError(message) : new Error(message)
-    ) as Error & { prompt?: string }
-    failure.prompt = payload.prompt
-    throw failure
-  }
-
-  return parseDivisionAnalysis(payload)
 }

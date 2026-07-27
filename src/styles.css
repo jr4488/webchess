@@ -1,14 +1,8 @@
 /**
- * Cosmic observatory palette.
+ * Play-interface palette.
  *
- * Every colour in this stylesheet resolves through these tokens, so the whole
- * theme is defined here. The `-rgb` triples exist because most surfaces are
- * translucent films layered over the starfield rather than solid fills.
- *
- * Two conventions carried over from the original ink-on-paper theme and still
- * hold: `--ink*` is the reading colour and the colour of hairlines drawn over
- * the background, and `--cream` is the brightest value in the system, used for
- * text on saturated accents and for the white pieces. Both are light here.
+ * Every colour resolves through these tokens. The `-rgb` triples support
+ * restrained translucent panels without adding decorative DOM layers.
  */
 :root {
   color-scheme: dark;
@@ -37,15 +31,10 @@
   --cream: #f5f8ff;
   --cream-rgb: 228, 236, 255;
 
-  /*
-   * Raised panels. Previously these were painted as a near-opaque wash of the
-   * brightest colour, which only reads as a surface on a light background. As
-   * a token they stay panels, tinted rather than bleached, and the original
-   * alphas now control how much starfield shows through.
-   */
+  /* Raised panel colour, kept separate from the reading-text palette. */
   --panel-rgb: 26, 34, 64;
 
-  /* Warm star accent. */
+  /* Warm action accent. */
   --gold: #ffc978;
   --gold-rgb: 255, 201, 120;
   --gold-pale: #ffe4b8;
@@ -116,19 +105,6 @@ textarea:focus-visible,
   position: relative;
   min-height: 100vh;
   overflow: hidden;
-}
-
-.paper-noise {
-  position: fixed;
-  z-index: 100;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.18;
-  mix-blend-mode: multiply;
-  background-image:
-    repeating-radial-gradient(circle at 20% 30%, transparent 0 2px, rgba(var(--ink-rgb), 0.05) 2.5px 3px),
-    repeating-linear-gradient(93deg, transparent 0 7px, rgba(var(--shadow-rgb), 0.025) 7px 8px);
-  background-size: 9px 9px, 17px 17px;
 }
 
 .site-header {
@@ -323,6 +299,26 @@ textarea:focus-visible,
   padding: clamp(30px, 4vw, 70px) clamp(24px, 5.5vw, 94px) 46px;
 }
 
+.session-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 auto 24px;
+  padding: 14px 18px;
+  border: 1px solid var(--vermillion-dark);
+  color: var(--ink);
+  background: rgba(var(--panel-rgb), 0.94);
+  line-height: 1.5;
+}
+
+.session-banner .text-button {
+  flex: 0 0 auto;
+  color: var(--vermillion-dark);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .site-footer {
   position: relative;
   z-index: 2;
@@ -420,6 +416,11 @@ button:disabled {
   min-height: calc(100vh - 230px);
 }
 
+.restore-layout {
+  grid-template-columns: minmax(0, 720px);
+  justify-content: center;
+}
+
 .question-copy {
   max-width: 600px;
 }
@@ -501,7 +502,7 @@ button:disabled {
 }
 
 .form-data-note a {
-  color: var(--vermillion-dark);
+  color: var(--vermillion);
   font-weight: 700;
   text-underline-offset: 2px;
 }
@@ -3277,6 +3278,33 @@ button:disabled {
   line-height: 1.58;
 }
 
+.replay-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 15px 16px;
+  border: 1px solid rgba(var(--vermillion-rgb), 0.48);
+  color: var(--ink);
+  background: rgba(var(--vermillion-rgb), 0.08);
+}
+
+.replay-error svg {
+  flex: 0 0 auto;
+  color: var(--vermillion);
+}
+
+.replay-error strong {
+  font-size: 0.72rem;
+}
+
+.replay-error p {
+  margin: 4px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+  line-height: 1.55;
+}
+
 .reading-actions {
   position: relative;
   z-index: 1;
@@ -3912,134 +3940,8 @@ button:disabled {
   }
 }
 
-/* ==========================================================================
-   Cosmic observatory
-   --------------------------------------------------------------------------
-   The backdrop is built from tiled radial-gradients rather than per-star
-   elements, so a field of several hundred stars costs three composited layers
-   and animates on background-position alone. Everything here sits behind the
-   interface and never takes pointer events.
-   ========================================================================== */
-
-.cosmos {
-  position: fixed;
-  z-index: 0;
-  inset: 0;
-  overflow: hidden;
-  pointer-events: none;
-  background:
-    radial-gradient(ellipse 120% 80% at 50% -10%, #131a3a 0%, transparent 60%),
-    radial-gradient(ellipse 90% 60% at 10% 110%, #10152e 0%, transparent 55%),
-    var(--void);
-}
-
-.cosmos__stars {
-  position: absolute;
-  inset: -50%;
-  background-repeat: repeat;
-  will-change: transform;
-}
-
-/* Each layer is one tile of dots; different tile sizes stop the repeat from
-   reading as a grid, and different speeds create the parallax. */
-.cosmos__stars--far {
-  background-image:
-    radial-gradient(1px 1px at 20% 30%, rgba(var(--cream-rgb), 0.75), transparent),
-    radial-gradient(1px 1px at 70% 65%, rgba(var(--cream-rgb), 0.55), transparent),
-    radial-gradient(1px 1px at 45% 85%, rgba(var(--ink-rgb), 0.5), transparent),
-    radial-gradient(1px 1px at 88% 12%, rgba(var(--cream-rgb), 0.45), transparent);
-  background-size: 190px 190px;
-  opacity: 0.55;
-  animation: cosmos-drift 240s linear infinite;
-}
-
-.cosmos__stars--mid {
-  background-image:
-    radial-gradient(1.6px 1.6px at 35% 20%, rgba(var(--cream-rgb), 0.9), transparent),
-    radial-gradient(1.4px 1.4px at 80% 70%, rgba(var(--gold-pale-rgb), 0.7), transparent),
-    radial-gradient(1.2px 1.2px at 12% 78%, rgba(var(--cream-rgb), 0.6), transparent);
-  background-size: 310px 310px;
-  opacity: 0.7;
-  animation: cosmos-drift 160s linear infinite reverse;
-}
-
-.cosmos__stars--near {
-  background-image:
-    radial-gradient(2.2px 2.2px at 60% 40%, rgba(var(--cream-rgb), 1), transparent),
-    radial-gradient(2px 2px at 15% 15%, rgba(var(--gold-rgb), 0.8), transparent),
-    radial-gradient(1.8px 1.8px at 90% 88%, rgba(var(--jade-rgb), 0.6), transparent);
-  background-size: 520px 520px;
-  opacity: 0.85;
-  animation:
-    cosmos-drift 100s linear infinite,
-    cosmos-twinkle 6s ease-in-out infinite;
-}
-
-@keyframes cosmos-drift {
-  from { transform: translate3d(0, 0, 0); }
-  to { transform: translate3d(-190px, -120px, 0); }
-}
-
-@keyframes cosmos-twinkle {
-  0%, 100% { opacity: 0.85; }
-  50% { opacity: 0.5; }
-}
-
-/* Slow-moving colour fields that keep large dark areas from going flat. */
-.cosmos__nebula {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(80px);
-  opacity: 0.4;
-  will-change: transform;
-}
-
-.cosmos__nebula--rose {
-  top: -12vh;
-  right: -8vw;
-  width: 46vw;
-  height: 46vw;
-  background: radial-gradient(circle, rgba(var(--vermillion-rgb), 0.4), transparent 68%);
-  animation: cosmos-float-a 46s ease-in-out infinite;
-}
-
-.cosmos__nebula--gold {
-  bottom: -18vh;
-  left: -10vw;
-  width: 52vw;
-  height: 52vw;
-  background: radial-gradient(circle, rgba(var(--gold-rgb), 0.26), transparent 68%);
-  animation: cosmos-float-b 62s ease-in-out infinite;
-}
-
-.cosmos__nebula--jade {
-  top: 32vh;
-  left: 44vw;
-  width: 34vw;
-  height: 34vw;
-  background: radial-gradient(circle, rgba(var(--jade-rgb), 0.22), transparent 70%);
-  animation: cosmos-float-a 54s ease-in-out infinite reverse;
-}
-
-@keyframes cosmos-float-a {
-  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
-  50% { transform: translate3d(-6vw, 5vh, 0) scale(1.14); }
-}
-
-@keyframes cosmos-float-b {
-  0%, 100% { transform: translate3d(0, 0, 0) scale(1.05); }
-  50% { transform: translate3d(7vw, -4vh, 0) scale(0.92); }
-}
-
 body {
   background: var(--void);
-}
-
-/* The original grain multiplied against paper; over deep space it has to add
-   light instead of subtracting it. */
-.paper-noise {
-  opacity: 0.05;
-  mix-blend-mode: screen;
 }
 
 
