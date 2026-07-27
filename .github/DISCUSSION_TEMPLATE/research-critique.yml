@@ -1,0 +1,21 @@
+title: "[Research critique] "
+labels: []
+body:
+  - type: textarea
+    id: claim
+    attributes:
+      label: Claim or assumption under review
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and reasoning
+      description: Separate observed evidence, interpretation, and uncertainty.
+    validations:
+      required: true
+  - type: textarea
+    id: test
+    attributes:
+      label: A useful test
+      description: Propose a falsifiable comparison, measure, or reproduction.
