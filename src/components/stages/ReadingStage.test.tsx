@@ -1,6 +1,7 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
+import { beginModelActivity } from '../../lib/model-activity'
 import { makeProblemParts } from '../../test/fixtures'
 import type { CaptureRecord, FinalReading, GameOutcome, Piece } from '../../types'
 import { ReadingStage } from './ReadingStage'
@@ -9,7 +10,6 @@ const API_PROVIDER = {
   id: 'openai-api',
   label: 'OpenAI API',
   billing: 'platform-api',
-  localOnly: false,
   dataControlsUrl: 'https://developers.openai.com/api/docs/guides/your-data',
   model: 'gpt-5.6-sol',
   webSearch: 'disabled',
@@ -156,7 +156,10 @@ function renderReading(overrides: Partial<React.ComponentProps<typeof ReadingSta
       answerPrompt="Canonical answer prompt containing only captured signals."
       answerError=""
       answerActivity={null}
+      replayError=""
       captureKeys={new Set(['2:3', '1:5'])}
+      replayDisabled={false}
+      resetDisabled={false}
       onRetryAnswer={vi.fn()}
       onReplay={vi.fn()}
       onReset={vi.fn()}
@@ -233,22 +236,179 @@ describe('ReadingStage final answer', () => {
     expect(screen.queryByText(/waiting to be sent/i)).not.toBeInTheDocument()
   })
 
-  it('identifies the model and local ChatGPT Codex provider together', () => {
+  it('identifies the model and hosted OpenAI provider together', () => {
     renderReading({
       provider: {
-        id: 'codex-chatgpt',
-        label: 'ChatGPT Codex',
-        billing: 'chatgpt-workspace',
-        localOnly: true,
-        dataControlsUrl: 'https://help.openai.com/en/articles/7730893-data-controls-faq',
+        label: 'OpenAI API',
+        dataControlsUrl: 'https://developers.openai.com/api/docs/guides/your-data',
         model: 'gpt-5.6-sol',
-        webSearch: 'live',
       },
       answerModel: 'gpt-5.6-sol',
     })
 
     expect(screen.getByText(
-      /gpt-5\.6-sol · ChatGPT Codex · answer from 2 captured signals/i,
+      /gpt-5\.6-sol · OpenAI API · answer from 2 captured signals/i,
     )).toBeInTheDocument()
+  })
+
+  it('falls back to the strongest captured signal when the reading has no primary capture', () => {
+    renderReading({
+      reading: {
+        ...reading,
+        sections: [{
+          ...reading.sections[0],
+          captureId: undefined,
+          partIds: [],
+        }],
+      },
+    })
+
+    expect(screen.getByTestId('radial-board')).toHaveAttribute('data-highlighted', '1:5')
+  })
+
+  it('renders an empty highlight safely when a completed game has no captures', () => {
+    renderReading({
+      captures: [],
+      captureKeys: new Set(),
+      reading: {
+        ...reading,
+        sections: [],
+      },
+      outcome: {
+        winner: null,
+        reason: 'no-moves',
+        completedTurn: 12,
+      },
+    })
+
+    expect(screen.getByTestId('radial-board')).toHaveAttribute('data-highlighted', '')
+    expect(screen.getByText(/neither side had a legal move/i)).toBeInTheDocument()
+    expect(screen.getByText(/answer from 0 captured signals/i)).toBeInTheDocument()
+  })
+
+  it.each([
+    ['no-progress', /100 consecutive non-capturing plies/i],
+    ['move-limit', /256-ply limit without a decisive king capture/i],
+    ['no-moves', /neither side had a legal move/i],
+  ] as const)('explains the %s terminal rule without implying a winner', (reason, detail) => {
+    renderReading({
+      outcome: {
+        winner: null,
+        reason,
+        completedTurn: 100,
+      },
+    })
+
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
+      /board reached a standstill/i,
+    )
+    expect(screen.getByText(detail)).toBeInTheDocument()
+  })
+
+  it('describes a Black terminal capture from server-derived evidence', () => {
+    const terminalCapture: CaptureRecord = {
+      ...captures[1],
+      attacker: {
+        ...whiteRook,
+        id: 'black-rook',
+        side: 'black',
+      },
+      captured: {
+        ...blackKing,
+        id: 'white-king',
+        side: 'white',
+      },
+    }
+
+    renderReading({
+      outcome: {
+        winner: 'black',
+        reason: 'king-captured',
+        completedTurn: 41,
+        terminalCapture,
+      },
+    })
+
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
+      /black reached white’s core purpose/i,
+    )
+    expect(screen.getByText(/black’s rook captured white’s king/i)).toBeInTheDocument()
+  })
+
+  it('keeps multiline and nonconsecutive numbered actions readable', () => {
+    renderReading({
+      answer: [
+        '### **Answer**',
+        'Begin with **one reversible test**.',
+        'Three next moves:',
+        '1) Name the owner.',
+        'Add the review date on the same card.',
+        '3. Stop if the evidence threshold is missed.',
+      ].join('\n'),
+    })
+
+    const lists = screen.getAllByRole('list')
+    expect(lists).toHaveLength(2)
+    expect(within(lists[0]).getByRole('listitem')).toHaveTextContent(
+      /name the owner\.\s*add the review date/i,
+    )
+    expect(within(lists[1]).getByRole('listitem')).toHaveAttribute('value', '3')
+    expect(screen.getByText('one reversible test').tagName).toBe('STRONG')
+  })
+
+  it('exposes retry and navigation actions without retaining a failed prompt', () => {
+    const onRetryAnswer = vi.fn()
+    const onReplay = vi.fn()
+    const onReset = vi.fn()
+    renderReading({
+      answerStatus: 'error',
+      answer: '',
+      answerPrompt: '',
+      answerError: 'The provider timed out.',
+      onRetryAnswer,
+      onReplay,
+      onReset,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /try the answer again/i }))
+    fireEvent.click(screen.getByRole('button', { name: /replay this board/i }))
+    fireEvent.click(screen.getByRole('button', { name: /bring another problem/i }))
+
+    expect(onRetryAnswer).toHaveBeenCalledOnce()
+    expect(onReplay).toHaveBeenCalledOnce()
+    expect(onReset).toHaveBeenCalledOnce()
+    expect(screen.queryByText(/see the prompt used/i)).not.toBeInTheDocument()
+  })
+
+  it('shows durable answer activity while a pending response is restored', () => {
+    renderReading({
+      answerStatus: 'loading',
+      answer: '',
+      answerActivity: beginModelActivity('answer'),
+    })
+
+    expect(screen.getAllByText(/request in progress/i)).toHaveLength(2)
+    expect(screen.getByText(/weighing 2 captured signals across 31 moves/i)).toBeInTheDocument()
+  })
+
+  it('disables the new-problem action while reset is pending', () => {
+    renderReading({ replayDisabled: true, resetDisabled: true })
+
+    expect(screen.getByRole('button', { name: /replay this board/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /bring another problem/i })).toBeDisabled()
+  })
+
+  it('shows replay recovery separately while leaving its same-intent retry enabled', () => {
+    renderReading({
+      replayError: 'The replay response was lost in transit.',
+      replayDisabled: false,
+      resetDisabled: true,
+    })
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /replay response was lost in transit/i,
+    )
+    expect(screen.getByRole('button', { name: /replay this board/i })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /bring another problem/i })).toBeDisabled()
   })
 })

@@ -20,51 +20,11 @@ export type DivisionPhase =
 
 export type ModelActivityOperation = 'division' | 'answer'
 
-export type ModelActivityPhase =
-  | 'request-accepted'
-  | 'preparing-input'
-  | 'awaiting-model'
-  | 'thinking'
-  | 'writing-rationale'
-  | 'drafting'
-  | 'validating-output'
-  | 'complete'
-
-export interface ModelActivityHistoryEntry {
-  phase: ModelActivityPhase
-  at: number
-}
-
-export interface ModelActivityRationaleNote {
-  text: string
-  at: number
-}
-
-/**
- * Where displayed reasoning text came from.
- *
- * `summary` is a provider-authored summary written for end users. `raw` is a
- * local model's own thinking, which only ever leaves a model running on this
- * machine. The UI must keep these visibly distinct.
- */
-export type ReasoningSource = 'summary' | 'raw'
-
-export interface ModelActivityReasoning {
-  source: ReasoningSource
-  text: string
-  updatedAt: number
-}
-
 export interface ModelActivityState {
   operation: ModelActivityOperation
-  status: 'active' | 'complete' | 'error'
-  phase: ModelActivityPhase
+  status: 'active' | 'error'
   startedAt: number
-  lastHeartbeatAt: number
-  lastProviderActivityAt?: number
-  history: ModelActivityHistoryEntry[]
-  rationaleNotes: ModelActivityRationaleNote[]
-  reasoning: ModelActivityReasoning | null
+  lastUpdatedAt: number
 }
 
 export interface CellCoord {

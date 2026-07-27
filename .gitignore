@@ -1,7 +1,15 @@
 node_modules
 dist
 coverage
+.next
+next-env.d.ts
+.vercel
+.playwright
+playwright-report
+test-results
+tsconfig.tsbuildinfo
 .vite
+public/downloads
 .env
 .env.*
 !.env.example

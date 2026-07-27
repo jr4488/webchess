@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Piece } from '../types'
 import { createInitialPieces } from './game'
 import { createAutoPlayEngine } from './auto-play'
-import type { EngineResponse } from './engine/protocol'
 
 const originalWorker = globalThis.Worker
 
@@ -20,8 +19,10 @@ afterEach(() => {
 /** Stands in for the real worker so the facade can be driven step by step. */
 class FakeWorker {
   static instances: FakeWorker[] = []
+  static listenerTypeToFail: string | null = null
   static postsToFail = 0
   readonly posted: unknown[] = []
+  throwOnTerminate = false
   terminated = false
   private readonly listeners = new Map<string, ((event: unknown) => void)[]>()
 
@@ -30,6 +31,9 @@ class FakeWorker {
   }
 
   addEventListener(type: string, listener: (event: unknown) => void): void {
+    if (FakeWorker.listenerTypeToFail === type) {
+      throw new Error(`Could not register ${type}.`)
+    }
     const existing = this.listeners.get(type) ?? []
     existing.push(listener)
     this.listeners.set(type, existing)
@@ -45,9 +49,10 @@ class FakeWorker {
 
   terminate(): void {
     this.terminated = true
+    if (this.throwOnTerminate) throw new Error('The worker was already broken.')
   }
 
-  reply(data: EngineResponse): void {
+  reply(data: unknown): void {
     for (const listener of this.listeners.get('message') ?? []) listener({ data })
   }
 
@@ -62,6 +67,7 @@ class FakeWorker {
 
 function useFakeWorker(): typeof FakeWorker {
   FakeWorker.instances = []
+  FakeWorker.listenerTypeToFail = null
   FakeWorker.postsToFail = 0
   globalThis.Worker = FakeWorker as unknown as typeof Worker
   return FakeWorker
@@ -107,12 +113,34 @@ describe('auto-play engine without a worker', () => {
   it('reports a failure rather than throwing when the search breaks', async () => {
     Reflect.deleteProperty(globalThis, 'Worker')
     const engine = createAutoPlayEngine()
-    const broken = [{ ...pieces[0]!, position: { ring: Number.NaN, sector: 0 } }]
+    const broken = [{
+      ...pieces[0]!,
+      get position(): never {
+        throw new Error('The saved position is corrupt.')
+      },
+    }]
 
     const result = await engine.chooseMove(broken, 'white', 'broken', { depth: 1 })
 
-    // A position the engine cannot use yields no move rather than an exception.
-    expect(result.status === 'ok' || result.status === 'failed').toBe(true)
+    expect(result).toEqual({
+      status: 'failed',
+      message: 'The saved position is corrupt.',
+    })
+    engine.dispose()
+  })
+
+  it('normalizes invalid fallback limits instead of running unbounded work', async () => {
+    Reflect.deleteProperty(globalThis, 'Worker')
+    const engine = createAutoPlayEngine()
+
+    const result = await engine.chooseMove(pieces, 'white', 'normalized-fallback', {
+      depth: Number.NaN,
+      nodeBudget: 0,
+    })
+
+    expect(result.status).toBe('ok')
+    expect(result.status === 'ok' && result.analysis?.depth).toBeLessThanOrEqual(2)
+    expect(result.status === 'ok' && result.analysis?.nodes).toBeLessThanOrEqual(1)
     engine.dispose()
   })
 })
@@ -183,6 +211,27 @@ describe('auto-play engine with a worker', () => {
   })
 
   it.each([
+    ['a mismatched request id', { id: 99, move: null }],
+    ['a non-integer request id', { id: 1.5, move: null }],
+    ['a missing move', { id: 1 }],
+    ['an invalid analysis', { id: 1, move: null, analysis: { nodes: Number.NaN, depth: 2 } }],
+  ])('retires a worker that returns %s', async (_, response) => {
+    const worker = useFakeWorker()
+    const engine = createAutoPlayEngine()
+
+    const pending = engine.chooseMove(pieces, 'white', 'invalid-response', { depth: 2 })
+    const invalid = worker.instances[0]!
+    invalid.reply(response)
+
+    expect(await pending).toEqual({
+      status: 'failed',
+      message: 'The move engine returned an invalid response.',
+    })
+    expect(invalid.terminated).toBe(true)
+    engine.dispose()
+  })
+
+  it.each([
     ['error', (instance: FakeWorker) => instance.fail()],
     ['messageerror', (instance: FakeWorker) => instance.messageError()],
   ])('retires a worker after %s so the next request starts fresh', async (_, crash) => {
@@ -223,6 +272,23 @@ describe('auto-play engine with a worker', () => {
     engine.dispose()
   })
 
+  it('still settles a failed search when terminating the broken worker throws', async () => {
+    const worker = useFakeWorker()
+    const engine = createAutoPlayEngine()
+
+    const pending = engine.chooseMove(pieces, 'white', 'broken-termination', { depth: 2 })
+    const broken = worker.instances[0]!
+    broken.throwOnTerminate = true
+    broken.fail()
+
+    expect(await pending).toEqual({
+      status: 'failed',
+      message: 'The move engine stopped unexpectedly.',
+    })
+    expect(broken.terminated).toBe(true)
+    engine.dispose()
+  })
+
   it('replaces the worker on reset so a running search is abandoned', async () => {
     const worker = useFakeWorker()
     const engine = createAutoPlayEngine()
@@ -240,6 +306,22 @@ describe('auto-play engine with a worker', () => {
     engine.dispose()
   })
 
+  it('retires an idle worker on reset without creating replacement work', async () => {
+    const worker = useFakeWorker()
+    const engine = createAutoPlayEngine()
+
+    const first = engine.chooseMove(pieces, 'white', 'idle-reset', { depth: 2 })
+    const idle = worker.instances[0]!
+    idle.reply({ id: 1, move: null })
+    await first
+
+    engine.reset()
+
+    expect(idle.terminated).toBe(true)
+    expect(worker.instances).toHaveLength(1)
+    engine.dispose()
+  })
+
   it('falls back to the main thread when the worker cannot start', async () => {
     globalThis.Worker = class {
       constructor() {
@@ -250,6 +332,19 @@ describe('auto-play engine with a worker', () => {
     const engine = createAutoPlayEngine()
     const result = await engine.chooseMove(pieces, 'white', 'blocked', { depth: 1 })
 
+    expect(result.status).toBe('ok')
+    engine.dispose()
+  })
+
+  it('retires a partly initialized worker before falling back', async () => {
+    const worker = useFakeWorker()
+    worker.listenerTypeToFail = 'messageerror'
+    const engine = createAutoPlayEngine()
+
+    const result = await engine.chooseMove(pieces, 'white', 'listener-failure', { depth: 1 })
+
+    expect(worker.instances).toHaveLength(1)
+    expect(worker.instances[0]!.terminated).toBe(true)
     expect(result.status).toBe('ok')
     engine.dispose()
   })

@@ -1,17 +1,13 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import { makeProblemFacets } from '../test/fixtures'
 import {
   composeProblemParts,
   divisionSeed,
-  parseDivisionAnalysis,
-  requestProblemDivision,
 } from './division'
 import { deterministicShuffle, HEXAGRAM_LENSES } from './problem'
 
 describe('semantic problem division', () => {
-  afterEach(() => vi.unstubAllGlobals())
-
   it('uses independent facet, hexagram, and board permutations', () => {
     const facets = makeProblemFacets()
     const seed = 'server-random-seed-42'
@@ -70,114 +66,4 @@ describe('semantic problem division', () => {
     expect(() => composeProblemParts(duplicated, 'bad-seed')).toThrow(/each facet id/i)
   })
 
-  it('posts only the problem and parses the server analysis', async () => {
-    const response = {
-      facets: makeProblemFacets(),
-      seed: 'fresh-server-seed',
-      model: 'gpt-5.6-sol',
-      prompt: 'Canonical division prompt',
-    }
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(response), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    await expect(requestProblemDivision(
-      'How should this plan change?',
-      undefined,
-      'csrf-token',
-    )).resolves.toEqual(
-      parseDivisionAnalysis(response),
-    )
-    expect(fetchMock).toHaveBeenCalledWith('/api/divide', expect.objectContaining({
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: expect.objectContaining({ 'X-WebChess-CSRF': 'csrf-token' }),
-      body: JSON.stringify({ problem: 'How should this plan change?' }),
-    }))
-  })
-
-  it('surfaces an expired session distinctly', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      error: 'Your access session has expired.',
-    }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' },
-    })))
-
-    await expect(requestProblemDivision('How should this plan change?')).rejects.toMatchObject({
-      name: 'SessionRequiredError',
-      status: 401,
-      message: 'Your access session has expired.',
-    })
-  })
-
-  it('explains an interrupted connection instead of repeating the browser wording', async () => {
-    // What a browser throws when it cannot reach the server at all.
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
-
-    await expect(requestProblemDivision('How should this plan change?')).rejects.toThrow(
-      /connection to WebChess was interrupted before the division finished/iu,
-    )
-  })
-
-  it('explains a response stream that stops partway through', async () => {
-    // What a browser throws when an accepted NDJSON response stops arriving,
-    // which is how a server restart mid-run presents to the client.
-    const body = new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode('{"type":"phase","phase":"thinking"}\n'))
-        controller.error(new TypeError('network error'))
-      },
-    })
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, {
-      status: 200,
-      headers: { 'Content-Type': 'application/x-ndjson' },
-    })))
-
-    await expect(requestProblemDivision(
-      'How should this plan change?',
-      undefined,
-      undefined,
-      () => {},
-    )).rejects.toThrow(/connection to WebChess was interrupted/iu)
-  })
-
-  it('requires a fresh session for a specifically identified stale CSRF token', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      error: 'The request security token is invalid.',
-      code: 'csrf',
-    }), {
-      status: 403,
-      headers: { 'Content-Type': 'application/json' },
-    })))
-
-    await expect(requestProblemDivision(
-      'How should this plan change?',
-      undefined,
-      'stale-token',
-    )).rejects.toMatchObject({
-      name: 'SessionRequiredError',
-      message: 'The request security token is invalid.',
-    })
-  })
-
-  it('does not mistake an origin rejection for an expired session', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      error: 'Request origin is not allowed.',
-    }), {
-      status: 403,
-      headers: { 'Content-Type': 'application/json' },
-    })))
-
-    await expect(requestProblemDivision(
-      'How should this plan change?',
-      undefined,
-      'csrf-token',
-    )).rejects.toMatchObject({
-      name: 'Error',
-      message: 'Request origin is not allowed.',
-    })
-  })
 })

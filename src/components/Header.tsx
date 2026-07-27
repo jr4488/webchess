@@ -11,10 +11,11 @@ const PHASES: ReadonlyArray<{ stage: Stage; number: string; label: string }> = [
 
 interface HeaderProps {
   stage: Stage
+  resetDisabled: boolean
   onReset: () => void
 }
 
-export function Header({ stage, onReset }: HeaderProps) {
+export function Header({ stage, resetDisabled, onReset }: HeaderProps) {
   const currentIndex = PHASES.findIndex((phase) => phase.stage === stage)
 
   return (
@@ -45,7 +46,12 @@ export function Header({ stage, onReset }: HeaderProps) {
           <span>How it works</span>
         </a>
         {stage !== 'question' ? (
-          <button className="text-button" type="button" onClick={onReset}>
+          <button
+            className="text-button"
+            type="button"
+            disabled={resetDisabled}
+            onClick={onReset}
+          >
             <RotateCcw size={14} />
             New question
           </button>

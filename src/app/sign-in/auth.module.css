@@ -1,0 +1,108 @@
+.shell {
+  display: grid;
+  min-height: 100vh;
+  grid-template-rows: auto 1fr;
+  color: #171717;
+  background: #f7f5ef;
+}
+
+.homeLink {
+  width: fit-content;
+  margin: 1.25rem clamp(1rem, 4vw, 3rem);
+  color: #171717;
+  font-size: 1rem;
+  font-weight: 700;
+  text-decoration-thickness: 0.12em;
+  text-underline-offset: 0.25em;
+}
+
+.main {
+  display: grid;
+  width: min(100% - 2rem, 70rem);
+  grid-template-columns: minmax(0, 1fr) minmax(20rem, 28rem);
+  align-items: center;
+  gap: clamp(2rem, 7vw, 6rem);
+  margin-inline: auto;
+  padding-block: 2rem 5rem;
+}
+
+.copy {
+  max-width: 38rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.75rem;
+  color: #8b2e18;
+  font-size: 0.875rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.copy h1,
+.unavailable h1 {
+  max-width: 14ch;
+  margin: 0;
+  font-size: clamp(2.5rem, 6vw, 4.75rem);
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.copy p:not(.eyebrow),
+.unavailable p {
+  max-width: 52ch;
+  margin: 1.5rem 0 0;
+  color: #47433d;
+  font-size: clamp(1.05rem, 2vw, 1.25rem);
+  line-height: 1.65;
+}
+
+.clerk {
+  min-width: 0;
+}
+
+.unavailable {
+  max-width: 46rem;
+  grid-column: 1 / -1;
+  padding: clamp(1.5rem, 5vw, 3.5rem);
+  border: 1px solid #a49d90;
+  background: #fffdf8;
+}
+
+.unavailable a {
+  display: inline-block;
+  margin-top: 1.75rem;
+  color: #7b2816;
+  font-size: 1rem;
+  font-weight: 750;
+  text-underline-offset: 0.25em;
+}
+
+.homeLink:focus-visible,
+.unavailable a:focus-visible {
+  outline: 3px solid #1d5f82;
+  outline-offset: 4px;
+}
+
+@media (max-width: 48rem) {
+  .main {
+    grid-template-columns: 1fr;
+    align-content: start;
+    padding-top: 1rem;
+  }
+
+  .copy h1,
+  .unavailable h1 {
+    font-size: clamp(2.35rem, 13vw, 3.75rem);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shell *,
+  .shell *::before,
+  .shell *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

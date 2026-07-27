@@ -4,7 +4,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Ask for installation or usage help here. Never post credentials, private questions, or personal data.
+        Ask for installation or usage help here. Never post credentials, cookies, environment files, private game questions, generated personal data, or other personal information.
   - type: textarea
     id: goal
     attributes:

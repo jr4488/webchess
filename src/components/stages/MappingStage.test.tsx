@@ -13,18 +13,14 @@ vi.mock('../RadialBoard', () => ({
 }))
 
 describe('MappingStage provider provenance', () => {
-  it('identifies the model and ChatGPT Codex provider together', () => {
+  it('identifies the fixed model and hosted OpenAI provider together', () => {
     render(
       <MappingStage
         problem="How should this plan change?"
         provider={{
-          id: 'codex-chatgpt',
-          label: 'ChatGPT Codex',
-          billing: 'chatgpt-workspace',
-          localOnly: true,
-          dataControlsUrl: 'https://help.openai.com/en/articles/7730893-data-controls-faq',
+          label: 'OpenAI API',
+          dataControlsUrl: 'https://developers.openai.com/api/docs/guides/your-data',
           model: 'gpt-5.6-sol',
-          webSearch: 'live',
         }}
         parts={makeProblemParts('mapping-provider')}
         progress={64}
@@ -34,13 +30,14 @@ describe('MappingStage provider provenance', () => {
         divisionPrompt=""
         divisionError=""
         divisionActivity={null}
+        beginDisabled={false}
         onBegin={vi.fn()}
         onRetry={vi.fn()}
       />,
     )
 
     expect(screen.getByText(
-      /gpt-5\.6-sol · ChatGPT Codex · semantic division/i,
+      /gpt-5\.6-sol · OpenAI API · semantic division/i,
     )).toBeInTheDocument()
   })
 })

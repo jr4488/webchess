@@ -1,11 +1,22 @@
-import { act, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
 import type { AutoPlayEngine, EngineResult } from './lib/auto-play'
+import { CURRENT_GAME_VERSIONS } from './lib/game-contract'
+import type { ReplayState } from './lib/game-contract'
+import { acceptMoveCommand, createReplayState, toGameView } from './lib/game-replay'
 import type { EngineOptions } from './lib/engine'
+import { composeProblemParts } from './lib/division'
+import { WebChessApiError } from './lib/webchess-api'
+import type {
+  DurableGame,
+  DurableGameStatus,
+  MoveGameCommand,
+  RevisionCommand,
+} from './lib/webchess-api'
 import { makeDivisionAnalysis } from './test/fixtures'
-import type { Piece, Side } from './types'
+import type { CellCoord, GeneratedAnswer, Piece, Side } from './types'
 
 interface DeferredEngineRequest {
   pieces: readonly Piece[]
@@ -13,6 +24,26 @@ interface DeferredEngineRequest {
   seed: string | number
   options: EngineOptions | undefined
   resolve: (result: EngineResult) => void
+}
+
+interface Deferred<T> {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (error: unknown) => void
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolvePromise!: (value: T) => void
+  let rejectPromise!: (error: unknown) => void
+  const promise = new Promise<T>((resolve, reject) => {
+    resolvePromise = resolve
+    rejectPromise = reject
+  })
+  return {
+    promise,
+    resolve: resolvePromise,
+    reject: rejectPromise,
+  }
 }
 
 const engineHarness = vi.hoisted(() => ({
@@ -23,10 +54,23 @@ const engineHarness = vi.hoisted(() => ({
   dispose: vi.fn<AutoPlayEngine['dispose']>(),
 }))
 
+const apiHarness = vi.hoisted(() => ({
+  abandonGame: vi.fn(),
+  createIdempotencyKey: vi.fn(() => '018f47b2-4b0c-7b9e-8f24-123456789000'),
+  divideProblem: vi.fn(),
+  getCurrentGame: vi.fn(),
+  getOwnedGame: vi.fn(),
+  recoverDivisionIntent: vi.fn(),
+  replayGame: vi.fn(),
+  requestGameAnswer: vi.fn(),
+  startGame: vi.fn(),
+  submitMove: vi.fn(),
+}))
+
 /**
- * These tests play whole games to check the app's staging, so they use the real
- * move rules at the shallowest depth. The engine's own strength is covered in
- * its tests; searching to full depth here would cost minutes per game.
+ * App-level tests exercise the real Engine V2 move selector at depth one. The
+ * engine's strength and worker protocol have their own suites; this harness
+ * adds controllable deferred results for cancellation and stale-result tests.
  */
 vi.mock('./lib/auto-play', async () => {
   const { findBestMove } = await import('./lib/engine')
@@ -53,35 +97,217 @@ vi.mock('./lib/auto-play', async () => {
   }
 })
 
-const ACTIVE_SESSION = {
-  authenticated: true,
-  csrfToken: 'test-csrf-token',
-  expiresAt: '2099-01-01T00:00:00.000Z',
-  provider: {
-    id: 'openai-api',
-    label: 'OpenAI API',
-    billing: 'platform-api',
-    localOnly: false,
-    dataControlsUrl: 'https://developers.openai.com/api/docs/guides/your-data',
-    model: 'gpt-5.6-sol',
-    webSearch: 'disabled',
-  },
+vi.mock('./lib/webchess-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/webchess-api')>()
+  return {
+    ...actual,
+    abandonGame: apiHarness.abandonGame,
+    createIdempotencyKey: apiHarness.createIdempotencyKey,
+    divideProblem: apiHarness.divideProblem,
+    getCurrentGame: apiHarness.getCurrentGame,
+    getOwnedGame: apiHarness.getOwnedGame,
+    recoverDivisionIntent: apiHarness.recoverDivisionIntent,
+    replayGame: apiHarness.replayGame,
+    requestGameAnswer: apiHarness.requestGameAnswer,
+    startGame: apiHarness.startGame,
+    submitMove: apiHarness.submitMove,
+  }
+})
+
+const GAME_ID = '123e4567-e89b-42d3-a456-426614174000'
+const REPLAY_GAME_ID = '123e4567-e89b-42d3-a456-426614174001'
+const PROBLEM = 'How should this position move toward a useful next step?'
+const ANSWER: GeneratedAnswer = {
+  answer: 'Protect the purpose, then test the smallest reversible next step.',
+  model: 'gpt-5.6-sol',
+  prompt: 'Canonical answer prompt made from the server-verified replay.',
 }
 
-function jsonResponse(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {
+let serverGame: DurableGame | null
+
+function makeMappedGame(
+  problem = PROBLEM,
+  id = GAME_ID,
+  sourceGameId: string | null = null,
+): DurableGame {
+  const analysis = makeDivisionAnalysis(`division/${id}`)
+  return {
+    id,
+    sourceGameId,
+    revision: 1,
+    status: 'mapped',
+    problem,
+    division: {
+      seed: analysis.seed,
+      facets: analysis.facets,
+      parts: composeProblemParts(analysis.facets, String(analysis.seed)),
+      model: analysis.model,
+      prompt: analysis.prompt,
+    },
+    state: toGameView(createReplayState()),
+    answer: null,
+  }
+}
+
+function makePlayingGame(problem = PROBLEM): DurableGame {
+  return {
+    ...makeMappedGame(problem),
+    revision: 2,
+    status: 'playing',
+  }
+}
+
+function makeDividingGame(): DurableGame {
+  return {
+    id: GAME_ID,
+    sourceGameId: null,
+    revision: 0,
+    status: 'dividing',
+    problem: PROBLEM,
+    division: null,
+    state: null,
+    answer: null,
+  }
+}
+
+function moveGame(
+  game: DurableGame,
+  pieceId: string,
+  to: CellCoord,
+): DurableGame {
+  if (!game.state || !game.division) {
+    throw new Error('A mapped game is required.')
+  }
+
+  const accepted = acceptMoveCommand(
+    game.state,
+    {
+      expectedPly: game.state.completedPlies + 1,
+      pieceId,
+      to,
+    },
+    game.division.parts,
+  )
+  const status: DurableGameStatus = accepted.state.outcome ? 'completed' : 'playing'
+  return {
+    ...game,
+    revision: game.revision + 1,
     status,
-    headers: { 'Content-Type': 'application/json' },
+    state: toGameView(accepted.state),
+  }
+}
+
+function terminalReadyState(): ReplayState {
+  const pieces: Piece[] = [
+    {
+      id: 'white-king-1',
+      side: 'white',
+      kind: 'king',
+      position: { ring: 7, sector: 0 },
+      moved: false,
+    },
+    {
+      id: 'white-rook-1',
+      side: 'white',
+      kind: 'rook',
+      position: { ring: 1, sector: 4 },
+      moved: true,
+    },
+    {
+      id: 'black-king-1',
+      side: 'black',
+      kind: 'king',
+      position: { ring: 0, sector: 4 },
+      moved: false,
+    },
+  ]
+
+  return {
+    versions: CURRENT_GAME_VERSIONS,
+    pieces,
+    turn: 'white',
+    completedPlies: 0,
+    quietPlies: 0,
+    events: [],
+    captures: [],
+    lastMove: null,
+    outcome: null,
+  }
+}
+
+function makeTerminalReadyGame(): DurableGame {
+  return {
+    ...makePlayingGame(),
+    revision: 11,
+    state: toGameView(terminalReadyState()),
+  }
+}
+
+function makeAnsweredGame(): DurableGame {
+  const completed = moveGame(
+    makeTerminalReadyGame(),
+    'white-rook-1',
+    { ring: 0, sector: 4 },
+  )
+  return {
+    ...completed,
+    revision: completed.revision + 1,
+    status: 'answered',
+    answer: ANSWER,
+  }
+}
+
+function makeAnswerFailedGame(): DurableGame {
+  const completed = moveGame(
+    makeTerminalReadyGame(),
+    'white-rook-1',
+    { ring: 0, sector: 4 },
+  )
+  return {
+    ...completed,
+    status: 'answer_failed',
+    answer: null,
+  }
+}
+
+function requireServerGame(): DurableGame {
+  if (!serverGame) throw new Error('The mock server has no current game.')
+  return serverGame
+}
+
+function assertRevision(command: RevisionCommand, game: DurableGame): void {
+  if (command.expectedRevision !== game.revision) {
+    throw new Error(
+      `Stale mock request: expected revision ${game.revision}, received ${command.expectedRevision}.`,
+    )
+  }
+}
+
+async function flushAsyncWork(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve()
+  })
+  await act(async () => {
+    await Promise.resolve()
   })
 }
 
-async function submitProblem(problem: string): Promise<void> {
-  await act(async () => {})
+async function renderRestoredApp(): Promise<ReturnType<typeof render>> {
+  const previousRestoreCalls = apiHarness.getCurrentGame.mock.calls.length
+  const result = render(<App />)
+  await waitFor(() => {
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(previousRestoreCalls + 1)
+  })
+  await flushAsyncWork()
+  return result
+}
+
+async function submitProblem(problem = PROBLEM): Promise<void> {
   fireEvent.change(screen.getByLabelText(/what are you trying to understand/i), {
     target: { value: problem },
   })
   fireEvent.click(screen.getByRole('button', { name: /divide the problem/i }))
-  await act(async () => {})
+  await flushAsyncWork()
 }
 
 async function finishMapping(): Promise<void> {
@@ -91,172 +317,680 @@ async function finishMapping(): Promise<void> {
   await act(() => vi.advanceTimersByTimeAsync(6_500))
 }
 
-async function beginDeferredGame(): Promise<void> {
-  const division = makeDivisionAnalysis('deferred-engine-seed')
-  vi.stubGlobal('fetch', vi.fn().mockImplementation((input: string) => {
-    if (input === '/api/session') return Promise.resolve(jsonResponse(ACTIVE_SESSION))
-    if (input === '/api/divide') return Promise.resolve(jsonResponse(division))
-    throw new Error(`Unexpected request: ${input}`)
-  }))
+beforeEach(() => {
+  serverGame = null
+  engineHarness.deferred = false
+  engineHarness.pending.splice(0)
+  engineHarness.chooseMove.mockClear()
+  engineHarness.reset.mockClear()
+  engineHarness.dispose.mockClear()
 
-  render(<App />)
-  await submitProblem('How should this position move toward a useful next step?')
-  await finishMapping()
-  fireEvent.click(screen.getByRole('button', { name: /set the pieces in motion/i }))
-  engineHarness.deferred = true
-}
+  for (const mock of Object.values(apiHarness)) mock.mockClear()
 
-describe('WebChess flow', () => {
-  afterEach(() => {
-    engineHarness.deferred = false
-    engineHarness.pending.splice(0)
-    engineHarness.chooseMove.mockClear()
-    engineHarness.reset.mockClear()
-    engineHarness.dispose.mockClear()
-    vi.useRealTimers()
-    vi.unstubAllGlobals()
-  })
-
-  it('gates paid play until an access code starts a server session', async () => {
-    const fetchMock = vi.fn().mockImplementation((input: string, init?: RequestInit) => {
-      if (input === '/api/session' && init?.method === 'POST') {
-        return Promise.resolve(jsonResponse(ACTIVE_SESSION))
-      }
-      if (input === '/api/session') {
-        return Promise.resolve(jsonResponse({ authenticated: false }))
-      }
-      throw new Error(`Unexpected paid request before authentication: ${input}`)
+  apiHarness.getCurrentGame.mockImplementation(async () => serverGame)
+  apiHarness.getOwnedGame.mockImplementation(async (gameId: string) => {
+    if (serverGame?.id === gameId) return serverGame
+    throw new WebChessApiError('That saved game was not found.', {
+      kind: 'not-found',
+      status: 404,
     })
-    vi.stubGlobal('fetch', fetchMock)
+  })
+  apiHarness.recoverDivisionIntent.mockImplementation(async () => {
+    if (serverGame) return serverGame
+    throw new WebChessApiError('That saved game was not found.', {
+      kind: 'not-found',
+      status: 404,
+    })
+  })
+  apiHarness.divideProblem.mockImplementation(async (problem: string) => {
+    serverGame = makeMappedGame(problem)
+    return serverGame
+  })
+  apiHarness.startGame.mockImplementation(
+    async (_gameId: string, command: RevisionCommand) => {
+      const current = requireServerGame()
+      assertRevision(command, current)
+      serverGame = {
+        ...current,
+        revision: current.revision + 1,
+        status: 'playing',
+      }
+      return serverGame
+    },
+  )
+  apiHarness.submitMove.mockImplementation(
+    async (_gameId: string, command: MoveGameCommand) => {
+      const current = requireServerGame()
+      assertRevision(command, current)
+      serverGame = moveGame(current, command.pieceId, command.to)
+      return serverGame
+    },
+  )
+  apiHarness.requestGameAnswer.mockImplementation(
+    async (_gameId: string, command: RevisionCommand) => {
+      const current = requireServerGame()
+      assertRevision(command, current)
+      serverGame = {
+        ...current,
+        revision: current.revision + 1,
+        status: 'answered',
+        answer: ANSWER,
+      }
+      return { game: serverGame, answer: ANSWER }
+    },
+  )
+  apiHarness.replayGame.mockImplementation(
+    async (_gameId: string, command: RevisionCommand) => {
+      const current = requireServerGame()
+      assertRevision(command, current)
+      serverGame = {
+        ...makeMappedGame(current.problem, REPLAY_GAME_ID, current.id),
+        revision: 0,
+      }
+      return serverGame
+    },
+  )
+  apiHarness.abandonGame.mockImplementation(
+    async (_gameId: string, command: RevisionCommand) => {
+      const current = requireServerGame()
+      assertRevision(command, current)
+      serverGame = {
+        ...current,
+        revision: current.revision + 1,
+        status: 'abandoned',
+      }
+      return serverGame
+    },
+  )
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+})
+
+describe('durable WebChess client flow', () => {
+  it('shows a restore failure and retries the durable replay on demand', async () => {
+    serverGame = makeMappedGame()
+    apiHarness.getCurrentGame.mockRejectedValueOnce(
+      new Error('The saved game store is temporarily unavailable.'),
+    )
+
     render(<App />)
-    await act(async () => {})
 
-    fireEvent.change(screen.getByLabelText(/access code/i), {
-      target: { value: 'private-access-code' },
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /saved game store is temporarily unavailable/i,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /restore again/i }))
+
+    await waitFor(() => {
+      expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
+      expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
     })
-    fireEvent.click(screen.getByRole('button', { name: /enter webchess/i }))
-    await act(async () => {})
-
-    expect(fetchMock).toHaveBeenCalledWith('/api/session', expect.objectContaining({
-      method: 'POST',
-      credentials: 'same-origin',
-      body: JSON.stringify({ accessCode: 'private-access-code' }),
-    }))
-    expect(screen.getByLabelText(/what are you trying to understand/i)).toBeInTheDocument()
-    expect(screen.getByText(/Platform API billing for the configured project/i)).toBeInTheDocument()
-    expect(screen.queryByDisplayValue('private-access-code')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
-  it('shows the semantic pipeline, maps 64 server facets, and asks GPT after the game', async () => {
+  it('restores the current mapped game without repeating semantic division', async () => {
+    serverGame = makeMappedGame()
+
+    await renderRestoredApp()
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledOnce()
+    expect(apiHarness.divideProblem).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
+    expect(screen.getAllByText(/sol facet/i).length).toBeGreaterThan(0)
+    expect(screen.queryByLabelText(/what are you trying to understand/i)).not.toBeInTheDocument()
+  })
+
+  it('restores the same authoritative move DTO after a browser remount', async () => {
+    serverGame = moveGame(
+      makePlayingGame(),
+      'white-pawn-4',
+      { ring: 4, sector: 3 },
+    )
+    const savedDto = serverGame
+
+    const firstMount = await renderRestoredApp()
+    expect(document.querySelector('.turn-header .eyebrow')).toHaveTextContent('Move 02')
+    expect(screen.getAllByText(/saved at move 1\. black moves next/i)).toHaveLength(2)
+
+    firstMount.unmount()
+    await renderRestoredApp()
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
+    await expect(apiHarness.getCurrentGame.mock.results[1]?.value).resolves.toBe(savedDto)
+    expect(document.querySelector('.turn-header .eyebrow')).toHaveTextContent('Move 02')
+    expect(screen.getAllByText(/saved at move 1\. black moves next/i)).toHaveLength(2)
+    expect(apiHarness.startGame).not.toHaveBeenCalled()
+    expect(apiHarness.submitMove).not.toHaveBeenCalled()
+  })
+
+  it('keeps polling a restored division across unchanged and transient responses', async () => {
     vi.useFakeTimers()
-    const division = makeDivisionAnalysis('full-flow-seed')
-    const fetchMock = vi.fn().mockImplementation((input: string) => {
-      if (input === '/api/session') return Promise.resolve(jsonResponse(ACTIVE_SESSION))
-      if (input === '/api/divide') return Promise.resolve(jsonResponse(division))
-      if (input === '/api/answer') {
-        return Promise.resolve(jsonResponse({
-          answer: 'Protect the purpose, then test the smallest reversible next step.',
-          model: 'gpt-5.6-sol',
-          prompt: 'Canonical WebChess prompt made from the complete conflict trail.',
-        }))
-      }
-      throw new Error(`Unexpected request: ${input}`)
-    })
-    vi.stubGlobal('fetch', fetchMock)
-    render(<App />)
+    const dividing = makeDividingGame()
+    const mapped = makeMappedGame()
+    apiHarness.getCurrentGame
+      .mockResolvedValueOnce(dividing)
+      .mockResolvedValueOnce({ ...dividing })
+      .mockRejectedValueOnce(new Error('The saved game store briefly disconnected.'))
+      .mockResolvedValue(mapped)
 
-    await submitProblem('How should thoughtful plan 0 move into its next useful phase?')
+    render(<App />)
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await flushAsyncWork()
+
+    expect(screen.getAllByText(/model analyzing 64 candidate facets/i).length).toBeGreaterThan(0)
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledOnce()
+
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    await flushAsyncWork()
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
+    expect(screen.getAllByText(/model analyzing 64 candidate facets/i).length).toBeGreaterThan(0)
+
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    await flushAsyncWork()
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(3)
+    expect(screen.getByRole('alert')).toHaveTextContent(/briefly disconnected/i)
+
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    await flushAsyncWork()
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(4)
+    expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('polls a restored in-progress answer until the durable result is ready', async () => {
+    vi.useFakeTimers()
+    const answered = makeAnsweredGame()
+    const answering: DurableGame = {
+      ...answered,
+      revision: answered.revision - 1,
+      status: 'answering',
+      answer: null,
+    }
+    apiHarness.getCurrentGame
+      .mockResolvedValueOnce(answering)
+      .mockRejectedValueOnce(new Error('The saved game store briefly disconnected.'))
+      .mockResolvedValue(answered)
+
+    render(<App />)
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await flushAsyncWork()
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledOnce()
+    expect(
+      screen.getAllByRole('status').some((element) =>
+        /final answer is being composed/i.test(element.textContent ?? ''),
+      ),
+    ).toBe(true)
+    expect(screen.getByRole('button', { name: /new question/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /replay this board/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /bring another problem/i })).toBeDisabled()
+
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    await flushAsyncWork()
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('00:01')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(/briefly disconnected/i)
+
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    await flushAsyncWork()
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(3)
+    expect(screen.getByText(ANSWER.answer)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('gives a foreground answer restore priority over the next silent poll', async () => {
+    vi.useFakeTimers()
+    const answered = makeAnsweredGame()
+    const answering: DurableGame = {
+      ...answered,
+      revision: answered.revision - 1,
+      status: 'answering',
+      answer: null,
+    }
+    const foregroundRestore = createDeferred<DurableGame | null>()
+    apiHarness.getCurrentGame
+      .mockResolvedValueOnce(answering)
+      .mockRejectedValueOnce(
+        new Error('The saved game store briefly disconnected.'),
+      )
+      .mockImplementationOnce(() => foregroundRestore.promise)
+      .mockResolvedValue(answered)
+
+    render(<App />)
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await flushAsyncWork()
+
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    await flushAsyncWork()
+    expect(screen.getByRole('alert')).toHaveTextContent(/briefly disconnected/i)
+
+    fireEvent.click(screen.getByRole('button', { name: /restore again/i }))
+    await flushAsyncWork()
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(3)
+    const foregroundSignal = (
+      apiHarness.getCurrentGame.mock.calls[2]?.[0] as {
+        signal: AbortSignal
+      }
+    ).signal
+    expect(
+      screen.getByText(/replaying the durable move log/i),
+    ).toBeInTheDocument()
+
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    await flushAsyncWork()
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(3)
+    expect(foregroundSignal.aborted).toBe(false)
+
+    await act(async () => {
+      foregroundRestore.resolve(answered)
+    })
+    await flushAsyncWork()
+
+    expect(screen.getByText(ANSWER.answer)).toBeInTheDocument()
+    expect(screen.queryByLabelText(/restoring saved game/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('divides into 64 mapped facets and starts only by game id and revision', async () => {
+    await renderRestoredApp()
+    vi.useFakeTimers()
+
+    await submitProblem()
+
+    expect(apiHarness.divideProblem).toHaveBeenCalledWith(
+      PROBLEM,
+      expect.objectContaining({
+        idempotencyKey: expect.any(String),
+        signal: expect.any(AbortSignal),
+      }),
+    )
     expect(screen.getAllByText(/64 model facets received/i).length).toBeGreaterThan(0)
     expect(screen.getByText(/gpt-5\.6-sol · OpenAI API · semantic division/i)).toBeInTheDocument()
 
-    await act(() => vi.advanceTimersByTimeAsync(800))
-    expect(screen.getAllByText(/problem facets independently shuffled/i).length).toBeGreaterThan(0)
-    await act(() => vi.advanceTimersByTimeAsync(800))
-    expect(screen.getAllByText(/i ching lenses independently shuffled/i).length).toBeGreaterThan(0)
-    await act(() => vi.advanceTimersByTimeAsync(800))
-    expect(screen.getAllByText(/facets paired with hexagrams/i).length).toBeGreaterThan(0)
     await finishMapping()
 
     expect(screen.getByRole('progressbar', { name: /facets cast onto the board/i })).toHaveAttribute(
       'aria-valuenow',
       '64',
     )
-    expect(screen.getByLabelText(/64-part board is complete/i)).not.toHaveAttribute('aria-busy')
-    expect(document.querySelectorAll('.division-pipeline li.is-complete')).toHaveLength(6)
-    expect(screen.getAllByText(/sol facet/i).length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: /set the pieces in motion/i }))
-    fireEvent.click(screen.getByRole('button', { name: /auto-play to the end/i }))
+    await flushAsyncWork()
 
-    for (let turn = 0; turn < 60; turn += 1) {
-      await act(() => vi.advanceTimersByTimeAsync(700))
-      const depth = screen.queryByRole('progressbar', { name: /captured signal depth/i })
-      if (depth?.getAttribute('aria-valuenow') === '7') break
-    }
-
+    expect(apiHarness.startGame).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: 1 },
+      { idempotencyKey: expect.any(String) },
+    )
     expect(screen.getByRole('region', { name: /play the problem/i })).toBeInTheDocument()
-    expect(screen.getByRole('progressbar', { name: /captured signal depth/i })).toHaveAttribute('aria-valuenow', '7')
-    expect(screen.queryByRole('region', { name: /final webchess answer/i })).not.toBeInTheDocument()
+    expect(document.querySelector('.turn-header .eyebrow')).toHaveTextContent('Move 01')
+  })
 
-    let terminalMove = 0
-    for (let turn = 0; turn < 300; turn += 1) {
-      await act(() => vi.advanceTimersByTimeAsync(700))
-      if (screen.queryByText(/game complete · weaving the final answer/i)) {
-        terminalMove = Number.parseInt(
-          document.querySelector('.turn-header .eyebrow')?.textContent?.match(/\d+/)?.[0] ?? '0',
-          10,
-        )
-        break
-      }
-    }
-    expect(terminalMove).toBeGreaterThan(0)
-    await act(() => vi.advanceTimersByTimeAsync(1_200))
-    await act(async () => {})
+  it('guards a pending start and reuses its idempotency key after a transport failure', async () => {
+    serverGame = makeMappedGame()
+    const pendingStart = createDeferred<DurableGame>()
+    apiHarness.startGame.mockImplementationOnce(() => pendingStart.promise)
+    await renderRestoredApp()
 
-    expect(screen.getByRole('region', { name: /final webchess answer/i })).toBeInTheDocument()
-    expect(screen.getByText(/protect the purpose, then test/i)).toBeInTheDocument()
-    expect(screen.getByText(
-      /gpt-5\.6-sol · OpenAI API · answer from \d+ captured signals/i,
-    )).toBeInTheDocument()
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const beginButton = screen.getByRole('button', { name: /set the pieces in motion/i })
+    const resetButton = screen.getByRole('button', { name: /new question/i })
+    fireEvent.click(beginButton)
+    fireEvent.click(beginButton)
 
-    const answerRequest = fetchMock.mock.calls.find(([url]) => url === '/api/answer')
-    expect(answerRequest).toBeDefined()
-    expect(answerRequest?.[1]).toMatchObject({
-      credentials: 'same-origin',
-      headers: expect.objectContaining({ 'X-WebChess-CSRF': 'test-csrf-token' }),
+    expect(apiHarness.startGame).toHaveBeenCalledOnce()
+    expect(beginButton).toBeDisabled()
+    expect(resetButton).toBeDisabled()
+
+    await act(async () => {
+      pendingStart.reject(
+        new WebChessApiError('The start response was lost in transit.', {
+          kind: 'transport',
+        }),
+      )
     })
-    const body = JSON.parse(String(answerRequest?.[1]?.body)) as {
-      captures: Array<{ part: { title: string; focus: string } }>
-      outcome: { reason: string; completedTurn: number }
-    }
-    expect(body.captures.length).toBeGreaterThanOrEqual(7)
-    expect(body.captures[0].part.title).toMatch(/Sol facet/i)
-    expect(body.captures[0].part.focus).toMatch(/Concrete focus/i)
-    expect(['king-captured', 'no-progress', 'move-limit']).toContain(body.outcome.reason)
-    expect(body.outcome.completedTurn).toBe(terminalMove)
-  }, 30_000)
 
-  it('cancels an autoplay search on pause and ignores its stale completion', async () => {
+    expect(beginButton).toBeEnabled()
+    expect(resetButton).toBeEnabled()
+    fireEvent.click(beginButton)
+    await flushAsyncWork()
+
+    expect(apiHarness.startGame).toHaveBeenCalledTimes(2)
+    const firstOptions = apiHarness.startGame.mock.calls[0]?.[2] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.startGame.mock.calls[1]?.[2] as {
+      idempotencyKey: string
+    }
+    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+    expect(apiHarness.createIdempotencyKey).toHaveBeenCalledOnce()
+    expect(screen.getByRole('region', { name: /play the problem/i })).toBeInTheDocument()
+  })
+
+  it('does not overwrite a successfully restored start conflict with the stale error', async () => {
+    serverGame = makeMappedGame()
+    apiHarness.startGame.mockImplementationOnce(async () => {
+      const current = requireServerGame()
+      serverGame = {
+        ...current,
+        revision: current.revision + 1,
+        status: 'playing',
+      }
+      throw new WebChessApiError('The game already started elsewhere.', {
+        kind: 'conflict',
+      })
+    })
+    await renderRestoredApp()
+
+    fireEvent.click(screen.getByRole('button', { name: /set the pieces in motion/i }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('region', { name: /play the problem/i })).toBeInTheDocument()
+    })
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('retries an ambiguous division with the same idempotency key', async () => {
+    await renderRestoredApp()
+    apiHarness.divideProblem.mockRejectedValueOnce(
+      new WebChessApiError('The connection ended before the division was confirmed.', {
+        kind: 'transport',
+      }),
+    )
+
+    await submitProblem()
+
+    expect(screen.getByText(/connection ended before the division was confirmed/i)).toBeInTheDocument()
+    expect(apiHarness.recoverDivisionIntent).toHaveBeenCalledWith(
+      '018f47b2-4b0c-7b9e-8f24-123456789000',
+      { signal: expect.any(AbortSignal) },
+    )
+    expect(screen.getByRole('button', { name: /new question/i })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: /try the division again/i }))
+    await flushAsyncWork()
+
+    expect(apiHarness.divideProblem).toHaveBeenCalledTimes(2)
+    const firstOptions = apiHarness.divideProblem.mock.calls[0]?.[1] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.divideProblem.mock.calls[1]?.[1] as {
+      idempotencyKey: string
+    }
+    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+    expect(screen.getAllByText(/64 model facets received/i).length).toBeGreaterThan(0)
+  })
+
+  it('recovers and durably abandons an original failed division before refresh', async () => {
+    const firstMount = await renderRestoredApp()
+    apiHarness.divideProblem.mockImplementationOnce(
+      async (problem: string): Promise<DurableGame> => {
+        serverGame = {
+          ...makeDividingGame(),
+          id: GAME_ID,
+          revision: 1,
+          status: 'division_failed',
+          problem,
+        }
+        throw new WebChessApiError('The model rejected the division.', {
+          kind: 'http-error',
+          status: 502,
+        })
+      },
+    )
+
+    await submitProblem()
+
+    expect(apiHarness.recoverDivisionIntent).toHaveBeenCalledWith(
+      '018f47b2-4b0c-7b9e-8f24-123456789000',
+      { signal: expect.any(AbortSignal) },
+    )
+    expect(screen.getByText(/model rejected the division/i)).toBeInTheDocument()
+
+    const resetButton = screen.getByRole('button', { name: /new question/i })
+    expect(resetButton).toBeEnabled()
+    fireEvent.click(resetButton)
+    await flushAsyncWork()
+
+    expect(apiHarness.abandonGame).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: 1 },
+      { idempotencyKey: expect.any(String) },
+    )
+    expect(serverGame?.status).toBe('abandoned')
+
+    firstMount.unmount()
+    apiHarness.getCurrentGame.mockImplementation(
+      async () => serverGame?.status === 'abandoned' ? null : serverGame,
+    )
+    await renderRestoredApp()
+
+    expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
+    expect(apiHarness.divideProblem).toHaveBeenCalledOnce()
+  })
+
+  it('disables reset until an initial division returns a durable game target', async () => {
+    await renderRestoredApp()
+    const pendingDivision = createDeferred<DurableGame>()
+    apiHarness.divideProblem.mockImplementationOnce(() => pendingDivision.promise)
+
+    await submitProblem()
+    const resetButton = screen.getByRole('button', { name: /new question/i })
+
+    expect(resetButton).toBeDisabled()
+    expect(apiHarness.abandonGame).not.toHaveBeenCalled()
+
+    const mapped = makeMappedGame()
+    serverGame = mapped
+    await act(async () => pendingDivision.resolve(mapped))
+    await flushAsyncWork()
+
+    expect(resetButton).toBeEnabled()
+    fireEvent.click(resetButton)
+    await flushAsyncWork()
+
+    expect(apiHarness.abandonGame).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: 1 },
+      { idempotencyKey: expect.any(String) },
+    )
+    expect(serverGame?.status).toBe('abandoned')
+    expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
+  })
+
+  it('guards a pending reset and reuses its idempotency key after a transport failure', async () => {
+    serverGame = makePlayingGame()
+    const pendingReset = createDeferred<DurableGame>()
+    apiHarness.abandonGame.mockImplementationOnce(() => pendingReset.promise)
+    await renderRestoredApp()
+
+    const resetButton = screen.getByRole('button', { name: /new question/i })
+    fireEvent.click(resetButton)
+    fireEvent.click(resetButton)
+
+    expect(apiHarness.abandonGame).toHaveBeenCalledOnce()
+    expect(resetButton).toBeDisabled()
+
+    await act(async () => {
+      pendingReset.reject(
+        new WebChessApiError('The reset response was lost in transit.', {
+          kind: 'transport',
+        }),
+      )
+    })
+
+    expect(resetButton).toBeEnabled()
+    fireEvent.click(resetButton)
+    await flushAsyncWork()
+
+    expect(apiHarness.abandonGame).toHaveBeenCalledTimes(2)
+    const firstOptions = apiHarness.abandonGame.mock.calls[0]?.[2] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.abandonGame.mock.calls[1]?.[2] as {
+      idempotencyKey: string
+    }
+    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+    expect(apiHarness.createIdempotencyKey).toHaveBeenCalledOnce()
+    expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
+  })
+
+  it('does not overwrite a successfully restored reset conflict with the stale error', async () => {
+    serverGame = makePlayingGame()
+    apiHarness.abandonGame.mockImplementationOnce(async () => {
+      const current = requireServerGame()
+      serverGame = {
+        ...current,
+        revision: current.revision + 1,
+      }
+      throw new WebChessApiError('The game changed before reset.', {
+        kind: 'conflict',
+      })
+    })
+    await renderRestoredApp()
+
+    fireEvent.click(screen.getByRole('button', { name: /new question/i }))
+
+    await waitFor(() => {
+      expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
+    })
+    expect(screen.getByRole('region', { name: /play the problem/i })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('durably abandons an answered game before showing a new question', async () => {
+    serverGame = makeAnsweredGame()
+    await renderRestoredApp()
+
+    fireEvent.click(screen.getByRole('button', { name: /bring another problem/i }))
+    await flushAsyncWork()
+
+    expect(apiHarness.abandonGame).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: 13 },
+      { idempotencyKey: expect.any(String) },
+    )
+    expect(serverGame?.status).toBe('abandoned')
+    expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
+  })
+
+  it('keeps reset disabled until a restored division has a durable mapped target', async () => {
     vi.useFakeTimers()
-    await beginDeferredGame()
+    const dividing = makeDividingGame()
+    const mapped = makeMappedGame()
+    const pendingPoll = createDeferred<DurableGame | null>()
+    apiHarness.getCurrentGame
+      .mockResolvedValueOnce(dividing)
+      .mockImplementationOnce(() => pendingPoll.promise)
+
+    render(<App />)
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await flushAsyncWork()
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+
+    const resetButton = screen.getByRole('button', { name: /new question/i })
+    expect(resetButton).toBeDisabled()
+    fireEvent.click(resetButton)
+    expect(apiHarness.abandonGame).not.toHaveBeenCalled()
+
+    await act(async () => pendingPoll.resolve(mapped))
+    await flushAsyncWork()
+
+    expect(resetButton).toBeEnabled()
+    expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
+  })
+
+  it('autoplays with the shallow Engine V2 result and persists only the move command', async () => {
+    serverGame = makePlayingGame()
+    await renderRestoredApp()
+    vi.useFakeTimers()
+
+    fireEvent.click(screen.getByRole('button', { name: /auto-play to the end/i }))
+    await act(() => vi.advanceTimersByTimeAsync(321))
+    await flushAsyncWork()
+
+    expect(apiHarness.submitMove).toHaveBeenCalledOnce()
+    expect(engineHarness.chooseMove).toHaveBeenCalledWith(
+      expect.any(Array),
+      'white',
+      `${PROBLEM}/1`,
+      { completedPlies: 0, quietPlies: 0 },
+    )
+
+    const [gameId, command, options] = apiHarness.submitMove.mock.calls[0] as [
+      string,
+      MoveGameCommand,
+      { idempotencyKey: string },
+    ]
+    expect(gameId).toBe(GAME_ID)
+    expect(Object.keys(command).sort()).toEqual(['expectedRevision', 'pieceId', 'to'])
+    expect(command).toMatchObject({
+      expectedRevision: 2,
+      pieceId: expect.stringMatching(/^white-/),
+      to: {
+        ring: expect.any(Number),
+        sector: expect.any(Number),
+      },
+    })
+    expect(command).not.toHaveProperty('pieces')
+    expect(command).not.toHaveProperty('captures')
+    expect(command).not.toHaveProperty('outcome')
+    expect(options).toEqual({ idempotencyKey: expect.any(String) })
+    expect(document.querySelector('.turn-header .eyebrow')).toHaveTextContent('Move 02')
+
+    fireEvent.click(screen.getByRole('button', { name: /pause auto-play/i }))
+  })
+
+  it('keeps reset disabled while a move compare-and-swap is pending', async () => {
+    serverGame = makePlayingGame()
+    const pendingMove = createDeferred<DurableGame>()
+    apiHarness.submitMove.mockImplementationOnce(() => pendingMove.promise)
+    await renderRestoredApp()
+    vi.useFakeTimers()
+
+    fireEvent.click(screen.getByRole('button', { name: /auto-play to the end/i }))
+    await act(() => vi.advanceTimersByTimeAsync(321))
+    await flushAsyncWork()
+
+    const resetButton = screen.getByRole('button', { name: /new question/i })
+    expect(apiHarness.submitMove).toHaveBeenCalledOnce()
+    expect(resetButton).toBeDisabled()
+    fireEvent.click(resetButton)
+    expect(apiHarness.abandonGame).not.toHaveBeenCalled()
+
+    const command = apiHarness.submitMove.mock.calls[0]?.[1] as MoveGameCommand
+    const saved = moveGame(
+      requireServerGame(),
+      command.pieceId,
+      command.to,
+    )
+    serverGame = saved
+    await act(async () => {
+      pendingMove.resolve(saved)
+    })
+    await flushAsyncWork()
+
+    expect(resetButton).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: /pause auto-play/i }))
+  })
+
+  it('cancels autoplay and ignores the stale engine completion', async () => {
+    serverGame = makePlayingGame()
+    await renderRestoredApp()
+    vi.useFakeTimers()
+    engineHarness.deferred = true
 
     fireEvent.click(screen.getByRole('button', { name: /auto-play to the end/i }))
     await act(() => vi.advanceTimersByTimeAsync(321))
 
     expect(engineHarness.pending).toHaveLength(1)
-    expect(engineHarness.chooseMove).toHaveBeenCalledWith(
-      expect.any(Array),
-      'white',
-      expect.any(String),
-      { completedPlies: 0, quietPlies: 0 },
-    )
     expect(screen.getByRole('button', { name: /pause auto-play/i })).toBeEnabled()
-
     fireEvent.click(screen.getByRole('button', { name: /pause auto-play/i }))
-
-    expect(engineHarness.reset).toHaveBeenCalledTimes(1)
-    expect(screen.getByRole('button', { name: /auto-play to the end/i })).toBeEnabled()
-    expect(screen.getByRole('button', { name: /play one turn/i })).toBeEnabled()
 
     await act(async () => {
       engineHarness.pending[0]?.resolve({
@@ -270,25 +1004,23 @@ describe('WebChess flow', () => {
       })
     })
 
+    expect(engineHarness.reset).toHaveBeenCalledOnce()
+    expect(apiHarness.submitMove).not.toHaveBeenCalled()
     expect(document.querySelector('.turn-header .eyebrow')).toHaveTextContent('Move 01')
     expect(screen.getAllByText(/auto-play paused\. choose a white piece/i)).toHaveLength(2)
   })
 
-  it('blocks autoplay during a manual search and rejects completion after reset', async () => {
-    vi.useFakeTimers()
-    await beginDeferredGame()
+  it('cancels a manual search when the durable game is abandoned', async () => {
+    serverGame = makePlayingGame()
+    await renderRestoredApp()
+    engineHarness.deferred = true
 
     fireEvent.click(screen.getByRole('button', { name: /play one turn/i }))
-
     expect(engineHarness.pending).toHaveLength(1)
     expect(screen.getByRole('button', { name: /auto-play to the end/i })).toBeDisabled()
-    expect(screen.getByRole('button', { name: /searching/i })).toBeDisabled()
 
     fireEvent.click(screen.getByRole('button', { name: /new question/i }))
-
-    expect(engineHarness.reset).toHaveBeenCalledTimes(1)
-    expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
-
+    await flushAsyncWork()
     await act(async () => {
       engineHarness.pending[0]?.resolve({
         status: 'ok',
@@ -301,265 +1033,254 @@ describe('WebChess flow', () => {
       })
     })
 
+    expect(apiHarness.abandonGame).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: 2 },
+      { idempotencyKey: expect.any(String) },
+    )
+    expect(apiHarness.submitMove).not.toHaveBeenCalled()
     expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
-    expect(screen.queryByRole('region', { name: /play the problem/i })).not.toBeInTheDocument()
   })
 
-  it('stops autoplay cleanly when the engine returns an inapplicable move', async () => {
-    vi.useFakeTimers()
-    await beginDeferredGame()
+  it('recovers from failed and empty engine results without inventing a move', async () => {
+    serverGame = makePlayingGame()
+    await renderRestoredApp()
+    engineHarness.deferred = true
 
-    fireEvent.click(screen.getByRole('button', { name: /auto-play to the end/i }))
-    await act(() => vi.advanceTimersByTimeAsync(321))
+    fireEvent.click(screen.getByRole('button', { name: /play one turn/i }))
+    await act(async () => {
+      engineHarness.pending[0]?.resolve({
+        status: 'failed',
+        message: 'The worker stopped unexpectedly.',
+      })
+    })
 
+    expect(screen.getAllByText(/worker stopped unexpectedly.*move a piece yourself/i)).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: /play one turn/i }))
+    await act(async () => {
+      engineHarness.pending[1]?.resolve({ status: 'ok', move: null })
+    })
+    await flushAsyncWork()
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
+    expect(apiHarness.submitMove).not.toHaveBeenCalled()
+    expect(document.querySelector('.turn-header .eyebrow')).toHaveTextContent('Move 01')
+  })
+
+  it('answers a terminal server move using only its game id and saved revision', async () => {
+    serverGame = makeTerminalReadyGame()
+    await renderRestoredApp()
+    engineHarness.deferred = true
+
+    fireEvent.click(screen.getByRole('button', { name: /play one turn/i }))
     await act(async () => {
       engineHarness.pending[0]?.resolve({
         status: 'ok',
         move: {
-          pieceId: 'missing-piece',
-          from: { ring: 6, sector: 0 },
-          to: { ring: 5, sector: 0 },
-          score: 0,
+          pieceId: 'white-rook-1',
+          from: { ring: 1, sector: 4 },
+          to: { ring: 0, sector: 4 },
+          score: 10_000,
         },
       })
     })
 
-    expect(screen.getByRole('button', { name: /auto-play to the end/i })).toBeEnabled()
-    expect(screen.getByRole('button', { name: /play one turn/i })).toBeEnabled()
-    expect(screen.getAllByText(/move engine returned a move that no longer fits/i)).toHaveLength(2)
-  })
-
-  it('keeps the mapped board when an expired session is renewed for the same model', async () => {
-    vi.useFakeTimers()
-    const division = makeDivisionAnalysis('re-auth-seed')
-    const expiring = {
-      ...ACTIVE_SESSION,
-      expiresAt: new Date(Date.now() + 30_000).toISOString(),
-    }
-    const renewed = {
-      ...ACTIVE_SESSION,
-      csrfToken: 'rotated-csrf-token',
-      expiresAt: new Date(Date.now() + 8 * 3_600_000).toISOString(),
-    }
-    let authenticated = true
-    vi.stubGlobal('fetch', vi.fn().mockImplementation((input: string, init?: RequestInit) => {
-      if (input === '/api/session' && init?.method === 'POST') {
-        authenticated = true
-        return Promise.resolve(jsonResponse(renewed))
-      }
-      if (input === '/api/session') {
-        return Promise.resolve(jsonResponse(authenticated ? expiring : { authenticated: false }))
-      }
-      if (input === '/api/divide') return Promise.resolve(jsonResponse(division))
-      throw new Error(`Unexpected request: ${input}`)
-    }))
-    render(<App />)
-
-    await submitProblem('How should thoughtful plan 0 move into its next useful phase?')
-    await finishMapping()
-    expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
-
-    authenticated = false
-    await act(() => vi.advanceTimersByTimeAsync(31_000))
-    expect(screen.getByLabelText(/access code/i)).toBeInTheDocument()
-
-    fireEvent.change(screen.getByLabelText(/access code/i), {
-      target: { value: 'private-access-code' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /enter webchess/i }))
-    await act(async () => {})
-
-    // The facets belong to the model, not to the session token, so a renewed
-    // session returns to the same board rather than an empty question form.
-    expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
-    expect(screen.getAllByText(/sol facet/i).length).toBeGreaterThan(0)
-    expect(screen.queryByLabelText(/what are you trying to understand/i)).not.toBeInTheDocument()
-  })
-
-  it('does not reveal a local fallback while semantic analysis is pending or failed', async () => {
-    vi.useFakeTimers()
-    let resolveDivision: ((response: Response) => void) | undefined
-    const fetchMock = vi.fn().mockImplementation((input: string) => {
-      if (input === '/api/session') return Promise.resolve(jsonResponse(ACTIVE_SESSION))
-      return new Promise<Response>((resolve) => {
-      resolveDivision = resolve
-      })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-    render(<App />)
-
-    await submitProblem('What is the clearest next step for this difficult decision?')
-    expect(screen.getAllByText(/model analyzing 64 candidate facets/i).length).toBeGreaterThan(0)
-    expect(screen.queryByLabelText(/facets mapped/i)).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeDisabled()
-
-    await act(() => vi.advanceTimersByTimeAsync(8_000))
-    expect(screen.queryByLabelText(/facets mapped/i)).not.toBeInTheDocument()
-    expect(document.querySelector('.current-lens')).not.toBeInTheDocument()
-    expect(screen.queryByText(/sol facet \d/i)).not.toBeInTheDocument()
-
-    await act(async () => {
-      resolveDivision?.(jsonResponse({
-        error: 'Semantic analysis is unavailable right now.',
-        prompt: 'Canonical division prompt waiting for Sol.',
-      }, 503))
+    await waitFor(() => expect(apiHarness.requestGameAnswer).toHaveBeenCalledOnce())
+    await waitFor(() => {
+      expect(screen.getByRole('region', { name: /final webchess answer/i })).toBeInTheDocument()
+      expect(screen.getByText(/protect the purpose, then test/i)).toBeInTheDocument()
     })
 
-    expect(screen.getByText(/semantic analysis is unavailable/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /try the division again/i })).toBeInTheDocument()
-    expect(screen.getByText(/see the analysis prompt/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeDisabled()
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const [gameId, command, options] = apiHarness.requestGameAnswer.mock.calls[0] as [
+      string,
+      RevisionCommand,
+      { idempotencyKey: string; signal: AbortSignal },
+    ]
+    expect(gameId).toBe(GAME_ID)
+    expect(command).toEqual({ expectedRevision: 12 })
+    expect(Object.keys(command)).toEqual(['expectedRevision'])
+    expect(command).not.toHaveProperty('captures')
+    expect(command).not.toHaveProperty('outcome')
+    expect(command).not.toHaveProperty('problem')
+    expect(options).toEqual({
+      idempotencyKey: expect.any(String),
+      signal: expect.any(AbortSignal),
+    })
   })
 
-  it('shows only the prompt returned for the current answer attempt', async () => {
-    vi.useFakeTimers()
-    const division = makeDivisionAnalysis('answer-error-seed')
-    let answerAttempts = 0
-    vi.stubGlobal('fetch', vi.fn().mockImplementation((input: string) => {
-      if (input === '/api/session') return Promise.resolve(jsonResponse(ACTIVE_SESSION))
-      if (input === '/api/divide') return Promise.resolve(jsonResponse(division))
-      if (input === '/api/answer') {
-        answerAttempts += 1
-        return Promise.resolve(jsonResponse(
-          answerAttempts === 1
-            ? {
-                error: 'The configured model provider could not answer.',
-                prompt: 'The complete prompt used for the first attempt.',
-              }
-            : {
-                error: 'The retry lost its connection.',
-              },
-          503,
-        ))
-      }
-      throw new Error(`Unexpected request: ${input}`)
-    }))
-    render(<App />)
+  it('retries an ambiguous answer with the same idempotency key', async () => {
+    serverGame = makeAnswerFailedGame()
+    await renderRestoredApp()
+    apiHarness.requestGameAnswer.mockRejectedValueOnce(
+      new WebChessApiError('The connection ended before the answer was confirmed.', {
+        kind: 'transport',
+      }),
+    )
 
-    await submitProblem('What is the clearest next step for this difficult decision?')
-    await finishMapping()
-    fireEvent.click(screen.getByRole('button', { name: /set the pieces in motion/i }))
-    fireEvent.click(screen.getByRole('button', { name: /auto-play to the end/i }))
-
-    for (let turn = 0; turn < 300; turn += 1) {
-      await act(() => vi.advanceTimersByTimeAsync(700))
-      if (screen.queryByRole('region', { name: /final webchess answer/i })) break
-    }
-    await act(() => vi.advanceTimersByTimeAsync(1_200))
-    await act(async () => {})
-
-    expect(screen.getByText(/configured model provider could not answer/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /try the answer again/i })).toBeInTheDocument()
-    expect(screen.getByText(/see the prompt used for this attempt/i)).toBeInTheDocument()
-    expect(screen.getByText(/complete prompt used for the first attempt/i)).toBeInTheDocument()
+    expect(screen.getByText(/server replay is complete, but the model answer failed/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /try the answer again/i }))
+    await waitFor(() => {
+      expect(screen.getByText(/connection ended before the answer was confirmed/i)).toBeInTheDocument()
+    })
 
     fireEvent.click(screen.getByRole('button', { name: /try the answer again/i }))
-    await act(async () => {})
-
-    expect(answerAttempts).toBe(2)
-    expect(screen.getByText(/retry lost its connection/i)).toBeInTheDocument()
-    expect(screen.queryByText(/see the prompt used for this attempt/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/complete prompt used for the first attempt/i)).not.toBeInTheDocument()
-  }, 30_000)
-
-  it('returns to the access gate when a paid request reports an expired session', async () => {
-    const fetchMock = vi.fn().mockImplementation((input: string) => {
-      if (input === '/api/session') return Promise.resolve(jsonResponse(ACTIVE_SESSION))
-      if (input === '/api/divide') {
-        return Promise.resolve(jsonResponse({
-          error: 'Your access session has expired.',
-        }, 401))
-      }
-      throw new Error(`Unexpected request: ${input}`)
+    await waitFor(() => {
+      expect(screen.getByText(ANSWER.answer)).toBeInTheDocument()
     })
-    vi.stubGlobal('fetch', fetchMock)
-    render(<App />)
 
-    await submitProblem('How should this plan change without losing its purpose?')
-
-    expect(screen.getByLabelText(/access code/i)).toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent(/session has expired/i)
-    expect(fetchMock).toHaveBeenCalledWith('/api/divide', expect.objectContaining({
-      credentials: 'same-origin',
-      headers: expect.objectContaining({ 'X-WebChess-CSRF': 'test-csrf-token' }),
-    }))
+    expect(apiHarness.requestGameAnswer).toHaveBeenCalledTimes(2)
+    const firstOptions = apiHarness.requestGameAnswer.mock.calls[0]?.[2] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.requestGameAnswer.mock.calls[1]?.[2] as {
+      idempotencyKey: string
+    }
+    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
   })
 
-  it('clears model-derived state before adopting a replacement session and provider', async () => {
-    vi.useFakeTimers()
-    const expiringSession = {
-      ...ACTIVE_SESSION,
-      expiresAt: new Date(Date.now() + 1_000).toISOString(),
+  it('guards replay against rapid duplicate clicks and other reading actions', async () => {
+    serverGame = makeAnsweredGame()
+    const pendingReplay = createDeferred<DurableGame>()
+    apiHarness.replayGame.mockImplementationOnce(() => pendingReplay.promise)
+    await renderRestoredApp()
+
+    const replayButton = screen.getByRole('button', { name: /replay this board/i })
+    fireEvent.click(replayButton)
+    fireEvent.click(replayButton)
+
+    expect(apiHarness.replayGame).toHaveBeenCalledOnce()
+    expect(replayButton).toBeDisabled()
+    expect(screen.getByRole('button', { name: /new question/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /bring another problem/i })).toBeDisabled()
+
+    const replayed = {
+      ...makeMappedGame(PROBLEM, REPLAY_GAME_ID, GAME_ID),
+      revision: 0,
     }
-    const replacementSession = {
-      ...ACTIVE_SESSION,
-      csrfToken: 'replacement-csrf-token',
-      provider: {
-        id: 'codex-chatgpt',
-        label: 'ChatGPT Codex',
-        billing: 'chatgpt-workspace',
-        localOnly: true,
-        dataControlsUrl: 'https://help.openai.com/en/articles/7730893-data-controls-faq',
-        model: 'gpt-5.6-sol',
-        webSearch: 'live',
-      },
+    serverGame = replayed
+    await act(async () => pendingReplay.resolve(replayed))
+    await flushAsyncWork()
+
+    expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
+  })
+
+  it('locks reset after an ambiguous replay until a same-key retry resolves its child', async () => {
+    serverGame = makeAnsweredGame()
+    const firstMount = await renderRestoredApp()
+    let replayChild: DurableGame | null = null
+    apiHarness.replayGame
+      .mockImplementationOnce(
+        async (
+          sourceGameId: string,
+          _command: RevisionCommand,
+          options: { idempotencyKey: string },
+        ) => {
+          replayChild = {
+            ...makeMappedGame(PROBLEM, options.idempotencyKey, sourceGameId),
+            revision: 0,
+          }
+          serverGame = replayChild
+          throw new WebChessApiError(
+            'The replay response was lost in transit.',
+            { kind: 'transport' },
+          )
+        },
+      )
+      .mockImplementationOnce(async () => {
+        if (!replayChild) throw new Error('The mock replay child is missing.')
+        return replayChild
+      })
+    apiHarness.getOwnedGame.mockRejectedValueOnce(
+      new WebChessApiError('The replay child is not visible yet.', {
+        kind: 'not-found',
+        status: 404,
+      }),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /replay this board/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        /replay response was lost in transit/i,
+      )
+    })
+
+    const headerReset = screen.getByRole('button', { name: /new question/i })
+    const readingReset = screen.getByRole('button', { name: /bring another problem/i })
+    const replayButton = screen.getByRole('button', { name: /replay this board/i })
+    expect(headerReset).toBeDisabled()
+    expect(readingReset).toBeDisabled()
+    expect(replayButton).toBeEnabled()
+    fireEvent.click(headerReset)
+    expect(apiHarness.abandonGame).not.toHaveBeenCalled()
+
+    fireEvent.click(replayButton)
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
+    })
+
+    expect(apiHarness.replayGame).toHaveBeenCalledTimes(2)
+    const firstOptions = apiHarness.replayGame.mock.calls[0]?.[2] as {
+      idempotencyKey: string
     }
-    const division = makeDivisionAnalysis('replacement-session-seed')
-    const fetchMock = vi.fn().mockImplementation((input: string, init?: RequestInit) => {
-      if (input === '/api/session' && init?.method === 'POST') {
-        return Promise.resolve(jsonResponse(replacementSession))
-      }
-      if (input === '/api/session') return Promise.resolve(jsonResponse(expiringSession))
-      if (input === '/api/divide') return Promise.resolve(jsonResponse(division))
-      throw new Error(`Unexpected request: ${input}`)
+    const retryOptions = apiHarness.replayGame.mock.calls[1]?.[2] as {
+      idempotencyKey: string
+    }
+    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+    expect(requireServerGame()).toMatchObject({
+      id: firstOptions.idempotencyKey,
+      sourceGameId: GAME_ID,
+      revision: 0,
     })
-    vi.stubGlobal('fetch', fetchMock)
-    render(<App />)
 
-    await submitProblem('How should this plan change without losing its purpose?')
-    expect(screen.getByRole('region', {
-      name: /dividing your problem into 64 facets/i,
-    })).toBeInTheDocument()
-    expect(screen.getByText(/gpt-5\.6-sol · OpenAI API · semantic division/i)).toBeInTheDocument()
-
-    await act(() => vi.advanceTimersByTimeAsync(1_100))
-    expect(screen.getByLabelText(/access code/i)).toBeInTheDocument()
-
-    fireEvent.change(screen.getByLabelText(/access code/i), {
-      target: { value: 'replacement-access-code' },
+    fireEvent.click(screen.getByRole('button', { name: /new question/i }))
+    await waitFor(() => {
+      expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
     })
-    fireEvent.click(screen.getByRole('button', { name: /enter webchess/i }))
-    await act(async () => {})
+    expect(apiHarness.abandonGame).toHaveBeenCalledWith(
+      firstOptions.idempotencyKey,
+      { expectedRevision: 0 },
+      { idempotencyKey: expect.any(String) },
+    )
+
+    firstMount.unmount()
+    apiHarness.getCurrentGame.mockImplementation(
+      async () => serverGame?.status === 'abandoned' ? null : serverGame,
+    )
+    await renderRestoredApp()
 
     expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
-    expect(screen.getByText(/sent through ChatGPT Codex/i)).toBeInTheDocument()
-    expect(screen.queryByRole('region', {
-      name: /dividing your problem into 64 facets/i,
-    })).not.toBeInTheDocument()
   })
 
-  it('ends the server session with CSRF protection before clearing the client', async () => {
-    const fetchMock = vi.fn().mockImplementation((input: string, init?: RequestInit) => {
-      if (input === '/api/session' && init?.method === 'DELETE') {
-        return Promise.resolve(jsonResponse({ authenticated: false }))
-      }
-      if (input === '/api/session') return Promise.resolve(jsonResponse(ACTIVE_SESSION))
-      throw new Error(`Unexpected request: ${input}`)
+  it('creates a durable replay and abandons that replay before a new question', async () => {
+    serverGame = makeAnsweredGame()
+    await renderRestoredApp()
+
+    fireEvent.click(screen.getByRole('button', { name: /replay this board/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
     })
-    vi.stubGlobal('fetch', fetchMock)
-    render(<App />)
-    await act(async () => {})
 
-    fireEvent.click(screen.getByRole('button', { name: /end session/i }))
-    await act(async () => {})
+    expect(apiHarness.replayGame).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: 13 },
+      { idempotencyKey: expect.any(String) },
+    )
+    expect(requireServerGame()).toMatchObject({
+      id: REPLAY_GAME_ID,
+      sourceGameId: GAME_ID,
+      revision: 0,
+      status: 'mapped',
+    })
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/session', expect.objectContaining({
-      method: 'DELETE',
-      credentials: 'same-origin',
-      headers: expect.objectContaining({ 'X-WebChess-CSRF': 'test-csrf-token' }),
-    }))
-    expect(screen.getByLabelText(/access code/i)).toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent(/session has ended/i)
+    fireEvent.click(screen.getByRole('button', { name: /new question/i }))
+    await waitFor(() => {
+      expect(screen.getByLabelText(/what are you trying to understand/i)).toHaveValue('')
+    })
+
+    expect(apiHarness.abandonGame).toHaveBeenCalledWith(
+      REPLAY_GAME_ID,
+      { expectedRevision: 0 },
+      { idempotencyKey: expect.any(String) },
+    )
   })
 })

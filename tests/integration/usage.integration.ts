@@ -1,0 +1,1716 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+
+import { composeProblemParts } from '../../src/lib/division'
+import { DurableGameRepository } from '../../src/server/games'
+import {
+  createUsageController,
+  hashDeletedUserKey,
+} from '../../src/server/usage'
+import type { UsageConfig } from '../../src/server/usage'
+import { makeProblemFacets } from '../../src/test/fixtures'
+import {
+  createPostgresTestDatabase,
+} from './postgres-test-database'
+import type { PostgresTestDatabase } from './postgres-test-database'
+
+const NOW = new Date('2026-07-26T19:12:34.000Z')
+const OWNER = 'user_usage_integration'
+const OTHER_OWNER = 'user_usage_integration_other'
+const REQUEST_ID = '11000000-0000-4000-8000-000000000001'
+const OTHER_REQUEST_ID = '11000000-0000-4000-8000-000000000002'
+const THIRD_REQUEST_ID = '11000000-0000-4000-8000-000000000003'
+const FOURTH_REQUEST_ID = '11000000-0000-4000-8000-000000000004'
+const FIFTH_REQUEST_ID = '11000000-0000-4000-8000-000000000005'
+const SIXTH_REQUEST_ID = '11000000-0000-4000-8000-000000000006'
+const IDEMPOTENCY_KEY = '12000000-0000-4000-8000-000000000001'
+const OTHER_IDEMPOTENCY_KEY = '12000000-0000-4000-8000-000000000002'
+const THIRD_IDEMPOTENCY_KEY = '12000000-0000-4000-8000-000000000003'
+const FOURTH_IDEMPOTENCY_KEY = '12000000-0000-4000-8000-000000000004'
+const FIFTH_IDEMPOTENCY_KEY = '12000000-0000-4000-8000-000000000005'
+const SIXTH_IDEMPOTENCY_KEY = '12000000-0000-4000-8000-000000000006'
+const LEASE_TOKEN = '13000000-0000-4000-8000-000000000001'
+const SHA256 = 'a'.repeat(64)
+
+const DEFAULT_CONFIG: UsageConfig = {
+  hmacSecret: 'integration-secret-material-32-bytes-minimum',
+  deletionHmacSecret:
+    'integration-deletion-secret-material-32-bytes-minimum',
+  dailyGameLimit: 10,
+  dailyModelRequestLimit: 100,
+  dailyGlobalModelRequestLimit: 200,
+  hourlyModelRequestLimit: 20,
+  hourlyIpModelRequestLimit: 40,
+  hourlyGameStartLimit: 20,
+  hourlyIpGameStartLimit: 40,
+  hourlyGameMoveLimit: 600,
+  hourlyIpGameMoveLimit: 1_200,
+  hourlyAccountExportLimit: 2,
+  hourlyIpAccountExportLimit: 10,
+  concurrentModelLimit: 1,
+  globalModelConcurrentLimit: 4,
+  modelLeaseSeconds: 180,
+}
+
+let database: PostgresTestDatabase
+
+beforeEach(async () => {
+  database = await createPostgresTestDatabase('usage')
+  await database.migrate()
+})
+
+afterEach(async () => {
+  await database.dispose()
+})
+
+function controller(
+  config: UsageConfig = DEFAULT_CONFIG,
+  now: () => Date = () => new Date(NOW),
+) {
+  return createUsageController({
+    db: database.adapter,
+    config,
+    now,
+    randomUuid: () => LEASE_TOKEN,
+  })
+}
+
+function divisionReservation(
+  overrides: Partial<Parameters<
+    ReturnType<typeof controller>['reserveModelRequest']
+  >[0]> = {},
+) {
+  return {
+    requestId: REQUEST_ID,
+    gameId: null,
+    userId: OWNER,
+    operation: 'division' as const,
+    idempotencyKey: IDEMPOTENCY_KEY,
+    requestSha256: SHA256,
+    provider: 'openai',
+    model: 'gpt-5.6-sol',
+    promptVersion: 'division-v1',
+    softwareVersion: 'integration-test',
+    countsAsGameStart: true,
+    ipAddress: '203.0.113.10',
+    ...overrides,
+  }
+}
+
+async function createDivisionShell(
+  ownerId: string,
+  gameId: string,
+  problem: string,
+) {
+  await database.adapter.query({
+    text: `
+      INSERT INTO user_controls (clerk_user_id, last_seen_at, updated_at)
+      VALUES ($1::text, $2::timestamptz, $2::timestamptz)
+      ON CONFLICT (clerk_user_id) DO NOTHING
+    `,
+    values: [ownerId, NOW.toISOString()],
+  })
+  await database.adapter.query({
+    text: `
+      INSERT INTO model_requests (
+        id,
+        clerk_user_id,
+        game_id,
+        operation,
+        idempotency_key,
+        request_sha256,
+        status,
+        provider,
+        model,
+        prompt_version,
+        software_version,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        $1::uuid,
+        $2::text,
+        NULL,
+        'division',
+        $1::uuid,
+        $3::text,
+        'reserved',
+        'openai',
+        'gpt-5.6-sol',
+        'division-v1',
+        'integration-test',
+        $4::timestamptz,
+        $4::timestamptz
+      )
+    `,
+    values: [gameId, ownerId, SHA256, NOW.toISOString()],
+  })
+  const games = new DurableGameRepository(database.adapter)
+  const created = await games.getOrCreateDivision({
+    ownerId,
+    gameId,
+    problem,
+    softwareVersion: 'integration-test',
+  })
+  await database.adapter.query({
+    text: `
+      DELETE FROM model_requests
+      WHERE id = $1::uuid
+    `,
+    values: [gameId],
+  })
+  return created
+}
+
+async function createTerminalReplaySource(
+  ownerId: string,
+  gameId: string,
+  problem: string,
+): Promise<void> {
+  await createDivisionShell(ownerId, gameId, problem)
+  const facets = makeProblemFacets('Replay integration facet')
+  const seed = `replay-integration/${gameId}`
+  const parts = composeProblemParts(facets, seed)
+  await database.adapter.query({
+    text: `
+      UPDATE games
+      SET
+        status = 'completed',
+        division_seed = $2::text,
+        division_facets = $3::jsonb,
+        problem_parts = $4::jsonb,
+        division_model = 'gpt-5.6-sol',
+        division_prompt_version = 'division-v1',
+        division_prompt_sha256 = $5::text,
+        division_digest = $6::text,
+        outcome = '{"winner":"white","reason":"king_captured"}'::jsonb,
+        completed_at = $7::timestamptz,
+        updated_at = $7::timestamptz
+      WHERE id = $1::uuid
+    `,
+    values: [
+      gameId,
+      seed,
+      JSON.stringify(facets),
+      JSON.stringify(parts),
+      'b'.repeat(64),
+      'c'.repeat(64),
+      NOW.toISOString(),
+    ],
+  })
+}
+
+describe('durable usage accounting against PostgreSQL', () => {
+  it('reserves, links, starts, settles, and recovers a paid result idempotently', async () => {
+    const usage = controller()
+    const reservationInput = divisionReservation()
+
+    const reserved = await usage.reserveModelRequest(reservationInput)
+    expect(reserved).toMatchObject({
+      ok: true,
+      kind: 'reserved',
+      requestId: REQUEST_ID,
+      gameId: null,
+      status: 'reserved',
+      leaseToken: LEASE_TOKEN,
+    })
+
+    await expect(
+      usage.reserveModelRequest(reservationInput),
+    ).resolves.toMatchObject({
+      ok: true,
+      kind: 'existing',
+      requestId: REQUEST_ID,
+      status: 'reserved',
+      leaseToken: LEASE_TOKEN,
+    })
+    await expect(usage.getUsageSummary(OWNER)).resolves.toMatchObject({
+      modelOperations: { used: 0, reserved: 1 },
+      gameStarts: { used: 0, reserved: 1 },
+      activeModelRequests: 1,
+    })
+
+    const games = new DurableGameRepository(database.adapter)
+    const created = await games.getOrCreateDivision({
+      ownerId: OWNER,
+      gameId: REQUEST_ID,
+      problem: 'How can this integration remain durable across retries?',
+      softwareVersion: 'integration-test',
+    })
+    expect(created.created).toBe(true)
+
+    await expect(
+      usage.attachModelRequestGame({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        gameId: REQUEST_ID,
+      }),
+    ).resolves.toEqual({ ok: true, attached: true })
+    await expect(
+      usage.attachModelRequestGame({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        gameId: REQUEST_ID,
+      }),
+    ).resolves.toEqual({ ok: true, attached: false })
+
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'in_progress',
+      alreadyStarted: false,
+    })
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'in_progress',
+      alreadyStarted: true,
+    })
+
+    const settlement = {
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      outcome: 'succeeded' as const,
+      providerResponseId: 'resp_integration',
+      responseSha256: 'b'.repeat(64),
+      resultPayload: {
+        kind: 'division',
+        gameId: REQUEST_ID,
+      },
+      usage: {
+        reported: true,
+        inputTokens: 120,
+        cachedInputTokens: 30,
+        cacheWriteInputTokens: 0,
+        outputTokens: 45,
+        reasoningTokens: 18,
+        totalTokens: 165,
+      },
+    }
+    await expect(
+      usage.settleModelRequest(settlement),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'succeeded',
+      alreadySettled: false,
+    })
+    await expect(
+      usage.settleModelRequest(settlement),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'succeeded',
+      alreadySettled: true,
+    })
+
+    await expect(
+      usage.getModelRequestResult({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+      }),
+    ).resolves.toEqual({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+      operation: 'division',
+      status: 'succeeded',
+      resultPayload: {
+        kind: 'division',
+        gameId: REQUEST_ID,
+      },
+    })
+    await expect(
+      usage.getModelRequestByIdempotencyKey({
+        userId: OWNER,
+        operation: 'division',
+        idempotencyKey: IDEMPOTENCY_KEY,
+      }),
+    ).resolves.toMatchObject({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+      operation: 'division',
+    })
+    await expect(
+      usage.getModelRequestByIdempotencyKey({
+        userId: OTHER_OWNER,
+        operation: 'division',
+        idempotencyKey: IDEMPOTENCY_KEY,
+      }),
+    ).resolves.toEqual({ found: false })
+    await expect(
+      usage.getLatestModelRequestForGame({
+        userId: OWNER,
+        gameId: REQUEST_ID,
+        operation: 'division',
+      }),
+    ).resolves.toMatchObject({
+      found: true,
+      requestId: REQUEST_ID,
+      status: 'succeeded',
+    })
+    await expect(usage.getUsageSummary(OWNER)).resolves.toMatchObject({
+      modelOperations: { used: 1, reserved: 0 },
+      gameStarts: { used: 1, reserved: 0 },
+      activeModelRequests: 0,
+    })
+
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT
+          status,
+          provider_response_id,
+          usage_reported,
+          input_tokens,
+          cached_input_tokens,
+          cache_write_input_tokens,
+          output_tokens,
+          reasoning_tokens,
+          total_tokens,
+          result_payload
+        FROM model_requests
+        WHERE id = $1::uuid
+      `,
+      values: [REQUEST_ID],
+    })
+    expect(persisted.rows).toEqual([
+      {
+        status: 'succeeded',
+        provider_response_id: 'resp_integration',
+        usage_reported: true,
+        input_tokens: '120',
+        cached_input_tokens: '30',
+        cache_write_input_tokens: '0',
+        output_tokens: '45',
+        reasoning_tokens: '18',
+        total_tokens: '165',
+        result_payload: {
+          kind: 'division',
+          gameId: REQUEST_ID,
+        },
+      },
+    ])
+
+    const persistedRates = await database.adapter.query({
+      text: `
+        SELECT key_hash
+        FROM rate_buckets
+        ORDER BY key_type
+      `,
+    })
+    expect(persistedRates.rows).toHaveLength(4)
+    for (const row of persistedRates.rows) {
+      expect(row.key_hash).toMatch(/^[0-9a-f]{64}$/)
+      expect(row.key_hash).not.toContain('203.0.113.10')
+      expect(row.key_hash).not.toContain(OWNER)
+    }
+  })
+
+  it('persists a billable failed-response provider ID and compares it idempotently', async () => {
+    const usage = controller()
+    await expect(
+      usage.reserveModelRequest(divisionReservation()),
+    ).resolves.toMatchObject({ ok: true, kind: 'reserved' })
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toMatchObject({ ok: true, status: 'in_progress' })
+
+    const failure = {
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      outcome: 'failed' as const,
+      failureCode: 'provider_contract_invalid',
+      providerResponseId: 'resp_failed_integration',
+      providerHttpStatus: 422,
+    }
+    await expect(usage.settleModelRequest(failure)).resolves.toEqual({
+      ok: true,
+      status: 'failed',
+      alreadySettled: false,
+    })
+    await expect(usage.settleModelRequest(failure)).resolves.toEqual({
+      ok: true,
+      status: 'failed',
+      alreadySettled: true,
+    })
+    await expect(
+      usage.settleModelRequest({
+        ...failure,
+        providerResponseId: 'resp_changed',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'SETTLEMENT_CONFLICT',
+      httpStatus: 409,
+    })
+
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT
+          status,
+          provider_response_id,
+          response_sha256,
+          result_payload,
+          failure_code,
+          provider_http_status
+        FROM model_requests
+        WHERE id = $1::uuid
+      `,
+      values: [REQUEST_ID],
+    })
+    expect(persisted.rows).toEqual([
+      {
+        status: 'failed',
+        provider_response_id: 'resp_failed_integration',
+        response_sha256: null,
+        result_payload: null,
+        failure_code: 'provider_contract_invalid',
+        provider_http_status: 422,
+      },
+    ])
+  })
+
+  it('rechecks deletion, suspension, and temporary blocks before provider work starts', async () => {
+    const usage = controller()
+    await usage.reserveModelRequest(divisionReservation())
+
+    await database.adapter.query({
+      text: `
+        UPDATE user_controls
+        SET suspended = true, reason_code = 'test_suspension'
+        WHERE clerk_user_id = $1::text
+      `,
+      values: [OWNER],
+    })
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      code: 'ACCOUNT_SUSPENDED',
+      httpStatus: 403,
+    })
+
+    await database.adapter.query({
+      text: `
+        UPDATE user_controls
+        SET
+          suspended = false,
+          blocked_until = $2::timestamptz,
+          reason_code = 'test_block'
+        WHERE clerk_user_id = $1::text
+      `,
+      values: [
+        OWNER,
+        new Date(NOW.valueOf() + 60_000).toISOString(),
+      ],
+    })
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      code: 'ACCOUNT_TEMPORARILY_BLOCKED',
+      httpStatus: 403,
+    })
+
+    await database.adapter.query({
+      text: `
+        UPDATE user_controls
+        SET blocked_until = NULL, reason_code = NULL
+        WHERE clerk_user_id = $1::text
+      `,
+      values: [OWNER],
+    })
+    await database.adapter.query({
+      text: `
+        INSERT INTO deleted_user_tombstones (user_key_hash, deleted_at)
+        VALUES ($1::text, $2::timestamptz)
+      `,
+      values: [
+        hashDeletedUserKey(DEFAULT_CONFIG.deletionHmacSecret, OWNER),
+        NOW.toISOString(),
+      ],
+    })
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      code: 'ACCOUNT_DELETED',
+      httpStatus: 403,
+    })
+
+    const unchanged = await database.adapter.query({
+      text: `
+        SELECT
+          requests.status,
+          requests.provider_started_at,
+          buckets.used,
+          buckets.reserved,
+          count(slots.request_id)::integer AS occupied_slots
+        FROM model_requests AS requests
+        JOIN usage_buckets AS buckets
+          ON buckets.subject_type = 'user'
+          AND buckets.subject_key = requests.clerk_user_id
+          AND buckets.metric = 'model_requests'
+        LEFT JOIN model_concurrency_slots AS slots
+          ON slots.request_id = requests.id
+        WHERE requests.id = $1::uuid
+        GROUP BY
+          requests.status,
+          requests.provider_started_at,
+          buckets.used,
+          buckets.reserved
+      `,
+      values: [REQUEST_ID],
+    })
+    expect(unchanged.rows).toEqual([
+      {
+        status: 'reserved',
+        provider_started_at: null,
+        used: '0',
+        reserved: '1',
+        occupied_slots: 1,
+      },
+    ])
+  })
+
+  it('enforces begin and settlement lease boundaries while preserving committed retry idempotency', async () => {
+    let currentTime = new Date(NOW)
+    const usage = controller(
+      DEFAULT_CONFIG,
+      () => new Date(currentTime),
+    )
+
+    await usage.reserveModelRequest(divisionReservation())
+    await usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })
+    const settledFailure = {
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      outcome: 'failed' as const,
+      failureCode: 'provider_contract_invalid',
+      providerResponseId: 'resp_before_expiry',
+      providerHttpStatus: 422,
+    }
+    currentTime = new Date(NOW.valueOf() + 179_999)
+    await expect(
+      usage.settleModelRequest(settledFailure),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'failed',
+      alreadySettled: false,
+    })
+
+    currentTime = new Date(NOW)
+    await usage.reserveModelRequest(
+      divisionReservation({
+        requestId: OTHER_REQUEST_ID,
+        idempotencyKey: OTHER_IDEMPOTENCY_KEY,
+        requestSha256: 'd'.repeat(64),
+      }),
+    )
+    await usage.beginProviderCall({
+      userId: OWNER,
+      requestId: OTHER_REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })
+    currentTime = new Date(NOW.valueOf() + 180_000)
+    await expect(
+      usage.settleModelRequest({
+        ...settledFailure,
+        requestId: OTHER_REQUEST_ID,
+        providerResponseId: 'resp_at_expiry',
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 1,
+      clearedSlots: 1,
+    })
+
+    currentTime = new Date(NOW.valueOf() + 180_001)
+    await expect(
+      usage.settleModelRequest(settledFailure),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'failed',
+      alreadySettled: true,
+    })
+
+    currentTime = new Date(NOW)
+    await usage.reserveModelRequest(
+      divisionReservation({
+        requestId: THIRD_REQUEST_ID,
+        idempotencyKey: THIRD_IDEMPOTENCY_KEY,
+        requestSha256: 'e'.repeat(64),
+      }),
+    )
+    currentTime = new Date(NOW.valueOf() + 180_000)
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: THIRD_REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+
+    const expired = await database.adapter.query({
+      text: `
+        SELECT status
+        FROM model_requests
+        WHERE id = $1::uuid
+      `,
+      values: [OTHER_REQUEST_ID],
+    })
+    expect(expired.rows).toEqual([{ status: 'indeterminate' }])
+  })
+
+  it('returns the same duplicate-success rejection on an exact settlement retry', async () => {
+    await createDivisionShell(
+      OWNER,
+      REQUEST_ID,
+      'Which duplicate model success should remain authoritative?',
+    )
+    await database.adapter.query({
+      text: `
+        INSERT INTO model_requests (
+          id,
+          clerk_user_id,
+          game_id,
+          operation,
+          idempotency_key,
+          request_sha256,
+          status,
+          provider,
+          model,
+          prompt_version,
+          software_version,
+          provider_response_id,
+          response_sha256,
+          result_payload,
+          completed_at,
+          created_at,
+          updated_at
+        )
+        VALUES
+          (
+            $1::uuid,
+            $3::text,
+            $4::uuid,
+            'answer',
+            $5::uuid,
+            $7::text,
+            'succeeded',
+            'openai',
+            'gpt-5.6-sol',
+            'answer-v1',
+            'integration-test',
+            'resp_winner',
+            $8::text,
+            '{"kind":"answer","answer":"winner"}'::jsonb,
+            $9::timestamptz,
+            $9::timestamptz - interval '1 minute',
+            $9::timestamptz
+          ),
+          (
+            $2::uuid,
+            $3::text,
+            $4::uuid,
+            'answer',
+            $6::uuid,
+            $7::text,
+            'in_progress',
+            'openai',
+            'gpt-5.6-sol',
+            'answer-v1',
+            'integration-test',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            $9::timestamptz,
+            $9::timestamptz
+          )
+      `,
+      values: [
+        OTHER_REQUEST_ID,
+        THIRD_REQUEST_ID,
+        OWNER,
+        REQUEST_ID,
+        OTHER_IDEMPOTENCY_KEY,
+        THIRD_IDEMPOTENCY_KEY,
+        SHA256,
+        'b'.repeat(64),
+        NOW.toISOString(),
+      ],
+    })
+    await database.adapter.query({
+      text: `
+        UPDATE model_concurrency_slots
+        SET
+          request_id = $1::uuid,
+          clerk_user_id = $2::text,
+          lease_token = $3::uuid,
+          lease_expires_at = $4::timestamptz
+        WHERE slot = 1
+      `,
+      values: [
+        THIRD_REQUEST_ID,
+        OWNER,
+        LEASE_TOKEN,
+        new Date(NOW.valueOf() + 180_000).toISOString(),
+      ],
+    })
+
+    let currentTime = new Date(NOW)
+    const usage = controller(
+      DEFAULT_CONFIG,
+      () => new Date(currentTime),
+    )
+    const duplicate = {
+      userId: OWNER,
+      requestId: THIRD_REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      outcome: 'succeeded' as const,
+      providerResponseId: 'resp_duplicate',
+      responseSha256: 'c'.repeat(64),
+      resultPayload: {
+        kind: 'answer',
+        answer: 'duplicate',
+      },
+      usage: {
+        reported: true,
+        inputTokens: 25,
+        cachedInputTokens: 5,
+        cacheWriteInputTokens: 0,
+        outputTokens: 10,
+        reasoningTokens: 4,
+        totalTokens: 35,
+      },
+    }
+    await expect(usage.settleModelRequest(duplicate)).resolves.toEqual({
+      ok: false,
+      code: 'OPERATION_ALREADY_SUCCEEDED',
+      httpStatus: 409,
+    })
+    const firstPersistence = await database.adapter.query({
+      text: `
+        SELECT
+          status,
+          failure_code,
+          provider_response_id,
+          updated_at,
+          completed_at
+        FROM model_requests
+        WHERE id = $1::uuid
+      `,
+      values: [THIRD_REQUEST_ID],
+    })
+
+    currentTime = new Date(NOW.valueOf() + 60_000)
+    await expect(usage.settleModelRequest(duplicate)).resolves.toEqual({
+      ok: false,
+      code: 'OPERATION_ALREADY_SUCCEEDED',
+      httpStatus: 409,
+    })
+    const retriedPersistence = await database.adapter.query({
+      text: `
+        SELECT
+          status,
+          failure_code,
+          provider_response_id,
+          updated_at,
+          completed_at
+        FROM model_requests
+        WHERE id = $1::uuid
+      `,
+      values: [THIRD_REQUEST_ID],
+    })
+    expect(retriedPersistence.rows).toEqual(firstPersistence.rows)
+    expect(retriedPersistence.rows).toEqual([
+      {
+        status: 'rejected',
+        failure_code: 'operation_already_succeeded',
+        provider_response_id: 'resp_duplicate',
+        updated_at: NOW,
+        completed_at: NOW,
+      },
+    ])
+    await expect(
+      usage.settleModelRequest({
+        ...duplicate,
+        providerResponseId: 'resp_changed',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'SETTLEMENT_CONFLICT',
+      httpStatus: 409,
+    })
+  })
+
+  it('enforces daily, per-user concurrency, and deployment-wide limits durably', async () => {
+    const dailyUsage = controller({
+      ...DEFAULT_CONFIG,
+      dailyGameLimit: 1,
+    })
+    await expect(
+      dailyUsage.reserveModelRequest(divisionReservation()),
+    ).resolves.toMatchObject({ ok: true, kind: 'reserved' })
+    await expect(
+      dailyUsage.reserveModelRequest(
+        divisionReservation({
+          requestId: OTHER_REQUEST_ID,
+          idempotencyKey: OTHER_IDEMPOTENCY_KEY,
+          requestSha256: 'b'.repeat(64),
+        }),
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'GAME_START_DAILY_QUOTA_EXCEEDED',
+      httpStatus: 429,
+    })
+
+    const otherUserUsage = controller({
+      ...DEFAULT_CONFIG,
+      dailyGlobalModelRequestLimit: 1,
+    })
+    await expect(
+      otherUserUsage.reserveModelRequest(
+        divisionReservation({
+          requestId: OTHER_REQUEST_ID,
+          userId: OTHER_OWNER,
+          idempotencyKey: OTHER_IDEMPOTENCY_KEY,
+          requestSha256: 'c'.repeat(64),
+          ipAddress: '203.0.113.11',
+        }),
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'MODEL_GLOBAL_DAILY_CAPACITY',
+      httpStatus: 503,
+    })
+  })
+
+  it('enforces durable user and IP move windows without storing raw identifiers', async () => {
+    const usage = controller({
+      ...DEFAULT_CONFIG,
+      hourlyGameMoveLimit: 2,
+      hourlyIpGameMoveLimit: 2,
+    })
+
+    await expect(
+      usage.consumeGameMoveRate({
+        userId: OWNER,
+        ipAddress: '198.51.100.20',
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      remaining: { user: 1, ip: 1 },
+    })
+    await expect(
+      usage.consumeGameMoveRate({
+        userId: OWNER,
+        ipAddress: '198.51.100.20',
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      remaining: { user: 0, ip: 0 },
+    })
+    await expect(
+      usage.consumeGameMoveRate({
+        userId: OWNER,
+        ipAddress: '198.51.100.20',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'GAME_MOVE_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+
+    const rows = await database.adapter.query({
+      text: `
+        SELECT key_type, key_hash, count
+        FROM rate_buckets
+        ORDER BY key_type
+      `,
+    })
+    expect(rows.rows).toEqual([
+      {
+        key_type: 'ip',
+        key_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        count: 3,
+      },
+      {
+        key_type: 'user',
+        key_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        count: 3,
+      },
+    ])
+  })
+
+  it('enforces durable account-export user and IP windows', async () => {
+    const ipAddress = '198.51.100.44'
+    const usage = controller({
+      ...DEFAULT_CONFIG,
+      hourlyAccountExportLimit: 2,
+      hourlyIpAccountExportLimit: 2,
+    })
+
+    await expect(
+      usage.consumeAccountExportRate({
+        userId: OWNER,
+        ipAddress,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      remaining: { user: 1, ip: 1 },
+    })
+    await expect(
+      usage.consumeAccountExportRate({
+        userId: OWNER,
+        ipAddress,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      remaining: { user: 0, ip: 0 },
+    })
+    await expect(
+      usage.consumeAccountExportRate({
+        userId: OWNER,
+        ipAddress,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_EXPORT_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+    await expect(
+      usage.consumeAccountExportRate({
+        userId: OTHER_OWNER,
+        ipAddress,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'IP_ACCOUNT_EXPORT_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT key_type, count
+        FROM rate_buckets
+        WHERE action = 'account_export'
+        ORDER BY key_type, count
+      `,
+    })
+    expect(persisted.rows).toEqual([
+      { key_type: 'ip', count: 4 },
+      { key_type: 'user', count: 1 },
+      { key_type: 'user', count: 3 },
+    ])
+  })
+
+  it('applies game-start rate limits to new divisions but not answers', async () => {
+    await createDivisionShell(
+      OWNER,
+      REQUEST_ID,
+      'Which answer should avoid the new-game start throttle?',
+    )
+    const usage = controller({
+      ...DEFAULT_CONFIG,
+      hourlyGameStartLimit: 1,
+      hourlyIpGameStartLimit: 1,
+    })
+    const answerReservation = await usage.reserveModelRequest({
+      ...divisionReservation({
+        requestId: OTHER_REQUEST_ID,
+        gameId: REQUEST_ID,
+        operation: 'answer',
+        idempotencyKey: OTHER_IDEMPOTENCY_KEY,
+        requestSha256: 'f'.repeat(64),
+        countsAsGameStart: false,
+        ipAddress: '198.51.100.60',
+      }),
+    })
+    expect(answerReservation).toMatchObject({ ok: true, kind: 'reserved' })
+    if (!answerReservation.ok || !answerReservation.leaseToken) {
+      throw new Error('Answer reservation did not return a lease.')
+    }
+    await usage.releaseReservation({
+      userId: OWNER,
+      requestId: OTHER_REQUEST_ID,
+      leaseToken: answerReservation.leaseToken,
+      reason: 'provider_not_started',
+    })
+
+    const firstDivision = await usage.reserveModelRequest(
+      divisionReservation({
+        requestId: THIRD_REQUEST_ID,
+        idempotencyKey: THIRD_IDEMPOTENCY_KEY,
+        requestSha256: '1'.repeat(64),
+        ipAddress: '198.51.100.61',
+      }),
+    )
+    expect(firstDivision).toMatchObject({ ok: true, kind: 'reserved' })
+    if (!firstDivision.ok || !firstDivision.leaseToken) {
+      throw new Error('Division reservation did not return a lease.')
+    }
+    await usage.releaseReservation({
+      userId: OWNER,
+      requestId: THIRD_REQUEST_ID,
+      leaseToken: firstDivision.leaseToken,
+      reason: 'provider_not_started',
+    })
+    await expect(
+      usage.reserveModelRequest(
+        divisionReservation({
+          requestId: FOURTH_REQUEST_ID,
+          idempotencyKey: FOURTH_IDEMPOTENCY_KEY,
+          requestSha256: '2'.repeat(64),
+          ipAddress: '198.51.100.62',
+        }),
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'GAME_START_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+
+    const otherUsage = controller({
+      ...DEFAULT_CONFIG,
+      hourlyGameStartLimit: 10,
+      hourlyIpGameStartLimit: 1,
+    })
+    const sharedIp = '198.51.100.63'
+    const otherFirst = await otherUsage.reserveModelRequest(
+      divisionReservation({
+        requestId: FIFTH_REQUEST_ID,
+        userId: OTHER_OWNER,
+        idempotencyKey: FIFTH_IDEMPOTENCY_KEY,
+        requestSha256: '3'.repeat(64),
+        ipAddress: sharedIp,
+      }),
+    )
+    expect(otherFirst).toMatchObject({ ok: true, kind: 'reserved' })
+    if (!otherFirst.ok || !otherFirst.leaseToken) {
+      throw new Error('Other division reservation did not return a lease.')
+    }
+    await otherUsage.releaseReservation({
+      userId: OTHER_OWNER,
+      requestId: FIFTH_REQUEST_ID,
+      leaseToken: otherFirst.leaseToken,
+      reason: 'provider_not_started',
+    })
+    await expect(
+      otherUsage.reserveModelRequest(
+        divisionReservation({
+          requestId: SIXTH_REQUEST_ID,
+          userId: 'user_usage_integration_third',
+          idempotencyKey: SIXTH_IDEMPOTENCY_KEY,
+          requestSha256: '4'.repeat(64),
+          ipAddress: sharedIp,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'IP_GAME_START_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+  })
+
+  it('charges a replay game start exactly once and enforces account and daily boundaries', async () => {
+    await createTerminalReplaySource(
+      OWNER,
+      REQUEST_ID,
+      'Which replay start should count exactly once across retries?',
+    )
+    const usage = controller({
+      ...DEFAULT_CONFIG,
+      dailyGameLimit: 1,
+      hourlyGameStartLimit: 10,
+      hourlyIpGameStartLimit: 10,
+    })
+    const input = {
+      userId: OWNER,
+      sourceGameId: REQUEST_ID,
+      expectedRevision: 0,
+      idempotencyKey: IDEMPOTENCY_KEY,
+      ipAddress: '198.51.100.30',
+    }
+
+    await expect(usage.consumeReplayGameStart(input)).resolves.toEqual({
+      ok: true,
+      kind: 'consumed',
+      gameId: IDEMPOTENCY_KEY,
+    })
+    await expect(usage.consumeReplayGameStart(input)).resolves.toEqual({
+      ok: true,
+      kind: 'existing',
+      gameId: IDEMPOTENCY_KEY,
+    })
+    const replayCurrentState = await database.adapter.query({
+      text: `
+        SELECT id::text, source_game_id::text, is_current
+        FROM games
+        WHERE clerk_user_id = $1::text
+        ORDER BY id
+      `,
+      values: [OWNER],
+    })
+    expect(replayCurrentState.rows).toEqual([
+      {
+        id: REQUEST_ID,
+        source_game_id: null,
+        is_current: false,
+      },
+      {
+        id: IDEMPOTENCY_KEY,
+        source_game_id: REQUEST_ID,
+        is_current: true,
+      },
+    ])
+    await expect(
+      usage.consumeReplayGameStart({
+        ...input,
+        expectedRevision: 1,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'IDEMPOTENCY_CONFLICT',
+      httpStatus: 409,
+    })
+    await expect(
+      usage.consumeReplayGameStart({
+        ...input,
+        idempotencyKey: OTHER_IDEMPOTENCY_KEY,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'GAME_START_DAILY_QUOTA_EXCEEDED',
+      httpStatus: 429,
+    })
+
+    await database.adapter.query({
+      text: `
+        UPDATE user_controls
+        SET
+          suspended = true,
+          reason_code = 'integration_suspension',
+          updated_at = $2::timestamptz
+        WHERE clerk_user_id = $1::text
+      `,
+      values: [OWNER, NOW.toISOString()],
+    })
+    await expect(
+      usage.consumeReplayGameStart({
+        ...input,
+        idempotencyKey: THIRD_IDEMPOTENCY_KEY,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_SUSPENDED',
+      httpStatus: 403,
+    })
+    await database.adapter.query({
+      text: `
+        UPDATE user_controls
+        SET
+          suspended = false,
+          blocked_until = $2::timestamptz,
+          reason_code = 'integration_temporary_block',
+          updated_at = $3::timestamptz
+        WHERE clerk_user_id = $1::text
+      `,
+      values: [
+        OWNER,
+        new Date(NOW.valueOf() + 60 * 60 * 1_000).toISOString(),
+        NOW.toISOString(),
+      ],
+    })
+    await expect(
+      usage.consumeReplayGameStart({
+        ...input,
+        idempotencyKey: FOURTH_IDEMPOTENCY_KEY,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_TEMPORARILY_BLOCKED',
+      httpStatus: 403,
+    })
+
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT
+          (
+            SELECT count(*)::integer
+            FROM game_start_requests
+            WHERE clerk_user_id = $1::text
+          ) AS requests,
+          (
+            SELECT used
+            FROM usage_buckets
+            WHERE
+              subject_type = 'user'
+              AND subject_key = $1::text
+              AND metric = 'game_starts'
+          ) AS used,
+          (
+            SELECT count
+            FROM rate_buckets
+            WHERE
+              key_type = 'user'
+              AND action = 'game_start'
+          ) AS user_rate,
+          (
+            SELECT count
+            FROM rate_buckets
+            WHERE
+              key_type = 'ip'
+              AND action = 'game_start'
+          ) AS ip_rate
+      `,
+      values: [OWNER],
+    })
+    expect(persisted.rows).toEqual([
+      {
+        requests: 1,
+        used: '1',
+        user_rate: 1,
+        ip_rate: 1,
+      },
+    ])
+  })
+
+  it('enforces shared user and IP replay-start rate windows', async () => {
+    await createTerminalReplaySource(
+      OWNER,
+      REQUEST_ID,
+      'How should one owner share a replay start rate window?',
+    )
+    await createTerminalReplaySource(
+      OTHER_OWNER,
+      OTHER_REQUEST_ID,
+      'How should two owners share one IP replay rate window?',
+    )
+    const ipAddress = '198.51.100.31'
+    const userLimited = controller({
+      ...DEFAULT_CONFIG,
+      dailyGameLimit: 10,
+      hourlyGameStartLimit: 1,
+      hourlyIpGameStartLimit: 10,
+    })
+    await expect(
+      userLimited.consumeReplayGameStart({
+        userId: OWNER,
+        sourceGameId: REQUEST_ID,
+        expectedRevision: 0,
+        idempotencyKey: IDEMPOTENCY_KEY,
+        ipAddress,
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      kind: 'consumed',
+      gameId: IDEMPOTENCY_KEY,
+    })
+    await expect(
+      userLimited.consumeReplayGameStart({
+        userId: OWNER,
+        sourceGameId: REQUEST_ID,
+        expectedRevision: 0,
+        idempotencyKey: OTHER_IDEMPOTENCY_KEY,
+        ipAddress,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'GAME_START_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+
+    const ipLimited = controller({
+      ...DEFAULT_CONFIG,
+      dailyGameLimit: 10,
+      hourlyGameStartLimit: 10,
+      hourlyIpGameStartLimit: 1,
+    })
+    await expect(
+      ipLimited.consumeReplayGameStart({
+        userId: OTHER_OWNER,
+        sourceGameId: OTHER_REQUEST_ID,
+        expectedRevision: 0,
+        idempotencyKey: THIRD_IDEMPOTENCY_KEY,
+        ipAddress,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'IP_GAME_START_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+
+    const ledgers = await database.adapter.query({
+      text: `
+        SELECT clerk_user_id, count(*)::integer AS count
+        FROM game_start_requests
+        GROUP BY clerk_user_id
+        ORDER BY clerk_user_id
+      `,
+    })
+    expect(ledgers.rows).toEqual([{ clerk_user_id: OWNER, count: 1 }])
+  })
+
+  it('cancels reserved work for self-deletion and keeps a durable force-deletion barrier', async () => {
+    const usage = controller()
+    const reserved = await usage.reserveModelRequest(divisionReservation())
+    expect(reserved).toMatchObject({
+      ok: true,
+      leaseToken: LEASE_TOKEN,
+    })
+    await expect(usage.deleteAccountData(OWNER)).resolves.toEqual({
+      ok: true,
+      deleted: true,
+    })
+    await expect(usage.deleteAccountData(OWNER)).resolves.toEqual({
+      ok: true,
+      deleted: true,
+    })
+
+    const retained = await database.adapter.query({
+      text: `
+        SELECT
+          (SELECT count(*)::integer FROM user_controls) AS users,
+          (
+            SELECT suspended
+            FROM user_controls
+            WHERE clerk_user_id = $1::text
+          ) AS suspended,
+          (
+            SELECT reason_code
+            FROM user_controls
+            WHERE clerk_user_id = $1::text
+          ) AS reason_code,
+          (SELECT count(*)::integer FROM games) AS games,
+          (SELECT count(*)::integer FROM game_events) AS events,
+          (SELECT count(*)::integer FROM model_requests) AS requests,
+          (
+            SELECT count(*)::integer
+            FROM usage_buckets
+            WHERE subject_type = 'user'
+          ) AS user_usage,
+          (
+            SELECT count(*)::integer
+            FROM rate_buckets
+            WHERE key_type = 'user'
+          ) AS user_rates,
+          (
+            SELECT count(*)::integer
+            FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+      `,
+      values: [OWNER],
+    })
+    expect(retained.rows).toEqual([
+      {
+        users: 1,
+        suspended: true,
+        reason_code: 'ACCOUNT_DELETION_PENDING',
+        games: 0,
+        events: 0,
+        requests: 0,
+        user_usage: 0,
+        user_rates: 0,
+        occupied_slots: 0,
+      },
+    ])
+
+    await expect(
+      usage.reserveModelRequest(divisionReservation()),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_SUSPENDED',
+      httpStatus: 403,
+    })
+    await expect(
+      usage.consumeGameMoveRate({
+        userId: OWNER,
+        ipAddress: '198.51.100.20',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_SUSPENDED',
+      httpStatus: 403,
+    })
+    await expect(
+      usage.consumeAccountExportRate({
+        userId: OWNER,
+        ipAddress: '198.51.100.20',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_SUSPENDED',
+      httpStatus: 403,
+    })
+
+    const afterDeniedReuse = await database.adapter.query({
+      text: `
+        SELECT
+          (SELECT count(*)::integer FROM games) AS games,
+          (SELECT count(*)::integer FROM model_requests) AS requests,
+          (SELECT count(*)::integer FROM usage_buckets) AS usage,
+          (
+            SELECT count(*)::integer
+            FROM rate_buckets
+            WHERE key_type = 'user'
+          ) AS user_rates
+      `,
+    })
+    expect(afterDeniedReuse.rows).toEqual([
+      {
+        games: 0,
+        requests: 0,
+        usage: 1,
+        user_rates: 0,
+      },
+    ])
+
+    await expect(
+      usage.deleteAccountData(OWNER, { force: true }),
+    ).resolves.toEqual({
+      ok: true,
+      deleted: true,
+    })
+    await expect(
+      usage.deleteAccountData(OWNER, { force: true }),
+    ).resolves.toEqual({
+      ok: true,
+      deleted: false,
+    })
+
+    const forcedCleanup = await database.adapter.query({
+      text: `
+        SELECT
+          (
+            SELECT count(*)::integer
+            FROM deleted_user_tombstones
+          ) AS barriers,
+          (
+            SELECT user_key_hash
+            FROM deleted_user_tombstones
+            LIMIT 1
+          ) AS barrier_hash,
+          (SELECT count(*)::integer FROM user_controls) AS users,
+          (SELECT count(*)::integer FROM games) AS games,
+          (SELECT count(*)::integer FROM model_requests) AS requests,
+          (
+            SELECT count(*)::integer
+            FROM usage_buckets
+            WHERE subject_type = 'user'
+          ) AS user_usage,
+          (
+            SELECT count(*)::integer
+            FROM rate_buckets
+            WHERE key_type = 'user'
+          ) AS user_rates
+      `,
+    })
+    expect(forcedCleanup.rows).toEqual([
+      {
+        barriers: 1,
+        barrier_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        users: 0,
+        games: 0,
+        requests: 0,
+        user_usage: 0,
+        user_rates: 0,
+      },
+    ])
+    expect(forcedCleanup.rows[0]?.barrier_hash).not.toContain(OWNER)
+
+    await expect(
+      usage.reserveModelRequest(divisionReservation()),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_DELETED',
+      httpStatus: 403,
+      retryAfterSeconds: null,
+    })
+    await expect(
+      usage.consumeGameMoveRate({
+        userId: OWNER,
+        ipAddress: '198.51.100.21',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_DELETED',
+      httpStatus: 403,
+    })
+    await expect(
+      usage.consumeAccountExportRate({
+        userId: OWNER,
+        ipAddress: '198.51.100.21',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_DELETED',
+      httpStatus: 403,
+    })
+    await expect(usage.getUsageSummary(OWNER)).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_DELETED',
+      httpStatus: 403,
+    })
+    await expect(
+      usage.consumeReplayGameStart({
+        userId: OWNER,
+        sourceGameId: REQUEST_ID,
+        expectedRevision: 0,
+        idempotencyKey: OTHER_IDEMPOTENCY_KEY,
+        ipAddress: '198.51.100.21',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_DELETED',
+      httpStatus: 403,
+    })
+
+    const afterBarrierDenials = await database.adapter.query({
+      text: `
+        SELECT
+          (SELECT count(*)::integer FROM user_controls) AS users,
+          (
+            SELECT count(*)::integer
+            FROM usage_buckets
+            WHERE subject_type = 'user'
+          ) AS user_usage,
+          (
+            SELECT count(*)::integer
+            FROM rate_buckets
+            WHERE key_type = 'user'
+          ) AS user_rates,
+          (SELECT count(*)::integer FROM game_start_requests) AS replays
+      `,
+    })
+    expect(afterBarrierDenials.rows).toEqual([
+      { users: 0, user_usage: 0, user_rates: 0, replays: 0 },
+    ])
+  })
+
+  it('blocks self-deletion during provider work but force deletion wins and rejects late settlement', async () => {
+    const usage = controller()
+    await usage.reserveModelRequest(divisionReservation())
+    const games = new DurableGameRepository(database.adapter)
+    await games.getOrCreateDivision({
+      ownerId: OWNER,
+      gameId: REQUEST_ID,
+      problem: 'Should forced deletion win while provider work is active?',
+      softwareVersion: 'integration-test',
+    })
+    await usage.attachModelRequestGame({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+    })
+    await usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })
+
+    await expect(usage.deleteAccountData(OWNER)).resolves.toMatchObject({
+      ok: false,
+      code: 'ACTIVE_MODEL_REQUEST',
+      httpStatus: 409,
+      retryAfterSeconds: 180,
+    })
+    await expect(
+      usage.deleteAccountData(OWNER, { force: true }),
+    ).resolves.toEqual({
+      ok: true,
+      deleted: true,
+    })
+    await expect(
+      usage.settleModelRequest({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+        outcome: 'failed',
+        failureCode: 'late_after_force_delete',
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      code: 'REQUEST_NOT_FOUND',
+      httpStatus: 409,
+    })
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      code: 'ACCOUNT_DELETED',
+      httpStatus: 403,
+    })
+
+    const deleted = await database.adapter.query({
+      text: `
+        SELECT
+          (SELECT count(*)::integer FROM deleted_user_tombstones)
+            AS barriers,
+          (SELECT count(*)::integer FROM user_controls) AS users,
+          (SELECT count(*)::integer FROM games) AS games,
+          (SELECT count(*)::integer FROM model_requests) AS requests,
+          (
+            SELECT count(*)::integer
+            FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+      `,
+    })
+    expect(deleted.rows).toEqual([
+      {
+        barriers: 1,
+        users: 0,
+        games: 0,
+        requests: 0,
+        occupied_slots: 0,
+      },
+    ])
+  })
+})

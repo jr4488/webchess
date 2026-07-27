@@ -1,3 +1,5 @@
+'use client'
+
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent } from 'react'
 

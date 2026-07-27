@@ -135,7 +135,7 @@ export function PlayingStage({
             <p className="eyebrow"><span /> Move {String(turnNumber).padStart(2, '0')}</p>
             <h2>{turn === 'white' ? 'Outside moves in.' : 'Inside moves out.'}</h2>
           </div>
-          <span className={`turn-stone turn-stone--${turn}`} aria-label={`${turn} to move`} />
+          <span className={`turn-stone turn-stone--${turn}`} aria-hidden="true" />
         </div>
         <p className="problem-reminder">{problem}</p>
 
@@ -184,7 +184,7 @@ export function PlayingStage({
         </div>
         <p className="play-help">Choose a piece yourself, play one turn, or let WebChess continue to the end.</p>
 
-        <small className="end-rule">Seven captured signals mark reflection depth; they are not evidence and do not end the game. A Core Purpose capture or a full-board stopping rule ends play.</small>
+        <small className="end-rule">Seven captured signals mark reflection depth; they are not evidence and do not end the game. A Core Purpose capture wins; mutual immobility, 100 quiet plies, or 256 total plies draws.</small>
 
         {focusedPart ? (
           <article className="focus-card">
