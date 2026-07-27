@@ -370,3 +370,19 @@ These fixtures cover obvious templates and lexical near-duplication. They are a 
 - White pawns move inward and Black pawns move outward.
 - The guided players search several moves ahead, following every exchange to its end before judging a position, and weigh material, King safety, pawn advance, and the squares each piece commands. Search runs in a worker thread and deepens until it has spent a fixed budget of positions, so it thinks for about two seconds a move without freezing the board. Equal moves use a seeded tie-break, and the budget is counted in positions rather than seconds, so replaying the current board follows the same guided path on any machine.
 - Castling and en passant are intentionally omitted in this reflective circular variant.
+
+
+## Website, research, and community
+
+- **Public website and guided demonstration:** https://webchess.madness.chatgpt.site
+- **Technical white paper:** https://webchess.madness.chatgpt.site/research
+- **Architecture and evaluation notes:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/RESEARCH.md](docs/RESEARCH.md)
+- **Support and design discussion:** https://github.com/jr4488/webchess/discussions
+- **Security reports:** see [SECURITY.md](SECURITY.md)
+- **Contributing:** see [CONTRIBUTING.md](CONTRIBUTING.md)
+
+The public website's visitor-key demonstration is deliberately narrower than this repository's complete circular-chess application. Its credential boundary is documented in [docs/DEMO-SECURITY.md](docs/DEMO-SECURITY.md).
+
+## License
+
+Copyright 2026 Jack Reynolds and WebChess contributors. Licensed under the [Apache License 2.0](LICENSE).
