@@ -29,6 +29,7 @@ Run:
 
 ```bash
 npm ci
+npm run verify:openclaw
 npm run lint
 npm run typecheck
 npm run test
@@ -41,6 +42,10 @@ npm run test:a11y
 npm run test:e2e
 npm run test:links
 ```
+
+`verify:openclaw` is the database-free gate for the local plugin. The remaining
+commands include the hosted service's PostgreSQL integration coverage and
+release checks.
 
 Changes to circular movement, replay, ending precedence, model prompts,
 structured schemas, authentication, ownership, quota accounting, rate limits,

@@ -4,6 +4,7 @@ import {
   Sparkles,
 } from 'lucide-react'
 
+import type { WebChessProviderKind } from '../lib/hosted-provider'
 import type { ModelActivityState } from '../types'
 
 export interface ModelActivityMetric {
@@ -15,6 +16,7 @@ interface ModelActivityPanelProps {
   activity: ModelActivityState
   modelLabel: string
   providerLabel: string
+  runtimeKind?: WebChessProviderKind
   summary: string
   metrics?: readonly ModelActivityMetric[]
 }
@@ -26,9 +28,17 @@ function formatDuration(milliseconds: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
-function requestDetail(activity: ModelActivityState): string {
+function requestDetail(
+  activity: ModelActivityState,
+  runtimeKind: WebChessProviderKind,
+): string {
   if (activity.status === 'error') {
     return 'The request ended without a validated result. The error below describes what can be tried next.'
+  }
+  if (runtimeKind === 'openclaw') {
+    return activity.operation === 'division'
+      ? 'Waiting for the loopback-only WebChess process to ask your configured OpenClaw model for exactly 64 facets and validate the completed structure.'
+      : 'Waiting for the loopback-only WebChess process to replay the completed game, derive the captured record, and validate the completed answer.'
   }
   return activity.operation === 'division'
     ? 'Waiting for the authenticated server to apply durable controls, request exactly 64 facets, and validate the completed structure.'
@@ -39,6 +49,7 @@ export function ModelActivityPanel({
   activity,
   modelLabel,
   providerLabel,
+  runtimeKind = 'hosted',
   summary,
   metrics = [],
 }: ModelActivityPanelProps) {
@@ -59,7 +70,7 @@ export function ModelActivityPanel({
   const elapsedLabel = formatDuration(endedAt - activity.startedAt)
   const statusLabel =
     activity.status === 'error' ? 'Request ended' : 'Request in progress'
-  const detail = requestDetail(activity)
+  const detail = requestDetail(activity, runtimeKind)
 
   return (
     <section

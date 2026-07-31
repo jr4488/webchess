@@ -216,7 +216,7 @@ function parseAnswer(value: unknown): GeneratedAnswer | null {
   }
 }
 
-function parseGame(value: unknown): DurableGame {
+export function parseDurableGame(value: unknown): DurableGame {
   const game = recordOf(value, 'Game')
   const status = nonEmptyString(game.status, 'Game status')
   if (!GAME_STATUSES.has(status)) {
@@ -242,12 +242,12 @@ function parseGame(value: unknown): DurableGame {
 }
 
 function parseGameEnvelope(value: unknown): DurableGame {
-  return parseGame(recordOf(value, 'Response').game)
+  return parseDurableGame(recordOf(value, 'Response').game)
 }
 
 function parseCurrentGameEnvelope(value: unknown): DurableGame | null {
   const game = recordOf(value, 'Response').game
-  return game === null ? null : parseGame(game)
+  return game === null ? null : parseDurableGame(game)
 }
 
 function parseAnswerEnvelope(value: unknown): AnswerGameResult {
@@ -255,7 +255,7 @@ function parseAnswerEnvelope(value: unknown): AnswerGameResult {
   const answer = parseAnswer(response.answer)
   if (!answer) throw invalidResponse('The answer response is incomplete.')
   return {
-    game: parseGame(response.game),
+    game: parseDurableGame(response.game),
     answer,
   }
 }

@@ -65,13 +65,31 @@ export function QuestionStage({
               : 'Use 12–240 characters.'}
           </p>
           <p className="form-data-note" id="problem-data-note">
-            Your question is saved to your WebChess account and sent from the server through{' '}
-            {provider.label} using {provider.model} to build the 64-part map. After play, the server
-            replays the saved move log and sends only the original question, verified ending, and
-            capture-derived record for the answer. WebChess supplies the provider credential;
-            your browser never sends an API key.{' '}
+            {provider.kind === 'openclaw' ? (
+              <>
+                Your saved game and move history stay in this browser on this machine. To build the
+                64-part map, a loopback-only WebChess process sends your question through{' '}
+                {provider.label} using {provider.model}. After play, that local process replays the
+                move log and sends only the original question, verified ending, and capture-derived
+                record for the answer. OpenClaw uses your configured provider and authentication—
+                which may contact a remote provider—but credentials never enter the browser or a
+                WebChess-operated service.{' '}
+              </>
+            ) : (
+              <>
+                Your question is saved to your WebChess account and sent from the server through{' '}
+                {provider.label} using {provider.model} to build the 64-part map. After play, the
+                server replays the saved move log and sends only the original question, verified
+                ending, and capture-derived record for the answer. WebChess supplies the provider
+                credential; your browser never sends an API key.{' '}
+              </>
+            )}
             <a href={provider.dataControlsUrl} target="_blank" rel="noreferrer">
-              OpenAI Platform data controls
+              {provider.dataControlsLabel ?? (
+                provider.kind === 'openclaw'
+                  ? 'How OpenClaw runs model requests'
+                  : 'OpenAI Platform data controls'
+              )}
             </a>
           </p>
         </form>

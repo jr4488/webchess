@@ -1,9 +1,29 @@
 # WebChess privacy notice
 
-**Effective date:** July 26, 2026
+**Effective date:** July 29, 2026
 
-This notice describes the intended production WebChess service. It does not
-claim that a production deployment is currently live.
+This notice distinguishes the local OpenClaw plugin from the intended hosted
+WebChess service. It does not claim that a production hosted deployment is
+currently live.
+
+## Local OpenClaw plugin
+
+The plugin launches WebChess on `127.0.0.1` and keeps the question, generated
+cast, move history, and validated answer in that browser profile's local
+storage. WebChess does not create a hosted account, upload that history to a
+WebChess database, synchronize it, or receive telemetry from the local app.
+Clearing the site's browser data deletes the local game, and another browser
+profile or machine does not receive it.
+
+Model work uses the user's own OpenClaw installation, configured default model,
+and existing provider authentication. The provider may be remote. In that case,
+OpenClaw sends the question during division and the original question plus the
+verified ending and capture-derived record during final synthesis according to
+that provider's terms and data controls. The plugin does not receive or proxy
+the credential and does not add a WebChess-operated service to that path.
+
+The remainder of this notice describes the separate hosted-service
+architecture.
 
 ## What WebChess processes
 

@@ -1,5 +1,7 @@
 node_modules
 dist
+!openclaw-plugin/dist/
+!openclaw-plugin/dist/*.js
 coverage
 .next
 next-env.d.ts

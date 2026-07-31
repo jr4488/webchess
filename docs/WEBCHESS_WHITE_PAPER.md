@@ -2,8 +2,8 @@
 
 ## A research and technical white paper on problem decomposition, constrained play, symbolic reframing, and AI-assisted synthesis
 
-**Version:** 1.3<br>
-**Date:** July 26, 2026<br>
+**Version:** 1.4<br>
+**Date:** July 29, 2026<br>
 **Status:** Design description and research agenda<br>
 **Project:** WebChess 0.1.0
 
@@ -1443,8 +1443,16 @@ The proper claim is therefore neither mystical nor dismissive:
 
 ## Appendix A. Current implementation specification
 
-This table records the repository's production-rebuild contract. It does not
-claim that a production Vercel deployment has been promoted.
+The method and rules are shared by two runtime surfaces. The first table records
+the hosted production-rebuild contract; it does not claim that a production
+Vercel deployment has been promoted. The second records the local OpenClaw
+plugin's different installation, persistence, credential, and model-access
+boundaries. Unless that second table says otherwise, its problem length,
+64-facet division, seeded cast, board, rules, engine, ending precedence, final
+prompt evidence, five-section answer, and public-reasoning-display requirements
+are identical to the hosted settings.
+
+### Hosted runtime
 
 | Component | Current setting |
 |---|---|
@@ -1482,6 +1490,28 @@ claim that a production Vercel deployment has been promoted.
 | Protected-route access | Clerk session, per-route authentication, owner-scoped database access, origin/input validation, and idempotency |
 | Default spend controls | Two game starts per user/day; 100 model operations/day; 20/user/hour; 40/source digest/hour; one active model request/user; four globally; 180-second leases; durable accounting plus an OpenAI project budget |
 | Account data controls | Self-service export and content deletion; a suspended marker prevents quota reset until the signed Clerk deletion webhook removes the final account record |
+
+### Local OpenClaw plugin runtime
+
+| Component | Current setting |
+|---|---|
+| Package form | Installable OpenClaw plugin with <code>openclaw.plugin.json</code>, a compiled runtime entry, and the complete local Next.js application |
+| Activation and launch | Startup-lazy descriptor-backed <code>openclaw webchess</code> command; no background service or agent tool |
+| Runtime target | Foreground Next.js process bound only to <code>127.0.0.1</code>; default port <code>3210</code> and visual path <code>/openclaw</code>; Ctrl-C stops it |
+| Interface | The familiar visual board, animated piece moves, manual/guided/autoplay controls, capture trail, public model milestones, validated 64-facet map, and final reading |
+| Authentication | No WebChess account; OpenClaw owns and resolves the user's configured provider authentication |
+| Local state | One current question, cast, append-only move/pass history, and validated answer in browser-local storage; no cloud database, backup, sync, or cross-profile transfer |
+| State validation | The app recomposes the field from saved facets and seed and canonically replays the event log; the answer route independently repeats composition and replay and requires a real ending |
+| Model access | Child process invokes <code>openclaw infer model run --local --json --thinking medium</code>; no model override, browser credential, shared proxy, or operator key |
+| Provider boundary | The configured provider may be remote and may receive the division and answer prompts under the user's own account and data controls; WebChess adds no hosted hop |
+| Model output boundary | OpenClaw's JSON envelope is size- and time-bounded; returned public text must satisfy the exact WebChess JSON contract and application validation before use |
+| Reasoning display | Bounded public stage, elapsed-status, attribution, and validation information; no request for or display of hidden chain-of-thought |
+| Browser/server authority | Browser applies and animates legal moves locally with revision checks; canonical reconstruction rejects inconsistent stored state and derives the final evidence record |
+| Network boundary | Local routes require explicit enablement, loopback Host/URL agreement, and exact same-origin mutation requests; local mode is disabled on Vercel |
+| Hosted dependencies | Clerk, Neon, Vercel, hosted accounts, WebChess telemetry, and any WebChess-owned OpenAI key are unused; provider environment already present in the user's shell remains available to that user's OpenClaw |
+| Credential handling | Provider credentials stay in OpenClaw/provider configuration and are never copied into browser storage, request bodies, WebChess logs, or a WebChess-operated service |
+| Persistence tradeoff | Clearing site data deletes the game; different browsers, profiles, and machines do not share it; concurrent tabs fail stale revisions rather than synchronizing |
+| Runs per new game | Two successful user-funded model operations through OpenClaw: division and post-ending answer |
 
 ## Appendix B. Glossary
 

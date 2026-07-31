@@ -51,7 +51,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22.20.0
+          node-version: 22.22.3
           cache: npm
 
       - name: Use the declared npm version
@@ -68,6 +68,12 @@ jobs:
 
       - name: Type check
         run: npm run typecheck
+
+      - name: Build the OpenClaw plugin entry
+        run: npm run plugin:build
+
+      - name: Verify the committed plugin build
+        run: git diff --exit-code -- openclaw-plugin/dist
 
       - name: Unit and PostgreSQL integration coverage
         env:

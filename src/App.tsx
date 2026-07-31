@@ -15,24 +15,16 @@ import {
 } from './lib/game'
 import { createAutoPlayEngine } from './lib/auto-play'
 import type { AutoPlayEngine } from './lib/auto-play'
-import { HOSTED_WEBCHESS_PROVIDER } from './lib/hosted-provider'
 import { normalizeProblemInput, problemPartAt } from './lib/problem'
 import { PIECE_METAPHORS, synthesizeReading } from './lib/reading'
 import { beginModelActivity } from './lib/model-activity'
-import {
-  abandonGame,
-  createIdempotencyKey,
-  divideProblem,
-  getCurrentGame,
-  getOwnedGame,
-  isWebChessApiError,
-  recoverDivisionIntent,
-  replayGame,
-  requestGameAnswer,
-  startGame,
-  submitMove,
-} from './lib/webchess-api'
+import { isWebChessApiError } from './lib/webchess-api'
 import type { DurableGame } from './lib/webchess-api'
+import {
+  HOSTED_WEBCHESS_RUNTIME,
+  OPENCLAW_WEBCHESS_RUNTIME,
+} from './lib/webchess-runtime'
+import type { WebChessRuntime } from './lib/webchess-runtime'
 import type {
   AnswerStatus,
   CaptureRecord,
@@ -49,7 +41,6 @@ import type {
 } from './types'
 
 const EMPTY_SET = new Set<string>()
-const PLAY_SIGN_IN_PATH = '/sign-in?return_url=%2Fplay'
 const CAST_REVEAL_INTERVAL_MS = 90
 const DIVISION_PHASE_DURATION_MS = 780
 
@@ -92,6 +83,14 @@ function outcomeNotice(outcome: GameOutcome): string {
 }
 
 export function App() {
+  return <WebChessExperience runtime={HOSTED_WEBCHESS_RUNTIME} />
+}
+
+export function OpenClawApp() {
+  return <WebChessExperience runtime={OPENCLAW_WEBCHESS_RUNTIME} />
+}
+
+function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   const [game, setGame] = useState<DurableGame | null>(null)
   const [restoring, setRestoring] = useState(true)
   const [restoreError, setRestoreError] = useState('')
@@ -399,7 +398,7 @@ export function App() {
     }
 
     try {
-      const current = await getCurrentGame({ signal: controller.signal })
+      const current = await runtime.api.getCurrentGame({ signal: controller.signal })
       if (
         controller.signal.aborted ||
         restoreRequestGenerationRef.current !== generation ||
@@ -422,7 +421,7 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind === 'authentication-required'
       ) {
-        window.location.assign(PLAY_SIGN_IN_PATH)
+        if (runtime.signInPath) window.location.assign(runtime.signInPath)
         return
       }
       setRestoreError(
@@ -439,7 +438,13 @@ export function App() {
         if (!silent) setRestoring(false)
       }
     }
-  }, [applyDurableGame, invalidateRestoreRequest, resetGameState])
+  }, [
+    applyDurableGame,
+    invalidateRestoreRequest,
+    resetGameState,
+    runtime.api,
+    runtime.signInPath,
+  ])
 
   useEffect(() => {
     const restoreTimer = window.setTimeout(() => void restoreCurrentGame(), 0)
@@ -555,12 +560,12 @@ export function App() {
       movePendingRef.current = true
       setMovePending(true)
       try {
-        const saved = await submitMove(game.id, {
+        const saved = await runtime.api.submitMove(game.id, {
           expectedRevision: game.revision,
           pieceId,
           to: destination,
         }, {
-          idempotencyKey: createIdempotencyKey(),
+          idempotencyKey: runtime.api.createIdempotencyKey(),
         })
         const nextState = saved.state
         if (!nextState) throw new Error('The server did not return the saved board.')
@@ -607,7 +612,7 @@ export function App() {
           isWebChessApiError(error) &&
           error.kind === 'authentication-required'
         ) {
-          window.location.assign(PLAY_SIGN_IN_PATH)
+          if (runtime.signInPath) window.location.assign(runtime.signInPath)
           return false
         }
         if (
@@ -637,6 +642,8 @@ export function App() {
       parts,
       pieces,
       restoreCurrentGame,
+      runtime.api,
+      runtime.signInPath,
       turn,
     ],
   )
@@ -752,9 +759,9 @@ export function App() {
         const existingIntent = answerIntentRef.current
         const intent = existingIntent?.gameId === game.id
           ? existingIntent
-          : { gameId: game.id, key: createIdempotencyKey() }
+          : { gameId: game.id, key: runtime.api.createIdempotencyKey() }
         answerIntentRef.current = intent
-        const generated = await requestGameAnswer(game.id, {
+        const generated = await runtime.api.requestGameAnswer(game.id, {
           expectedRevision: game.revision,
         }, {
           idempotencyKey: intent.key,
@@ -769,7 +776,7 @@ export function App() {
           isWebChessApiError(error) &&
           error.kind === 'authentication-required'
         ) {
-          window.location.assign(PLAY_SIGN_IN_PATH)
+          if (runtime.signInPath) window.location.assign(runtime.signInPath)
           return
         }
         if (!isWebChessApiError(error) || error.kind !== 'transport') {
@@ -803,6 +810,8 @@ export function App() {
     game,
     outcome,
     restoreCurrentGame,
+    runtime.api,
+    runtime.signInPath,
     stage,
   ])
 
@@ -824,7 +833,7 @@ export function App() {
     const existingIntent = divisionIntentRef.current
     const intent = existingIntent?.problem === subject
       ? existingIntent
-      : { problem: subject, key: createIdempotencyKey() }
+      : { problem: subject, key: runtime.api.createIdempotencyKey() }
     divisionIntentRef.current = intent
     const activity = beginModelActivity('division')
 
@@ -839,7 +848,7 @@ export function App() {
     setDivisionTargetUnresolved(true)
 
     try {
-      const divided = await divideProblem(subject, {
+      const divided = await runtime.api.divideProblem(subject, {
         idempotencyKey: intent.key,
         signal: controller.signal,
       })
@@ -853,7 +862,7 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind === 'authentication-required'
       ) {
-        window.location.assign(PLAY_SIGN_IN_PATH)
+        if (runtime.signInPath) window.location.assign(runtime.signInPath)
         return
       }
 
@@ -863,7 +872,7 @@ export function App() {
       let recoveryError: unknown
 
       try {
-        const recovered = await recoverDivisionIntent(intent.key, {
+        const recovered = await runtime.api.recoverDivisionIntent(intent.key, {
           signal: controller.signal,
         })
         if (controller.signal.aborted || divisionRequestRef.current !== controller) return
@@ -894,7 +903,7 @@ export function App() {
           isWebChessApiError(recoveryFailure) &&
           recoveryFailure.kind === 'authentication-required'
         ) {
-          window.location.assign(PLAY_SIGN_IN_PATH)
+          if (runtime.signInPath) window.location.assign(runtime.signInPath)
           return
         }
         recoveryError = recoveryFailure
@@ -904,10 +913,12 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind !== 'transport' &&
         error.kind !== 'invalid-response'
-      const targetDefinitelyAbsent =
-        originalFailureWasDefinitive &&
+      const recoveryReportedAbsent =
         isWebChessApiError(recoveryError) &&
         recoveryError.kind === 'not-found'
+      const targetDefinitelyAbsent =
+        recoveryReportedAbsent &&
+        (runtime.kind === 'openclaw' || originalFailureWasDefinitive)
 
       setDivisionTargetUnresolved(!targetDefinitelyAbsent)
       if (targetDefinitelyAbsent) divisionIntentRef.current = null
@@ -965,12 +976,12 @@ export function App() {
       : {
           gameId: current.id,
           expectedRevision: current.revision,
-          key: createIdempotencyKey(),
+          key: runtime.api.createIdempotencyKey(),
         }
     startIntentRef.current = intent
 
     try {
-      const started = await startGame(current.id, {
+      const started = await runtime.api.startGame(current.id, {
         expectedRevision: current.revision,
       }, {
         idempotencyKey: intent.key,
@@ -987,7 +998,7 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind === 'authentication-required'
       ) {
-        window.location.assign(PLAY_SIGN_IN_PATH)
+        if (runtime.signInPath) window.location.assign(runtime.signInPath)
         return
       }
       if (!isWebChessApiError(error) || error.kind !== 'transport') {
@@ -1078,13 +1089,13 @@ export function App() {
     const existingIntent = replayIntentRef.current
     const intent = existingIntent?.gameId === current.id
       ? existingIntent
-      : { gameId: current.id, key: createIdempotencyKey() }
+      : { gameId: current.id, key: runtime.api.createIdempotencyKey() }
     replayIntentRef.current = intent
     replayPendingRef.current = true
     setReplayPending(true)
     setReplayError('')
     try {
-      const replayed = await replayGame(current.id, {
+      const replayed = await runtime.api.replayGame(current.id, {
         expectedRevision: current.revision,
       }, {
         idempotencyKey: intent.key,
@@ -1101,7 +1112,7 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind === 'authentication-required'
       ) {
-        window.location.assign(PLAY_SIGN_IN_PATH)
+        if (runtime.signInPath) window.location.assign(runtime.signInPath)
         return
       }
 
@@ -1116,7 +1127,7 @@ export function App() {
           // Replay creation atomically uses its replay idempotency UUID as the
           // child ID. Division recovery must use the separate intent endpoint
           // because division games are identified by a server request UUID.
-          const recovered = await getOwnedGame(intent.key)
+          const recovered = await runtime.api.getOwnedGame(intent.key)
           if (recovered.sourceGameId !== current.id) {
             throw new Error(
               'The recovered replay does not belong to this source game.',
@@ -1141,7 +1152,7 @@ export function App() {
             isWebChessApiError(recoveryError) &&
             recoveryError.kind === 'authentication-required'
           ) {
-            window.location.assign(PLAY_SIGN_IN_PATH)
+            if (runtime.signInPath) window.location.assign(runtime.signInPath)
             return
           }
           setReplayTargetUnresolved(true)
@@ -1208,11 +1219,11 @@ export function App() {
         : {
             gameId: current.id,
             expectedRevision: current.revision,
-            key: createIdempotencyKey(),
+            key: runtime.api.createIdempotencyKey(),
           }
       resetIntentRef.current = intent
 
-      await abandonGame(current.id, {
+      await runtime.api.abandonGame(current.id, {
         expectedRevision: current.revision,
       }, {
         idempotencyKey: intent.key,
@@ -1262,6 +1273,7 @@ export function App() {
         stage={visibleStage}
         resetDisabled={resetDisabled}
         onReset={reset}
+        localMode={runtime.kind === 'openclaw'}
       />
 
       <main className="main-content">
@@ -1269,7 +1281,7 @@ export function App() {
           <div className="session-banner" role="alert">
             <span>{restoreError}</span>
             <button type="button" className="text-button" onClick={() => void restoreCurrentGame()}>
-              Restore again
+              {runtime.restoreActionLabel}
             </button>
           </div>
         )}
@@ -1283,14 +1295,14 @@ export function App() {
               <p className="eyebrow"><span /> Saved game</p>
               <h1>Restoring your board…</h1>
               <p className="lede" role="status">
-                WebChess is replaying the durable move log before play continues.
+                {runtime.restoreDescription}
               </p>
             </div>
           </section>
         ) : stage === 'question' ? (
           <QuestionStage
             problem={problem}
-            provider={HOSTED_WEBCHESS_PROVIDER}
+            provider={runtime.provider}
             setProblem={setProblem}
             onSubmit={beginMapping}
           />
@@ -1299,7 +1311,7 @@ export function App() {
         {!restoring && stage === 'mapping' && (
           <MappingStage
             problem={problem}
-            provider={HOSTED_WEBCHESS_PROVIDER}
+            provider={runtime.provider}
             parts={parts}
             progress={mappingProgress}
             divisionStatus={divisionStatus}
@@ -1343,7 +1355,7 @@ export function App() {
         {!restoring && stage === 'reading' && outcome && (
           <ReadingStage
             problem={problem}
-            provider={HOSTED_WEBCHESS_PROVIDER}
+            provider={runtime.provider}
             parts={parts}
             pieces={pieces}
             captures={captures}
@@ -1370,7 +1382,13 @@ export function App() {
       <footer className="site-footer">
         <span>WebChess</span>
         <span>A thinking game inspired by change, not a prediction.</span>
-        <a className="text-button" href="/account">Account and usage</a>
+        {runtime.footerAction ? (
+          <a className="text-button" href={runtime.footerAction.href}>
+            {runtime.footerAction.label}
+          </a>
+        ) : (
+          <span>Runs locally through your OpenClaw configuration.</span>
+        )}
       </footer>
     </div>
   )

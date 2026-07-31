@@ -12,6 +12,14 @@ const API_PROVIDER = {
   webSearch: 'disabled',
 } as const
 
+const OPENCLAW_PROVIDER = {
+  kind: 'openclaw',
+  label: 'your local OpenClaw',
+  dataControlsLabel: 'How OpenClaw runs model requests',
+  dataControlsUrl: 'https://docs.openclaw.ai/cli/infer',
+  model: 'your configured default model',
+} as const
+
 describe('QuestionStage', () => {
   it('uses native bounded input without silently truncating the question', () => {
     const setProblem = vi.fn()
@@ -52,5 +60,25 @@ describe('QuestionStage', () => {
       'href',
       'https://developers.openai.com/api/docs/guides/your-data',
     )
+  })
+
+  it('explains browser-local storage and user-owned OpenClaw authentication', () => {
+    render(
+      <QuestionStage
+        problem="A concrete question"
+        provider={OPENCLAW_PROVIDER}
+        setProblem={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText(/saved game and move history stay in this browser/i)).toBeInTheDocument()
+    expect(screen.getByText(/sends your question through your local OpenClaw/i)).toBeInTheDocument()
+    expect(screen.getByText(/configured provider and authentication/i)).toBeInTheDocument()
+    expect(screen.getByText(/may contact a remote provider/i)).toBeInTheDocument()
+    expect(screen.getByText(/credentials never enter the browser or a WebChess-operated service/i)).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: /How OpenClaw runs model requests/i }),
+    ).toHaveAttribute('href', 'https://docs.openclaw.ai/cli/infer')
   })
 })

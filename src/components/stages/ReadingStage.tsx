@@ -301,6 +301,7 @@ export function ReadingStage({
               activity={answerActivity}
               modelLabel={answerModelLabel}
               providerLabel={provider.label}
+              runtimeKind={provider.kind}
               summary={`Weighing ${captures.length} captured signals across ${outcome.completedTurn} moves, then composing the five checked answer sections.`}
               metrics={[
                 { label: 'Captured signals', value: captures.length },

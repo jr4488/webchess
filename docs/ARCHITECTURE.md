@@ -7,9 +7,9 @@ access separate so that each has an inspectable provenance and failure mode.
 
 1. **Question** — preserve the authenticated user's normalized 12–240
    character problem as the governing reference.
-2. **Division** — a server-only structured OpenAI request proposes 64 bounded
-   perspective facets. Deterministic checks reject known structural and lexical
-   failure patterns; they do not prove truth, relevance, or distinctness.
+2. **Division** — a structured model request proposes 64 bounded perspective
+   facets. Deterministic checks reject known structural and lexical failure
+   patterns; they do not prove truth, relevance, or distinctness.
 3. **Independent cast** — the server creates a seed and independently
    permutes facets, I Ching-inspired change lenses, and completed pair
    positions. The exact field and provenance are persisted.
@@ -24,7 +24,55 @@ access separate so that each has an inspectable provenance and failure mode.
    structured OpenAI request. The answer remains traceable to the persisted
    question, cast, outcome, and capture trail.
 
-## Runtime topology
+## Runtime topologies
+
+The local plugin and hosted service share the visual experience, rules engine,
+cast construction, replay, model prompts, and output validation. They do not
+share identity, persistence, credentials, or model billing.
+
+### Local OpenClaw plugin
+
+```text
+OpenClaw CLI
+  |
+  | startup-lazy `webchess` command
+  v
+Foreground Next.js process bound to 127.0.0.1
+  |-- /openclaw visual application
+  |-- /api/openclaw/status
+  |-- /api/openclaw/divide
+  |-- /api/openclaw/answer
+  |
+  +--> browser localStorage: one current question, cast, event log, and answer
+  |
+  +--> `openclaw infer model run --local --json --thinking medium`
+         +--> user's configured default provider, model, and authentication
+```
+
+The plugin is the install and launch boundary; it includes the complete
+browser application rather than exposing a headless agent tool. It registers no
+background service and starts no process until the user runs
+`openclaw webchess`. The launcher disables Next.js telemetry, clears hosted
+Clerk/database settings, blocks a repository `.env.local` from introducing a
+missing OpenAI key, preserves provider environment already present in the
+user's shell, binds only to IPv4 loopback, prints and optionally opens the local
+URL, and remains in the foreground until Ctrl-C. For a managed install, it
+stages the bundled application code in an operating-system temporary directory,
+links the installed dependency tree, and removes that working directory on
+exit. Persistent game data remains browser-local.
+
+The browser applies moves locally for responsive animation, but it cannot make
+arbitrary saved state authoritative. On every load, WebChess recomposes the
+cast from its facets and seed and canonically replays the event log. Before the
+second model call, the loopback route repeats that composition and replay,
+requires a real ending, and derives the answer evidence itself.
+
+There is no local account, cloud database, hosted WebChess request, sync, or
+shared operator credential. The configured model provider may be remote; that
+network boundary belongs to the user's OpenClaw configuration. The plugin never
+returns provider credentials to the app.
+
+### Hosted service
 
 ```text
 Unauthenticated browser
@@ -111,7 +159,7 @@ then wins over reserved or in-progress work and deletes the raw-ID record and
 all remaining content. Late provider finalization cannot recreate the deleted
 rows. A browser request cannot impersonate that event.
 
-## Durable data model
+## Hosted durable data model
 
 ### `user_controls`
 
@@ -311,8 +359,10 @@ without introducing a separate queue or cache as an authority.
 - Randomization generates variation, not evidence.
 - Board events create salience, not factual warrant.
 - The original question and every transformation remain inspectable.
-- Visitors never supply model credentials.
-- OpenAI calls occur only in authenticated server routes.
+- The local plugin never receives model credentials; OpenClaw owns provider
+  authentication and may contact the user's configured remote provider.
+- Hosted visitors never supply model credentials.
+- Hosted OpenAI calls occur only in authenticated server routes.
 - The server is authoritative for ownership, moves, passes, captures, endings,
   prompts, quota, and usage.
 - No correctness or security property depends on Function memory.

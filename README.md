@@ -18,20 +18,26 @@ limitations, and proposed validation program are documented in the
 
 ## Project status
 
-This repository is the sole canonical WebChess product. It is being rebuilt as
-an independent Next.js application for a new Vercel project named `webchess`.
-It is not part of MadnessBot.
+This repository is the sole canonical WebChess product. The same rules and
+visual game now have two deliberately separate runtime surfaces:
 
-The public repository and GitHub Discussions are available now. A production
-WebChess deployment is **not** claimed by this document. The release process
-requires a passing preview deployment, owner inspection, and explicit approval
-before production promotion or domain attachment.
+- an installable, startup-lazy OpenClaw plugin that launches the complete app
+  on the user's own machine, uses that user's configured OpenClaw model and
+  authentication, and keeps game history in browser-local storage; and
+- the existing account-backed service architecture for a future independent
+  Vercel project named `webchess`.
+
+It is not part of MadnessBot. The public repository and GitHub Discussions are
+available now. A production hosted deployment is **not** claimed by this
+document. The hosted release process still requires a passing preview,
+owner inspection, and explicit approval before production promotion or domain
+attachment.
 
 ## The real method
 
 ### 1. Divide the question
 
-The first server-side OpenAI request receives the user's question and proposes
+The first structured model request receives the user's question and proposes
 one facet for each intersection of eight practical dimensions and eight
 movements of change:
 
@@ -47,15 +53,16 @@ distinctness, correctness, or completeness.
 
 ### 2. Cast the field
 
-The server creates a fresh random seed and derives three domain-separated,
+WebChess creates a fresh random seed and derives three domain-separated,
 deterministic permutations:
 
 - the 64 facets;
 - the 64 I Ching-inspired lenses; and
 - the completed facet–lens pairs' board locations.
 
-The resulting field is persisted with its seed and version provenance. A
-replay uses the same field; a new division creates a new field.
+The resulting field is saved with its seed and version provenance—durably in
+the hosted service or in browser-local storage in the OpenClaw plugin. A replay
+uses the same field; a new division creates a new field.
 
 ### 3. Play the complete circular game
 
@@ -89,20 +96,22 @@ pass-enabled rules; it is not Stockfish and does not claim an Elo rating.
 
 ### 4. Replay and validate
 
-The browser sends only a requested piece and destination plus the expected
-game revision. It does not supply authoritative pieces, captures, passes,
-outcomes, attention weights, or answers.
+In the hosted service, the browser sends only a requested piece and destination
+plus the expected game revision. The authenticated server reconstructs the
+board and commits the derived event. In the local plugin, the browser applies
+the same rules for responsive play and stores the append-only event log, then
+reconstructs that log before treating a saved position as valid. The local
+answer route independently recomposes the field and replays the complete log
+before it can call the model.
 
-The authenticated server loads the persisted division and append-only event
-log, reconstructs the board from the canonical initial position, checks every
-move, derives forced passes and captures, applies ending precedence, and
-commits the next event with an idempotency key and compare-and-swap revision.
-This event-sourced record lets an unfinished game survive refresh and lets the
-server reject stale or fabricated state.
+Neither runtime trusts supplied pieces, captures, passes, outcomes, attention
+weights, or answers. Both reconstruct the board from the canonical initial
+position, check moves, derive forced passes and captures, apply ending
+precedence, and reject stale or fabricated state.
 
 ### 5. Synthesize after a real ending
 
-Only after server replay proves a terminal position does the second OpenAI
+Only after canonical replay proves a terminal position does the second model
 request receive:
 
 - the original question;
@@ -118,7 +127,61 @@ rather than being presented as evidence. The structured answer must include a
 direct response, what the conflicts emphasized, the main tension, exactly
 three next actions, and conditions that would change the recommendation.
 
-## Production architecture
+## Local OpenClaw plugin
+
+The OpenClaw package is the installation and launch layer for the full visual
+WebChess application. It is not a headless game tool. The command starts a
+foreground Next.js process bound only to `127.0.0.1`, opens the animated board
+in the user's browser, and stops when the user presses Ctrl-C:
+
+```text
+openclaw webchess
+  |
+  +--> local Next.js process at http://127.0.0.1:3210/openclaw
+         |-- visual board, guided/manual/autoplay flow, and public model status
+         |-- question, cast, move history, and answer in browser-local storage
+         |
+         +--> openclaw infer model run --local
+                +--> the user's configured model, provider, and authentication
+```
+
+It needs no Clerk account, Neon database, Vercel deployment, hosted WebChess
+service, or operator-owned API key. The launcher disables hosted identity and
+database settings for this process, disables Next.js telemetry, and never puts
+a provider credential in the browser. Provider environment already present in
+the user's launching shell remains available to that user's OpenClaw. OpenClaw's
+configured provider may itself be remote, so the question and the final
+game-derived prompt may leave the machine under that provider's own settings.
+WebChess does not add a proxy, account, sync service, or credential path.
+For managed installs, the launcher stages the bundled application in an
+operating-system temporary directory, links the plugin's installed
+dependencies, and removes that working directory when the command exits. Game
+data is never stored there.
+
+The board shows piece movement and the understandable public stages of each
+model request. It displays validated facets, model attribution, elapsed status,
+and the final structured reading; it does not request or expose private
+chain-of-thought.
+
+From a source checkout:
+
+```bash
+npm ci
+npm run plugin:build
+npm run verify:openclaw
+openclaw plugins install --link .
+openclaw plugins inspect webchess --runtime --json
+openclaw webchess
+```
+
+Use `openclaw webchess --no-open` to print the URL without opening a browser,
+or `--port 4312` to choose another loopback port. See
+[Installation](INSTALL.md) for source-link and packed-plugin workflows.
+`verify:openclaw` exercises the database-free plugin path. The broader
+hosted-service `verify` gate still includes its retained PostgreSQL integration
+tests.
+
+## Hosted architecture
 
 ```text
 Browser
@@ -191,9 +254,9 @@ No correctness, security, quota, or ownership decision may depend on Vercel
 Function memory. See [Architecture](docs/ARCHITECTURE.md) and
 [Security](SECURITY.md).
 
-## Run locally
+## Hosted-service development
 
-The supported local environment is Node.js 22 and npm 11.
+The hosted-service development environment remains Node.js 22 and npm 11.
 
 ```bash
 npm ci
@@ -223,6 +286,7 @@ Install exactly from the lockfile, then run:
 ```bash
 npm run lint
 npm run typecheck
+npm run plugin:build
 npm run test
 npm run test:coverage
 npm run test:integration

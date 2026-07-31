@@ -13,14 +13,21 @@ interface HeaderProps {
   stage: Stage
   resetDisabled: boolean
   onReset: () => void
+  localMode?: boolean
 }
 
-export function Header({ stage, resetDisabled, onReset }: HeaderProps) {
+export function Header({
+  stage,
+  resetDisabled,
+  onReset,
+  localMode = false,
+}: HeaderProps) {
   const currentIndex = PHASES.findIndex((phase) => phase.stage === stage)
+  const homeHref = localMode ? '/openclaw' : '/'
 
   return (
     <header className="site-header">
-      <a className="brand" href="/" aria-label="WebChess home">
+      <a className="brand" href={homeHref} aria-label="WebChess home">
         <span className="brand-mark" aria-hidden="true">
           <span />
         </span>
@@ -41,9 +48,13 @@ export function Header({ stage, resetDisabled, onReset }: HeaderProps) {
       </nav>
 
       <div className="header-actions">
-        <a className="header-link" href="/" aria-label="How WebChess works">
+        <a
+          className="header-link"
+          href={homeHref}
+          aria-label={localMode ? 'Local WebChess game' : 'How WebChess works'}
+        >
           <BookOpen size={14} aria-hidden="true" />
-          <span>How it works</span>
+          <span>{localMode ? 'Local mode' : 'How it works'}</span>
         </a>
         {stage !== 'question' ? (
           <button
