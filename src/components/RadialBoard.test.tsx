@@ -35,6 +35,38 @@ const mappedPart: ProblemPart = {
 }
 
 describe('RadialBoard interaction', () => {
+  it('places a dark dot in the white lobe and a light dot in the dark lobe', () => {
+    const { container } = render(
+      <RadialBoard
+        parts={[]}
+        pieces={[]}
+      />,
+    )
+
+    const darkDot = container.querySelector('.radial-board__yin-dot')
+    const lightDot = container.querySelector('.radial-board__yang-dot')
+
+    expect(Number(darkDot?.getAttribute('cy'))).toBeLessThan(400)
+    expect(Number(lightDot?.getAttribute('cy'))).toBeGreaterThan(400)
+  })
+
+  it('uses bold cameo silhouettes on contrasting side medallions', () => {
+    render(
+      <RadialBoard
+        parts={[]}
+        pieces={pieces}
+      />,
+    )
+
+    const whiteRookPiece = screen.getByRole('button', { name: /^white rook,/i })
+    const blackPawnPiece = screen.getByRole('button', { name: /^black pawn,/i })
+
+    expect(whiteRookPiece).toHaveClass('radial-board__piece--white')
+    expect(whiteRookPiece).toHaveTextContent('♜')
+    expect(blackPawnPiece).toHaveClass('radial-board__piece--black')
+    expect(blackPawnPiece).toHaveTextContent('♟')
+  })
+
   it('routes a click on an occupied legal destination through the cell capture handler', () => {
     const onCellSelect = vi.fn()
     const onPieceSelect = vi.fn()

@@ -280,6 +280,8 @@ export function ReadingStage({
       </div>
 
       <article className="reading-sheet">
+        <blockquote className="reading-question">“{problem}”</blockquote>
+
         <div className="outcome-banner">
           <small>How the board ended</small>
           <h1>{outcomeTitle}</h1>
@@ -375,7 +377,6 @@ export function ReadingStage({
           </div>
         </header>
 
-        <blockquote className="reading-question">“{problem}”</blockquote>
         <p className="reading-summary">{reading.summary}</p>
 
         <div className="reading-sections">

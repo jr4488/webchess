@@ -465,6 +465,23 @@ describe('durable WebChess client flow', () => {
     expect(apiHarness.submitMove).not.toHaveBeenCalled()
   })
 
+  it('restores the original question above a completed game outcome and answer', async () => {
+    serverGame = makeAnsweredGame()
+
+    const { container } = await renderRestoredApp()
+    const question = container.querySelector('.reading-question')
+    const outcomeBanner = container.querySelector('.outcome-banner')
+    const answerCard = container.querySelector('.ai-answer-card')
+
+    expect(question).toHaveTextContent(PROBLEM)
+    expect(question?.compareDocumentPosition(outcomeBanner as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(question?.compareDocumentPosition(answerCard as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
   it('keeps polling a restored division across unchanged and transient responses', async () => {
     vi.useFakeTimers()
     const dividing = makeDividingGame()

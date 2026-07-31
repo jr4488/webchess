@@ -927,8 +927,8 @@ button:disabled {
   left: var(--piece-x);
   top: var(--piece-y);
   display: grid;
-  width: clamp(24px, 3.5vw, 32px);
-  height: clamp(24px, 3.5vw, 32px);
+  width: clamp(26px, 3.5vw, 32px);
+  height: clamp(26px, 3.5vw, 32px);
   padding: 0;
   place-items: center;
   border: 0;
@@ -949,7 +949,8 @@ button:disabled {
   position: relative;
   z-index: 1;
   font-family: 'Times New Roman', 'DejaVu Serif', serif;
-  font-size: clamp(14px, 3vw, 28px);
+  font-size: clamp(15px, 2.8vw, 25px);
+  font-weight: 700;
   line-height: 1;
   transform: translateY(-1px);
 }
@@ -957,33 +958,41 @@ button:disabled {
 .radial-board__piece::before {
   position: absolute;
   z-index: 0;
-  inset: 3px;
+  inset: 2px;
+  border: 1px solid var(--gold);
   border-radius: 50%;
   content: '';
   transition: background 180ms ease, box-shadow 180ms ease;
 }
 
 .radial-board__piece--white {
-  color: var(--cream);
+  color: var(--paper-deep);
   background: transparent;
   box-shadow: none;
-  text-shadow: 0 1px 1px rgba(var(--ink-rgb), 0.8);
+  text-shadow: none;
 }
 
 .radial-board__piece--white::before {
-  background: rgba(var(--gold-deep-rgb), 0.72);
-  box-shadow: 0 3px 8px rgba(var(--shadow-rgb), 0.28), inset 0 0 0 1px rgba(var(--cream-rgb), 0.55);
+  background: var(--cream);
+  box-shadow:
+    0 0 0 2px rgba(var(--gold-rgb), 0.42),
+    0 3px 8px rgba(var(--shadow-rgb), 0.3),
+    inset 0 0 0 1px rgba(var(--paper-deep-rgb), 0.24);
 }
 
 .radial-board__piece--black {
-  color: var(--ink-deep);
+  color: var(--cream);
   background: transparent;
   box-shadow: none;
+  text-shadow: 0 1px 1px rgba(var(--ink-rgb), 0.72);
 }
 
 .radial-board__piece--black::before {
-  background: rgba(var(--gold-pale-rgb), 0.82);
-  box-shadow: 0 3px 8px rgba(var(--shadow-rgb), 0.22), inset 0 0 0 1px rgba(var(--ink-rgb), 0.34);
+  background: var(--paper-deep);
+  box-shadow:
+    0 0 0 2px rgba(var(--gold-rgb), 0.42),
+    0 3px 8px rgba(var(--shadow-rgb), 0.34),
+    inset 0 0 0 1px rgba(var(--cream-rgb), 0.16);
 }
 
 .radial-board__piece:hover,

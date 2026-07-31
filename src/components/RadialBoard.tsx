@@ -36,22 +36,12 @@ const SECTOR_GAP = 0.7
 const RING_GAP = 1.2
 
 const PIECE_GLYPHS = {
-  white: {
-    king: '\u2654',
-    queen: '\u2655',
-    rook: '\u2656',
-    bishop: '\u2657',
-    knight: '\u2658',
-    pawn: '\u2659',
-  },
-  black: {
-    king: '\u265A',
-    queen: '\u265B',
-    rook: '\u265C',
-    bishop: '\u265D',
-    knight: '\u265E',
-    pawn: '\u265F',
-  },
+  king: '\u265A',
+  queen: '\u265B',
+  rook: '\u265C',
+  bishop: '\u265D',
+  knight: '\u265E',
+  pawn: '\u265F',
 } as const
 
 const SECTOR_LABELS = ['North', 'North-east', 'East', 'South-east', 'South', 'South-west', 'West', 'North-west']
@@ -392,8 +382,8 @@ export function RadialBoard({
                   A ${(INNER_RADIUS - 8) / 2} ${(INNER_RADIUS - 8) / 2} 0 0 1 ${BOARD_CENTER} ${BOARD_CENTER}
                   A ${(INNER_RADIUS - 8) / 2} ${(INNER_RADIUS - 8) / 2} 0 0 0 ${BOARD_CENTER} ${BOARD_CENTER - INNER_RADIUS + 8} Z`}
             />
-            <circle cx={BOARD_CENTER} cy={BOARD_CENTER - (INNER_RADIUS - 8) / 2} r="8" className="radial-board__yang-dot" />
-            <circle cx={BOARD_CENTER} cy={BOARD_CENTER + (INNER_RADIUS - 8) / 2} r="8" className="radial-board__yin-dot" />
+            <circle cx={BOARD_CENTER} cy={BOARD_CENTER - (INNER_RADIUS - 8) / 2} r="8" className="radial-board__yin-dot" />
+            <circle cx={BOARD_CENTER} cy={BOARD_CENTER + (INNER_RADIUS - 8) / 2} r="8" className="radial-board__yang-dot" />
           </g>
 
           <g className="radial-board__labels" aria-hidden="true">
@@ -458,7 +448,7 @@ export function RadialBoard({
                   else onPieceSelect?.(piece.id)
                 }}
               >
-                <span aria-hidden="true">{PIECE_GLYPHS[piece.side][piece.kind]}</span>
+                <span aria-hidden="true">{PIECE_GLYPHS[piece.kind]}</span>
               </button>
             )
           })}
