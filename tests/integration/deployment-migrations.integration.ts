@@ -169,6 +169,21 @@ describe('deployment migration owner on PostgreSQL 17', () => {
       await administrator.query(
         `GRANT SELECT, UPDATE ON TABLE "${compatibilitySchema}".model_concurrency_slots TO "${runtimeRole}"`,
       )
+      await administrator.query(
+        `GRANT SELECT, INSERT, UPDATE ON TABLE
+          "${compatibilitySchema}".lifecycle_runs,
+          "${compatibilitySchema}".wilbur_actions
+        TO "${runtimeRole}"`,
+      )
+      await administrator.query(
+        `GRANT SELECT, INSERT ON TABLE
+          "${compatibilitySchema}".portia_reviews,
+          "${compatibilitySchema}".gate_decisions,
+          "${compatibilitySchema}".charlotte_results,
+          "${compatibilitySchema}".wilbur_observations,
+          "${compatibilitySchema}".lifecycle_events
+        TO "${runtimeRole}"`,
+      )
 
       const runtime = runtimeClient()
       await runtime.connect()

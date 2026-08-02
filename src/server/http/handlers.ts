@@ -4,10 +4,13 @@ import type { NextRequest } from 'next/server'
 import { verifyWebhook } from '@clerk/nextjs/webhooks'
 import { requireApiUser, verifySameOriginMutation } from '@/server/auth'
 import {
+  appendWilburObservationBodySchema,
+  createWilburActionBodySchema,
   deleteAccountBodySchema,
   divideBodySchema,
   moveBodySchema,
   revisionBodySchema,
+  updateWilburActionBodySchema,
 } from './contracts'
 import { ApiError } from './errors'
 import {
@@ -237,6 +240,183 @@ export function handleAnswerRequest(
       })
 
       return jsonResponse(result)
+    },
+    dependencies,
+  )
+}
+
+export function handleLifecycleRequest(
+  request: Request,
+  rawGameId: string,
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runAuthenticated(
+    request,
+    false,
+    async (scope) => {
+      const lifecycle = await scope.services.getLifecycle({
+        ...ownerContext(scope, request),
+        gameId: requireGameId(rawGameId),
+      })
+      return jsonResponse({ lifecycle })
+    },
+    dependencies,
+  )
+}
+
+async function runLifecycleRevisionMutation(
+  request: Request,
+  rawGameId: string,
+  method: 'runPortia' | 'runCharlotte',
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runAuthenticated(
+    request,
+    true,
+    async (scope) => {
+      const body = await parseStrictJson(request, revisionBodySchema)
+      const lifecycle = await scope.services[method]({
+        ...operationContext(scope, request),
+        gameId: requireGameId(rawGameId),
+        expectedRevision: body.expectedRevision,
+      })
+      return jsonResponse({ lifecycle })
+    },
+    dependencies,
+  )
+}
+
+export function handlePortiaRequest(
+  request: Request,
+  rawGameId: string,
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runLifecycleRevisionMutation(
+    request,
+    rawGameId,
+    'runPortia',
+    dependencies,
+  )
+}
+
+export function handleCharlotteRequest(
+  request: Request,
+  rawGameId: string,
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runLifecycleRevisionMutation(
+    request,
+    rawGameId,
+    'runCharlotte',
+    dependencies,
+  )
+}
+
+export function handleRetryLifecycleRequest(
+  request: Request,
+  rawGameId: string,
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runAuthenticated(
+    request,
+    true,
+    async (scope) => {
+      const body = await parseStrictJson(request, revisionBodySchema)
+      const result = await scope.services.retryLifecycle({
+        ...operationContext(scope, request),
+        gameId: requireGameId(rawGameId),
+        expectedRevision: body.expectedRevision,
+      })
+      return jsonResponse(result, { status: result.game ? 201 : 200 })
+    },
+    dependencies,
+  )
+}
+
+export function handleProvenanceRequest(
+  request: Request,
+  rawGameId: string,
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runAuthenticated(
+    request,
+    false,
+    async (scope) => {
+      const activities = await scope.services.getProvenance({
+        ...ownerContext(scope, request),
+        gameId: requireGameId(rawGameId),
+      })
+      return jsonResponse({ activities })
+    },
+    dependencies,
+  )
+}
+
+export function handleCreateWilburActionRequest(
+  request: Request,
+  rawGameId: string,
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runAuthenticated(
+    request,
+    true,
+    async (scope) => {
+      const body = await parseStrictJson(request, createWilburActionBodySchema)
+      const action = await scope.services.createWilburAction({
+        ...operationContext(scope, request),
+        gameId: requireGameId(rawGameId),
+        ...body,
+      })
+      return jsonResponse({ action }, { status: 201 })
+    },
+    dependencies,
+  )
+}
+
+export function handleUpdateWilburActionRequest(
+  request: Request,
+  rawGameId: string,
+  rawActionId: string,
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runAuthenticated(
+    request,
+    true,
+    async (scope) => {
+      const body = await parseStrictJson(request, updateWilburActionBodySchema)
+      const action = await scope.services.updateWilburAction({
+        ...operationContext(scope, request),
+        gameId: requireGameId(rawGameId),
+        actionId: requireGameId(rawActionId),
+        ...body,
+      })
+      return jsonResponse({ action })
+    },
+    dependencies,
+  )
+}
+
+export function handleAppendWilburObservationRequest(
+  request: Request,
+  rawGameId: string,
+  rawActionId: string,
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runAuthenticated(
+    request,
+    true,
+    async (scope) => {
+      const body = await parseStrictJson(
+        request,
+        appendWilburObservationBodySchema,
+      )
+      const observation = await scope.services.appendWilburObservation({
+        ...operationContext(scope, request),
+        gameId: requireGameId(rawGameId),
+        actionId: requireGameId(rawActionId),
+        ...body,
+      })
+      return jsonResponse({ observation }, { status: 201 })
     },
     dependencies,
   )

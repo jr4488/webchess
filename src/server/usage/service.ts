@@ -45,6 +45,7 @@ import type {
   GetModelRequestResultInput,
   GetModelRequestResultResult,
   GetLatestModelRequestForGameInput,
+  ModelOperation,
   ModelRequestStatus,
   ModelResultPayload,
   ReconcileExpiredLeasesResult,
@@ -96,7 +97,7 @@ interface ReplayGameStartRow extends SqlRow {
 interface ModelResultRow extends SqlRow {
   readonly request_id: string
   readonly game_id: string | null
-  readonly operation: 'division' | 'answer'
+  readonly operation: ModelOperation
   readonly status: ModelRequestStatus
   readonly result_payload: ModelResultPayload | null
 }
@@ -268,7 +269,7 @@ function validateReservationInput(input: ReserveModelRequestInput): void {
 
   if (input.countsAsGameStart !== (input.operation === 'division')) {
     throw new TypeError(
-      'Division requests must count as game starts; answer requests must not.',
+      'Division requests must count as game starts; later lifecycle operations must not.',
     )
   }
 }

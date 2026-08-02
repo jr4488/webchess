@@ -1,5 +1,7 @@
 import 'server-only'
 
+import { randomUUID } from 'node:crypto'
+
 import {
   APIConnectionError,
   APIConnectionTimeoutError,
@@ -10,6 +12,16 @@ import { z } from 'zod'
 
 import { composeProblemParts } from '../../lib/division'
 import { GameRuleError } from '../../lib/game-replay'
+import {
+  CURRENT_LIFECYCLE_VERSIONS,
+  charlotteResultSchema,
+  decideRetry,
+  deriveSurvivorCandidates,
+  evaluateGate,
+  portiaReviewSchema,
+  terminalFingerprint,
+  validatePortiaReview,
+} from '../../lib/lifecycle'
 import type { DurableGame } from '../../lib/webchess-api'
 import {
   getDatabase,
@@ -36,7 +48,9 @@ import {
   DIVISION_PROMPT_VERSION,
   DivisionFacetSchema,
   generateAnswer,
+  generateCharlotteSynthesis,
   generateDivision,
+  generatePortiaReview,
   ModelConfigurationError,
   ModelContractError,
   ModelInputError,
@@ -46,9 +60,19 @@ import {
   parseServerDerivedEvidence,
 } from '../openai'
 import type {
+  CharlotteGenerationResult,
   ModelGeneration,
+  PortiaInput,
   ServerDerivedEvidence,
 } from '../openai'
+import {
+  DurableLifecycleRepository,
+  isLifecycleRepositoryError,
+} from '../lifecycle'
+import type {
+  LifecycleAggregate,
+  LifecycleRepositoryPort,
+} from '../lifecycle'
 import {
   createUsageController,
   loadUsageConfig,
@@ -67,7 +91,7 @@ import { ApiError, isApiError, serviceUnavailable } from './errors'
 import type { WebChessApiServices } from './ports'
 
 const FALLBACK_SOFTWARE_VERSION = 'webchess@0.1.0'
-const ACCOUNT_EXPORT_FORMAT = 'webchess-account-export/1'
+const ACCOUNT_EXPORT_FORMAT = 'webchess-account-export/2'
 const DEFAULT_ACCOUNT_EXPORT_MAX_BYTES = 3_000_000
 const ACCOUNT_EXPORT_GUARD_SETTING = 'webchess.account_export_allowed'
 
@@ -90,8 +114,22 @@ const AnswerResultPayloadSchema = z.strictObject({
   answer: StoredAnswerSchema,
 })
 
+const PortiaResultPayloadSchema = z.strictObject({
+  format: z.literal('webchess-portia-result/1'),
+  review: portiaReviewSchema,
+})
+
+const CharlotteResultPayloadSchema = z.strictObject({
+  format: z.literal('webchess-charlotte-result/1'),
+  structured: charlotteResultSchema,
+  renderedAnswer: z.string().min(100).max(20_000),
+  wordCount: z.number().int().min(450).max(750),
+})
+
 type DivisionResultPayload = z.infer<typeof DivisionResultPayloadSchema>
 type AnswerResultPayload = z.infer<typeof AnswerResultPayloadSchema>
+type PortiaResultPayload = z.infer<typeof PortiaResultPayloadSchema>
+type CharlotteResultPayload = z.infer<typeof CharlotteResultPayloadSchema>
 
 type GameRepositoryPort = Pick<
   DurableGameRepository,
@@ -114,9 +152,12 @@ export interface ApiServiceAdapterDependencies {
   readonly answerGenerator: typeof generateAnswer
   readonly database: SqlAdapter
   readonly divisionGenerator: typeof generateDivision
+  readonly charlotteGenerator?: typeof generateCharlotteSynthesis
   readonly hmacSecret: string
   readonly openAiApiKey?: string
   readonly repository: GameRepositoryPort
+  readonly lifecycleRepository?: LifecycleRepositoryPort
+  readonly portiaGenerator?: typeof generatePortiaReview
   readonly softwareVersion: string
   readonly usage: UsageController
 }
@@ -168,11 +209,14 @@ function productionDependencies(): ApiServiceAdapterDependencies {
       process.env.WEBCHESS_ACCOUNT_EXPORT_MAX_BYTES,
     ),
     answerGenerator: generateAnswer,
+    charlotteGenerator: generateCharlotteSynthesis,
     database,
     divisionGenerator: generateDivision,
     hmacSecret: usageConfig.hmacSecret,
     openAiApiKey: process.env.OPENAI_API_KEY,
     repository: new DurableGameRepository(database),
+    lifecycleRepository: new DurableLifecycleRepository(database),
+    portiaGenerator: generatePortiaReview,
     softwareVersion: normalizeSoftwareVersion(
       process.env.WEBCHESS_SOFTWARE_VERSION ||
         process.env.VERCEL_GIT_COMMIT_SHA,
@@ -269,6 +313,35 @@ function usageError(denial: UsageDenied): ApiError {
 }
 
 function repositoryError(error: unknown): ApiError | null {
+  if (isLifecycleRepositoryError(error)) {
+    switch (error.code) {
+      case 'not-found':
+        return new ApiError(
+          'LIFECYCLE_NOT_FOUND',
+          404,
+          'This game does not have a WebChess 2.0 lifecycle record.',
+        )
+      case 'invalid-input':
+        return new ApiError(
+          'BAD_REQUEST',
+          400,
+          'The lifecycle command is invalid.',
+        )
+      case 'invalid-state':
+      case 'conflict':
+        return new ApiError(
+          'CONFLICT',
+          409,
+          'The lifecycle changed or cannot perform that operation.',
+        )
+      case 'integrity-error':
+        return new ApiError(
+          'INTERNAL_ERROR',
+          500,
+          'The saved lifecycle could not be verified.',
+        )
+    }
+  }
   if (isGameRepositoryError(error)) {
     switch (error.code) {
       case 'not-found':
@@ -503,6 +576,15 @@ function requireLease(reservation: ModelReservation): string {
   return reservation.leaseToken
 }
 
+function modelOperationLabel(operation: ModelOperation): string {
+  return {
+    division: 'division',
+    answer: 'answer',
+    portia: 'Portia review',
+    charlotte: 'Charlotte synthesis',
+  }[operation]
+}
+
 function beginProviderCallError(
   failure: ProviderCallTransitionFailure,
   operation: ModelOperation,
@@ -522,9 +604,7 @@ function beginProviderCallError(
   return new ApiError(
     'CONFLICT',
     failure.httpStatus === 410 ? 410 : 409,
-    operation === 'division'
-      ? 'The division reservation expired before the model call began.'
-      : 'The answer reservation expired before the model call began.',
+    `The ${modelOperationLabel(operation)} reservation expired before the model call began.`,
     { retryAfterSeconds: 2 },
   )
 }
@@ -548,6 +628,30 @@ function answerPayload(value: unknown): AnswerResultPayload {
       'INTERNAL_ERROR',
       500,
       'The saved answer result could not be verified.',
+    )
+  }
+  return parsed.data
+}
+
+function portiaPayload(value: unknown): PortiaResultPayload {
+  const parsed = PortiaResultPayloadSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new ApiError(
+      'INTERNAL_ERROR',
+      500,
+      'The saved Portia result could not be verified.',
+    )
+  }
+  return parsed.data
+}
+
+function charlottePayload(value: unknown): CharlotteResultPayload {
+  const parsed = CharlotteResultPayloadSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new ApiError(
+      'INTERNAL_ERROR',
+      500,
+      'The saved Charlotte result could not be verified.',
     )
   }
   return parsed.data
@@ -593,13 +697,142 @@ function serverEvidence(snapshot: TerminalGameSnapshot): ServerDerivedEvidence {
   })
 }
 
+function lifecycleConfigurationDigest(snapshot: DurableGameSnapshot): string {
+  return canonicalHash({
+    lifecycle: CURRENT_LIFECYCLE_VERSIONS,
+    game: snapshot.game?.versions ?? null,
+    divisionDigest: snapshot.division?.digest ?? null,
+  })
+}
+
+function requireLifecycleRepository(
+  dependencies: ApiServiceAdapterDependencies,
+): LifecycleRepositoryPort {
+  if (!dependencies.lifecycleRepository) {
+    throw serviceUnavailable('The WebChess 2.0 lifecycle store is not configured.')
+  }
+  return dependencies.lifecycleRepository
+}
+
+async function ensureLifecycleForNewGame(
+  dependencies: ApiServiceAdapterDependencies,
+  ownerId: string,
+  snapshot: DurableGameSnapshot,
+): Promise<LifecycleAggregate> {
+  return requireLifecycleRepository(dependencies).ensureForGame({
+    ownerId,
+    game: snapshot,
+    trajectorySeed: randomUUID(),
+  })
+}
+
+async function synchronizeLifecycleWithGame(
+  dependencies: ApiServiceAdapterDependencies,
+  ownerId: string,
+  snapshot: DurableGameSnapshot,
+): Promise<LifecycleAggregate> {
+  const repository = requireLifecycleRepository(dependencies)
+  let lifecycle = await repository.getForGame(
+    ownerId,
+    snapshot.id,
+  )
+  if (!lifecycle) {
+    throw new ApiError(
+      'LIFECYCLE_NOT_FOUND',
+      404,
+      'This legacy game remains readable but has no fabricated WebChess 2.0 lifecycle.',
+    )
+  }
+  const digest = lifecycleConfigurationDigest(snapshot)
+
+  if (
+    (snapshot.status === 'playing' || snapshot.game?.outcome != null) &&
+    lifecycle.state === 'chess_ready'
+  ) {
+    lifecycle = await repository.transition({
+      ownerId,
+      gameId: snapshot.id,
+      expectedRevision: lifecycle.revision,
+      to: 'chess_playing',
+      stage: 'chess',
+      activityType: 'game_started',
+      inputEntityIds: [snapshot.id],
+      outputEntityIds: [snapshot.id],
+      responsibleAgentIds: ['player', 'webchess-engine'],
+      configurationDigest: digest,
+    })
+  }
+
+  if (
+    snapshot.division &&
+    snapshot.game?.outcome &&
+    lifecycle.state === 'chess_playing'
+  ) {
+    const survivors = deriveSurvivorCandidates(
+      snapshot.game,
+      snapshot.division.parts,
+      {
+        gameId: snapshot.id,
+        attemptId: lifecycle.id,
+        divisionDigest: snapshot.division.digest,
+        rulesVersion: snapshot.game.versions.rules,
+        engineVersion: snapshot.game.versions.engine,
+        castVersion: snapshot.game.versions.cast,
+        eventVersion: snapshot.game.versions.event,
+      },
+    )
+    const fingerprint = terminalFingerprint(survivors)
+    lifecycle = await repository.transition({
+      ownerId,
+      gameId: snapshot.id,
+      expectedRevision: lifecycle.revision,
+      to: 'chess_terminal',
+      stage: 'chess',
+      activityType: 'terminal_ecology_derived',
+      inputEntityIds: [snapshot.id],
+      outputEntityIds: survivors.map((candidate) => candidate.candidateId),
+      responsibleAgentIds: ['webchess-engine'],
+      configurationDigest: digest,
+      terminalFingerprint: fingerprint,
+      survivors,
+    })
+  }
+  return lifecycle
+}
+
+async function preparePortia(
+  dependencies: ApiServiceAdapterDependencies,
+  ownerId: string,
+  snapshot: TerminalGameSnapshot,
+): Promise<LifecycleAggregate> {
+  let lifecycle = await synchronizeLifecycleWithGame(
+    dependencies,
+    ownerId,
+    snapshot,
+  )
+  if (lifecycle.state === 'chess_terminal') {
+    lifecycle = await requireLifecycleRepository(dependencies).transition({
+      ownerId,
+      gameId: snapshot.id,
+      expectedRevision: lifecycle.revision,
+      to: 'portia_pending',
+      stage: 'portia',
+      activityType: 'adversarial_review_queued',
+      inputEntityIds: lifecycle.survivors.map(
+        (candidate) => candidate.candidateId,
+      ),
+      responsibleAgentIds: ['portia'],
+      configurationDigest: lifecycleConfigurationDigest(snapshot),
+    })
+  }
+  return lifecycle
+}
+
 function pendingConflict(operation: ModelOperation): ApiError {
   return new ApiError(
     'CONFLICT',
     409,
-    operation === 'division'
-      ? 'This division is still being processed.'
-      : 'This answer is still being processed.',
+    `This ${modelOperationLabel(operation)} is still being processed.`,
     { retryAfterSeconds: 2 },
   )
 }
@@ -608,9 +841,7 @@ function terminalModelFailure(operation: ModelOperation): ApiError {
   return new ApiError(
     'UPSTREAM_FAILURE',
     502,
-    operation === 'division'
-      ? 'The model could not complete a valid WebChess division.'
-      : 'The model could not complete a valid WebChess answer.',
+    `The model could not complete a valid WebChess ${modelOperationLabel(operation)}.`,
   )
 }
 
@@ -1030,6 +1261,76 @@ function accountExportStatements(
             ) + 128
           FROM game_start_requests AS starts
           WHERE starts.clerk_user_id = $1::text
+
+          UNION ALL
+
+          SELECT greatest(
+            pg_column_size(runs)::bigint,
+            octet_length(to_jsonb(runs)::text)::bigint,
+            octet_length(jsonb_pretty(to_jsonb(runs)))::bigint
+          ) + 128
+          FROM lifecycle_runs AS runs
+          WHERE runs.clerk_user_id = $1::text
+
+          UNION ALL
+
+          SELECT greatest(
+            pg_column_size(reviews)::bigint,
+            octet_length(to_jsonb(reviews)::text)::bigint,
+            octet_length(jsonb_pretty(to_jsonb(reviews)))::bigint
+          ) + 128
+          FROM portia_reviews AS reviews
+          WHERE reviews.clerk_user_id = $1::text
+
+          UNION ALL
+
+          SELECT greatest(
+            pg_column_size(decisions)::bigint,
+            octet_length(to_jsonb(decisions)::text)::bigint,
+            octet_length(jsonb_pretty(to_jsonb(decisions)))::bigint
+          ) + 128
+          FROM gate_decisions AS decisions
+          WHERE decisions.clerk_user_id = $1::text
+
+          UNION ALL
+
+          SELECT greatest(
+            pg_column_size(results)::bigint,
+            octet_length(to_jsonb(results)::text)::bigint,
+            octet_length(jsonb_pretty(to_jsonb(results)))::bigint
+          ) + 128
+          FROM charlotte_results AS results
+          WHERE results.clerk_user_id = $1::text
+
+          UNION ALL
+
+          SELECT greatest(
+            pg_column_size(actions)::bigint,
+            octet_length(to_jsonb(actions)::text)::bigint,
+            octet_length(jsonb_pretty(to_jsonb(actions)))::bigint
+          ) + 128
+          FROM wilbur_actions AS actions
+          WHERE actions.clerk_user_id = $1::text
+
+          UNION ALL
+
+          SELECT greatest(
+            pg_column_size(observations)::bigint,
+            octet_length(to_jsonb(observations)::text)::bigint,
+            octet_length(jsonb_pretty(to_jsonb(observations)))::bigint
+          ) + 128
+          FROM wilbur_observations AS observations
+          WHERE observations.clerk_user_id = $1::text
+
+          UNION ALL
+
+          SELECT greatest(
+            pg_column_size(activities)::bigint,
+            octet_length(to_jsonb(activities)::text)::bigint,
+            octet_length(jsonb_pretty(to_jsonb(activities)))::bigint
+          ) + 128
+          FROM lifecycle_events AS activities
+          WHERE activities.clerk_user_id = $1::text
         ),
         estimate AS MATERIALIZED (
           SELECT (4096 + coalesce(sum(bytes), 0))::bigint AS estimated_bytes
@@ -1213,7 +1514,244 @@ function accountExportStatements(
       `,
       values: [ownerId],
     },
+    {
+      text: `
+        ${exportGuard}
+        SELECT
+          id::text, game_id::text AS "gameId",
+          root_run_id::text AS "rootRunId",
+          parent_run_id::text AS "parentRunId",
+          state, revision::text, field_generation AS "fieldGeneration",
+          game_attempt AS "gameAttempt",
+          same_field_retry_count AS "sameFieldRetryCount",
+          field_regeneration_count AS "fieldRegenerationCount",
+          division_seed AS "divisionSeed", cast_seed AS "castSeed",
+          trajectory_seed AS "trajectorySeed", retry_reason AS "retryReason",
+          terminal_fingerprint AS "terminalFingerprint",
+          survivor_set AS survivors,
+          software_version AS "softwareVersion",
+          lifecycle_version AS "lifecycleVersion",
+          rules_version AS "rulesVersion", engine_version AS "engineVersion",
+          cast_version AS "castVersion", event_version AS "eventVersion",
+          portia_prompt_version AS "portiaPromptVersion",
+          portia_contract_version AS "portiaContractVersion",
+          gate_algorithm_version AS "gateAlgorithmVersion",
+          retry_policy_version AS "retryPolicyVersion",
+          charlotte_prompt_version AS "charlottePromptVersion",
+          charlotte_contract_version AS "charlotteContractVersion",
+          wilbur_record_version AS "wilburRecordVersion",
+          created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM lifecycle_runs CROSS JOIN export_gate
+        WHERE export_gate.allowed AND clerk_user_id = $1::text
+        ORDER BY created_at, id
+      `,
+      values: [ownerId],
+    },
+    {
+      text: `
+        ${exportGuard}
+        SELECT id::text, lifecycle_run_id::text AS "lifecycleRunId",
+          model_request_id::text AS "modelRequestId",
+          input_digest AS "inputDigest", output_digest AS "outputDigest",
+          prompt_version AS "promptVersion",
+          contract_version AS "contractVersion", review,
+          created_at AS "createdAt"
+        FROM portia_reviews CROSS JOIN export_gate
+        WHERE export_gate.allowed AND clerk_user_id = $1::text
+        ORDER BY created_at, id
+      `,
+      values: [ownerId],
+    },
+    {
+      text: `
+        ${exportGuard}
+        SELECT id::text, lifecycle_run_id::text AS "lifecycleRunId",
+          algorithm_version AS "algorithmVersion",
+          input_digest AS "inputDigest", passed, result,
+          created_at AS "createdAt"
+        FROM gate_decisions CROSS JOIN export_gate
+        WHERE export_gate.allowed AND clerk_user_id = $1::text
+        ORDER BY created_at, id
+      `,
+      values: [ownerId],
+    },
+    {
+      text: `
+        ${exportGuard}
+        SELECT id::text, lifecycle_run_id::text AS "lifecycleRunId",
+          model_request_id::text AS "modelRequestId",
+          input_digest AS "inputDigest", output_digest AS "outputDigest",
+          prompt_version AS "promptVersion",
+          contract_version AS "contractVersion", result,
+          rendered_answer AS "renderedAnswer", created_at AS "createdAt"
+        FROM charlotte_results CROSS JOIN export_gate
+        WHERE export_gate.allowed AND clerk_user_id = $1::text
+        ORDER BY created_at, id
+      `,
+      values: [ownerId],
+    },
+    {
+      text: `
+        ${exportGuard}
+        SELECT id::text, lifecycle_run_id::text AS "lifecycleRunId",
+          charlotte_action_index AS "charlotteActionIndex",
+          idempotency_key::text AS "idempotencyKey",
+          request_digest AS "requestDigest", actor, action,
+          tested_assumption AS "testedAssumption",
+          expected_observation AS "expectedObservation",
+          decision_threshold AS "decisionThreshold",
+          review_horizon AS "reviewHorizon", status, revision::text,
+          record_version AS "recordVersion",
+          created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM wilbur_actions CROSS JOIN export_gate
+        WHERE export_gate.allowed AND clerk_user_id = $1::text
+        ORDER BY created_at, id
+      `,
+      values: [ownerId],
+    },
+    {
+      text: `
+        ${exportGuard}
+        SELECT id::text, action_id::text AS "actionId",
+          idempotency_key::text AS "idempotencyKey",
+          request_digest AS "requestDigest", observed_at AS "observedAt",
+          observation, evidence_classification AS "evidenceClassification",
+          expected_effect AS "expectedEffect",
+          unexpected_effect AS "unexpectedEffect",
+          stakeholder_response AS "stakeholderResponse",
+          assumption_result AS "assumptionResult",
+          next_decision AS "nextDecision", record_version AS "recordVersion",
+          created_at AS "createdAt"
+        FROM wilbur_observations CROSS JOIN export_gate
+        WHERE export_gate.allowed AND clerk_user_id = $1::text
+        ORDER BY observed_at, created_at, id
+      `,
+      values: [ownerId],
+    },
+    {
+      text: `
+        ${exportGuard}
+        SELECT id::text, lifecycle_run_id::text AS "lifecycleRunId",
+          sequence::text, stage, activity_type AS "activityType",
+          state_from AS "stateFrom", state_to AS "stateTo",
+          input_entity_ids AS "inputEntityIds",
+          output_entity_ids AS "outputEntityIds",
+          responsible_agent_ids AS "responsibleAgentIds",
+          configuration_digest AS "configurationDigest", status,
+          event_version AS "eventVersion", created_at AS "createdAt"
+        FROM lifecycle_events CROSS JOIN export_gate
+        WHERE export_gate.allowed AND clerk_user_id = $1::text
+        ORDER BY lifecycle_run_id, sequence
+      `,
+      values: [ownerId],
+    },
   ]
+}
+
+async function commitPortiaAndGate(
+  dependencies: ApiServiceAdapterDependencies,
+  ownerId: string,
+  game: TerminalGameSnapshot,
+  lifecycle: LifecycleAggregate,
+  modelRequestId: string,
+  inputDigest: string,
+  reviewValue: unknown,
+): Promise<LifecycleAggregate> {
+  const repository = requireLifecycleRepository(dependencies)
+  const review = validatePortiaReview(reviewValue, lifecycle.survivors)
+  let current = lifecycle
+  if (current.state === 'portia_pending') {
+    current = await repository.transition({
+      ownerId,
+      gameId: game.id,
+      expectedRevision: current.revision,
+      to: 'portia_running',
+      stage: 'portia',
+      activityType: 'adversarial_review_recovered',
+      inputEntityIds: current.survivors.map(
+        (candidate) => candidate.candidateId,
+      ),
+      responsibleAgentIds: ['portia'],
+      configurationDigest: lifecycleConfigurationDigest(game),
+    })
+  }
+  if (current.state === 'portia_running') {
+    current = await repository.storePortia({
+      ownerId,
+      gameId: game.id,
+      expectedRevision: current.revision,
+      modelRequestId,
+      inputDigest,
+      outputDigest: canonicalHash(review),
+      review,
+      configurationDigest: lifecycleConfigurationDigest(game),
+    })
+  }
+  if (current.state === 'portia_complete') {
+    const gate = evaluateGate(review, {
+      sameFieldRetryCount: current.sameFieldRetryCount,
+      fieldRegenerationCount: current.fieldRegenerationCount,
+    })
+    current = await repository.storeGate({
+      ownerId,
+      gameId: game.id,
+      expectedRevision: current.revision,
+      result: gate,
+      configurationDigest: lifecycleConfigurationDigest(game),
+    })
+  }
+  if (current.state === 'gate_passed') {
+    current = await repository.transition({
+      ownerId,
+      gameId: game.id,
+      expectedRevision: current.revision,
+      to: 'charlotte_pending',
+      stage: 'charlotte',
+      activityType: 'synthesis_authorized',
+      inputEntityIds: [game.id],
+      responsibleAgentIds: ['gate', 'charlotte'],
+      configurationDigest: lifecycleConfigurationDigest(game),
+    })
+  }
+  return current
+}
+
+async function commitCharlotte(
+  dependencies: ApiServiceAdapterDependencies,
+  ownerId: string,
+  game: TerminalGameSnapshot,
+  lifecycle: LifecycleAggregate,
+  modelRequestId: string,
+  inputDigest: string,
+  payload: CharlotteResultPayload,
+): Promise<LifecycleAggregate> {
+  const repository = requireLifecycleRepository(dependencies)
+  let current = lifecycle
+  if (current.state === 'charlotte_pending') {
+    current = await repository.transition({
+      ownerId,
+      gameId: game.id,
+      expectedRevision: current.revision,
+      to: 'charlotte_running',
+      stage: 'charlotte',
+      activityType: 'synthesis_recovered',
+      inputEntityIds: [game.id],
+      responsibleAgentIds: ['charlotte'],
+      configurationDigest: lifecycleConfigurationDigest(game),
+    })
+  }
+  if (current.state !== 'charlotte_running') return current
+  return repository.storeCharlotte({
+    ownerId,
+    gameId: game.id,
+    expectedRevision: current.revision,
+    modelRequestId,
+    inputDigest,
+    outputDigest: canonicalHash(payload),
+    result: payload.structured,
+    renderedAnswer: payload.renderedAnswer,
+    configurationDigest: lifecycleConfigurationDigest(game),
+  })
 }
 
 export function createApiServicesWithDependencies(
@@ -1228,7 +1766,7 @@ export function createApiServicesWithDependencies(
       softwareVersion: dependencies.softwareVersion,
     })
 
-  return {
+  const services: WebChessApiServices = {
     divide(input) {
       return apiOperation(async () => {
         const problem = normalizeProblem(input.problem)
@@ -1283,6 +1821,16 @@ export function createApiServicesWithDependencies(
             )
             if (recovered.status === 'division_failed') {
               throw terminalModelFailure('division')
+            }
+            if (
+              recovered.status !== 'dividing' &&
+              dependencies.lifecycleRepository
+            ) {
+              await ensureLifecycleForNewGame(
+                dependencies,
+                input.ownerId,
+                recovered,
+              )
             }
             return publicGame(recovered)
           }
@@ -1373,6 +1921,13 @@ export function createApiServicesWithDependencies(
             shell,
             winning,
           )
+          if (dependencies.lifecycleRepository) {
+            await ensureLifecycleForNewGame(
+              dependencies,
+              input.ownerId,
+              shell,
+            )
+          }
           return publicGame(shell)
         } catch (error) {
           if (!providerStarted) {
@@ -1444,16 +1999,26 @@ export function createApiServicesWithDependencies(
     },
 
     startGame(input) {
-      return apiOperation(async () =>
-        publicGame(
-          await dependencies.repository.startGame({
-            ownerId: input.ownerId,
-            gameId: input.gameId,
-            expectedRevision: input.expectedRevision,
-            idempotencyKey: input.idempotencyKey,
-          }),
-        ),
-      )
+      return apiOperation(async () => {
+        const snapshot = await dependencies.repository.startGame({
+          ownerId: input.ownerId,
+          gameId: input.gameId,
+          expectedRevision: input.expectedRevision,
+          idempotencyKey: input.idempotencyKey,
+        })
+        const lifecycle = await dependencies.lifecycleRepository?.getForGame(
+          input.ownerId,
+          snapshot.id,
+        )
+        if (lifecycle) {
+          await synchronizeLifecycleWithGame(
+            dependencies,
+            input.ownerId,
+            snapshot,
+          )
+        }
+        return publicGame(snapshot)
+      })
     },
 
     move(input) {
@@ -1474,6 +2039,17 @@ export function createApiServicesWithDependencies(
             to: input.to,
           },
         })
+        const lifecycle = await dependencies.lifecycleRepository?.getForGame(
+          input.ownerId,
+          moved.game.id,
+        )
+        if (lifecycle) {
+          await synchronizeLifecycleWithGame(
+            dependencies,
+            input.ownerId,
+            moved.game,
+          )
+        }
         return publicGame(moved.game)
       })
     },
@@ -1485,6 +2061,18 @@ export function createApiServicesWithDependencies(
           input.ownerId,
           input.gameId,
         )
+        if (
+          await dependencies.lifecycleRepository?.getForGame(
+            input.ownerId,
+            input.gameId,
+          )
+        ) {
+          throw new ApiError(
+            'CONFLICT',
+            409,
+            'WebChess 2.0 games must pass Portia and the Gate before Charlotte; the legacy answer route is disabled for this game.',
+          )
+        }
         if (terminal.status === 'answered' && terminal.answer) {
           return {
             game: publicGame(terminal),
@@ -1732,6 +2320,772 @@ export function createApiServicesWithDependencies(
       })
     },
 
+    getLifecycle(input) {
+      return apiOperation(async () => {
+        const game = await dependencies.repository.getOwnedGame(
+          input.ownerId,
+          input.gameId,
+        )
+        return synchronizeLifecycleWithGame(
+          dependencies,
+          input.ownerId,
+          game,
+        )
+      })
+    },
+
+    runPortia(input) {
+      return apiOperation(async () => {
+        const terminal = await dependencies.repository.getTerminalReplay(
+          input.ownerId,
+          input.gameId,
+        )
+        if (terminal.revision !== input.expectedRevision) {
+          throw new ApiError(
+            'CONFLICT',
+            409,
+            'The game revision changed before Portia began.',
+          )
+        }
+        let lifecycle = await preparePortia(
+          dependencies,
+          input.ownerId,
+          terminal,
+        )
+        if (lifecycle.state === 'portia_complete' && lifecycle.portia) {
+          return commitPortiaAndGate(
+            dependencies,
+            input.ownerId,
+            terminal,
+            lifecycle,
+            lifecycle.id,
+            canonicalHash({
+              operation: 'portia/v1-recovery',
+              gameId: terminal.id,
+              terminalFingerprint: lifecycle.terminalFingerprint,
+            }),
+            lifecycle.portia,
+          )
+        }
+        if (
+          lifecycle.portia &&
+          lifecycle.gate &&
+          lifecycle.state !== 'portia_pending' &&
+          lifecycle.state !== 'portia_running'
+        ) {
+          return lifecycle
+        }
+        if (
+          lifecycle.state !== 'portia_pending' &&
+          lifecycle.state !== 'portia_running'
+        ) {
+          throw new ApiError(
+            'CONFLICT',
+            409,
+            'Portia cannot run from the current lifecycle state.',
+          )
+        }
+
+        const apiKey = requireModelApiKey(dependencies.openAiApiKey)
+        const generator = dependencies.portiaGenerator
+        if (!generator) {
+          throw serviceUnavailable('The Portia model stage is not configured.')
+        }
+
+        await dependencies.usage.reconcileExpiredLeases()
+        const portiaInput: PortiaInput = {
+          problem: terminal.problem,
+          survivors: lifecycle.survivors,
+        }
+        const requestSha256 = canonicalHash({
+          operation: 'portia/v1',
+          gameId: terminal.id,
+          terminalFingerprint: lifecycle.terminalFingerprint,
+          input: portiaInput,
+          model: OPENAI_MODEL,
+          promptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+          contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+        })
+        const reservation = await dependencies.usage.reserveModelRequest({
+          requestId: input.requestId,
+          gameId: terminal.id,
+          userId: input.ownerId,
+          operation: 'portia',
+          idempotencyKey: input.idempotencyKey,
+          requestSha256,
+          provider: OPENAI_PROVIDER,
+          model: OPENAI_MODEL,
+          promptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+          softwareVersion: dependencies.softwareVersion,
+          countsAsGameStart: false,
+          ipAddress: input.ipAddress,
+        })
+        if (!reservation.ok) throw usageError(reservation)
+
+        if (reservation.kind === 'existing') {
+          const found = await dependencies.usage.getModelRequestResult({
+            userId: input.ownerId,
+            requestId: reservation.requestId,
+          })
+          const winning = await winningResult(
+            dependencies.usage,
+            input.ownerId,
+            terminal.id,
+            'portia',
+            found,
+          )
+          if (
+            winning.found &&
+            winning.status === 'succeeded' &&
+            winning.resultPayload
+          ) {
+            return commitPortiaAndGate(
+              dependencies,
+              input.ownerId,
+              terminal,
+              lifecycle,
+              winning.requestId,
+              requestSha256,
+              portiaPayload(winning.resultPayload).review,
+            )
+          }
+          if (
+            winning.found &&
+            (winning.status === 'reserved' || winning.status === 'in_progress')
+          ) {
+            throw pendingConflict('portia')
+          }
+          if (lifecycle.state === 'portia_running') {
+            await requireLifecycleRepository(dependencies).transition({
+              ownerId: input.ownerId,
+              gameId: terminal.id,
+              expectedRevision: lifecycle.revision,
+              to: 'portia_pending',
+              stage: 'portia',
+              activityType: 'adversarial_review_failed',
+              status: 'failed',
+              responsibleAgentIds: ['portia'],
+              configurationDigest: lifecycleConfigurationDigest(terminal),
+            })
+          }
+          throw terminalModelFailure('portia')
+        }
+
+        const leaseToken = requireLease(reservation)
+        const began = await dependencies.usage.beginProviderCall({
+          userId: input.ownerId,
+          requestId: reservation.requestId,
+          leaseToken,
+        })
+        if (!began.ok) throw beginProviderCallError(began, 'portia')
+        lifecycle = await requireLifecycleRepository(dependencies).transition({
+          ownerId: input.ownerId,
+          gameId: terminal.id,
+          expectedRevision: lifecycle.revision,
+          to: 'portia_running',
+          stage: 'portia',
+          activityType: 'adversarial_review_started',
+          inputEntityIds: lifecycle.survivors.map(
+            (candidate) => candidate.candidateId,
+          ),
+          responsibleAgentIds: ['portia'],
+          configurationDigest: lifecycleConfigurationDigest(terminal),
+        })
+        let generated: Awaited<ReturnType<typeof generatePortiaReview>>
+        try {
+          generated = await generator(portiaInput, {
+            userId: input.ownerId,
+            safetyHmacSecret: dependencies.hmacSecret,
+            apiKey,
+            signal: input.signal,
+            idempotencyKey: providerIdempotencyKey(
+              dependencies.hmacSecret,
+              input.ownerId,
+              'portia',
+              input.idempotencyKey,
+            ),
+          })
+        } catch (error) {
+          const settled = await settleDefinitiveFailure(dependencies, {
+            ownerId: input.ownerId,
+            reservation,
+            leaseToken,
+            error,
+            signal: input.signal,
+          })
+          if (settled) {
+            await requireLifecycleRepository(dependencies).transition({
+              ownerId: input.ownerId,
+              gameId: terminal.id,
+              expectedRevision: lifecycle.revision,
+              to: 'portia_pending',
+              stage: 'portia',
+              activityType: 'adversarial_review_failed',
+              status: 'failed',
+              responsibleAgentIds: ['portia'],
+              configurationDigest: lifecycleConfigurationDigest(terminal),
+            })
+          }
+          throw error
+        }
+        const stored = PortiaResultPayloadSchema.parse({
+          format: 'webchess-portia-result/1',
+          review: generated.result,
+        })
+        const payload = modelResultPayload(stored)
+        const settled = await dependencies.usage.settleModelRequest({
+          userId: input.ownerId,
+          requestId: reservation.requestId,
+          leaseToken,
+          outcome: 'succeeded',
+          usage: providerUsage(generated),
+          providerResponseId: generated.providerId,
+          responseSha256: canonicalHash(payload),
+          resultPayload: payload,
+        })
+        let winning = stored
+        if (!settled.ok) {
+          const recovered = await recoverCommittedResult(
+            dependencies,
+            input.ownerId,
+            terminal.id,
+            'portia',
+          )
+          if (!recovered.found || recovered.status !== 'succeeded') {
+            throw new ApiError(
+              'INTERNAL_ERROR',
+              500,
+              'The Portia result could not be committed safely.',
+            )
+          }
+          winning = portiaPayload(recovered.resultPayload)
+        }
+        return commitPortiaAndGate(
+          dependencies,
+          input.ownerId,
+          terminal,
+          lifecycle,
+          reservation.requestId,
+          requestSha256,
+          winning.review,
+        )
+      })
+    },
+
+    runCharlotte(input) {
+      return apiOperation(async () => {
+        const terminal = await dependencies.repository.getTerminalReplay(
+          input.ownerId,
+          input.gameId,
+        )
+        if (terminal.revision !== input.expectedRevision) {
+          throw new ApiError(
+            'CONFLICT',
+            409,
+            'The game revision changed before Charlotte began.',
+          )
+        }
+        let lifecycle = await synchronizeLifecycleWithGame(
+          dependencies,
+          input.ownerId,
+          terminal,
+        )
+        if (
+          lifecycle.charlotte &&
+          lifecycle.state !== 'charlotte_pending' &&
+          lifecycle.state !== 'charlotte_running'
+        ) {
+          return lifecycle
+        }
+        const portia = lifecycle.portia
+        const gate = lifecycle.gate
+        if (!portia || !gate?.passed) {
+          throw new ApiError(
+            'CONFLICT',
+            409,
+            'Charlotte requires a persisted Portia review and a passed Gate.',
+          )
+        }
+        if (lifecycle.state === 'gate_passed') {
+          lifecycle = await requireLifecycleRepository(dependencies).transition({
+            ownerId: input.ownerId,
+            gameId: terminal.id,
+            expectedRevision: lifecycle.revision,
+            to: 'charlotte_pending',
+            stage: 'charlotte',
+            activityType: 'synthesis_authorized',
+            responsibleAgentIds: ['gate', 'charlotte'],
+            configurationDigest: lifecycleConfigurationDigest(terminal),
+          })
+        }
+        if (
+          lifecycle.state !== 'charlotte_pending' &&
+          lifecycle.state !== 'charlotte_running'
+        ) {
+          throw new ApiError(
+            'CONFLICT',
+            409,
+            'Charlotte cannot run from the current lifecycle state.',
+          )
+        }
+
+        const apiKey = requireModelApiKey(dependencies.openAiApiKey)
+        const generator = dependencies.charlotteGenerator
+        if (!generator) {
+          throw serviceUnavailable('The Charlotte model stage is not configured.')
+        }
+
+        await dependencies.usage.reconcileExpiredLeases()
+        const modelInput = {
+          problem: terminal.problem,
+          portia,
+          gate,
+        }
+        const requestSha256 = canonicalHash({
+          operation: 'charlotte/v1',
+          gameId: terminal.id,
+          input: modelInput,
+          model: OPENAI_MODEL,
+          promptVersion: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+          contractVersion: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+        })
+        const reservation = await dependencies.usage.reserveModelRequest({
+          requestId: input.requestId,
+          gameId: terminal.id,
+          userId: input.ownerId,
+          operation: 'charlotte',
+          idempotencyKey: input.idempotencyKey,
+          requestSha256,
+          provider: OPENAI_PROVIDER,
+          model: OPENAI_MODEL,
+          promptVersion: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+          softwareVersion: dependencies.softwareVersion,
+          countsAsGameStart: false,
+          ipAddress: input.ipAddress,
+        })
+        if (!reservation.ok) throw usageError(reservation)
+        if (reservation.kind === 'existing') {
+          const found = await dependencies.usage.getModelRequestResult({
+            userId: input.ownerId,
+            requestId: reservation.requestId,
+          })
+          const winning = await winningResult(
+            dependencies.usage,
+            input.ownerId,
+            terminal.id,
+            'charlotte',
+            found,
+          )
+          if (
+            winning.found &&
+            winning.status === 'succeeded' &&
+            winning.resultPayload
+          ) {
+            return commitCharlotte(
+              dependencies,
+              input.ownerId,
+              terminal,
+              lifecycle,
+              winning.requestId,
+              requestSha256,
+              charlottePayload(winning.resultPayload),
+            )
+          }
+          if (
+            winning.found &&
+            (winning.status === 'reserved' || winning.status === 'in_progress')
+          ) {
+            throw pendingConflict('charlotte')
+          }
+          if (lifecycle.state === 'charlotte_running') {
+            await requireLifecycleRepository(dependencies).transition({
+              ownerId: input.ownerId,
+              gameId: terminal.id,
+              expectedRevision: lifecycle.revision,
+              to: 'charlotte_pending',
+              stage: 'charlotte',
+              activityType: 'synthesis_failed',
+              status: 'failed',
+              responsibleAgentIds: ['charlotte'],
+              configurationDigest: lifecycleConfigurationDigest(terminal),
+            })
+          }
+          throw terminalModelFailure('charlotte')
+        }
+
+        const leaseToken = requireLease(reservation)
+        const began = await dependencies.usage.beginProviderCall({
+          userId: input.ownerId,
+          requestId: reservation.requestId,
+          leaseToken,
+        })
+        if (!began.ok) throw beginProviderCallError(began, 'charlotte')
+        lifecycle = await requireLifecycleRepository(dependencies).transition({
+          ownerId: input.ownerId,
+          gameId: terminal.id,
+          expectedRevision: lifecycle.revision,
+          to: 'charlotte_running',
+          stage: 'charlotte',
+          activityType: 'synthesis_started',
+          inputEntityIds: [terminal.id],
+          responsibleAgentIds: ['charlotte'],
+          configurationDigest: lifecycleConfigurationDigest(terminal),
+        })
+        let generated: ModelGeneration<CharlotteGenerationResult>
+        try {
+          generated = await generator(modelInput, {
+            userId: input.ownerId,
+            safetyHmacSecret: dependencies.hmacSecret,
+            apiKey,
+            signal: input.signal,
+            idempotencyKey: providerIdempotencyKey(
+              dependencies.hmacSecret,
+              input.ownerId,
+              'charlotte',
+              input.idempotencyKey,
+            ),
+          })
+        } catch (error) {
+          const settled = await settleDefinitiveFailure(dependencies, {
+            ownerId: input.ownerId,
+            reservation,
+            leaseToken,
+            error,
+            signal: input.signal,
+          })
+          if (settled) {
+            await requireLifecycleRepository(dependencies).transition({
+              ownerId: input.ownerId,
+              gameId: terminal.id,
+              expectedRevision: lifecycle.revision,
+              to: 'charlotte_pending',
+              stage: 'charlotte',
+              activityType: 'synthesis_failed',
+              status: 'failed',
+              responsibleAgentIds: ['charlotte'],
+              configurationDigest: lifecycleConfigurationDigest(terminal),
+            })
+          }
+          throw error
+        }
+        const stored = CharlotteResultPayloadSchema.parse({
+          format: 'webchess-charlotte-result/1',
+          ...generated.result,
+        })
+        const payload = modelResultPayload(stored)
+        const settled = await dependencies.usage.settleModelRequest({
+          userId: input.ownerId,
+          requestId: reservation.requestId,
+          leaseToken,
+          outcome: 'succeeded',
+          usage: providerUsage(generated),
+          providerResponseId: generated.providerId,
+          responseSha256: canonicalHash(payload),
+          resultPayload: payload,
+        })
+        let winning = stored
+        if (!settled.ok) {
+          const recovered = await recoverCommittedResult(
+            dependencies,
+            input.ownerId,
+            terminal.id,
+            'charlotte',
+          )
+          if (!recovered.found || recovered.status !== 'succeeded') {
+            throw new ApiError(
+              'INTERNAL_ERROR',
+              500,
+              'The Charlotte result could not be committed safely.',
+            )
+          }
+          winning = charlottePayload(recovered.resultPayload)
+        }
+        return commitCharlotte(
+          dependencies,
+          input.ownerId,
+          terminal,
+          lifecycle,
+          reservation.requestId,
+          requestSha256,
+          winning,
+        )
+      })
+    },
+
+    retryLifecycle(input) {
+      return apiOperation(async () => {
+        const repository = requireLifecycleRepository(dependencies)
+        const terminal = await dependencies.repository.getTerminalReplay(
+          input.ownerId,
+          input.gameId,
+        )
+        if (terminal.revision !== input.expectedRevision) {
+          throw new ApiError('CONFLICT', 409, 'The game revision changed before Retry began.')
+        }
+        let lifecycle = await synchronizeLifecycleWithGame(
+          dependencies,
+          input.ownerId,
+          terminal,
+        )
+        if (lifecycle.state !== 'gate_failed' || !lifecycle.gate) {
+          throw new ApiError('CONFLICT', 409, 'Retry requires a failed deterministic Gate.')
+        }
+        const duplicateTerminalFingerprint = lifecycle.terminalFingerprint
+          ? await repository.hasPriorTerminalFingerprint(
+              input.ownerId,
+              lifecycle.rootRunId,
+              lifecycle.terminalFingerprint,
+              lifecycle.id,
+            )
+          : false
+        const decision = decideRetry({
+          gate: lifecycle.gate,
+          sameFieldRetryCount: lifecycle.sameFieldRetryCount,
+          fieldRegenerationCount: lifecycle.fieldRegenerationCount,
+          duplicateTerminalFingerprint,
+        })
+        if (decision.mode === 'insufficient_basis') {
+          lifecycle = await repository.transition({
+            ownerId: input.ownerId,
+            gameId: terminal.id,
+            expectedRevision: lifecycle.revision,
+            to: 'insufficient_basis',
+            stage: 'retry',
+            activityType: 'retry_budget_exhausted',
+            status: 'refused',
+            inputEntityIds: [terminal.id],
+            responsibleAgentIds: ['retry-policy'],
+            configurationDigest: lifecycleConfigurationDigest(terminal),
+          })
+          return { game: null, lifecycle }
+        }
+
+        let child: DurableGameSnapshot
+        if (decision.mode === 'replay_game') {
+          const allowed = await dependencies.usage.consumeReplayGameStart({
+            userId: input.ownerId,
+            sourceGameId: terminal.id,
+            expectedRevision: terminal.revision,
+            idempotencyKey: input.idempotencyKey,
+            ipAddress: input.ipAddress,
+          })
+          if (!allowed.ok) throw usageError(allowed)
+          child = await dependencies.repository.getOwnedGame(
+            input.ownerId,
+            allowed.gameId,
+          )
+        } else {
+          const apiKey = requireModelApiKey(dependencies.openAiApiKey)
+          const requestSha256 = canonicalHash({
+            operation: 'division/v2-field-retry',
+            problem: terminal.problem,
+            sourceGameId: terminal.id,
+            fieldGeneration: lifecycle.fieldGeneration + 1,
+            model: OPENAI_MODEL,
+            promptVersion: DIVISION_PROMPT_VERSION,
+            softwareVersion: dependencies.softwareVersion,
+          })
+          const reservation = await dependencies.usage.reserveModelRequest({
+            requestId: input.requestId,
+            gameId: null,
+            userId: input.ownerId,
+            operation: 'division',
+            idempotencyKey: input.idempotencyKey,
+            requestSha256,
+            provider: OPENAI_PROVIDER,
+            model: OPENAI_MODEL,
+            promptVersion: DIVISION_PROMPT_VERSION,
+            softwareVersion: dependencies.softwareVersion,
+            countsAsGameStart: true,
+            ipAddress: input.ipAddress,
+          })
+          if (!reservation.ok) throw usageError(reservation)
+          const shellResult = await dependencies.repository.getOrCreateDivision({
+            ownerId: input.ownerId,
+            problem: terminal.problem,
+            softwareVersion: dependencies.softwareVersion,
+            gameId: reservation.requestId,
+            sourceGameId: terminal.id,
+          })
+          child = shellResult.game
+          const attached = await dependencies.usage.attachModelRequestGame({
+            userId: input.ownerId,
+            requestId: reservation.requestId,
+            gameId: child.id,
+          })
+          if (!attached.ok) {
+            throw new ApiError('CONFLICT', 409, 'The regenerated field could not be linked safely.')
+          }
+          if (reservation.kind === 'existing') {
+            child = await reconcilePendingGame(
+              dependencies,
+              input.ownerId,
+              child,
+            )
+            if (child.status !== 'mapped') throw terminalModelFailure('division')
+          } else {
+            const leaseToken = requireLease(reservation)
+            const began = await dependencies.usage.beginProviderCall({
+              userId: input.ownerId,
+              requestId: reservation.requestId,
+              leaseToken,
+            })
+            if (!began.ok) throw beginProviderCallError(began, 'division')
+            const generated = await dependencies.divisionGenerator(
+              terminal.problem,
+              {
+                userId: input.ownerId,
+                safetyHmacSecret: dependencies.hmacSecret,
+                apiKey,
+                signal: input.signal,
+                idempotencyKey: providerIdempotencyKey(
+                  dependencies.hmacSecret,
+                  input.ownerId,
+                  'division',
+                  input.idempotencyKey,
+                ),
+              },
+            )
+            const stored = DivisionResultPayloadSchema.parse({
+              format: 'webchess-division-result/1',
+              seed: reservation.requestId,
+              facets: generated.result.facets,
+              model: generated.model,
+              prompt: generated.prompt,
+            })
+            const payload = modelResultPayload(stored)
+            const settled = await dependencies.usage.settleModelRequest({
+              userId: input.ownerId,
+              requestId: reservation.requestId,
+              leaseToken,
+              outcome: 'succeeded',
+              usage: providerUsage(generated),
+              providerResponseId: generated.providerId,
+              responseSha256: canonicalHash(payload),
+              resultPayload: payload,
+            })
+            let winning = stored
+            if (!settled.ok) {
+              const recovered = await recoverCommittedResult(
+                dependencies,
+                input.ownerId,
+                child.id,
+                'division',
+              )
+              if (!recovered.found || recovered.status !== 'succeeded') {
+                throw new ApiError('INTERNAL_ERROR', 500, 'The regenerated field could not be committed safely.')
+              }
+              winning = divisionPayload(recovered.resultPayload)
+            }
+            child = await finishDivisionForOwner(
+              dependencies.repository,
+              input.ownerId,
+              child,
+              winning,
+            )
+          }
+        }
+        lifecycle = await repository.createRetryRun({
+          ownerId: input.ownerId,
+          parentGameId: terminal.id,
+          childGame: child,
+          trajectorySeed: randomUUID(),
+          mode: decision.mode,
+          reason: decision.reason,
+          configurationDigest: lifecycleConfigurationDigest(child),
+        })
+        return { game: publicGame(child), lifecycle }
+      })
+    },
+
+    getProvenance(input) {
+      return apiOperation(async () => {
+        const lifecycle = await requireLifecycleRepository(dependencies)
+          .getForGame(input.ownerId, input.gameId)
+        if (!lifecycle) {
+          throw new ApiError('LIFECYCLE_NOT_FOUND', 404, 'Lifecycle provenance not found.')
+        }
+        return lifecycle.activities
+      })
+    },
+
+    createWilburAction(input) {
+      return apiOperation(() =>
+        requireLifecycleRepository(dependencies).createWilburAction({
+          ownerId: input.ownerId,
+          gameId: input.gameId,
+          id: input.requestId,
+          idempotencyKey: input.idempotencyKey,
+          requestDigest: canonicalHash({
+            operation: 'wilbur-action/v1',
+            gameId: input.gameId,
+            charlotteActionIndex: input.charlotteActionIndex,
+            actor: input.actor,
+            action: input.action,
+            testedAssumption: input.testedAssumption,
+            expectedObservation: input.expectedObservation,
+            decisionThreshold: input.decisionThreshold,
+            reviewHorizon: input.reviewHorizon,
+          }),
+          charlotteActionIndex: input.charlotteActionIndex,
+          actor: input.actor,
+          action: input.action,
+          testedAssumption: input.testedAssumption,
+          expectedObservation: input.expectedObservation,
+          decisionThreshold: input.decisionThreshold,
+          reviewHorizon: input.reviewHorizon,
+          configurationDigest: canonicalHash(CURRENT_LIFECYCLE_VERSIONS),
+        }),
+      )
+    },
+
+    updateWilburAction(input) {
+      return apiOperation(() =>
+        requireLifecycleRepository(dependencies).updateWilburAction({
+          ownerId: input.ownerId,
+          gameId: input.gameId,
+          actionId: input.actionId,
+          expectedRevision: input.expectedRevision,
+          status: input.status,
+          configurationDigest: canonicalHash(CURRENT_LIFECYCLE_VERSIONS),
+        }),
+      )
+    },
+
+    appendWilburObservation(input) {
+      return apiOperation(() =>
+        requireLifecycleRepository(dependencies).appendWilburObservation({
+          ownerId: input.ownerId,
+          gameId: input.gameId,
+          actionId: input.actionId,
+          id: input.requestId,
+          idempotencyKey: input.idempotencyKey,
+          requestDigest: canonicalHash({
+            operation: 'wilbur-observation/v1',
+            gameId: input.gameId,
+            actionId: input.actionId,
+            observedAt: input.observedAt,
+            observation: input.observation,
+            evidenceClassification: input.evidenceClassification,
+            expectedEffect: input.expectedEffect,
+            unexpectedEffect: input.unexpectedEffect,
+            stakeholderResponse: input.stakeholderResponse,
+            assumptionResult: input.assumptionResult,
+            nextDecision: input.nextDecision,
+          }),
+          observedAt: input.observedAt,
+          observation: input.observation,
+          evidenceClassification: input.evidenceClassification,
+          expectedEffect: input.expectedEffect,
+          unexpectedEffect: input.unexpectedEffect,
+          stakeholderResponse: input.stakeholderResponse,
+          assumptionResult: input.assumptionResult,
+          nextDecision: input.nextDecision,
+          configurationDigest: canonicalHash(CURRENT_LIFECYCLE_VERSIONS),
+        }),
+      )
+    },
+
     replay(input) {
       return apiOperation(async () => {
         const allowed = await dependencies.usage.consumeReplayGameStart({
@@ -1809,6 +3163,13 @@ export function createApiServicesWithDependencies(
           modelRequests: rowsAt(results, 4),
           usageBuckets: rowsAt(results, 5),
           gameStartRequests: rowsAt(results, 6),
+          lifecycleRuns: rowsAt(results, 7),
+          portiaReviews: rowsAt(results, 8),
+          gateDecisions: rowsAt(results, 9),
+          charlotteResults: rowsAt(results, 10),
+          wilburActions: rowsAt(results, 11),
+          wilburObservations: rowsAt(results, 12),
+          lifecycleActivities: rowsAt(results, 13),
         }
         if (
           new TextEncoder().encode(`${JSON.stringify(exported, null, 2)}\n`)
@@ -1856,6 +3217,7 @@ export function createApiServicesWithDependencies(
       })
     },
   }
+  return services
 }
 
 /**

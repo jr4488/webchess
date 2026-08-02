@@ -36,6 +36,32 @@ export {
 } from './division'
 export type { DivisionFacet, DivisionResult } from './division'
 
+export {
+  buildPortiaInput,
+  buildPortiaInstructions,
+  buildPortiaPrompt,
+  generatePortiaReview,
+  PORTIA_MAX_OUTPUT_TOKENS,
+} from './portia'
+export type { PortiaInput } from './portia'
+
+export {
+  buildCharlotteInput,
+  buildCharlotteInstructions,
+  buildCharlottePrompt,
+  CHARLOTTE_MAX_OUTPUT_TOKENS,
+  CHARLOTTE_MAX_WORDS,
+  CHARLOTTE_MIN_WORDS,
+  countCharlotteWords,
+  generateCharlotteSynthesis,
+  normalizeCharlotteGeneration,
+  renderCharlotteResult,
+} from './charlotte'
+export type {
+  CharlotteGenerationResult,
+  CharlotteInput,
+} from './charlotte'
+
 export { createSafetyIdentifier } from './safety'
 export {
   MODEL_RESPONSE_FAILURE_STATUSES,

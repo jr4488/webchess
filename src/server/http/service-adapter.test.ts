@@ -5,6 +5,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { CURRENT_GAME_VERSIONS } from '../../lib/game-contract'
 import { composeProblemParts } from '../../lib/division'
+import {
+  CURRENT_LIFECYCLE_VERSIONS,
+  evaluateGate,
+  PORTIA_ATTACK_TYPES,
+} from '../../lib/lifecycle'
+import type {
+  CharlotteResult,
+  LifecycleAggregate,
+  PortiaCandidateAssessment,
+  PortiaReview,
+  SurvivorCandidate,
+} from '../../lib/lifecycle'
 import { makeProblemFacets } from '../../test/fixtures'
 import type { CaptureRecord, GeneratedAnswer } from '../../types'
 import type { SqlAdapter, SqlResult, SqlRow } from '../db'
@@ -13,6 +25,7 @@ import {
   type DurableGameSnapshot,
   type TerminalGameSnapshot,
 } from '../games'
+import type { LifecycleRepositoryPort } from '../lifecycle'
 import {
   ModelContractError,
   ModelResponseError,
@@ -359,6 +372,323 @@ function createDependencies(): ApiServiceAdapterDependencies {
         reasoningOutputTokens: 30,
       },
     })),
+  }
+}
+
+function lifecycleCandidate(index: number): SurvivorCandidate {
+  return {
+    candidateId: `attempt-1:piece-${index + 1}`,
+    pieceId: `piece-${index + 1}`,
+    side: index % 2 === 0 ? 'white' : 'black',
+    pieceKind: index === 0 ? 'king' : 'rook',
+    originalPieceKind: index === 0 ? 'king' : 'rook',
+    pieceRole: 'the structure holding a bounded choice in place',
+    sidePolarity: index % 2 === 0 ? 'outside-in evidence' : 'inside-out possibility',
+    finalCoordinate: { ring: index + 1, sector: index },
+    facet: PARTS[index * 8],
+    route: [],
+    capturesMade: [],
+    attackedPlies: [],
+    moveCount: index + 1,
+    promoted: false,
+    terminalGameId: GAME_ID,
+    attemptId: '55555555-5555-4555-8555-555555555555',
+    sourceDigest: String(index + 1).repeat(64),
+  }
+}
+
+const LIFECYCLE_SURVIVORS = Array.from(
+  { length: 4 },
+  (_, index) => lifecycleCandidate(index),
+)
+
+function lifecycleAssessment(
+  candidate: SurvivorCandidate,
+  index: number,
+): PortiaCandidateAssessment {
+  return {
+    candidateId: candidate.candidateId,
+    disposition: index === 1 ? 'wounded' : 'preserved',
+    survivingInterpretation: 'A bounded interpretation remains useful after adversarial testing.',
+    requiredQualification: index === 1
+      ? 'Use this interpretation only after the local evidence check succeeds.'
+      : null,
+    redundancyClusterId: null,
+    coverageTags: [[
+      'protected_outcome',
+      'evidence_or_reality',
+      'risk_or_countercase',
+      'agency_or_action',
+    ][index] as PortiaCandidateAssessment['coverageTags'][number]],
+    missingEvidence: ['A direct observation remains necessary before scaling.'],
+    countercase: 'A contradictory observation would reverse the interpretation.',
+    reversalCondition: 'Stop when the protected outcome or evidence threshold fails.',
+    attackFindings: PORTIA_ATTACK_TYPES.map((attackType) => ({
+      attackType,
+      severity: 'moderate',
+      finding: `The ${attackType} attack identifies a bounded uncertainty.`,
+      consequence: 'Preserve uncertainty and a credible stopping rule.',
+      requiredRevision: 'State the tested assumption and evidence threshold.',
+    })),
+  }
+}
+
+function lifecycleReview(): PortiaReview {
+  const assessments = LIFECYCLE_SURVIVORS.map(lifecycleAssessment)
+  return {
+    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    runSummary: 'Portia examined every terminal survivor without treating survival as proof.',
+    assessments,
+    crossCandidateContradictions: [],
+    redundancyClusters: [],
+    missingCoverage: [],
+    unresolvedQuestions: ['Which direct observation would reduce uncertainty fastest?'],
+    recommendedGateInputs: {
+      tensionCandidatePairs: [[
+        assessments[0].candidateId,
+        assessments[2].candidateId,
+      ]],
+      fatalContradictionIds: [],
+      fieldRepairReasons: [],
+    },
+  }
+}
+
+function lifecycleCharlotte(portia = lifecycleReview()): CharlotteResult {
+  const wounded = portia.assessments[1]
+  return {
+    contractVersion: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+    protectedOutcome: 'Protect the declared outcome while generating useful direct evidence.',
+    directAnswer: 'Run one bounded, reversible test before making the larger commitment, then decide from the recorded observation rather than the metaphor.',
+    supportingCandidateIds: portia.assessments.map((item) => item.candidateId),
+    qualificationsByCandidateId: {
+      [wounded.candidateId]: wounded.requiredQualification ?? '',
+    },
+    centralTension: 'Learn promptly while protecting affected people from avoidable downside and preserving a real stopping path.',
+    valueConstraints: ['Keep uncertainty visible and do not weaken the protected outcome.'],
+    stakeholderConsequences: ['The accountable owner records impact and affected people retain agency.'],
+    recommendation: 'Authorize only the smallest reversible experiment and use the predeclared observation threshold to stop, revise, or continue.',
+    communicationStrategy: 'State the tested assumption, evidence boundary, and stop rule consistently.',
+    uncertainties: ['The direct observation has not yet been collected.'],
+    whatCouldChangeTheAnswer: ['A contradictory signal or unacceptable harm reverses the recommendation.'],
+    exactlyThreeNextActions: Array.from({ length: 3 }, (_, index) => ({
+      title: `Reversible action ${index + 1}`,
+      actor: 'The accountable decision owner',
+      assumptionBeingTested: 'A bounded action can generate useful decision evidence safely.',
+      smallestAction: 'Run one limited observation without expanding scope.',
+      expectedObservation: 'A direct signal appears inside the review horizon.',
+      decisionThreshold: 'Continue only when the declared signal appears without harm.',
+      reviewHorizon: 'Within fourteen days',
+      reversibility: 'Stop the test and restore the prior operating state.',
+      risksOrAffectedParties: 'Record affected parties and stop when the protected outcome is threatened.',
+      decisionRule: 'revise',
+    })),
+  }
+}
+
+function lifecycleAggregate(
+  overrides: Partial<LifecycleAggregate> = {},
+): LifecycleAggregate {
+  return {
+    id: '55555555-5555-4555-8555-555555555555',
+    rootRunId: '55555555-5555-4555-8555-555555555555',
+    parentRunId: null,
+    gameId: GAME_ID,
+    state: 'portia_pending',
+    revision: 5,
+    fieldGeneration: 1,
+    gameAttempt: 1,
+    sameFieldRetryCount: 0,
+    fieldRegenerationCount: 0,
+    divisionSeed: SEED,
+    castSeed: 'adapter-cast-seed',
+    trajectorySeed: 'adapter-trajectory-seed',
+    retryReason: null,
+    terminalFingerprint: 'f'.repeat(64),
+    survivors: LIFECYCLE_SURVIVORS,
+    portia: null,
+    gate: null,
+    charlotte: null,
+    charlotteRenderedAnswer: null,
+    wilburActions: [],
+    wilburObservations: [],
+    versions: {
+      software: '2.0.0',
+      lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+      portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+      portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      gateAlgorithm: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      retryPolicy: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+      charlottePrompt: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+      charlotteContract: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+      wilburRecord: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      rules: CURRENT_GAME_VERSIONS.rules,
+      engine: CURRENT_GAME_VERSIONS.engine,
+      cast: CURRENT_GAME_VERSIONS.cast,
+      event: CURRENT_GAME_VERSIONS.event,
+    },
+    activities: [],
+    createdAt: NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
+    ...overrides,
+  }
+}
+
+function createLifecycleRepository(
+  initial = lifecycleAggregate(),
+): LifecycleRepositoryPort {
+  let current = initial
+  const repository: LifecycleRepositoryPort = {
+    ensureForGame: vi.fn(async () => current),
+    getForGame: vi.fn(async () => current),
+    transition: vi.fn(async (input) => {
+      current = {
+        ...current,
+        revision: current.revision + 1,
+        state: input.to,
+        terminalFingerprint:
+          input.terminalFingerprint ?? current.terminalFingerprint,
+        survivors: input.survivors ?? current.survivors,
+      }
+      return current
+    }),
+    storePortia: vi.fn(async (input) => {
+      current = {
+        ...current,
+        revision: current.revision + 1,
+        state: 'portia_complete',
+        portia: input.review,
+      }
+      return current
+    }),
+    storeGate: vi.fn(async (input) => {
+      current = {
+        ...current,
+        revision: current.revision + 1,
+        state: input.result.passed ? 'gate_passed' : 'gate_failed',
+        gate: input.result,
+      }
+      return current
+    }),
+    storeCharlotte: vi.fn(async (input) => {
+      current = {
+        ...current,
+        revision: current.revision + 1,
+        state: 'charlotte_complete',
+        charlotte: input.result,
+        charlotteRenderedAnswer: input.renderedAnswer,
+      }
+      return current
+    }),
+    createRetryRun: vi.fn(async (input) => {
+      current = lifecycleAggregate({
+        id: '66666666-6666-4666-8666-666666666666',
+        rootRunId: initial.rootRunId,
+        parentRunId: initial.id,
+        gameId: input.childGame.id,
+        state: input.mode === 'replay_game' ? 'chess_ready' : 'field_ready',
+        retryReason: input.reason,
+        sameFieldRetryCount:
+          initial.sameFieldRetryCount + (input.mode === 'replay_game' ? 1 : 0),
+        fieldRegenerationCount:
+          initial.fieldRegenerationCount + (input.mode === 'regenerate_field' ? 1 : 0),
+      })
+      return current
+    }),
+    hasPriorTerminalFingerprint: vi.fn(async () => false),
+    createWilburAction: vi.fn(async (input) => ({
+      id: input.id,
+      lifecycleRunId: current.id,
+      charlotteActionIndex: input.charlotteActionIndex,
+      actor: input.actor,
+      action: input.action,
+      testedAssumption: input.testedAssumption,
+      expectedObservation: input.expectedObservation,
+      decisionThreshold: input.decisionThreshold,
+      reviewHorizon: input.reviewHorizon,
+      status: 'planned' as const,
+      revision: 0,
+      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+    })),
+    updateWilburAction: vi.fn(async (input) => ({
+      id: input.actionId,
+      lifecycleRunId: current.id,
+      charlotteActionIndex: 0,
+      actor: 'The accountable owner',
+      action: 'Run one bounded test.',
+      testedAssumption: 'The bounded test can produce useful evidence.',
+      expectedObservation: 'A direct signal appears.',
+      decisionThreshold: 'Continue only if the signal appears safely.',
+      reviewHorizon: 'Within fourteen days',
+      status: input.status,
+      revision: input.expectedRevision + 1,
+      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+    })),
+    appendWilburObservation: vi.fn(async (input) => ({
+      id: input.id,
+      actionId: input.actionId,
+      observedAt: input.observedAt,
+      observation: input.observation,
+      evidenceClassification: input.evidenceClassification,
+      expectedEffect: input.expectedEffect,
+      unexpectedEffect: input.unexpectedEffect,
+      stakeholderResponse: input.stakeholderResponse,
+      assumptionResult: input.assumptionResult,
+      nextDecision: input.nextDecision,
+      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      createdAt: NOW.toISOString(),
+    })),
+  }
+  return repository
+}
+
+function lifecycleDependencies(
+  initial = lifecycleAggregate(),
+): ApiServiceAdapterDependencies {
+  const dependencies = createDependencies()
+  const portiaGenerator = vi.fn(async () => ({
+    providerId: 'resp_portia',
+    model: OPENAI_MODEL,
+    prompt: 'Canonical Portia prompt.',
+    result: lifecycleReview(),
+    usage: {
+      reported: true,
+      inputTokens: 300,
+      outputTokens: 120,
+      totalTokens: 450,
+      cachedInputTokens: 20,
+      cacheWriteInputTokens: 0,
+      reasoningOutputTokens: 30,
+    },
+  }))
+  const charlotteGenerator = vi.fn(async () => ({
+    providerId: 'resp_charlotte',
+    model: OPENAI_MODEL,
+    prompt: 'Canonical Charlotte prompt.',
+    result: {
+      structured: lifecycleCharlotte(),
+      renderedAnswer: 'Charlotte preserves the qualified evidence boundary. '.repeat(12),
+      wordCount: 500,
+    },
+    usage: {
+      reported: true,
+      inputTokens: 240,
+      outputTokens: 110,
+      totalTokens: 380,
+      cachedInputTokens: 20,
+      cacheWriteInputTokens: 0,
+      reasoningOutputTokens: 30,
+    },
+  }))
+  return {
+    ...dependencies,
+    lifecycleRepository: createLifecycleRepository(initial),
+    portiaGenerator,
+    charlotteGenerator,
   }
 }
 
@@ -1408,7 +1738,7 @@ describe('durable HTTP service adapter', () => {
     })
 
     expect(exported).toMatchObject({
-      format: 'webchess-account-export/1',
+      format: 'webchess-account-export/2',
       controls: { suspended: false },
       games: [{ id: GAME_ID, revision: '3' }],
       events: [{ gameId: GAME_ID, ply: 1 }],
@@ -1435,11 +1765,13 @@ describe('durable HTTP service adapter', () => {
     const statements = vi.mocked(
       dependencies.database.transaction,
     ).mock.calls[0]?.[0]
-    expect(statements).toHaveLength(7)
+    expect(statements).toHaveLength(14)
     expect(statements?.[0]?.text).toContain('pg_column_size')
     expect(statements?.[6]?.text).toContain(
       'activated_at AS "activatedAt"',
     )
+    expect(statements?.[7]?.text).toContain('FROM lifecycle_runs')
+    expect(statements?.[13]?.text).toContain('FROM lifecycle_events')
     expect(
       statements
         ?.slice(1)
@@ -1538,5 +1870,260 @@ describe('durable HTTP service adapter', () => {
       code: 'PAYLOAD_TOO_LARGE',
       status: 413,
     })
+  })
+
+  it('runs Portia, commits the deterministic Gate, and authorizes Charlotte', async () => {
+    dependencies = lifecycleDependencies()
+    const services = createApiServicesWithDependencies(dependencies)
+
+    const lifecycle = await services.runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(lifecycle).toMatchObject({
+      state: 'charlotte_pending',
+      portia: { contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract },
+      gate: { passed: true, recommendedNextTransition: 'charlotte' },
+    })
+    expect(dependencies.portiaGenerator).toHaveBeenCalledWith(
+      {
+        problem: PROBLEM,
+        survivors: LIFECYCLE_SURVIVORS,
+      },
+      expect.objectContaining({
+        userId: OWNER_ID,
+        apiKey: 'server-test-key',
+        idempotencyKey: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      }),
+    )
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'succeeded',
+        resultPayload: expect.objectContaining({
+          format: 'webchess-portia-result/1',
+        }),
+      }),
+    )
+    expect(dependencies.lifecycleRepository?.storePortia).toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.storeGate).toHaveBeenCalledOnce()
+  })
+
+  it('runs Charlotte only from a persisted passed Gate and stores its qualified answer', async () => {
+    const portia = lifecycleReview()
+    const gate = evaluateGate(portia)
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'charlotte_pending',
+      portia,
+      gate,
+    }))
+
+    const lifecycle = await createApiServicesWithDependencies(
+      dependencies,
+    ).runCharlotte({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(lifecycle).toMatchObject({
+      state: 'charlotte_complete',
+      charlotte: {
+        contractVersion: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+        exactlyThreeNextActions: expect.any(Array),
+      },
+    })
+    expect(lifecycle.charlotte?.exactlyThreeNextActions).toHaveLength(3)
+    expect(dependencies.charlotteGenerator).toHaveBeenCalledWith(
+      { problem: PROBLEM, portia, gate },
+      expect.objectContaining({
+        userId: OWNER_ID,
+        apiKey: 'server-test-key',
+      }),
+    )
+    expect(dependencies.lifecycleRepository?.storeCharlotte)
+      .toHaveBeenCalledWith(expect.objectContaining({
+        modelRequestId: REQUEST_ID,
+        renderedAnswer: expect.stringContaining('qualified evidence boundary'),
+      }))
+  })
+
+  it('recovers persisted Portia output and returns completed Charlotte idempotently', async () => {
+    const portia = lifecycleReview()
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'portia_complete',
+      portia,
+    }))
+    const recovered = await createApiServicesWithDependencies(
+      dependencies,
+    ).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(recovered.state).toBe('charlotte_pending')
+    expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+
+    const gate = evaluateGate(portia)
+    const charlotte = lifecycleCharlotte(portia)
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'charlotte_complete',
+      portia,
+      gate,
+      charlotte,
+      charlotteRenderedAnswer: 'The persisted Charlotte answer is already complete.',
+    }))
+    const completed = await createApiServicesWithDependencies(
+      dependencies,
+    ).runCharlotte({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(completed.charlotte).toEqual(charlotte)
+    expect(dependencies.charlotteGenerator).not.toHaveBeenCalled()
+  })
+
+  it('enforces lifecycle authority and the bounded Retry outcomes', async () => {
+    dependencies = createDependencies()
+    await expect(
+      createApiServicesWithDependencies(dependencies).getLifecycle({
+        ownerId: OWNER_ID,
+        gameId: GAME_ID,
+        requestId: REQUEST_ID,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', status: 503 })
+
+    const failedPortia = {
+      ...lifecycleReview(),
+      assessments: [lifecycleReview().assessments[0]],
+      recommendedGateInputs: {
+        tensionCandidatePairs: [],
+        fatalContradictionIds: [],
+        fieldRepairReasons: [],
+      },
+    }
+    const failedGate = evaluateGate(failedPortia)
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'gate_failed',
+      portia: failedPortia,
+      gate: failedGate,
+    }))
+    const replayed = await createApiServicesWithDependencies(
+      dependencies,
+    ).retryLifecycle({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+    expect(replayed.game).not.toBeNull()
+    expect(replayed.lifecycle).toMatchObject({
+      state: 'chess_ready',
+      sameFieldRetryCount: 1,
+    })
+    expect(dependencies.usage.consumeReplayGameStart).toHaveBeenCalledOnce()
+
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'gate_failed',
+      portia: failedPortia,
+      gate: failedGate,
+      sameFieldRetryCount: 2,
+      fieldRegenerationCount: 1,
+    }))
+    const exhausted = await createApiServicesWithDependencies(
+      dependencies,
+    ).retryLifecycle({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+    expect(exhausted.game).toBeNull()
+    expect(exhausted.lifecycle.state).toBe('insufficient_basis')
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+  })
+
+  it('delegates owner-scoped Wilbur actions, statuses, observations, and provenance', async () => {
+    const portia = lifecycleReview()
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'charlotte_complete',
+      portia,
+      gate: evaluateGate(portia),
+      charlotte: lifecycleCharlotte(portia),
+      activities: [{
+        id: 'activity-1',
+        sequence: 1,
+        stage: 'charlotte',
+        activityType: 'synthesis_completed',
+        stateFrom: 'charlotte_running',
+        stateTo: 'charlotte_complete',
+        inputEntityIds: [],
+        outputEntityIds: [],
+        responsibleAgentIds: ['charlotte'],
+        configurationDigest: 'a'.repeat(64),
+        status: 'completed',
+        eventVersion: 1,
+        createdAt: NOW.toISOString(),
+      }],
+    }))
+    const services = createApiServicesWithDependencies(dependencies)
+    const context = {
+      ...operationInput(),
+      gameId: GAME_ID,
+    }
+
+    const created = await services.createWilburAction({
+      ...context,
+      charlotteActionIndex: 0,
+      actor: 'The accountable owner',
+      action: 'Run one bounded test.',
+      testedAssumption: 'The test can produce useful evidence.',
+      expectedObservation: 'A direct signal appears.',
+      decisionThreshold: 'Continue only if the signal appears safely.',
+      reviewHorizon: 'Within fourteen days',
+    })
+    const updated = await services.updateWilburAction({
+      ...context,
+      actionId: created.id,
+      expectedRevision: created.revision,
+      status: 'in_progress',
+    })
+    const observed = await services.appendWilburObservation({
+      ...context,
+      actionId: created.id,
+      observedAt: NOW.toISOString(),
+      observation: 'The bounded test produced one direct signal.',
+      evidenceClassification: 'Direct observation by the accountable owner.',
+      expectedEffect: 'A direct signal appears.',
+      unexpectedEffect: 'No unexpected effect was recorded.',
+      stakeholderResponse: 'Affected participants retained the stop path.',
+      assumptionResult: 'supported',
+      nextDecision: 'Continue only inside the original bounded scope.',
+    })
+    const provenance = await services.getProvenance({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })
+
+    expect(created.status).toBe('planned')
+    expect(updated.status).toBe('in_progress')
+    expect(observed.assumptionResult).toBe('supported')
+    expect(provenance).toHaveLength(1)
+    expect(dependencies.lifecycleRepository?.createWilburAction)
+      .toHaveBeenCalledWith(expect.objectContaining({
+        ownerId: OWNER_ID,
+        requestDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      }))
+    expect(dependencies.lifecycleRepository?.appendWilburObservation)
+      .toHaveBeenCalledWith(expect.objectContaining({
+        assumptionResult: 'supported',
+        requestDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      }))
   })
 })

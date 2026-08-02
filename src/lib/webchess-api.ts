@@ -1,4 +1,13 @@
 import type { GameView } from './game-contract'
+import { LIFECYCLE_STATES } from './lifecycle/contracts'
+import type {
+  AssumptionResult,
+  LifecycleActivity,
+  LifecycleAggregate,
+  WilburAction,
+  WilburActionStatus,
+  WilburObservation,
+} from './lifecycle/contracts'
 import type {
   CellCoord,
   GeneratedAnswer,
@@ -55,6 +64,37 @@ export interface RevisionCommand {
 export interface AnswerGameResult {
   game: DurableGame
   answer: GeneratedAnswer
+}
+
+export interface RetryLifecycleResult {
+  game: DurableGame | null
+  lifecycle: LifecycleAggregate
+}
+
+export interface CreateWilburActionCommand {
+  charlotteActionIndex: number | null
+  actor: string
+  action: string
+  testedAssumption: string
+  expectedObservation: string
+  decisionThreshold: string
+  reviewHorizon: string
+}
+
+export interface UpdateWilburActionCommand {
+  expectedRevision: number
+  status: WilburActionStatus
+}
+
+export interface AppendWilburObservationCommand {
+  observedAt: string
+  observation: string
+  evidenceClassification: string
+  expectedEffect: string
+  unexpectedEffect: string
+  stakeholderResponse: string
+  assumptionResult: AssumptionResult
+  nextDecision: string
 }
 
 export type WebChessApiErrorKind =
@@ -258,6 +298,75 @@ function parseAnswerEnvelope(value: unknown): AnswerGameResult {
     game: parseGame(response.game),
     answer,
   }
+}
+
+const LIFECYCLE_STATE_SET = new Set<string>(LIFECYCLE_STATES)
+
+function parseLifecycle(value: unknown): LifecycleAggregate {
+  const lifecycle = recordOf(value, 'Lifecycle')
+  const state = nonEmptyString(lifecycle.state, 'Lifecycle state')
+  if (!LIFECYCLE_STATE_SET.has(state)) {
+    throw invalidResponse(`Unsupported lifecycle state: ${state}.`)
+  }
+  for (const [field, item] of [
+    ['survivors', lifecycle.survivors],
+    ['wilburActions', lifecycle.wilburActions],
+    ['wilburObservations', lifecycle.wilburObservations],
+    ['activities', lifecycle.activities],
+  ] as const) {
+    if (!Array.isArray(item)) {
+      throw invalidResponse(`Lifecycle ${field} must be an array.`)
+    }
+  }
+  for (const field of ['versions'] as const) {
+    recordOf(lifecycle[field], `Lifecycle ${field}`)
+  }
+  for (const field of ['portia', 'gate', 'charlotte'] as const) {
+    if (lifecycle[field] !== null) {
+      recordOf(lifecycle[field], `Lifecycle ${field}`)
+    }
+  }
+  nonEmptyString(lifecycle.id, 'Lifecycle id')
+  nonEmptyString(lifecycle.rootRunId, 'Lifecycle root id')
+  nonEmptyString(lifecycle.gameId, 'Lifecycle game id')
+  nonnegativeInteger(lifecycle.revision, 'Lifecycle revision')
+  nonnegativeInteger(lifecycle.sameFieldRetryCount, 'Same-field retry count')
+  nonnegativeInteger(lifecycle.fieldRegenerationCount, 'Field regeneration count')
+  return lifecycle as unknown as LifecycleAggregate
+}
+
+function parseLifecycleEnvelope(value: unknown): LifecycleAggregate {
+  return parseLifecycle(recordOf(value, 'Response').lifecycle)
+}
+
+function parseRetryLifecycleEnvelope(value: unknown): RetryLifecycleResult {
+  const response = recordOf(value, 'Response')
+  return {
+    game: response.game === null ? null : parseGame(response.game),
+    lifecycle: parseLifecycle(response.lifecycle),
+  }
+}
+
+function parseProvenanceEnvelope(value: unknown): readonly LifecycleActivity[] {
+  const activities = recordOf(value, 'Response').activities
+  if (!Array.isArray(activities)) {
+    throw invalidResponse('Lifecycle activities must be an array.')
+  }
+  return activities as unknown as readonly LifecycleActivity[]
+}
+
+function parseWilburActionEnvelope(value: unknown): WilburAction {
+  return recordOf(
+    recordOf(value, 'Response').action,
+    'Wilbur action',
+  ) as unknown as WilburAction
+}
+
+function parseWilburObservationEnvelope(value: unknown): WilburObservation {
+  return recordOf(
+    recordOf(value, 'Response').observation,
+    'Wilbur observation',
+  ) as unknown as WilburObservation
 }
 
 function apiErrorKind(status: number): WebChessApiErrorKind {
@@ -550,6 +659,110 @@ export function requestGameAnswer(
   )
 }
 
+export function getGameLifecycle(
+  gameId: string,
+  options: RequestOptions = {},
+): Promise<LifecycleAggregate> {
+  return requestJson(
+    gamePath(gameId, 'lifecycle'),
+    { method: 'GET', headers: getHeaders(), signal: options.signal },
+    parseLifecycleEnvelope,
+  )
+}
+
+export function runPortia(
+  gameId: string,
+  command: RevisionCommand,
+  options: MutationOptions = {},
+): Promise<LifecycleAggregate> {
+  return mutateLifecycle(gameId, 'portia', command, options)
+}
+
+export function runCharlotte(
+  gameId: string,
+  command: RevisionCommand,
+  options: MutationOptions = {},
+): Promise<LifecycleAggregate> {
+  return mutateLifecycle(gameId, 'charlotte', command, options)
+}
+
+export function retryLifecycle(
+  gameId: string,
+  command: RevisionCommand,
+  options: MutationOptions = {},
+): Promise<RetryLifecycleResult> {
+  return requestJson(
+    gamePath(gameId, 'retry'),
+    mutationInit(command, options),
+    parseRetryLifecycleEnvelope,
+  )
+}
+
+export function getGameProvenance(
+  gameId: string,
+  options: RequestOptions = {},
+): Promise<readonly LifecycleActivity[]> {
+  return requestJson(
+    gamePath(gameId, 'provenance'),
+    { method: 'GET', headers: getHeaders(), signal: options.signal },
+    parseProvenanceEnvelope,
+  )
+}
+
+export function createWilburAction(
+  gameId: string,
+  command: CreateWilburActionCommand,
+  options: MutationOptions = {},
+): Promise<WilburAction> {
+  return requestJson(
+    gamePath(gameId, 'wilbur/actions'),
+    {
+      method: 'POST',
+      headers: createMutationHeaders(options.idempotencyKey),
+      body: JSON.stringify(command),
+      signal: options.signal,
+    },
+    parseWilburActionEnvelope,
+  )
+}
+
+export function updateWilburAction(
+  gameId: string,
+  actionId: string,
+  command: UpdateWilburActionCommand,
+  options: MutationOptions = {},
+): Promise<WilburAction> {
+  validateRevision(command.expectedRevision)
+  return requestJson(
+    `${gamePath(gameId, 'wilbur/actions')}/${encodeURIComponent(actionId)}`,
+    {
+      method: 'PATCH',
+      headers: createMutationHeaders(options.idempotencyKey),
+      body: JSON.stringify(command),
+      signal: options.signal,
+    },
+    parseWilburActionEnvelope,
+  )
+}
+
+export function appendWilburObservation(
+  gameId: string,
+  actionId: string,
+  command: AppendWilburObservationCommand,
+  options: MutationOptions = {},
+): Promise<WilburObservation> {
+  return requestJson(
+    `${gamePath(gameId, 'wilbur/actions')}/${encodeURIComponent(actionId)}/observations`,
+    {
+      method: 'POST',
+      headers: createMutationHeaders(options.idempotencyKey),
+      body: JSON.stringify(command),
+      signal: options.signal,
+    },
+    parseWilburObservationEnvelope,
+  )
+}
+
 export function replayGame(
   gameId: string,
   command: RevisionCommand,
@@ -589,5 +802,18 @@ function mutateGame(
     gamePath(gameId, action),
     mutationInit(command, options),
     parseGameEnvelope,
+  )
+}
+
+function mutateLifecycle(
+  gameId: string,
+  action: 'portia' | 'charlotte',
+  command: RevisionCommand,
+  options: MutationOptions,
+): Promise<LifecycleAggregate> {
+  return requestJson(
+    gamePath(gameId, action),
+    mutationInit(command, options),
+    parseLifecycleEnvelope,
   )
 }

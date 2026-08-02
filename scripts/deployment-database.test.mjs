@@ -91,6 +91,7 @@ describe('deployment database migration tooling', () => {
 
     expect(migrations.map((migration) => migration.id)).toEqual([
       '0001_durable_webchess',
+      '0002_webchess_2_lifecycle',
     ])
     expect(migrations[0].sql).toContain(
       'CREATE TABLE IF NOT EXISTS games',

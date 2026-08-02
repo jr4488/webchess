@@ -762,6 +762,12 @@ export class DurableGameRepository {
     const problem = normalizeProblem(input.problem)
     const softwareVersion = versionSchema.parse(input.softwareVersion)
     const problemSha256 = sha256Hex(problem)
+    const sourceGameId = input.sourceGameId === undefined
+      ? null
+      : assertUuid(input.sourceGameId, 'Source game id')
+    if (sourceGameId !== null) {
+      await this.ownedRow(ownerId, sourceGameId)
+    }
 
     const statements: readonly SqlStatement[] = [
       USAGE_OWNERSHIP_LOCK_STATEMENT,
@@ -802,6 +808,7 @@ export class DurableGameRepository {
           INSERT INTO games (
             id,
             clerk_user_id,
+            source_game_id,
             is_current,
             revision,
             status,
@@ -816,6 +823,7 @@ export class DurableGameRepository {
           SELECT
             $2::uuid,
             eligible_owner.clerk_user_id,
+            $10::uuid,
             true,
             0,
             'dividing',
@@ -844,6 +852,7 @@ export class DurableGameRepository {
           AND existing.engine_version = $7
           AND existing.cast_version = $8
           AND existing.software_version = $9
+          AND existing.source_game_id IS NOT DISTINCT FROM $10::uuid
       `,
         values: [
           ownerId,
@@ -855,6 +864,7 @@ export class DurableGameRepository {
           CURRENT_GAME_VERSIONS.engine,
           CURRENT_GAME_VERSIONS.cast,
           softwareVersion,
+          sourceGameId,
         ],
       },
     ]
@@ -910,7 +920,8 @@ export class DurableGameRepository {
       raced.rules_version !== CURRENT_GAME_VERSIONS.rules ||
       raced.engine_version !== CURRENT_GAME_VERSIONS.engine ||
       raced.cast_version !== CURRENT_GAME_VERSIONS.cast ||
-      raced.software_version !== softwareVersion
+      raced.software_version !== softwareVersion ||
+      raced.source_game_id !== sourceGameId
     ) {
       throw new GameRepositoryError(
         'idempotency-conflict',

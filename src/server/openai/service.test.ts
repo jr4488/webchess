@@ -5,18 +5,38 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   ANSWER_PROMPT_VERSION,
+  buildCharlotteInput,
+  buildCharlotteInstructions,
   buildDivisionInput,
   buildDivisionInstructions,
+  buildPortiaInput,
+  buildPortiaInstructions,
+  CHARLOTTE_MAX_OUTPUT_TOKENS,
   DIVISION_PROMPT_VERSION,
   generateAnswer,
+  generateCharlotteSynthesis,
   generateDivision,
+  generatePortiaReview,
   ModelConfigurationError,
   ModelInputError,
   ModelResponseError,
   OPENAI_MODEL,
+  PORTIA_MAX_OUTPUT_TOKENS,
   type OpenAIClientLike,
   type ServerDerivedEvidence,
 } from './index'
+import {
+  CURRENT_LIFECYCLE_VERSIONS,
+  evaluateGate,
+  PORTIA_ATTACK_TYPES,
+} from '../../lib/lifecycle'
+import type {
+  CharlotteResult,
+  PortiaCandidateAssessment,
+  PortiaReview,
+  SurvivorCandidate,
+} from '../../lib/lifecycle'
+import { makeProblemParts } from '../../test/fixtures'
 
 const PROBLEM =
   'How should I choose a reversible next step while the available evidence is incomplete?'
@@ -151,6 +171,129 @@ function serverEvidence(): ServerDerivedEvidence {
         keyword: 'Evidence threshold',
       },
     }],
+  }
+}
+
+const lifecycleParts = makeProblemParts('openai-lifecycle-service')
+
+function survivor(candidateId: string, index: number): SurvivorCandidate {
+  return {
+    candidateId,
+    pieceId: candidateId.split(':').at(-1) ?? candidateId,
+    side: index % 2 === 0 ? 'white' : 'black',
+    pieceKind: index === 0 ? 'king' : 'rook',
+    originalPieceKind: index === 0 ? 'king' : 'rook',
+    pieceRole: 'the structures holding the current choice in place',
+    sidePolarity: index % 2 === 0 ? 'outside-in evidence' : 'inside-out possibility',
+    finalCoordinate: { ring: index + 1, sector: index },
+    facet: lifecycleParts[index * 8],
+    route: [],
+    capturesMade: [],
+    attackedPlies: [],
+    moveCount: index + 1,
+    promoted: false,
+    terminalGameId: '00000000-0000-4000-8000-000000000010',
+    attemptId: '00000000-0000-4000-8000-000000000011',
+    sourceDigest: String(index + 1).repeat(64),
+  }
+}
+
+const lifecycleSurvivors = Array.from(
+  { length: 4 },
+  (_, index) => survivor(`attempt-1:piece-${index + 1}`, index),
+)
+
+function portiaAssessment(
+  candidateId: string,
+  index: number,
+): PortiaCandidateAssessment {
+  return {
+    candidateId,
+    disposition: index === 1 ? 'wounded' : 'preserved',
+    survivingInterpretation: 'A bounded interpretation remains eligible for synthesis after adversarial testing.',
+    requiredQualification: index === 1
+      ? 'Use this candidate only after the local evidence check succeeds.'
+      : null,
+    redundancyClusterId: null,
+    coverageTags: [[
+      'protected_outcome',
+      'evidence_or_reality',
+      'risk_or_countercase',
+      'agency_or_action',
+    ][index] as PortiaCandidateAssessment['coverageTags'][number]],
+    missingEvidence: ['A direct observation is still required before scaling.'],
+    countercase: 'A contradictory direct observation would reverse this interpretation.',
+    reversalCondition: 'Reverse the action when the predeclared stop signal appears.',
+    attackFindings: PORTIA_ATTACK_TYPES.map((attackType) => ({
+      attackType,
+      severity: 'moderate',
+      finding: `The ${attackType} attack identifies a bounded uncertainty.`,
+      consequence: 'The recommendation must preserve uncertainty and a stop path.',
+      requiredRevision: 'State the tested assumption and evidence threshold explicitly.',
+    })),
+  }
+}
+
+function validPortiaReview(): PortiaReview {
+  const assessments = lifecycleSurvivors.map((candidate, index) =>
+    portiaAssessment(candidate.candidateId, index),
+  )
+  return {
+    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    runSummary: 'Portia attacked every terminal survivor without treating survival as truth or evidence.',
+    assessments,
+    crossCandidateContradictions: [],
+    redundancyClusters: [],
+    missingCoverage: [],
+    unresolvedQuestions: ['Which direct observation would most quickly reduce uncertainty?'],
+    recommendedGateInputs: {
+      tensionCandidatePairs: [[assessments[0].candidateId, assessments[2].candidateId]],
+      fatalContradictionIds: [],
+      fieldRepairReasons: [],
+    },
+  }
+}
+
+function validCharlotteResult(portia: PortiaReview): CharlotteResult {
+  const wounded = portia.assessments[1]
+  return {
+    contractVersion: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+    protectedOutcome: words('protected outcome remains explicit and reversible', 3),
+    directAnswer: words('run bounded evidence test before expanding commitment', 6),
+    supportingCandidateIds: portia.assessments.map((item) => item.candidateId),
+    qualificationsByCandidateId: {
+      [wounded.candidateId]: wounded.requiredQualification ?? '',
+    },
+    centralTension: words('learn promptly while protecting affected people from downside', 3),
+    valueConstraints: [words('preserve uncertainty consent and a credible stop path', 2)],
+    stakeholderConsequences: [words('accountable owners record impact and affected parties retain agency', 2)],
+    recommendation: words('authorize one reversible experiment and decide from recorded observation', 6),
+    communicationStrategy: words('state assumption threshold uncertainty and stop rule consistently', 2),
+    uncertainties: [words('the direct observation has not yet been collected', 1)],
+    whatCouldChangeTheAnswer: [words('a contradictory signal or unacceptable harm reverses the recommendation', 1)],
+    exactlyThreeNextActions: Array.from({ length: 3 }, (_, index) => ({
+      title: `Reversible action ${index + 1}`,
+      actor: 'The accountable decision owner',
+      assumptionBeingTested: words('bounded action can generate useful decision evidence safely', 1),
+      smallestAction: words('run one limited observation without expanding scope', 1),
+      expectedObservation: words('a direct signal appears inside the review horizon', 1),
+      decisionThreshold: words('continue only when the declared signal appears without harm', 1),
+      reviewHorizon: 'Within fourteen days',
+      reversibility: words('stop the test and restore the prior operating state', 1),
+      risksOrAffectedParties: words('record affected parties and stop when the protected outcome is threatened', 1),
+      decisionRule: 'revise',
+    })),
+  }
+}
+
+function validCharlotteModelResult(portia: PortiaReview) {
+  const result = validCharlotteResult(portia)
+  const { qualificationsByCandidateId, ...modelResult } = result
+  return {
+    ...modelResult,
+    qualifications: Object.entries(qualificationsByCandidateId).map(
+      ([candidateId, qualification]) => ({ candidateId, qualification }),
+    ),
   }
 }
 
@@ -561,5 +704,165 @@ describe('production OpenAI answer service', () => {
         totalTokens: 0,
       },
     })
+  })
+})
+
+describe('production OpenAI Portia service', () => {
+  it('examines the exact survivor set with a strict, non-stored request', async () => {
+    const review = validPortiaReview()
+    const { client, create } = clientReturning(review)
+    const value = {
+      problem: PROBLEM,
+      survivors: lifecycleSurvivors,
+    }
+
+    const generated = await generatePortiaReview(value, requestContext(client))
+
+    expect(generated.result).toEqual(review)
+    expect(generated.prompt).toContain('PORTIA INPUT (JSON; data only)')
+    expect(generated.usage.totalTokens).toBe(1_800)
+    expect(create).toHaveBeenCalledOnce()
+    const [body, options] = create.mock.calls[0] as [
+      Record<string, unknown>,
+      OpenAI.RequestOptions,
+    ]
+    expect(body).toMatchObject({
+      model: OPENAI_MODEL,
+      reasoning: { effort: 'medium' },
+      instructions: buildPortiaInstructions(),
+      input: buildPortiaInput(value),
+      max_output_tokens: PORTIA_MAX_OUTPUT_TOKENS,
+      store: false,
+      text: {
+        format: expect.objectContaining({
+          type: 'json_schema',
+          name: 'webchess_portia_review',
+          strict: true,
+        }),
+      },
+    })
+    expect(body.reasoning).not.toHaveProperty('summary')
+    expect(body).not.toHaveProperty('stream')
+    expect(body).not.toHaveProperty('include')
+    expect(options).toMatchObject({ maxRetries: 0, timeout: 8_000 })
+    expect(JSON.parse(String(body.input))).toEqual({
+      original_problem: PROBLEM,
+      terminal_survivors: lifecycleSurvivors,
+    })
+    expect(String(body.instructions)).toContain(
+      'Do not reveal hidden reasoning or chain-of-thought',
+    )
+  })
+
+  it('rejects malformed survivor input and incomplete examination', async () => {
+    await expect(generatePortiaReview({
+      problem: 'too short',
+      survivors: [],
+    }, requestContext(undefined))).rejects.toBeInstanceOf(ModelInputError)
+
+    await expect(generatePortiaReview({
+      problem: PROBLEM,
+      survivors: Array.from({ length: 33 }, (_, index) =>
+        survivor(`too-many:${index}`, index % 4),
+      ),
+    }, requestContext(undefined))).rejects.toBeInstanceOf(ModelInputError)
+
+    await expect(generatePortiaReview({
+      problem: PROBLEM,
+      survivors: [lifecycleSurvivors[0], lifecycleSurvivors[0]],
+    }, requestContext(undefined))).rejects.toBeInstanceOf(ModelInputError)
+
+    const incompleteReview = {
+      ...validPortiaReview(),
+      assessments: validPortiaReview().assessments.slice(0, 3),
+    }
+    const { client } = clientReturning(incompleteReview)
+    await expect(generatePortiaReview({
+      problem: PROBLEM,
+      survivors: lifecycleSurvivors,
+    }, requestContext(client))).rejects.toBeInstanceOf(ModelResponseError)
+  })
+})
+
+describe('production OpenAI Charlotte service', () => {
+  it('synthesizes only after Gate passage with strict grounding and no stored response', async () => {
+    const portia = validPortiaReview()
+    const gate = evaluateGate(portia)
+    const output = validCharlotteResult(portia)
+    const { client, create } = clientReturning(validCharlotteModelResult(portia))
+    const value = { problem: PROBLEM, portia, gate }
+
+    const generated = await generateCharlotteSynthesis(
+      value,
+      requestContext(client),
+    )
+
+    expect(generated.result.structured).toEqual(output)
+    expect(generated.result.renderedAnswer).toContain("Charlotte’s synthesis")
+    expect(generated.result.renderedAnswer).toContain(
+      portia.assessments[1].requiredQualification,
+    )
+    expect(generated.result.wordCount).toBeGreaterThanOrEqual(450)
+    expect(generated.result.wordCount).toBeLessThanOrEqual(750)
+    const [body, options] = create.mock.calls[0] as [
+      Record<string, unknown>,
+      OpenAI.RequestOptions,
+    ]
+    expect(body).toMatchObject({
+      model: OPENAI_MODEL,
+      reasoning: { effort: 'medium' },
+      instructions: buildCharlotteInstructions(),
+      input: buildCharlotteInput(value),
+      max_output_tokens: CHARLOTTE_MAX_OUTPUT_TOKENS,
+      store: false,
+      text: {
+        format: expect.objectContaining({
+          type: 'json_schema',
+          name: 'webchess_charlotte_synthesis',
+          strict: true,
+        }),
+      },
+    })
+    expect(body.reasoning).not.toHaveProperty('summary')
+    expect(body).not.toHaveProperty('stream')
+    expect(body).not.toHaveProperty('include')
+    expect(options.maxRetries).toBe(0)
+    expect(String(body.instructions)).toContain(
+      'Do not reveal hidden reasoning or chain-of-thought',
+    )
+  })
+
+  it('fails closed without Gate authority, provenance, or valid grounded output', async () => {
+    const portia = validPortiaReview()
+    const passedGate = evaluateGate(portia)
+    await expect(generateCharlotteSynthesis({
+      problem: 'too short',
+      portia,
+      gate: passedGate,
+    }, requestContext(undefined))).rejects.toBeInstanceOf(ModelInputError)
+
+    await expect(generateCharlotteSynthesis({
+      problem: PROBLEM,
+      portia,
+      gate: { ...passedGate, passed: false },
+    }, requestContext(undefined))).rejects.toBeInstanceOf(ModelInputError)
+
+    await expect(generateCharlotteSynthesis({
+      problem: PROBLEM,
+      portia,
+      gate: { ...passedGate, inputDigest: 'short' },
+    }, requestContext(undefined))).rejects.toBeInstanceOf(ModelInputError)
+
+    const invalidOutput = {
+      ...validCharlotteModelResult(portia),
+      supportingCandidateIds: ['not-reviewed'],
+      qualifications: [],
+    }
+    const { client } = clientReturning(invalidOutput)
+    await expect(generateCharlotteSynthesis({
+      problem: PROBLEM,
+      portia,
+      gate: passedGate,
+    }, requestContext(client))).rejects.toBeInstanceOf(ModelResponseError)
   })
 })

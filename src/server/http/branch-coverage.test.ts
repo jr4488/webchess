@@ -76,6 +76,14 @@ function createServices(): WebChessApiServices {
     answer: vi.fn(async () => {
       throw new Error('not used')
     }),
+    getLifecycle: vi.fn(async () => { throw new Error('not used') }),
+    runPortia: vi.fn(async () => { throw new Error('not used') }),
+    retryLifecycle: vi.fn(async () => { throw new Error('not used') }),
+    runCharlotte: vi.fn(async () => { throw new Error('not used') }),
+    getProvenance: vi.fn(async () => { throw new Error('not used') }),
+    createWilburAction: vi.fn(async () => { throw new Error('not used') }),
+    updateWilburAction: vi.fn(async () => { throw new Error('not used') }),
+    appendWilburObservation: vi.fn(async () => { throw new Error('not used') }),
     replay: vi.fn(async () => GAME),
     abandon: vi.fn(async () => ({ ...GAME, status: 'abandoned' as const })),
     getAccountUsage: vi.fn(async () => ({

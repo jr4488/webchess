@@ -1,6 +1,6 @@
 import type { SqlAdapter } from '../db/sql'
 
-export type ModelOperation = 'division' | 'answer'
+export type ModelOperation = 'division' | 'answer' | 'portia' | 'charlotte'
 
 export type ModelRequestStatus =
   | 'reserved'
@@ -61,7 +61,7 @@ export interface ReserveModelRequestInput {
   readonly softwareVersion: string
   /**
    * Division requests that create a new game reserve the separate daily game
-   * allowance. Answer requests must leave this false.
+   * allowance. All later lifecycle operations must leave this false.
    */
   readonly countsAsGameStart: boolean
   readonly ipAddress: string

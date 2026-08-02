@@ -19,12 +19,18 @@ afterAll(async () => {
 describe('durable WebChess migration on PostgreSQL 17', () => {
   it('applies the canonical migration atomically and replays it idempotently', async () => {
     await expect(database.migrate()).resolves.toEqual({
-      applied: ['0001_durable_webchess'],
+      applied: [
+        '0001_durable_webchess',
+        '0002_webchess_2_lifecycle',
+      ],
       alreadyApplied: [],
     })
     await expect(database.migrate()).resolves.toEqual({
       applied: [],
-      alreadyApplied: ['0001_durable_webchess'],
+      alreadyApplied: [
+        '0001_durable_webchess',
+        '0002_webchess_2_lifecycle',
+      ],
     })
 
     const version = await database.adapter.query<SqlRow>({
@@ -41,16 +47,23 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
       `,
     })
     expect(tables.rows.map((row) => row.tablename)).toEqual([
+      'charlotte_results',
       'deleted_user_tombstones',
       'game_events',
       'game_start_requests',
       'games',
+      'gate_decisions',
+      'lifecycle_events',
+      'lifecycle_runs',
       'model_concurrency_slots',
       'model_requests',
+      'portia_reviews',
       'rate_buckets',
       'usage_buckets',
       'user_controls',
       'webchess_schema_migrations',
+      'wilbur_actions',
+      'wilbur_observations',
     ])
 
     const slots = await database.adapter.query<SqlRow>({
