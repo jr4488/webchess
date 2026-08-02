@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 
 import { Header } from './components/Header'
+import { LifecycleStage } from './components/stages/LifecycleStage'
 import { MappingStage } from './components/stages/MappingStage'
 import { PlayingStage } from './components/stages/PlayingStage'
 import { QuestionStage } from './components/stages/QuestionStage'
@@ -21,18 +22,32 @@ import { PIECE_METAPHORS, synthesizeReading } from './lib/reading'
 import { beginModelActivity } from './lib/model-activity'
 import {
   abandonGame,
+  appendWilburObservation,
+  createWilburAction,
   createIdempotencyKey,
   divideProblem,
   getCurrentGame,
+  getGameLifecycle,
   getOwnedGame,
   isWebChessApiError,
   recoverDivisionIntent,
   replayGame,
+  retryLifecycle,
+  runCharlotte,
+  runPortia,
   requestGameAnswer,
   startGame,
   submitMove,
+  updateWilburAction,
 } from './lib/webchess-api'
-import type { DurableGame } from './lib/webchess-api'
+import type {
+  AppendWilburObservationCommand,
+  DurableGame,
+} from './lib/webchess-api'
+import type {
+  LifecycleAggregate,
+  WilburAction,
+} from './lib/lifecycle/contracts'
 import type {
   AnswerStatus,
   CaptureRecord,
@@ -61,6 +76,7 @@ interface ActiveEngineRequest {
 }
 
 type GameMutationMode = 'starting' | 'resetting'
+type LifecycleMode = 'loading' | 'v2' | 'legacy'
 
 interface ActiveGameMutation {
   mode: GameMutationMode
@@ -129,10 +145,17 @@ export function App() {
   const [replayPending, setReplayPending] = useState(false)
   const [replayError, setReplayError] = useState('')
   const [replayTargetUnresolved, setReplayTargetUnresolved] = useState(false)
+  const [lifecycle, setLifecycle] = useState<LifecycleAggregate | null>(null)
+  const [lifecycleMode, setLifecycleMode] = useState<LifecycleMode>('loading')
+  const [lifecycleBusy, setLifecycleBusy] = useState(false)
+  const [lifecycleError, setLifecycleError] = useState('')
+  const [actionPendingIndex, setActionPendingIndex] = useState<number | null>(null)
+  const [wilburPending, setWilburPending] = useState(false)
   const restoreRequestRef = useRef<ActiveRestoreRequest | null>(null)
   const restoreRequestGenerationRef = useRef(0)
   const divisionRequestRef = useRef<AbortController | null>(null)
   const answerRequestRef = useRef<AbortController | null>(null)
+  const lifecycleRequestRef = useRef<AbortController | null>(null)
   const movePendingRef = useRef(false)
   const divisionIntentRef = useRef<{ problem: string; key: string } | null>(null)
   const answerIntentRef = useRef<{ gameId: string; key: string } | null>(null)
@@ -140,6 +163,9 @@ export function App() {
   const replayPendingRef = useRef(false)
   const startIntentRef = useRef<RevisionMutationIntent | null>(null)
   const resetIntentRef = useRef<RevisionMutationIntent | null>(null)
+  const portiaIntentRef = useRef<{ gameId: string; key: string } | null>(null)
+  const charlotteIntentRef = useRef<{ gameId: string; key: string } | null>(null)
+  const lifecycleRetryIntentRef = useRef<{ gameId: string; key: string } | null>(null)
   const activeGameMutationRef = useRef<ActiveGameMutation | null>(null)
   const gameFinishing = outcome !== null && stage === 'playing'
   const thinking = engineSearchMode !== null || movePending
@@ -186,12 +212,17 @@ export function App() {
     divisionRequestRef.current = null
     answerRequestRef.current?.abort()
     answerRequestRef.current = null
+    lifecycleRequestRef.current?.abort()
+    lifecycleRequestRef.current = null
     divisionIntentRef.current = null
     answerIntentRef.current = null
     replayIntentRef.current = null
     replayPendingRef.current = false
     startIntentRef.current = null
     resetIntentRef.current = null
+    portiaIntentRef.current = null
+    charlotteIntentRef.current = null
+    lifecycleRetryIntentRef.current = null
     movePendingRef.current = false
     invalidateEngineRequest(true)
     setStage('question')
@@ -225,6 +256,12 @@ export function App() {
     setReplayPending(false)
     setReplayError('')
     setReplayTargetUnresolved(false)
+    setLifecycle(null)
+    setLifecycleMode('loading')
+    setLifecycleBusy(false)
+    setLifecycleError('')
+    setActionPendingIndex(null)
+    setWilburPending(false)
     setNotice('Choose a white piece. Its possible paths will appear.')
   }, [invalidateEngineRequest])
 
@@ -296,6 +333,22 @@ export function App() {
         }
       : null)
     setFocusedCell(state?.lastMove?.to ?? null)
+
+    const isTerminal =
+      nextGame.status === 'completed' ||
+      nextGame.status === 'answering' ||
+      nextGame.status === 'answer_failed' ||
+      nextGame.status === 'answered'
+    const isLegacyAnswerState =
+      nextGame.status === 'answering' ||
+      nextGame.status === 'answer_failed' ||
+      nextGame.status === 'answered'
+    setLifecycle(null)
+    setLifecycleMode(
+      isLegacyAnswerState ? 'legacy' : isTerminal ? 'loading' : 'v2',
+    )
+    setLifecycleBusy(false)
+    setLifecycleError('')
 
     setAnswer(storedAnswer?.answer ?? '')
     setAnswerModel(storedAnswer?.model ?? '')
@@ -523,6 +576,7 @@ export function App() {
     invalidateRestoreRequest()
     divisionRequestRef.current?.abort()
     answerRequestRef.current?.abort()
+    lifecycleRequestRef.current?.abort()
   }, [invalidateRestoreRequest])
 
   useEffect(() => {
@@ -537,7 +591,7 @@ export function App() {
       stageRoot?.scrollIntoView?.({ block: 'start' })
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [stage])
+  }, [lifecycleMode, stage])
 
   const movePiece = useCallback(
     async (pieceId: string, destination: CellCoord): Promise<boolean> => {
@@ -718,9 +772,158 @@ export function App() {
     return () => window.clearTimeout(timer)
   }, [autoPlaying, movePending, outcome, playOneTurn, stage])
 
+  const refreshLifecycle = useCallback(async () => {
+    const current = game
+    if (!current || !outcome) return
+    lifecycleRequestRef.current?.abort()
+    const controller = new AbortController()
+    lifecycleRequestRef.current = controller
+    setLifecycleBusy(true)
+    setLifecycleError('')
+    try {
+      const restored = await getGameLifecycle(current.id, {
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted) return
+      setLifecycle(restored)
+      setLifecycleMode('v2')
+      if (restored.charlotteRenderedAnswer) {
+        setAnswer(restored.charlotteRenderedAnswer)
+        setAnswerStatus('success')
+        setAnswerActivity(null)
+      }
+    } catch (error) {
+      if (controller.signal.aborted) return
+      if (isWebChessApiError(error) && error.kind === 'not-found') {
+        setLifecycleMode('legacy')
+        return
+      }
+      if (
+        isWebChessApiError(error) &&
+        error.kind === 'authentication-required'
+      ) {
+        window.location.assign(PLAY_SIGN_IN_PATH)
+        return
+      }
+      setLifecycleError(
+        error instanceof Error
+          ? error.message
+          : 'WebChess could not restore the lifecycle record.',
+      )
+    } finally {
+      if (lifecycleRequestRef.current === controller) {
+        lifecycleRequestRef.current = null
+        setLifecycleBusy(false)
+      }
+    }
+  }, [game, outcome])
+
   useEffect(() => {
     if (
       stage !== 'reading' ||
+      !outcome ||
+      !game ||
+      lifecycleMode !== 'loading'
+    ) return
+    const timer = window.setTimeout(() => void refreshLifecycle(), 0)
+    return () => window.clearTimeout(timer)
+  }, [game, lifecycleMode, outcome, refreshLifecycle, stage])
+
+  useEffect(() => {
+    if (
+      stage !== 'reading' ||
+      lifecycleMode !== 'v2' ||
+      !lifecycle ||
+      !game ||
+      !outcome ||
+      lifecycleBusy ||
+      lifecycleError
+    ) return
+
+    const portiaState =
+      lifecycle.state === 'chess_terminal' ||
+      lifecycle.state === 'portia_pending' ||
+      lifecycle.state === 'portia_running' ||
+      lifecycle.state === 'portia_complete'
+    const charlotteState =
+      lifecycle.state === 'gate_passed' ||
+      lifecycle.state === 'charlotte_pending' ||
+      lifecycle.state === 'charlotte_running'
+    if (!portiaState && !charlotteState) return
+
+    const delay =
+      lifecycle.state === 'portia_running' ||
+      lifecycle.state === 'charlotte_running'
+        ? 1_500
+        : 0
+    const timer = window.setTimeout(() => {
+      const controller = new AbortController()
+      lifecycleRequestRef.current = controller
+      setLifecycleBusy(true)
+      const existingIntent = portiaState
+        ? portiaIntentRef.current
+        : charlotteIntentRef.current
+      const intent = existingIntent?.gameId === game.id
+        ? existingIntent
+        : { gameId: game.id, key: createIdempotencyKey() }
+      if (portiaState) portiaIntentRef.current = intent
+      else charlotteIntentRef.current = intent
+
+      const operation = portiaState
+        ? runPortia(game.id, { expectedRevision: game.revision }, {
+            idempotencyKey: intent.key,
+            signal: controller.signal,
+          })
+        : runCharlotte(game.id, { expectedRevision: game.revision }, {
+            idempotencyKey: intent.key,
+            signal: controller.signal,
+          })
+      void operation.then((advanced) => {
+        if (controller.signal.aborted) return
+        if (portiaState) portiaIntentRef.current = null
+        else charlotteIntentRef.current = null
+        setLifecycle(advanced)
+        if (advanced.charlotteRenderedAnswer) {
+          setAnswer(advanced.charlotteRenderedAnswer)
+          setAnswerStatus('success')
+          setAnswerActivity(null)
+        }
+      }).catch((error: unknown) => {
+        if (controller.signal.aborted) return
+        if (isWebChessApiError(error) && error.kind === 'conflict') {
+          return
+        }
+        if (!isWebChessApiError(error) || error.kind !== 'transport') {
+          if (portiaState) portiaIntentRef.current = null
+          else charlotteIntentRef.current = null
+        }
+        setLifecycleError(
+          error instanceof Error
+            ? error.message
+            : 'The lifecycle stage could not be completed.',
+        )
+      }).finally(() => {
+        if (lifecycleRequestRef.current === controller) {
+          lifecycleRequestRef.current = null
+          setLifecycleBusy(false)
+        }
+      })
+    }, delay)
+    return () => window.clearTimeout(timer)
+  }, [
+    game,
+    lifecycle,
+    lifecycleBusy,
+    lifecycleError,
+    lifecycleMode,
+    outcome,
+    stage,
+  ])
+
+  useEffect(() => {
+    if (
+      stage !== 'reading' ||
+      lifecycleMode !== 'legacy' ||
       !outcome ||
       answerStatus !== 'loading' ||
       !game
@@ -801,6 +1004,7 @@ export function App() {
     answerStatus,
     applyDurableGame,
     game,
+    lifecycleMode,
     outcome,
     restoreCurrentGame,
     stage,
@@ -1066,6 +1270,144 @@ export function App() {
     setAnswerStatus('loading')
   }
 
+  const retryLifecyclePath = async () => {
+    const current = game
+    if (!current || !lifecycle || lifecycleBusy) return
+
+    const existingIntent = lifecycleRetryIntentRef.current
+    const intent = existingIntent?.gameId === current.id
+      ? existingIntent
+      : { gameId: current.id, key: createIdempotencyKey() }
+    lifecycleRetryIntentRef.current = intent
+    setLifecycleBusy(true)
+    setLifecycleError('')
+    try {
+      const retried = await retryLifecycle(current.id, {
+        expectedRevision: current.revision,
+      }, {
+        idempotencyKey: intent.key,
+      })
+      lifecycleRetryIntentRef.current = null
+      if (retried.game) {
+        applyDurableGame(retried.game, { animateMapping: true })
+        setLifecycle(retried.lifecycle)
+        setLifecycleMode('v2')
+        setNotice(
+          retried.lifecycle.fieldGeneration > lifecycle.fieldGeneration
+            ? 'Anansi has woven a fresh field. The changed evidence is ready to play.'
+            : 'The same evidence field is ready for a new chess trajectory.',
+        )
+      } else {
+        setLifecycle(retried.lifecycle)
+      }
+    } catch (error) {
+      if (!isWebChessApiError(error) || error.kind !== 'transport') {
+        lifecycleRetryIntentRef.current = null
+      }
+      if (isWebChessApiError(error) && error.kind === 'conflict') {
+        await refreshLifecycle()
+        return
+      }
+      setLifecycleError(
+        error instanceof Error
+          ? error.message
+          : 'Retry could not safely create another bounded path.',
+      )
+    } finally {
+      setLifecycleBusy(false)
+    }
+  }
+
+  const trackCharlotteAction = async (index: number) => {
+    const current = game
+    const suggestion = lifecycle?.charlotte?.exactlyThreeNextActions[index]
+    if (!current || !suggestion || actionPendingIndex !== null) return
+
+    setActionPendingIndex(index)
+    setLifecycleError('')
+    try {
+      await createWilburAction(current.id, {
+        charlotteActionIndex: index,
+        actor: suggestion.actor,
+        action: suggestion.smallestAction,
+        testedAssumption: suggestion.assumptionBeingTested,
+        expectedObservation: suggestion.expectedObservation,
+        decisionThreshold: suggestion.decisionThreshold,
+        reviewHorizon: suggestion.reviewHorizon,
+      }, {
+        idempotencyKey: createIdempotencyKey(),
+      })
+      await refreshLifecycle()
+    } catch (error) {
+      setLifecycleError(
+        error instanceof Error
+          ? error.message
+          : 'Wilbur could not add that action to the saved record.',
+      )
+    } finally {
+      setActionPendingIndex(null)
+    }
+  }
+
+  const setWilburActionStatus = async (
+    action: WilburAction,
+    status: WilburAction['status'],
+  ) => {
+    const current = game
+    if (!current || wilburPending) return
+
+    setWilburPending(true)
+    setLifecycleError('')
+    try {
+      await updateWilburAction(current.id, action.id, {
+        expectedRevision: action.revision,
+        status,
+      }, {
+        idempotencyKey: createIdempotencyKey(),
+      })
+      await refreshLifecycle()
+    } catch (error) {
+      if (isWebChessApiError(error) && error.kind === 'conflict') {
+        await refreshLifecycle()
+        return
+      }
+      setLifecycleError(
+        error instanceof Error
+          ? error.message
+          : 'Wilbur could not update that action.',
+      )
+    } finally {
+      setWilburPending(false)
+    }
+  }
+
+  const observeWilburAction = async (
+    action: WilburAction,
+    observation: AppendWilburObservationCommand,
+  ): Promise<boolean> => {
+    const current = game
+    if (!current || wilburPending) return false
+
+    setWilburPending(true)
+    setLifecycleError('')
+    try {
+      await appendWilburObservation(current.id, action.id, observation, {
+        idempotencyKey: createIdempotencyKey(),
+      })
+      await refreshLifecycle()
+      return true
+    } catch (error) {
+      setLifecycleError(
+        error instanceof Error
+          ? error.message
+          : 'Wilbur could not append that observation.',
+      )
+      return false
+    } finally {
+      setWilburPending(false)
+    }
+  }
+
   const replayProblem = async () => {
     const current = game
     if (
@@ -1248,6 +1590,9 @@ export function App() {
     gameMutationMode !== null ||
     replayPending ||
     movePending ||
+    lifecycleBusy ||
+    actionPendingIndex !== null ||
+    wilburPending ||
     game?.status === 'dividing' ||
     game?.status === 'answering' ||
     answerStatus === 'loading' ||
@@ -1340,7 +1685,28 @@ export function App() {
           />
         )}
 
-        {!restoring && stage === 'reading' && outcome && (
+        {!restoring && stage === 'reading' && outcome && lifecycleMode !== 'legacy' && (
+          <LifecycleStage
+            problem={problem}
+            parts={parts}
+            pieces={pieces}
+            captures={captures}
+            lastMove={lastMove}
+            outcome={outcome}
+            lifecycle={lifecycle}
+            busy={lifecycleBusy}
+            error={lifecycleError}
+            actionPendingIndex={actionPendingIndex}
+            wilburPending={wilburPending}
+            onRefresh={() => void refreshLifecycle()}
+            onRetry={() => void retryLifecyclePath()}
+            onCreateAction={(index) => void trackCharlotteAction(index)}
+            onUpdateAction={(action, status) => void setWilburActionStatus(action, status)}
+            onObserve={observeWilburAction}
+          />
+        )}
+
+        {!restoring && stage === 'reading' && outcome && lifecycleMode === 'legacy' && (
           <ReadingStage
             problem={problem}
             provider={HOSTED_WEBCHESS_PROVIDER}

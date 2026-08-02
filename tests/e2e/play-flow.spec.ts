@@ -10,6 +10,7 @@ import type {
   DurableGame,
   MoveGameCommand,
 } from '../../src/lib/webchess-api'
+import type { LifecycleAggregate } from '../../src/lib/lifecycle/contracts'
 import {
   makeProblemFacets,
   makeProblemParts,
@@ -103,6 +104,168 @@ function nearTerminalState(): ReplayState {
     lastMove: null,
     outcome: null,
   }
+}
+
+function completedLifecycleGame(): DurableGame {
+  const accepted = acceptMoveCommand(
+    nearTerminalState(),
+    {
+      expectedPly: 256,
+      pieceId: 'white-rook',
+      to: { ring: 2, sector: 0 },
+    },
+    parts,
+  )
+  return game('completed', 3, toGameView(accepted.state))
+}
+
+function completedLifecycle(): LifecycleAggregate {
+  const candidateIds = [
+    'attempt-2:white-king',
+    'attempt-2:white-rook',
+    'attempt-2:black-king',
+  ]
+  const actions = Array.from({ length: 3 }, (_, index) => ({
+    title: `Bounded action ${index + 1}`,
+    actor: 'The accountable player',
+    assumptionBeingTested: 'A small reversible test can produce useful evidence.',
+    smallestAction: `Run bounded observation ${index + 1} without scaling.`,
+    expectedObservation: 'A direct signal appears inside the review horizon.',
+    decisionThreshold: 'Continue only if the signal appears safely.',
+    reviewHorizon: 'Within fourteen days',
+    reversibility: 'Stop and restore the prior state.',
+    risksOrAffectedParties: 'The people carrying the downside can stop the test.',
+    decisionRule: 'revise' as const,
+  }))
+
+  return {
+    id: '72000000-0000-4000-8000-000000000002',
+    rootRunId: '72000000-0000-4000-8000-000000000001',
+    parentRunId: '72000000-0000-4000-8000-000000000001',
+    gameId,
+    state: 'wilbur_observed',
+    revision: 12,
+    fieldGeneration: 1,
+    gameAttempt: 2,
+    sameFieldRetryCount: 1,
+    fieldRegenerationCount: 0,
+    divisionSeed: 'browser-play-flow',
+    castSeed: 'browser-cast',
+    trajectorySeed: 'browser-trajectory',
+    retryReason: 'The first traversal left too few independent candidates.',
+    terminalFingerprint: 'f'.repeat(64),
+    survivors: [
+      { candidateId: candidateIds[0], finalCoordinate: { ring: 7, sector: 4 } },
+      { candidateId: candidateIds[1], finalCoordinate: { ring: 2, sector: 0 } },
+      { candidateId: candidateIds[2], finalCoordinate: { ring: 2, sector: 0 } },
+    ],
+    portia: {
+      contractVersion: 'webchess-portia-review-v1',
+      runSummary: 'Portia ran all thirteen attacks and retained a qualified basis.',
+      assessments: candidateIds.map((candidateId, index) => ({
+        candidateId,
+        disposition: index === 2 ? 'wounded' as const : 'preserved' as const,
+        survivingInterpretation: 'Protect the outcome while testing one reversible step.',
+        requiredQualification: index === 2
+          ? 'Treat the observation as directional rather than causal proof.'
+          : null,
+        redundancyClusterId: null,
+        coverageTags: ['protected_outcome'],
+        missingEvidence: ['A direct observation is still required.'],
+        countercase: 'A contradictory observation would reverse this interpretation.',
+        reversalCondition: 'Reverse if the protected outcome is threatened.',
+        attackFindings: [],
+      })),
+      crossCandidateContradictions: [],
+      redundancyClusters: [],
+      missingCoverage: [],
+      unresolvedQuestions: ['What direct observation should come next?'],
+      recommendedGateInputs: {
+        tensionCandidatePairs: [],
+        fatalContradictionIds: [],
+        fieldRepairReasons: [],
+      },
+    },
+    gate: {
+      passed: true,
+      usableCandidateCount: 3,
+      independentClusterCount: 3,
+      contradictionResults: { fatalUnaddressedIds: [], tensionCandidatePairs: [] },
+      missingRequirements: [],
+      explanation: 'The deterministic evidence and actionability floors are met.',
+    },
+    charlotte: {
+      contractVersion: 'webchess-charlotte-result-v1',
+      protectedOutcome: 'Learn safely without an irreversible commitment.',
+      directAnswer: 'Run a bounded experiment before making the larger commitment.',
+      supportingCandidateIds: candidateIds,
+      qualificationsByCandidateId: {
+        [candidateIds[2]]: 'An observation updates the assumption but does not prove causality.',
+      },
+      centralTension: 'Learn promptly without exposing affected people to avoidable downside.',
+      valueConstraints: ['Keep a stop path.'],
+      stakeholderConsequences: ['The accountable player owns the test.'],
+      recommendation: 'Run the smallest reversible experiment and decide from the observation.',
+      communicationStrategy: 'State the assumption, signal, and stopping rule.',
+      uncertainties: ['The observation is not yet known.'],
+      whatCouldChangeTheAnswer: ['A contradictory observation.'],
+      exactlyThreeNextActions: actions,
+    },
+    charlotteRenderedAnswer: [
+      '# A bounded path forward',
+      '',
+      'Protect the purpose, run the smallest reversible test, and decide from the observation.',
+    ].join('\n'),
+    wilburActions: [{
+      id: 'action-1',
+      lifecycleRunId: '72000000-0000-4000-8000-000000000002',
+      charlotteActionIndex: 0,
+      actor: actions[0].actor,
+      action: actions[0].smallestAction,
+      testedAssumption: actions[0].assumptionBeingTested,
+      expectedObservation: actions[0].expectedObservation,
+      decisionThreshold: actions[0].decisionThreshold,
+      reviewHorizon: actions[0].reviewHorizon,
+      status: 'in_progress',
+      revision: 1,
+      version: 'webchess-wilbur-v1',
+      createdAt: '2026-08-01T20:00:00.000Z',
+      updatedAt: '2026-08-01T20:00:00.000Z',
+    }],
+    wilburObservations: [],
+    activities: Array.from({ length: 8 }, (_, index) => ({
+      id: `activity-${index + 1}`,
+      sequence: index + 1,
+      stage: ['anansi', 'chess', 'portia', 'gate', 'retry', 'charlotte', 'wilbur', 'web'][index],
+      activityType: 'stage_completed',
+      stateFrom: null,
+      stateTo: 'wilbur_observed',
+      inputEntityIds: [],
+      outputEntityIds: [],
+      responsibleAgentIds: ['webchess'],
+      configurationDigest: 'a'.repeat(64),
+      status: 'completed',
+      eventVersion: 1,
+      createdAt: `2026-08-01T20:0${index}:00.000Z`,
+    })),
+    versions: {
+      software: '2.0.0',
+      lifecycle: 'webchess-lifecycle-v2',
+      portiaPrompt: 'webchess-portia-v1',
+      portiaContract: 'webchess-portia-review-v1',
+      gateAlgorithm: 'webchess-gate-v1',
+      retryPolicy: 'webchess-retry-v1',
+      charlottePrompt: 'webchess-charlotte-v1',
+      charlotteContract: 'webchess-charlotte-result-v1',
+      wilburRecord: 'webchess-wilbur-v1',
+      rules: 'circular-direct-king-v1',
+      engine: 'engine-v2',
+      cast: 'independent-three-shuffle-v1',
+      event: 1,
+    },
+    createdAt: '2026-08-01T20:00:00.000Z',
+    updatedAt: '2026-08-01T20:07:00.000Z',
+  } as unknown as LifecycleAggregate
 }
 
 function requestBody<T>(route: Route): T {
@@ -275,6 +438,18 @@ test.describe('complete durable play flow', () => {
         return
       }
 
+      if (
+        request.method() === 'GET'
+        && pathname === `/api/games/${gameId}/lifecycle`
+      ) {
+        await route.fulfill({
+          status: 404,
+          contentType: 'application/json; charset=utf-8',
+          body: JSON.stringify({ error: { message: 'Legacy game.' } }),
+        })
+        return
+      }
+
       if (pathname === '/api/divide') {
         expectServerMutationBoundary(route)
         expect(requestBody<{ problem: string }>(route)).toEqual({ problem })
@@ -425,9 +600,75 @@ test.describe('complete durable play flow', () => {
       'POST /api/divide',
       `POST /api/games/${gameId}/start`,
       `POST /api/games/${gameId}/moves`,
+      `GET /api/games/${gameId}/lifecycle`,
       `POST /api/games/${gameId}/answer`,
       'GET /api/games/current',
     ])
+  })
+
+  test('renders the complete eight-stage lifecycle as a responsive, accessible action record', async ({
+    page,
+  }, testInfo) => {
+    const currentGame = completedLifecycleGame()
+    const lifecycle = completedLifecycle()
+
+    await page.setExtraHTTPHeaders({
+      'x-webchess-e2e-auth':
+        process.env.WEBCHESS_E2E_AUTH ?? 'playwright-local',
+    })
+    await page.route('**/api/**', async (route) => {
+      const request = route.request()
+      const pathname = new URL(request.url()).pathname
+
+      if (request.method() === 'GET' && pathname === '/api/games/current') {
+        await json(route, { game: currentGame })
+        return
+      }
+      if (
+        request.method() === 'GET'
+        && pathname === `/api/games/${gameId}/lifecycle`
+      ) {
+        await json(route, { lifecycle })
+        return
+      }
+      throw new Error(
+        `Unexpected lifecycle API request: ${request.method()} ${pathname}`,
+      )
+    })
+
+    await page.goto('/play', { waitUntil: 'domcontentloaded' })
+    await expect(
+      page.getByRole('heading', { name: /The ending is only the middle of the web/i }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole('region', { name: 'WebChess lifecycle progress' }),
+    ).toBeVisible()
+    await expect(page.locator('.lifecycle-step')).toHaveCount(8)
+    await expect(page.getByText(/This path keeps its history/i)).toBeVisible()
+    await expect(page.getByText(/What survived scrutiny/i)).toBeVisible()
+    await expect(page.getByText(/A direction that keeps its qualifications/i)).toBeVisible()
+    await expect(page.getByText(/Let the web meet reality/i)).toBeVisible()
+    await expect(
+      page.getByText(/Inspect the saved activity thread/i),
+    ).toBeVisible()
+    await expectAccessibleDynamicStage(page, 'WebChess 2.0 lifecycle')
+
+    const railDimensions = await page.locator('.lifecycle-rail').evaluate((element) => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    }))
+    if (testInfo.project.name === 'mobile') {
+      expect(railDimensions.scrollWidth).toBeGreaterThan(railDimensions.clientWidth)
+    } else {
+      expect(railDimensions.scrollWidth).toBeLessThanOrEqual(railDimensions.clientWidth + 1)
+    }
+
+    await page.getByRole('button', { name: 'Record what happened' }).click()
+    await expect(page.getByLabel('What did you observe?')).toBeVisible()
+    await expect(
+      page.getByLabel('What did this do to the tested assumption?'),
+    ).toBeVisible()
+    await expectWcagAA(page)
   })
 
   test('runs Engine V2 in a web worker and cancels outstanding autoplay on pause and reset', async ({

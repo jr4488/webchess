@@ -9,6 +9,7 @@ import { acceptMoveCommand, createReplayState, toGameView } from './lib/game-rep
 import type { EngineOptions } from './lib/engine'
 import { composeProblemParts } from './lib/division'
 import { WebChessApiError } from './lib/webchess-api'
+import type { LifecycleAggregate } from './lib/lifecycle/contracts'
 import type {
   DurableGame,
   DurableGameStatus,
@@ -59,10 +60,13 @@ const apiHarness = vi.hoisted(() => ({
   createIdempotencyKey: vi.fn(() => '018f47b2-4b0c-7b9e-8f24-123456789000'),
   divideProblem: vi.fn(),
   getCurrentGame: vi.fn(),
+  getGameLifecycle: vi.fn(),
   getOwnedGame: vi.fn(),
   recoverDivisionIntent: vi.fn(),
   replayGame: vi.fn(),
   requestGameAnswer: vi.fn(),
+  runCharlotte: vi.fn(),
+  runPortia: vi.fn(),
   startGame: vi.fn(),
   submitMove: vi.fn(),
 }))
@@ -105,10 +109,13 @@ vi.mock('./lib/webchess-api', async (importOriginal) => {
     createIdempotencyKey: apiHarness.createIdempotencyKey,
     divideProblem: apiHarness.divideProblem,
     getCurrentGame: apiHarness.getCurrentGame,
+    getGameLifecycle: apiHarness.getGameLifecycle,
     getOwnedGame: apiHarness.getOwnedGame,
     recoverDivisionIntent: apiHarness.recoverDivisionIntent,
     replayGame: apiHarness.replayGame,
     requestGameAnswer: apiHarness.requestGameAnswer,
+    runCharlotte: apiHarness.runCharlotte,
+    runPortia: apiHarness.runPortia,
     startGame: apiHarness.startGame,
     submitMove: apiHarness.submitMove,
   }
@@ -270,6 +277,104 @@ function makeAnswerFailedGame(): DurableGame {
   }
 }
 
+function makeLifecycle(
+  state: LifecycleAggregate['state'],
+  options: { portia?: boolean; gate?: boolean; charlotte?: boolean } = {},
+): LifecycleAggregate {
+  const candidateId = 'attempt-1:white-rook-1'
+  const portia = options.portia ? {
+    contractVersion: 'portia-contract-v1',
+    runSummary: 'Portia tested every survivor and retained the bounded interpretation.',
+    assessments: [{
+      candidateId,
+      disposition: 'preserved',
+      survivingInterpretation: 'The protected outcome remains a useful constraint.',
+      requiredQualification: null,
+      redundancyClusterId: null,
+      coverageTags: ['protected_outcome'],
+      missingEvidence: ['A direct observation is still required.'],
+      countercase: 'A contradictory observation would reverse the interpretation.',
+      reversalCondition: 'Reverse if the declared observation contradicts it.',
+      attackFindings: [],
+    }],
+    crossCandidateContradictions: [],
+    redundancyClusters: [],
+    missingCoverage: [],
+    unresolvedQuestions: ['What direct observation should come next?'],
+    recommendedGateInputs: {
+      tensionCandidatePairs: [],
+      fatalContradictionIds: [],
+      fieldRepairReasons: [],
+    },
+  } : null
+  const charlotte = options.charlotte ? {
+    contractVersion: 'charlotte-contract-v1',
+    protectedOutcome: 'Protect the purpose while learning safely.',
+    directAnswer: 'Run a bounded test before making the larger commitment.',
+    supportingCandidateIds: [candidateId],
+    qualificationsByCandidateId: {},
+    centralTension: 'Learn promptly without exposing affected people to avoidable downside.',
+    valueConstraints: ['Keep a stop path.'],
+    stakeholderConsequences: ['The accountable player owns the test.'],
+    recommendation: 'Run the smallest reversible experiment and decide from the observation.',
+    communicationStrategy: 'State the assumption, signal, and stopping rule.',
+    uncertainties: ['The observation is not yet known.'],
+    whatCouldChangeTheAnswer: ['A contradictory observation.'],
+    exactlyThreeNextActions: Array.from({ length: 3 }, (_, index) => ({
+      title: `Action ${index + 1}`,
+      actor: 'The accountable player',
+      assumptionBeingTested: 'A bounded action can produce useful evidence.',
+      smallestAction: 'Run one limited observation without scaling.',
+      expectedObservation: 'A direct signal appears inside the review horizon.',
+      decisionThreshold: 'Continue only if the signal appears safely.',
+      reviewHorizon: 'Within fourteen days',
+      reversibility: 'Stop and restore the prior state.',
+      risksOrAffectedParties: 'Stop if the protected outcome is threatened.',
+      decisionRule: 'revise' as const,
+    })),
+  } : null
+  return {
+    id: '72000000-0000-4000-8000-000000000001',
+    rootRunId: '72000000-0000-4000-8000-000000000001',
+    parentRunId: null,
+    gameId: GAME_ID,
+    state,
+    revision: 4,
+    fieldGeneration: 1,
+    gameAttempt: 1,
+    sameFieldRetryCount: 0,
+    fieldRegenerationCount: 0,
+    divisionSeed: 'division-seed',
+    castSeed: 'cast-seed',
+    trajectorySeed: 'trajectory-seed',
+    retryReason: null,
+    terminalFingerprint: 'f'.repeat(64),
+    survivors: [{
+      candidateId,
+      finalCoordinate: { ring: 0, sector: 4 },
+    }],
+    portia,
+    gate: options.gate ? {
+      passed: true,
+      usableCandidateCount: 4,
+      independentClusterCount: 4,
+      contradictionResults: { fatalUnaddressedIds: [], tensionCandidatePairs: [] },
+      missingRequirements: [],
+      explanation: 'The deterministic evidence floor is met.',
+    } : null,
+    charlotte,
+    charlotteRenderedAnswer: options.charlotte
+      ? 'Protect the purpose, run the smallest reversible test, and decide from the observation.'
+      : null,
+    wilburActions: [],
+    wilburObservations: [],
+    activities: [],
+    versions: {},
+    createdAt: '2026-08-01T20:00:00.000Z',
+    updatedAt: '2026-08-01T20:00:00.000Z',
+  } as unknown as LifecycleAggregate
+}
+
 function requireServerGame(): DurableGame {
   if (!serverGame) throw new Error('The mock server has no current game.')
   return serverGame
@@ -328,6 +433,12 @@ beforeEach(() => {
   for (const mock of Object.values(apiHarness)) mock.mockClear()
 
   apiHarness.getCurrentGame.mockImplementation(async () => serverGame)
+  apiHarness.getGameLifecycle.mockRejectedValue(
+    new WebChessApiError('This saved game predates the v2 lifecycle.', {
+      kind: 'not-found',
+      status: 404,
+    }),
+  )
   apiHarness.getOwnedGame.mockImplementation(async (gameId: string) => {
     if (serverGame?.id === gameId) return serverGame
     throw new WebChessApiError('That saved game was not found.', {
@@ -1106,6 +1217,48 @@ describe('durable WebChess client flow', () => {
       idempotencyKey: expect.any(String),
       signal: expect.any(AbortSignal),
     })
+  })
+
+  it('advances a v2 terminal game through Portia and Charlotte without the legacy answer route', async () => {
+    const completed = moveGame(
+      makeTerminalReadyGame(),
+      'white-rook-1',
+      { ring: 0, sector: 4 },
+    )
+    serverGame = completed
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('chess_terminal'),
+    )
+    apiHarness.runPortia.mockResolvedValue(
+      makeLifecycle('charlotte_pending', { portia: true, gate: true }),
+    )
+    apiHarness.runCharlotte.mockResolvedValue(
+      makeLifecycle('charlotte_complete', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
+    )
+
+    await renderRestoredApp()
+
+    expect(await screen.findByText(/A direction that keeps its qualifications/i))
+      .toBeInTheDocument()
+    expect(screen.getByText(/Protect the purpose, run the smallest reversible test/i))
+      .toBeInTheDocument()
+    expect(apiHarness.runPortia).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: completed.revision },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    )
+    expect(apiHarness.runCharlotte).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: completed.revision },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    )
+    expect(apiHarness.requestGameAnswer).not.toHaveBeenCalled()
+    expect(screen.getByRole('region', { name: /WebChess 2\.0 lifecycle/i }))
+      .toBeInTheDocument()
   })
 
   it('retries an ambiguous answer with the same idempotency key', async () => {
