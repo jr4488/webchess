@@ -11,6 +11,7 @@ proposed benefits should be tested against explicit alternatives.
 | Decision quality | Does the process improve choices after evidence is gathered? | Blind rubric scores, calibration, later outcome review |
 | Action quality | Does the result produce smaller and more reversible next moves? | Specificity, reversibility, completion rate |
 | Epistemic discipline | Can users distinguish resonance, interpretation, and evidence? | Claim audits, uncertainty labels, counterpoint retention |
+| Lifecycle learning | Do bounded actions and Wilbur observations improve later decisions without inflating confidence? | Action completion, stopping-rule use, assumption reversals, adverse-effect reporting |
 
 ## Minimum reporting standard
 
@@ -31,7 +32,9 @@ semantic quality.
 Do not submit confidential questions, credentials, personal data, or regulated
 information.
 
-Read the current [technical white paper](WEBCHESS_WHITE_PAPER.md). The deployed
+Read the current [WebChess 2.0 technical white paper](WEBCHESS_WHITE_PAPER_V2.md).
+Portia dispositions, Gate passes, and completed software tests are conformance
+evidence—not proof that a recommendation is true or effective. The deployed
 site reserves:
 
 - `/downloads/webchess-white-paper.md`

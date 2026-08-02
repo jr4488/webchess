@@ -1,6 +1,6 @@
 # WebChess privacy notice
 
-**Effective date:** July 26, 2026
+**Effective date:** August 1, 2026
 
 This notice describes the intended production WebChess service. It does not
 claim that a production deployment is currently live.
@@ -30,10 +30,15 @@ WebChess stores:
 - the 64 generated facets and composed facet–lens field;
 - the random seed and prompt/model/rules/engine/software provenance;
 - the append-only move and forced-pass event log;
-- derived captures, outcome, answer, and timestamps; and
+- derived captures and outcome;
+- terminal survivors, Portia reviews, deterministic Gate decisions, retry
+  ancestry, Charlotte results, Wilbur actions and append-only observations,
+  lifecycle events, and their version provenance;
+- legacy v1 answers and timestamps; and
 - replay relationships and the current-game marker.
 
-Questions, facets, and answers may contain personal or sensitive information.
+Questions, facets, lifecycle artifacts, observations, and answers may contain
+personal or sensitive information.
 Do not submit confidential, regulated, safety-critical, or third-party personal
 data.
 
@@ -53,7 +58,8 @@ artifacts, database URLs, and raw request bodies.
 ## Why the data is used
 
 Data is used to authenticate the user, preserve games across refreshes, replay
-and validate moves, produce the requested division and answer, prevent abuse,
+and validate moves, produce the requested division, Portia review, and
+Charlotte synthesis, preserve user-authored observations, prevent abuse,
 enforce quotas, account for model cost, diagnose failures, support export and
 deletion, and protect the service.
 
@@ -63,8 +69,9 @@ WebChess does not sell game content or use it for advertising.
 
 - **Clerk** processes authentication and account controls.
 - **Neon** stores durable application data.
-- **OpenAI** processes the question and game-derived prompt for the two model
-  stages. Calls use `store: false`; OpenAI's organization, project, abuse-
+- **OpenAI** processes bounded inputs for division, Portia, and Charlotte.
+  The deterministic Gate, Retry policy, and Wilbur record do not call a model.
+  Calls use `store: false`; OpenAI's organization, project, abuse-
   monitoring, retention, and data-sharing policies still apply.
 - **Vercel** hosts the application and processes network and runtime data.
 - **Google** participates only if the user chooses Google sign-in.

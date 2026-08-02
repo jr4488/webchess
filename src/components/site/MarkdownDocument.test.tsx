@@ -28,6 +28,8 @@ describe('MarkdownDocument', () => {
           '',
           '[Architecture section](docs/ARCHITECTURE.md#invariants)',
           '',
+          '[Operator guide](docs/WEBCHESS_2_0_OPERATIONS.md)',
+          '',
           '[Terms section](docs/TERMS.md#limits)',
           '',
           '[Root link](/privacy)',
@@ -69,7 +71,11 @@ describe('MarkdownDocument', () => {
     ).toHaveAttribute('href', '/install#requirements')
     expect(
       screen.getByRole('link', { name: 'Architecture section' }),
-    ).toHaveAttribute('href', '/white-paper#4-system-architecture')
+    ).toHaveAttribute('href', '/white-paper#29-current-production-architecture')
+    expect(screen.getByRole('link', { name: 'Operator guide' })).toHaveAttribute(
+      'href',
+      '/operations',
+    )
     expect(
       screen.getByRole('link', { name: 'Terms section' }),
     ).toHaveAttribute('href', '/terms#limits')

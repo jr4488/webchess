@@ -13,7 +13,7 @@ const downloadDirectory = join(repositoryRoot, 'public', 'downloads')
 const sourcePaths = {
   installation: join(repositoryRoot, 'INSTALL.md'),
   license: join(repositoryRoot, 'LICENSE'),
-  whitePaper: join(repositoryRoot, 'docs', 'WEBCHESS_WHITE_PAPER.md'),
+  whitePaper: join(repositoryRoot, 'docs', 'WEBCHESS_WHITE_PAPER_V2.md'),
 }
 
 const outputPaths = {
@@ -131,7 +131,7 @@ function renderWhitePaperHtml(markdown) {
             createElement(
               'a',
               {
-                href: repositoryHref('docs/WEBCHESS_WHITE_PAPER.md', href),
+                href: repositoryHref('docs/WEBCHESS_WHITE_PAPER_V2.md', href),
                 title,
               },
               children,
@@ -591,7 +591,7 @@ function paginateWhitePaper(markdown) {
       color: 0.4,
       font: 'F1',
       size: 7.5,
-      text: `WebChess 0.1.0 | Page ${index + 1} of ${pages.length}`,
+      text: `WebChess 2.0.0 | Page ${index + 1} of ${pages.length}`,
       x: marginX,
       y: 28,
     })
@@ -698,7 +698,7 @@ async function main() {
 
   assertDocument('INSTALL.md', installation)
   assertDocument('LICENSE', license)
-  assertDocument('docs/WEBCHESS_WHITE_PAPER.md', whitePaper)
+  assertDocument('docs/WEBCHESS_WHITE_PAPER_V2.md', whitePaper)
 
   const whitePaperHtml = renderWhitePaperHtml(whitePaper)
   const whitePaperPdf = createPdf(whitePaper)

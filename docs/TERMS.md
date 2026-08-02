@@ -1,6 +1,6 @@
 # WebChess terms of use
 
-**Effective date:** July 26, 2026
+**Effective date:** August 1, 2026
 
 These plain-language terms describe the intended production WebChess service.
 Using a deployed WebChess service means agreeing to these terms and the
@@ -9,8 +9,11 @@ Using a deployed WebChess service means agreeing to these terms and the
 ## What the service is
 
 WebChess is an experimental reflection and problem-framing tool. It generates a
-64-facet field, uses a circular-chess game to select items for attention, and
-asks a model to propose a candidate answer and reversible next actions.
+64-facet field, uses a circular-chess game to expose terminal survivors, asks
+Portia to attack those interpretations, applies a deterministic sufficiency
+Gate and bounded Retry policy, and asks Charlotte for a qualified candidate
+answer and reversible next actions. Wilbur records what the user reports
+happened afterward.
 
 WebChess is not divination, prediction, factual verification, professional
 advice, an emergency service, or an autonomous decision maker. A capture,
@@ -36,7 +39,9 @@ or third-party personal information.
 
 ## Model output and decisions
 
-AI output can be incomplete, incorrect, biased, inconsistent, or unsafe. Users
+AI output can be incomplete, incorrect, biased, inconsistent, or unsafe. A
+Portia survival label or Gate pass is not factual verification. A Wilbur
+observation is user-supplied and is not independently verified. Users
 must independently verify factual claims and use qualified professionals for
 medical, legal, financial, safety, employment, education, housing, insurance,
 credit, or other consequential decisions.

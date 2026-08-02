@@ -20,9 +20,16 @@ access separate so that each has an inspectable provenance and failure mode.
 5. **Authoritative replay** — every requested move is checked by replaying the
    immutable starting state and ordered event log. The server derives captures,
    forced passes, promotion, counters, and outcomes.
-6. **Synthesis** — only a server-proven ending may trigger the second
-   structured OpenAI request. The answer remains traceable to the persisted
-   question, cast, outcome, and capture trail.
+6. **Portia** — a strict structured model operation attacks every server-
+   derived terminal survivor with the complete versioned attack taxonomy.
+7. **Gate** — deterministic code checks usable count, independent clusters,
+   coverage, tension, severe objections, and fatal contradictions.
+8. **Retry** — a stored policy permits at most two same-field games and one
+   regenerated field, then ends at `insufficient_basis`.
+9. **Charlotte** — only a passed, persisted Gate authorizes qualified
+   synthesis. Supporting IDs are limited to preserved or wounded candidates.
+10. **Wilbur and Web** — the player owns action status and appends observations
+    to the immutable genealogy; model output cannot declare real-world success.
 
 ## Runtime topology
 
@@ -80,7 +87,7 @@ membership, or sequence privileges.
 
 Every configured Vercel build checks the runtime connection in a
 repeatable-read, read-only transaction. The check requires exact migration IDs
-and checksums; exactly the expected ten tables and their column names, types, and
+and checksums; exactly the expected seventeen tables and their column names, types, and
 nullability; valid and ready definitions for the two critical partial unique
 indexes; and the exact effective schema/table privilege allowlist, including
 access inherited through memberships or `PUBLIC`. Missing or extra application
@@ -162,7 +169,8 @@ replay rather than trusted as event input.
 
 ### `model_requests`
 
-The authoritative model-call ledger. Each division or answer records an
+The authoritative model-call ledger. Each division, legacy answer, Portia, or
+Charlotte operation records an
 idempotency key, request digest, status, model and prompt provenance, provider
 response ID, bounded token counts, timestamps, and a safe failure code.
 Provider output that is refused, incomplete, malformed, or schema-invalid is
@@ -170,6 +178,19 @@ not persisted; WebChess keeps only a syntactically sanitized provider response
 ID, safe failure classification, HTTP status when applicable, and normalized
 token usage when the provider supplied it. Prompts and secrets are not copied
 into operational logs.
+
+### Lifecycle genealogy
+
+`lifecycle_runs` is the versioned state and ancestry authority for
+Anansi → Chess → Portia → Gate → Retry → Charlotte → Wilbur → Web. It stores
+independent seeds, retry counters, parent/root relationships, survivor sets,
+terminal fingerprints, and all contract/algorithm versions.
+
+`portia_reviews`, `gate_decisions`, and `charlotte_results` are immutable
+attempt artifacts. `wilbur_actions` is revisioned; `wilbur_observations` and
+`lifecycle_events` are append-only. Every table is owner-scoped and cascades
+through the existing account/game deletion boundary. Account export v2 reads
+the complete genealogy in the same bounded repeatable-read snapshot.
 
 ### `usage_buckets`
 
@@ -316,11 +337,14 @@ without introducing a separate queue or cache as an authority.
 - The server is authoritative for ownership, moves, passes, captures, endings,
   prompts, quota, and usage.
 - No correctness or security property depends on Function memory.
-- Final synthesis is allowed only after canonical replay proves an ending.
+- Portia is allowed only after canonical replay proves an ending.
+- Charlotte is allowed only after a complete Portia review and persisted Gate pass.
+- Retry is bounded to two same-field games and one regenerated field.
+- Model output cannot author or rewrite a Wilbur observation.
 - A replay preserves the cast; a new division creates a new cast.
 - Model and prompt provenance are recorded without logging secrets.
 - A replay start is cloned and accounted atomically.
 - Forced deletion retains no raw Clerk ID in application tables.
 
-See the [technical white paper](WEBCHESS_WHITE_PAPER.md) for the intellectual
+See the [WebChess 2.0 technical white paper](WEBCHESS_WHITE_PAPER_V2.md) for the intellectual
 lineage, evidence matrix, limitations, and evaluation agenda.

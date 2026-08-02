@@ -156,7 +156,11 @@ runtime-role allowlist:
 - `SELECT` and `UPDATE` on `model_concurrency_slots`; and
 - `SELECT`, `INSERT`, `UPDATE`, and `DELETE` on `user_controls`, `games`,
   `model_requests`, `game_start_requests`, `usage_buckets`, and
-  `rate_buckets`.
+  `rate_buckets`;
+- `SELECT`, `INSERT`, and `UPDATE` on `lifecycle_runs` and `wilbur_actions`;
+  and
+- `SELECT` and `INSERT` on `portia_reviews`, `gate_decisions`,
+  `charlotte_results`, `wilbur_observations`, and `lifecycle_events`.
 
 Grant no sequence privileges. Remove any role membership that would let the
 runtime login assume an owner, and remove excess access inherited from another
@@ -180,7 +184,7 @@ That command opens a repeatable-read, read-only transaction and fails unless:
 
 - the migration ledger contains exactly the release's ordered IDs and
   checksums;
-- the application schema contains exactly the ten expected tables, with the
+- the application schema contains exactly the seventeen expected tables, with the
   expected column names, types, and nullability;
 - `games_one_current_per_user` and
   `model_requests_one_succeeded_operation_per_game` are valid, ready, unique
@@ -205,6 +209,13 @@ The migration creates:
 - `usage_buckets`
 - `rate_buckets`
 - `model_concurrency_slots`
+- `lifecycle_runs`
+- `portia_reviews`
+- `gate_decisions`
+- `charlotte_results`
+- `wilbur_actions`
+- `wilbur_observations`
+- `lifecycle_events`
 
 The owner command is idempotent for already-recorded, matching files. Once
 `0001_durable_webchess.sql` has been applied to the first durable database, its
@@ -387,8 +398,11 @@ npm run test:links
 Do not create a preview until all gates pass. Automated tests and CI must use
 deterministic OpenAI stubs and must never spend live model tokens. After those
 gates pass, the owner's bounded manual Preview inspection may use the dedicated
-Preview OpenAI key for one complete game: one division call and, after a real
-ending, one answer call. Durable application quotas remain enabled throughout.
+Preview OpenAI key for one complete v2 game: one division call and, after a
+real ending, one Portia call and one Charlotte call. A failed Gate may add only
+the bounded Retry work described in
+[the operator guide](docs/WEBCHESS_2_0_OPERATIONS.md). Durable application
+quotas remain enabled throughout.
 
 ## 8. Create the independent Vercel project
 

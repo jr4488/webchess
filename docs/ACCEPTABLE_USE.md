@@ -21,7 +21,8 @@ Do not use WebChess to:
   consequential decisions about a person;
 - impersonate a person or misrepresent model output as human expertise,
   objective evidence, prediction, or a WebChess-validated fact;
-- evade division, replay, move, export, model, rate, quota, suspension,
+- evade division, Portia, Gate, Retry, Charlotte, Wilbur, replay, move, export,
+  model, rate, quota, suspension,
   deletion, account, or cost controls, including through duplicate identities,
   idempotency-key manipulation, or network-identity rotation;
 - share, sell, or automate accounts;

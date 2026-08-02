@@ -8,13 +8,16 @@ from many angles before acting. It combines:
    change lenses on an eight-ring by eight-sector board;
 3. a complete circular-chess game whose captures create an inspectable trail
    of attention; and
-4. a second structured model pass that turns the completed game record into a
-   candidate answer and three reversible next actions.
+4. Portia, a structured adversarial pass over the terminal survivors;
+5. a deterministic sufficiency Gate with a bounded Retry policy;
+6. Charlotte, a traceable synthesis with exactly three reversible actions; and
+7. Wilbur, a human-owned action and observation record that lets the Web learn
+   from what actually happened.
 
 WebChess is a thinking aid, not divination, prediction, or evidence. A board
 event makes a facet salient; it does not make that facet true. The full method,
 limitations, and proposed validation program are documented in the
-[technical white paper](docs/WEBCHESS_WHITE_PAPER.md).
+[WebChess 2.0 technical white paper](docs/WEBCHESS_WHITE_PAPER_V2.md).
 
 ## Project status
 
@@ -100,23 +103,26 @@ commits the next event with an idempotency key and compare-and-swap revision.
 This event-sourced record lets an unfinished game survive refresh and lets the
 server reject stale or fabricated state.
 
-### 5. Synthesize after a real ending
+### 5. Test what survives, then act
 
-Only after server replay proves a terminal position does the second OpenAI
-request receive:
+Only after server replay proves a terminal position does WebChess derive the
+terminal survivor set and send it to Portia. Portia performs all thirteen
+versioned attack types against every survivor and classifies each as
+`preserved`, `wounded`, `consumed`, or `unresolved`. Survival is explicitly not
+treated as truth.
 
-- the original question;
-- the outcome and completed-ply count;
-- both side polarities;
-- grouped captured facets with recurrence counts and peak attention weights;
-- the chronological capture trail.
+A deterministic Gate then requires enough usable, independent, covered
+material, a non-redundant tension, and no fatal unaddressed contradiction. A
+failed Gate can authorize no more than two same-field replays and one fresh
+field generation. Exhaustion ends visibly as `insufficient_basis`; it never
+silently invokes Charlotte.
 
-Ordinary non-capturing moves and uncaptured facets are retained for game
-integrity but are not treated as final-answer inputs. Prompt, model, rules,
-engine, cast, and software provenance remain with the durable game record
-rather than being presented as evidence. The structured answer must include a
-direct response, what the conflicts emphasized, the main tension, exactly
-three next actions, and conditions that would change the recommendation.
+After a Gate pass, Charlotte may cite only preserved or wounded candidates and
+must retain every wound used as support. It produces a qualified answer and
+exactly three bounded, reversible experiments. Wilbur lets the authenticated
+player select an action, mark it in progress, and append a real-world
+observation. The lifecycle, retry ancestry, artifacts, versions, actions, and
+observations remain in an owner-scoped provenance record.
 
 ## Production architecture
 
@@ -132,7 +138,7 @@ Next.js on Vercel
   |
   +--> Clerk: Google, email, and passkey authentication
   +--> Neon Postgres: games, events, usage, quotas, rate limits, leases
-  +--> OpenAI: fixed gpt-5.6-sol model; store: false
+  +--> OpenAI: fixed gpt-5.6-sol division, Portia, and Charlotte calls; store: false
 ```
 
 The OpenAI key is a Vercel server secret owned by WebChess. Visitors never
@@ -268,7 +274,9 @@ Repository documents:
 - [Terms](docs/TERMS.md)
 - [Acceptable use](docs/ACCEPTABLE_USE.md)
 - [Research and evaluation](docs/RESEARCH.md)
-- [Technical white paper](docs/WEBCHESS_WHITE_PAPER.md)
+- [WebChess 2.0 technical white paper](docs/WEBCHESS_WHITE_PAPER_V2.md)
+- [Archived WebChess 1.3 white paper](docs/archive/WEBCHESS_WHITE_PAPER_V1.3.md)
+- [WebChess 2.0 operator guide](docs/WEBCHESS_2_0_OPERATIONS.md)
 - [Contributing](CONTRIBUTING.md)
 - [Support](SUPPORT.md)
 - [Apache-2.0 license](LICENSE)

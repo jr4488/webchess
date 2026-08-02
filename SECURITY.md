@@ -27,8 +27,9 @@ are unsupported.
 The browser is untrusted. It receives only public configuration and
 user-authorized game views. It may request a move by piece ID and destination,
 but it may not authoritatively supply the board, capture record, forced pass,
-outcome, attention weight, quota balance, usage record, or final-answer
-payload.
+outcome, attention weight, terminal survivor, Portia disposition, Gate result,
+retry eligibility, quota balance, usage record, Charlotte result, or Wilbur
+observation.
 
 Never put secrets in `NEXT_PUBLIC_*`, client components, browser storage,
 analytics, logs, screenshots, issues, or Discussions.
@@ -78,7 +79,10 @@ state without deterministic validation.
 Neon Postgres is authoritative for ownership, current games, append-only move
 events, model-request accounting, usage quotas, rate buckets, and concurrency
 leases. The server reconstructs a position from the canonical initial board
-and ordered events before accepting a move or answer request.
+and ordered events before accepting a move or lifecycle request. Portia
+receives only server-derived terminal survivors. The Gate and Retry policy run
+in deterministic code, Charlotte requires a stored Gate pass, and Wilbur
+observations are accepted only from authenticated user mutations.
 
 Ordered schema changes are applied only by the protected
 `MIGRATION_DATABASE_URL` owner command. Its supported wrapper fails closed
@@ -104,7 +108,7 @@ have only ledger `SELECT` and the required operations on each named application
 table.
 
 The Vercel build uses only the least-privileged runtime `DATABASE_URL` for a
-repeatable-read, read-only check of the exact migration ledger; the ten-table
+repeatable-read, read-only check of the exact migration ledger; the seventeen-table
 column catalog; the two critical partial unique indexes; and effective
 schema/table privileges obtained directly, through role membership, or through
 `PUBLIC`. Missing or unexpected tables or columns, an invalid index,
@@ -140,6 +144,7 @@ Controls are layered:
 - global concurrency slots with expiring leases;
 - bounded request and response sizes;
 - transactionally reserved and settled model usage;
+- hard lifecycle Retry bounds (two same-field games and one regenerated field);
 - durable provider response IDs and token counts;
 - suspensions and temporary blocks; and
 - an OpenAI project budget as the external spend backstop.
