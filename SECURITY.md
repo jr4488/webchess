@@ -27,11 +27,53 @@ are unsupported.
 The browser is untrusted. It receives only public configuration and
 user-authorized game views. It may request a move by piece ID and destination,
 but it may not authoritatively supply the board, capture record, forced pass,
-outcome, attention weight, quota balance, usage record, or final-answer
-payload.
+outcome, attention weight, terminal survivor, Portia disposition, Gate result,
+retry eligibility, quota balance, usage record, Charlotte result, or Wilbur
+observation.
 
 Never put secrets in `NEXT_PUBLIC_*`, client components, browser storage,
 analytics, logs, screenshots, issues, or Discussions.
+
+### Local OpenClaw plugin
+
+The installable OpenClaw plugin is a separate trust boundary from the hosted
+service. It launches the complete visual application in a foreground child
+process bound explicitly to `127.0.0.1`. The plugin does not register a
+background service, agent tool, Gateway HTTP route, cloud database, hosted
+account, telemetry endpoint, or WebChess-operated model proxy. Inspect the
+package and `openclaw.plugin.json` before installing it, as with any code that
+runs on the local machine.
+
+The launcher clears Clerk and hosted `DATABASE_URL` settings for the child
+process, admits only the dedicated loopback
+`WEBCHESS_OPENCLAW_DATABASE_URL`, and disables Next.js telemetry. Provider
+environment already present in the launching shell remains available to the
+user's OpenClaw; a missing OpenAI key is pinned empty so a repository
+`.env.local` cannot introduce a hosted-service key. Managed installs stage only
+bundled application code in a temporary local working directory, link the
+plugin's installed dependencies, and remove the directory at shutdown; game
+data remains in the dedicated local PostgreSQL database. Local model routes are
+disabled on Vercel, reject non-loopback Host/URL pairs, require an exact
+same-origin `Origin` on mutations, enforce bounded JSON bodies, and return
+no-store responses. The launcher always uses OpenClaw's local inference
+transport.
+
+OpenClaw is invoked with an argument array through `execFile` and
+`shell: false`; prompts are not interpreted as shell text. Calls have bounded
+output, a configurable bounded timeout, and TERM-to-KILL cleanup. The plugin
+does not select a provider or model and does not read, copy, return, or place
+provider credentials in the browser. OpenClaw resolves its own configured
+default model and authentication. That provider may be remote and may process
+the question or final game-derived prompt under its own data controls.
+
+The dedicated local PostgreSQL database is the persistence boundary, while the
+shared server handlers and append-only event log remain authoritative.
+WebChess recomputes the 64-cell cast from the saved facets and seed, replays the
+ordered event log under the canonical rules, derives captures and endings, and
+rejects inconsistent saved state before requesting an answer. Browser profiles
+on the same loopback installation restore the same owner-scoped game; another
+machine does not receive it, and WebChess provides no cloud backup or
+synchronization for local mode.
 
 ### Authentication
 
@@ -56,12 +98,12 @@ limits. Final marker cleanup is authenticated through Clerk's signed
 **Allow users to delete their accounts** setting and a real disposable-user
 smoke that proves `user.delete()` and the signed webhook both complete.
 
-### OpenAI
+### Hosted OpenAI access
 
-There is one WebChess-owned OpenAI Platform project key, stored only as a
-server-side Vercel secret. Visitors never supply an API key and cannot choose a
-model or provider. Clerk sign-in does not grant WebChess access to a user's
-ChatGPT account or allowance.
+The hosted architecture has one WebChess-owned OpenAI Platform project key,
+stored only as a server-side Vercel secret. Hosted visitors never supply an API
+key and cannot choose a model or provider. Clerk sign-in does not grant
+WebChess access to a user's ChatGPT account or allowance.
 
 The server uses a code-fixed `gpt-5.6-sol` model, bounded structured outputs,
 timeouts, `store: false`, and a purpose-separated, pseudonymous
@@ -78,7 +120,10 @@ state without deterministic validation.
 Neon Postgres is authoritative for ownership, current games, append-only move
 events, model-request accounting, usage quotas, rate buckets, and concurrency
 leases. The server reconstructs a position from the canonical initial board
-and ordered events before accepting a move or answer request.
+and ordered events before accepting a move or lifecycle request. Portia
+receives only server-derived terminal survivors. The Gate and Retry policy run
+in deterministic code, Charlotte requires a stored Gate pass, and Wilbur
+observations are accepted only from authenticated user mutations.
 
 Ordered schema changes are applied only by the protected
 `MIGRATION_DATABASE_URL` owner command. Its supported wrapper fails closed
@@ -101,10 +146,13 @@ the owner credential, and then reconnects through the exact runtime URL to run
 the schema check. The runtime role must have schema `USAGE` but not `CREATE`,
 must not own or be able to assume an owner of any application table, and must
 have only ledger `SELECT` and the required operations on each named application
-table.
+table. Its only column-scoped exception is `UPDATE` on
+`gate_decisions.answer_user_prompt` and
+`gate_decisions.answer_user_prompt_sha256`; mutation access to any other Gate
+column fails the compatibility check.
 
 The Vercel build uses only the least-privileged runtime `DATABASE_URL` for a
-repeatable-read, read-only check of the exact migration ledger; the ten-table
+repeatable-read, read-only check of the exact migration ledger; the seventeen-table
 column catalog; the two critical partial unique indexes; and effective
 schema/table privileges obtained directly, through role membership, or through
 `PUBLIC`. Missing or unexpected tables or columns, an invalid index,
@@ -140,6 +188,7 @@ Controls are layered:
 - global concurrency slots with expiring leases;
 - bounded request and response sizes;
 - transactionally reserved and settled model usage;
+- hard lifecycle Retry bounds (two same-field games and one regenerated field);
 - durable provider response IDs and token counts;
 - suspensions and temporary blocks; and
 - an OpenAI project budget as the external spend backstop.

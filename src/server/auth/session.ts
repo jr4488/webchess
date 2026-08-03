@@ -6,6 +6,7 @@ import { redirect } from 'next/navigation'
 
 import { isClerkConfigured } from './config'
 import { resolveLocalE2EUser } from './e2e'
+import { resolveLocalOpenClawUser } from './openclaw'
 import {
   authenticationUnavailableJson,
   unauthorizedJson,
@@ -36,7 +37,7 @@ export async function getRequestAuth(
 ): Promise<RequestAuth> {
   const resolvedRequest = request ?? (await requestFromCurrentHeaders())
   const localUser = resolvedRequest
-    ? resolveLocalE2EUser(resolvedRequest)
+    ? resolveLocalOpenClawUser(resolvedRequest) ?? resolveLocalE2EUser(resolvedRequest)
     : null
 
   if (localUser) {

@@ -20,6 +20,9 @@ export type DivisionPhase =
 
 export type ModelActivityOperation = 'division' | 'answer'
 
+/** Durable ceiling shared by model generation and answer persistence. */
+export const MAX_PERSISTED_MODEL_PROMPT_CHARS = 3_000_000
+
 export interface ModelActivityState {
   operation: ModelActivityOperation
   status: 'active' | 'error'

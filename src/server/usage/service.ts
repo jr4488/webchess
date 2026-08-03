@@ -45,6 +45,7 @@ import type {
   GetModelRequestResultInput,
   GetModelRequestResultResult,
   GetLatestModelRequestForGameInput,
+  ModelOperation,
   ModelRequestStatus,
   ModelResultPayload,
   ReconcileExpiredLeasesResult,
@@ -96,7 +97,9 @@ interface ReplayGameStartRow extends SqlRow {
 interface ModelResultRow extends SqlRow {
   readonly request_id: string
   readonly game_id: string | null
-  readonly operation: 'division' | 'answer'
+  readonly operation: ModelOperation
+  readonly request_sha256: string
+  readonly prompt_version: string
   readonly status: ModelRequestStatus
   readonly result_payload: ModelResultPayload | null
 }
@@ -268,7 +271,7 @@ function validateReservationInput(input: ReserveModelRequestInput): void {
 
   if (input.countsAsGameStart !== (input.operation === 'division')) {
     throw new TypeError(
-      'Division requests must count as game starts; answer requests must not.',
+      'Division requests must count as game starts; later lifecycle operations must not.',
     )
   }
 }
@@ -318,7 +321,9 @@ function validateSettlement(input: SettleModelRequestInput): void {
   assertNonnegativeInteger(usage?.totalTokens, 'totalTokens')
 
   if (input.outcome === 'succeeded') {
-    assertText(input.providerResponseId, 'providerResponseId', 1, 255)
+    if (input.providerResponseId !== undefined) {
+      assertText(input.providerResponseId, 'providerResponseId', 1, 255)
+    }
     assertSha256(input.responseSha256, 'responseSha256')
     validateResultPayload(input.resultPayload)
     return
@@ -355,7 +360,9 @@ function modelResultFromRows(
   }
   if (
     row.operation !== 'division' &&
-    row.operation !== 'answer'
+    row.operation !== 'answer' &&
+    row.operation !== 'portia' &&
+    row.operation !== 'charlotte'
   ) {
     throw new Error('Model result query returned an invalid operation.')
   }
@@ -367,6 +374,8 @@ function modelResultFromRows(
     requestId: row.request_id,
     gameId: row.game_id,
     operation: row.operation,
+    requestSha256: row.request_sha256,
+    promptVersion: row.prompt_version,
     status: row.status,
     resultPayload: row.result_payload,
   }
@@ -723,6 +732,12 @@ export function createUsageController(
     ): Promise<GetModelRequestResultResult> {
       assertText(input.userId, 'userId', 3, 255)
       assertUuid(input.gameId, 'gameId')
+      if (input.requestSha256 !== undefined) {
+        assertSha256(input.requestSha256, 'requestSha256')
+      }
+      if (input.promptVersion !== undefined) {
+        assertText(input.promptVersion, 'promptVersion', 1, 80)
+      }
       const result = await db.query(
         buildGetLatestModelRequestForGameStatement(input),
       )
@@ -734,6 +749,12 @@ export function createUsageController(
     ): Promise<GetModelRequestResultResult> {
       assertText(input.userId, 'userId', 3, 255)
       assertUuid(input.gameId, 'gameId')
+      if (input.requestSha256 !== undefined) {
+        assertSha256(input.requestSha256, 'requestSha256')
+      }
+      if (input.promptVersion !== undefined) {
+        assertText(input.promptVersion, 'promptVersion', 1, 80)
+      }
       const result = await db.query(
         buildGetSucceededModelResultForGameStatement(input),
       )

@@ -47,7 +47,16 @@ const INSPECT_MIGRATION_LEDGER_SQL = `
           'game_start_requests',
           'usage_buckets',
           'rate_buckets',
-          'model_concurrency_slots'
+          'model_concurrency_slots',
+          'lifecycle_runs',
+          'portia_reviews',
+          'gate_decisions',
+          'charlotte_results',
+          'wilbur_actions',
+          'wilbur_observations',
+          'lifecycle_events',
+          'research_requests',
+          'research_sources'
         )
     ) AS has_webchess_objects
 `
@@ -62,6 +71,13 @@ const RUNTIME_TABLE_PRIVILEGES = [
   'TRIGGER',
 ]
 
+const RUNTIME_COLUMN_PRIVILEGES = [
+  'SELECT',
+  'INSERT',
+  'UPDATE',
+  'REFERENCES',
+]
+
 const RUNTIME_TABLE_PRIVILEGE_CONTRACT = {
   webchess_schema_migrations: ['SELECT'],
   deleted_user_tombstones: ['SELECT', 'INSERT', 'UPDATE'],
@@ -73,6 +89,15 @@ const RUNTIME_TABLE_PRIVILEGE_CONTRACT = {
   usage_buckets: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   rate_buckets: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   model_concurrency_slots: ['SELECT', 'UPDATE'],
+  lifecycle_runs: ['SELECT', 'INSERT', 'UPDATE'],
+  portia_reviews: ['SELECT', 'INSERT'],
+  gate_decisions: ['SELECT', 'INSERT'],
+  charlotte_results: ['SELECT', 'INSERT'],
+  wilbur_actions: ['SELECT', 'INSERT', 'UPDATE'],
+  wilbur_observations: ['SELECT', 'INSERT'],
+  lifecycle_events: ['SELECT', 'INSERT'],
+  research_requests: ['SELECT', 'INSERT', 'UPDATE'],
+  research_sources: ['SELECT', 'INSERT'],
 }
 
 const RUNTIME_COLUMN_CONTRACT = {
@@ -211,6 +236,187 @@ const RUNTIME_COLUMN_CONTRACT = {
     ['lease_token', 'uuid', false],
     ['lease_expires_at', 'timestamp with time zone', false],
   ],
+  lifecycle_runs: [
+    ['id', 'uuid', true],
+    ['clerk_user_id', 'text', true],
+    ['game_id', 'uuid', true],
+    ['root_run_id', 'uuid', true],
+    ['parent_run_id', 'uuid', false],
+    ['state', 'text', true],
+    ['revision', 'bigint', true],
+    ['field_generation', 'smallint', true],
+    ['game_attempt', 'smallint', true],
+    ['same_field_retry_count', 'smallint', true],
+    ['field_regeneration_count', 'smallint', true],
+    ['division_seed', 'text', true],
+    ['cast_seed', 'text', true],
+    ['trajectory_seed', 'text', true],
+    ['retry_reason', 'text', false],
+    ['terminal_fingerprint', 'character(64)', false],
+    ['survivor_set', 'jsonb', false],
+    ['software_version', 'text', true],
+    ['lifecycle_version', 'text', true],
+    ['rules_version', 'text', true],
+    ['engine_version', 'text', true],
+    ['cast_version', 'text', true],
+    ['event_version', 'smallint', true],
+    ['portia_prompt_version', 'text', true],
+    ['portia_contract_version', 'text', true],
+    ['gate_algorithm_version', 'text', true],
+    ['retry_policy_version', 'text', true],
+    ['charlotte_prompt_version', 'text', true],
+    ['charlotte_contract_version', 'text', true],
+    ['wilbur_record_version', 'text', true],
+    ['created_at', 'timestamp with time zone', true],
+    ['updated_at', 'timestamp with time zone', true],
+    ['answer_prompt_digest', 'character(64)', false],
+    ['portia_current_candidate_id', 'text', false],
+    ['portia_active_model_request_id', 'uuid', false],
+    ['portia_failed_attempt_count', 'smallint', true],
+    ['portia_failure_limit', 'smallint', true],
+    ['portia_completed_candidate_ids', 'jsonb', true],
+    ['portia_assessment_drafts', 'jsonb', true],
+    ['charlotte_active_model_request_id', 'uuid', false],
+    ['charlotte_failed_attempt_count', 'smallint', true],
+    ['charlotte_failure_limit', 'smallint', true],
+  ],
+  portia_reviews: [
+    ['id', 'uuid', true],
+    ['clerk_user_id', 'text', true],
+    ['lifecycle_run_id', 'uuid', true],
+    ['model_request_id', 'uuid', true],
+    ['input_digest', 'character(64)', true],
+    ['output_digest', 'character(64)', true],
+    ['prompt_version', 'text', true],
+    ['contract_version', 'text', true],
+    ['review', 'jsonb', true],
+    ['created_at', 'timestamp with time zone', true],
+  ],
+  gate_decisions: [
+    ['id', 'uuid', true],
+    ['clerk_user_id', 'text', true],
+    ['lifecycle_run_id', 'uuid', true],
+    ['algorithm_version', 'text', true],
+    ['input_digest', 'character(64)', true],
+    ['passed', 'boolean', true],
+    ['result', 'jsonb', true],
+    ['created_at', 'timestamp with time zone', true],
+    ['answer_user_prompt', 'text', false],
+    ['answer_user_prompt_sha256', 'character(64)', false],
+  ],
+  charlotte_results: [
+    ['id', 'uuid', true],
+    ['clerk_user_id', 'text', true],
+    ['lifecycle_run_id', 'uuid', true],
+    ['model_request_id', 'uuid', true],
+    ['input_digest', 'character(64)', true],
+    ['output_digest', 'character(64)', true],
+    ['prompt_version', 'text', true],
+    ['contract_version', 'text', true],
+    ['result', 'jsonb', true],
+    ['rendered_answer', 'text', true],
+    ['created_at', 'timestamp with time zone', true],
+  ],
+  wilbur_actions: [
+    ['id', 'uuid', true],
+    ['clerk_user_id', 'text', true],
+    ['lifecycle_run_id', 'uuid', true],
+    ['charlotte_action_index', 'smallint', false],
+    ['idempotency_key', 'uuid', true],
+    ['request_digest', 'character(64)', true],
+    ['actor', 'text', true],
+    ['action', 'text', true],
+    ['tested_assumption', 'text', true],
+    ['expected_observation', 'text', true],
+    ['decision_threshold', 'text', true],
+    ['review_horizon', 'text', true],
+    ['status', 'text', true],
+    ['revision', 'bigint', true],
+    ['record_version', 'text', true],
+    ['created_at', 'timestamp with time zone', true],
+    ['updated_at', 'timestamp with time zone', true],
+  ],
+  wilbur_observations: [
+    ['id', 'uuid', true],
+    ['clerk_user_id', 'text', true],
+    ['action_id', 'uuid', true],
+    ['idempotency_key', 'uuid', true],
+    ['request_digest', 'character(64)', true],
+    ['observed_at', 'timestamp with time zone', true],
+    ['observation', 'text', true],
+    ['evidence_classification', 'text', true],
+    ['expected_effect', 'text', true],
+    ['unexpected_effect', 'text', true],
+    ['stakeholder_response', 'text', true],
+    ['assumption_result', 'text', true],
+    ['next_decision', 'text', true],
+    ['record_version', 'text', true],
+    ['created_at', 'timestamp with time zone', true],
+  ],
+  lifecycle_events: [
+    ['id', 'uuid', true],
+    ['clerk_user_id', 'text', true],
+    ['lifecycle_run_id', 'uuid', true],
+    ['sequence', 'bigint', true],
+    ['stage', 'text', true],
+    ['activity_type', 'text', true],
+    ['state_from', 'text', false],
+    ['state_to', 'text', true],
+    ['input_entity_ids', 'jsonb', true],
+    ['output_entity_ids', 'jsonb', true],
+    ['responsible_agent_ids', 'jsonb', true],
+    ['configuration_digest', 'character(64)', true],
+    ['status', 'text', true],
+    ['event_version', 'smallint', true],
+    ['created_at', 'timestamp with time zone', true],
+  ],
+  research_requests: [
+    ['id', 'uuid', true],
+    ['clerk_user_id', 'text', true],
+    ['game_id', 'uuid', true],
+    ['lifecycle_run_id', 'uuid', false],
+    ['stage', 'text', true],
+    ['requested_by', 'text', true],
+    ['policy_version', 'text', true],
+    ['materiality', 'text', false],
+    ['reason', 'text', true],
+    ['query', 'text', false],
+    ['status', 'text', true],
+    ['provider', 'text', true],
+    ['transport', 'text', true],
+    ['model', 'text', false],
+    ['invocation_limit', 'smallint', true],
+    ['result_limit', 'smallint', true],
+    ['source_limit', 'smallint', true],
+    ['timeout_ms', 'integer', true],
+    ['synthesis_character_limit', 'integer', true],
+    ['attempt_count', 'smallint', true],
+    ['executed_queries', 'jsonb', true],
+    ['search_synthesis', 'text', false],
+    ['direct_page_text_fetched', 'boolean', true],
+    ['retrieved_facts', 'jsonb', true],
+    ['omitted_source_count', 'smallint', true],
+    ['injection_signals', 'jsonb', true],
+    ['content_digest', 'character(64)', false],
+    ['failure_code', 'text', false],
+    ['started_at', 'timestamp with time zone', false],
+    ['completed_at', 'timestamp with time zone', false],
+    ['created_at', 'timestamp with time zone', true],
+    ['updated_at', 'timestamp with time zone', true],
+  ],
+  research_sources: [
+    ['id', 'uuid', true],
+    ['clerk_user_id', 'text', true],
+    ['research_request_id', 'uuid', true],
+    ['ordinal', 'smallint', true],
+    ['citation_id', 'text', true],
+    ['title', 'text', true],
+    ['url', 'text', true],
+    ['hostname', 'text', true],
+    ['trust', 'text', true],
+    ['discovered_from', 'text', true],
+    ['created_at', 'timestamp with time zone', true],
+  ],
 }
 
 const RUNTIME_INDEX_CONTRACT = [
@@ -227,6 +433,32 @@ const RUNTIME_INDEX_CONTRACT = [
     key_columns: 'game_id,operation',
     predicate:
       "((game_id IS NOT NULL) AND (status = 'succeeded'::text))",
+  },
+  {
+    index_name: 'lifecycle_runs_game_id_key',
+    table_name: 'lifecycle_runs',
+    key_columns: 'game_id',
+    predicate: null,
+  },
+  {
+    index_name:
+      'research_requests_game_id_stage_policy_version_key',
+    table_name: 'research_requests',
+    key_columns: 'game_id,stage,policy_version',
+    predicate: null,
+  },
+  {
+    index_name:
+      'research_sources_research_request_id_ordinal_key',
+    table_name: 'research_sources',
+    key_columns: 'research_request_id,ordinal',
+    predicate: null,
+  },
+  {
+    index_name: 'research_sources_research_request_id_url_key',
+    table_name: 'research_sources',
+    key_columns: 'research_request_id,url',
+    predicate: null,
   },
 ]
 
@@ -250,6 +482,28 @@ const runtimePrivilegeContractRows = Object.entries(
     privilege,
     allowed: grantedPrivileges.includes(privilege),
   })),
+)
+
+const runtimeColumnPrivilegeContractRows = Object.entries(
+  RUNTIME_COLUMN_CONTRACT,
+).flatMap(([tableName, columns]) =>
+  columns.flatMap(([columnName]) =>
+    RUNTIME_COLUMN_PRIVILEGES.map((privilege) => ({
+      table_name: tableName,
+      column_name: columnName,
+      privilege,
+      allowed:
+        RUNTIME_TABLE_PRIVILEGE_CONTRACT[tableName].includes(privilege) ||
+        (
+          tableName === 'gate_decisions' &&
+          privilege === 'UPDATE' &&
+          (
+            columnName === 'answer_user_prompt' ||
+            columnName === 'answer_user_prompt_sha256'
+          )
+        ),
+    })),
+  ),
 )
 
 const RUNTIME_COMPATIBILITY_SQL = `
@@ -323,6 +577,38 @@ const RUNTIME_COMPATIBILITY_SQL = `
         )
       END AS allowed
     FROM expected_privileges AS expected
+    CROSS JOIN active_schema
+    LEFT JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.nspname = active_schema.schema_name
+    LEFT JOIN pg_catalog.pg_class AS relation
+      ON relation.relnamespace = namespace.oid
+      AND relation.relname = expected.table_name
+      AND relation.relkind IN ('r', 'p')
+  ),
+  expected_column_privileges AS (
+    SELECT *
+    FROM jsonb_to_recordset($4::jsonb) AS expected (
+      table_name text,
+      column_name text,
+      privilege text,
+      allowed boolean
+    )
+  ),
+  actual_column_privileges AS (
+    SELECT
+      expected.table_name,
+      expected.column_name,
+      expected.privilege,
+      CASE
+        WHEN relation.oid IS NULL THEN NULL
+        ELSE pg_catalog.has_column_privilege(
+          current_user,
+          relation.oid,
+          expected.column_name,
+          expected.privilege
+        )
+      END AS allowed
+    FROM expected_column_privileges AS expected
     CROSS JOIN active_schema
     LEFT JOIN pg_catalog.pg_namespace AS namespace
       ON namespace.nspname = active_schema.schema_name
@@ -463,6 +749,13 @@ const RUNTIME_COMPATIBILITY_SQL = `
     ) AS privileges_exact,
     NOT EXISTS (
       SELECT 1
+      FROM expected_column_privileges AS expected
+      INNER JOIN actual_column_privileges AS actual
+        USING (table_name, column_name, privilege)
+      WHERE actual.allowed IS DISTINCT FROM expected.allowed
+    ) AS column_privileges_exact,
+    NOT EXISTS (
+      SELECT 1
       FROM expected_tables AS expected
       CROSS JOIN active_schema
       LEFT JOIN pg_catalog.pg_namespace AS namespace
@@ -502,6 +795,7 @@ const RUNTIME_COMPATIBILITY_FIELDS = [
   'tables_exact',
   'columns_exact',
   'privileges_exact',
+  'column_privileges_exact',
   'owner_isolated',
   'indexes_exact',
 ]
@@ -551,6 +845,11 @@ const RUNTIME_COMPATIBILITY_FAILURES = [
     'privileges_exact',
     false,
     'The runtime database role privileges do not match the least-privilege contract.',
+  ],
+  [
+    'column_privileges_exact',
+    false,
+    'The runtime database column privileges do not match the least-privilege contract.',
   ],
 ]
 
@@ -940,6 +1239,7 @@ export async function assertRuntimeDatabaseCompatibility(client) {
       JSON.stringify(runtimeColumnContractRows),
       JSON.stringify(runtimePrivilegeContractRows),
       JSON.stringify(RUNTIME_INDEX_CONTRACT),
+      JSON.stringify(runtimeColumnPrivilegeContractRows),
     ],
   )
   const row = inspection.rows?.[0]

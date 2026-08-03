@@ -54,6 +54,8 @@ export interface CreateDivisionInput {
   readonly problem: string
   readonly softwareVersion: string
   readonly gameId?: string
+  /** Present only when Retry deliberately regenerates a parent run's field. */
+  readonly sourceGameId?: string
 }
 
 export interface CreateDivisionResult {

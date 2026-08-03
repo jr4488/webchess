@@ -1,9 +1,35 @@
 # WebChess privacy notice
 
-**Effective date:** July 26, 2026
+**Effective date:** August 1, 2026
 
-This notice describes the intended production WebChess service. It does not
-claim that a production deployment is currently live.
+This notice distinguishes the local OpenClaw plugin from the intended hosted
+WebChess service. It does not claim that a production hosted deployment is
+currently live.
+
+## Local OpenClaw plugin
+
+The plugin launches WebChess on `127.0.0.1` and keeps the question, generated
+cast, move history, lifecycle artifacts, actions, and observations in a
+dedicated PostgreSQL 17 database on the same machine. WebChess does not create
+a hosted account, upload that history to a WebChess-operated database,
+synchronize it, or receive telemetry from the local app. Browser refreshes do
+not delete the local game; database retention and deletion remain under the
+local installation owner's control.
+
+Model work uses the user's own OpenClaw installation, configured default model,
+and existing provider authentication. The provider may be remote. In that case,
+OpenClaw sends bounded prompts for Division, Portia, the approved board-derived
+Answer, Charlotte, and legacy-v1 answer recovery where applicable, according to
+that provider's terms and data controls.
+Portia receives the concrete candidate prompt assembled from board weights,
+values, routes, captures, and survivor signals before an answer exists;
+Charlotte receives the exact generated answer afterward. The plugin does not
+receive or proxy the credential and does not add a WebChess-operated service to
+that path. Gate, Retry policy, Wilbur records, and provenance are local
+deterministic or user-authored operations.
+
+The remainder of this notice describes the separate hosted-service
+architecture.
 
 ## What WebChess processes
 
@@ -30,10 +56,17 @@ WebChess stores:
 - the 64 generated facets and composed facet–lens field;
 - the random seed and prompt/model/rules/engine/software provenance;
 - the append-only move and forced-pass event log;
-- derived captures, outcome, answer, and timestamps; and
+- derived captures and outcome;
+- terminal survivors, the reviewed answer-prompt digest, resumable per-signal
+  Portia assessments, technical-attempt counters, final Portia reviews,
+  deterministic Gate decisions, semantic retry ancestry, generated answers and
+  their approval provenance, Charlotte qualifications, Wilbur actions and
+  append-only observations, lifecycle events, and their version provenance;
+- legacy v1 answers and timestamps; and
 - replay relationships and the current-game marker.
 
-Questions, facets, and answers may contain personal or sensitive information.
+Questions, facets, lifecycle artifacts, observations, and answers may contain
+personal or sensitive information.
 Do not submit confidential, regulated, safety-critical, or third-party personal
 data.
 
@@ -53,7 +86,9 @@ artifacts, database URLs, and raw request bodies.
 ## Why the data is used
 
 Data is used to authenticate the user, preserve games across refreshes, replay
-and validate moves, produce the requested division and answer, prevent abuse,
+and validate moves, produce the requested division, assemble and validate the
+board-derived answer prompt, generate an approved Answer, qualify that exact
+Answer through Charlotte, preserve user-authored observations, prevent abuse,
 enforce quotas, account for model cost, diagnose failures, support export and
 deletion, and protect the service.
 
@@ -63,8 +98,9 @@ WebChess does not sell game content or use it for advertising.
 
 - **Clerk** processes authentication and account controls.
 - **Neon** stores durable application data.
-- **OpenAI** processes the question and game-derived prompt for the two model
-  stages. Calls use `store: false`; OpenAI's organization, project, abuse-
+- **OpenAI** processes bounded inputs for Division, Portia, the approved Answer,
+  and Charlotte. The deterministic Gate, Retry policy, and Wilbur record do not
+  call a model. Calls use `store: false`; OpenAI's organization, project, abuse-
   monitoring, retention, and data-sharing policies still apply.
 - **Vercel** hosts the application and processes network and runtime data.
 - **Google** participates only if the user chooses Google sign-in.

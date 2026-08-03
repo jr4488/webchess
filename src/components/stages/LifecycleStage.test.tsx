@@ -1,0 +1,1159 @@
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import { CURRENT_GAME_VERSIONS, type GameView } from '../../lib/game-contract'
+import type {
+  GateRecommendation,
+  LifecycleAggregate,
+  LifecycleState,
+  PortiaReview,
+} from '../../lib/lifecycle/contracts'
+import { PORTIA_ATTACK_TYPES } from '../../lib/lifecycle/contracts'
+import { CURRENT_LIFECYCLE_VERSIONS } from '../../lib/lifecycle/versions'
+import type { ResearchRecord } from '../../lib/research'
+import {
+  buildOpenClawAnswerModelPrompt,
+  OPENCLAW_LOCAL_MODEL_RUN_SYSTEM_PROMPT,
+} from '../../lib/full-answer-model-prompt'
+import type { DurableGame } from '../../lib/webchess-api'
+import { makeProblemFacets, makeProblemParts } from '../../test/fixtures'
+import type {
+  CaptureRecord,
+  GeneratedAnswer,
+  Piece,
+} from '../../types'
+import { LifecycleStage } from './LifecycleStage'
+
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(
+  window.navigator,
+  'clipboard',
+)
+const originalExecCommandDescriptor = Object.getOwnPropertyDescriptor(
+  document,
+  'execCommand',
+)
+
+afterEach(() => {
+  if (originalClipboardDescriptor) {
+    Object.defineProperty(
+      window.navigator,
+      'clipboard',
+      originalClipboardDescriptor,
+    )
+  } else {
+    Reflect.deleteProperty(window.navigator, 'clipboard')
+  }
+  if (originalExecCommandDescriptor) {
+    Object.defineProperty(
+      document,
+      'execCommand',
+      originalExecCommandDescriptor,
+    )
+  } else {
+    Reflect.deleteProperty(document, 'execCommand')
+  }
+  vi.restoreAllMocks()
+})
+
+vi.mock('../ProcessGraphic', () => ({
+  ProcessGraphic: ({ headline }: { headline: string }) => (
+    <div data-testid="process-graphic">{headline}</div>
+  ),
+}))
+
+vi.mock('../RadialBoard', () => ({
+  RadialBoard: ({
+    portiaActivity,
+  }: {
+    portiaActivity?: {
+      status: string
+      currentCell: { ring: number; sector: number } | null
+      currentLabel: string | null
+      reviewedCellKeys: ReadonlySet<string> | readonly string[]
+      announcement: string
+    }
+  }) => (
+    <div
+      data-testid="radial-board"
+      data-portia-status={portiaActivity?.status}
+      data-portia-current-cell={portiaActivity?.currentCell
+        ? `${portiaActivity.currentCell.ring}:${portiaActivity.currentCell.sector}`
+        : undefined}
+      data-portia-current-label={portiaActivity?.currentLabel ?? undefined}
+      data-portia-reviewed-cells={portiaActivity
+        ? [...portiaActivity.reviewedCellKeys].join(',')
+        : undefined}
+    >
+      {portiaActivity?.announcement}
+      {portiaActivity?.currentLabel
+        ? ` Current signal: ${portiaActivity.currentLabel}.`
+        : ''}
+    </div>
+  ),
+}))
+
+function aggregate(
+  state: LifecycleState,
+  recommendation: GateRecommendation,
+  retryCounts = { sameFieldRetryCount: 0, fieldRegenerationCount: 0 },
+): LifecycleAggregate {
+  return {
+    id: '72000000-0000-4000-8000-000000000001',
+    rootRunId: '72000000-0000-4000-8000-000000000001',
+    parentRunId: retryCounts.sameFieldRetryCount > 0
+      ? '72000000-0000-4000-8000-000000000000'
+      : null,
+    gameId: '73000000-0000-4000-8000-000000000001',
+    state,
+    revision: 4,
+    fieldGeneration: 1,
+    gameAttempt: 1,
+    sameFieldRetryCount: retryCounts.sameFieldRetryCount,
+    fieldRegenerationCount: retryCounts.fieldRegenerationCount,
+    divisionSeed: 'division-seed',
+    castSeed: 'cast-seed',
+    trajectorySeed: 'trajectory-seed',
+    retryReason: retryCounts.sameFieldRetryCount > 0
+      ? 'The root inquiry used another bounded path.'
+      : null,
+    terminalFingerprint: 'f'.repeat(64),
+    answerPromptDigest: null,
+    answerUserPrompt: null,
+    answerUserPromptSha256: null,
+    portiaActiveModelRequestId: null,
+    portiaFailedAttemptCount: 0,
+    portiaFailureLimit: 3,
+    survivors: [],
+    portiaProgress: {
+      currentCandidateId: null,
+      completedCandidateIds: [],
+      completedAssessments: [],
+    },
+    portia: null,
+    gate: {
+      passed: false,
+      usableCandidateCount: 3,
+      independentClusterCount: 2,
+      contradictionResults: {
+        fatalUnaddressedIds: [],
+        tensionCandidatePairs: [],
+      },
+      missingRequirements: ['At least four usable candidates are required.'],
+      recommendedNextTransition: recommendation,
+      explanation: 'The evidence floor was not met.',
+    },
+    charlotte: null,
+    charlotteRenderedAnswer: null,
+    wilburActions: [],
+    wilburObservations: [],
+    activities: [],
+    research: [],
+    versions: {},
+    createdAt: '2026-08-01T20:00:00.000Z',
+    updatedAt: '2026-08-01T20:00:00.000Z',
+  } as unknown as LifecycleAggregate
+}
+
+const PORTABLE_GAME_ID = '73000000-0000-4000-8000-000000000001'
+const PORTABLE_RUN_ID = '72000000-0000-4000-8000-000000000001'
+const PORTABLE_PROMPT_DIGEST = 'd'.repeat(64)
+const PORTABLE_PROMPT_SHA256 = 'a'.repeat(64)
+const PORTABLE_QUESTION = 'How should this decision be tested?'
+const PORTABLE_EXACT_INPUT = JSON.stringify({
+  reviewed_prompt: {
+    game_evidence: {
+      original_problem: PORTABLE_QUESTION,
+    },
+  },
+  portia_authorization: {
+    decision: 'permit',
+    usable_candidates: [{ candidate: 'candidate-white-queen', weight: 83 }],
+  },
+}, null, 2)
+const DIVISION_PROMPT_SENTINEL = 'DIVISION_PROVIDER_PROMPT_SENTINEL'
+const ANSWER_PROMPT_SENTINEL = 'ANSWER_PROVIDER_PROMPT_SENTINEL'
+const HIDDEN_CONTROL_SENTINELS = [
+  DIVISION_PROMPT_SENTINEL,
+  ANSWER_PROMPT_SENTINEL,
+  'SYSTEM_PROMPT_SENTINEL',
+  'DEVELOPER_PROMPT_SENTINEL',
+  'CREDENTIAL_SENTINEL',
+  'RESPONSE_SCHEMA_SENTINEL',
+] as const
+
+function portablePiece(
+  id: string,
+  side: Piece['side'],
+  position: Piece['position'],
+): Piece {
+  return {
+    id,
+    side,
+    kind: side === 'white' ? 'queen' : 'rook',
+    position,
+    moved: true,
+  }
+}
+
+function makePortableGame(): DurableGame {
+  const facets = makeProblemFacets('Portable facet')
+  const parts = makeProblemParts('portable-lifecycle-ui')
+  const attacker = portablePiece('white-queen', 'white', { ring: 1, sector: 1 })
+  const captured = portablePiece('black-rook', 'black', { ring: 1, sector: 1 })
+  const capture: CaptureRecord = {
+    id: 'portable-capture-1',
+    turn: 1,
+    attacker,
+    captured,
+    cell: { ring: 1, sector: 1 },
+    part: parts[9]!,
+    resonance: 83,
+    narration: 'The evidence lens displaced an unsupported shortcut.',
+  }
+  const state: GameView = {
+    versions: CURRENT_GAME_VERSIONS,
+    pieces: [attacker],
+    turn: 'white',
+    completedPlies: 2,
+    quietPlies: 0,
+    events: [
+      {
+        version: 1,
+        type: 'move',
+        ply: 1,
+        side: 'white',
+        pieceId: attacker.id,
+        from: { ring: 2, sector: 1 },
+        to: { ring: 1, sector: 1 },
+        capturedPieceId: captured.id,
+        promotedTo: 'queen',
+      },
+      {
+        version: 1,
+        type: 'forced-pass',
+        ply: 2,
+        side: 'black',
+        reason: 'no-legal-move',
+      },
+    ],
+    captures: [capture],
+    lastMove: {
+      from: { ring: 2, sector: 1 },
+      to: { ring: 1, sector: 1 },
+    },
+    outcome: {
+      winner: 'white',
+      reason: 'no-moves',
+      completedTurn: 2,
+      terminalCapture: capture,
+    },
+  }
+
+  return {
+    id: PORTABLE_GAME_ID,
+    sourceGameId: null,
+    revision: 17,
+    status: 'answered',
+    problem: PORTABLE_QUESTION,
+    division: {
+      seed: 'portable-seed',
+      facets,
+      parts,
+      model: 'test-division-model',
+      prompt: DIVISION_PROMPT_SENTINEL,
+    },
+    state,
+    answer: {
+      answer: 'A generated answer that must not be copied into the evidence payload.',
+      model: 'test-answer-model',
+      prompt: [
+        ANSWER_PROMPT_SENTINEL,
+        'SYSTEM_PROMPT_SENTINEL',
+        'DEVELOPER_PROMPT_SENTINEL',
+        'CREDENTIAL_SENTINEL',
+        'RESPONSE_SCHEMA_SENTINEL',
+      ].join(' '),
+    },
+  }
+}
+
+function makePortablePortiaReview(): PortiaReview {
+  return {
+    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    reviewedAnswerPromptDigest: PORTABLE_PROMPT_DIGEST,
+    promptDecision: 'permit',
+    promptDecisionRationale:
+      'The board-derived prompt may proceed with its evidence boundary intact.',
+    runSummary:
+      'Portia found a usable reversible-test signal and retained its uncertainty.',
+    assessments: [{
+      candidateId: 'candidate-white-queen',
+      disposition: 'preserved',
+      survivingInterpretation:
+        'A small reversible test can reveal whether this decision works.',
+      requiredQualification: null,
+      redundancyClusterId: null,
+      coverageTags: ['evidence_or_reality', 'agency_or_action'],
+      missingEvidence: ['A measured baseline before the trial'],
+      countercase: 'The symbolic path may not predict a real-world result.',
+      reversalCondition: 'Reverse course if the measured threshold is missed.',
+      attackFindings: PORTIA_ATTACK_TYPES.map((attackType) => ({
+        attackType,
+        outcome: 'passed' as const,
+        severity: 'low' as const,
+        finding: `The ${attackType} check is acceptable for a bounded trial.`,
+        consequence: 'The answer can preserve this signal without overstating it.',
+        requiredRevision: null,
+      })),
+    }],
+    crossCandidateContradictions: [],
+    redundancyClusters: [],
+    missingCoverage: [],
+    unresolvedQuestions: [],
+    recommendedGateInputs: {
+      tensionCandidatePairs: [],
+      fatalContradictionIds: [],
+      fieldRepairReasons: [],
+    },
+  }
+}
+
+function makePortableResearch(): ResearchRecord {
+  return {
+    id: '81000000-0000-4000-8000-000000000001',
+    lifecycleRunId: PORTABLE_RUN_ID,
+    gameId: PORTABLE_GAME_ID,
+    stage: 'portia',
+    requestedBy: 'research-policy',
+    policyVersion: 'research-policy/1',
+    materiality: 'required',
+    reason: 'The prompt depends on a current external benchmark.',
+    query: 'official reversible trial measurement guidance 2026',
+    status: 'completed',
+    provider: 'codex',
+    transport: 'local',
+    model: 'codex-search',
+    bounds: {
+      invocationLimit: 1,
+      resultLimit: 5,
+      sourceLimit: 3,
+      timeoutMs: 30_000,
+      synthesisCharacterLimit: 4_000,
+    },
+    attemptCount: 1,
+    executedQueries: ['official reversible trial measurement guidance 2026'],
+    searchSynthesis: 'The source supports a baseline and a stopping rule.',
+    directPageTextFetched: false,
+    retrievedFacts: [],
+    sources: [{
+      id: '82000000-0000-4000-8000-000000000001',
+      citationId: 'source-1',
+      ordinal: 1,
+      title: 'Measurement guidance',
+      url: 'https://www.nist.gov/example',
+      hostname: 'www.nist.gov',
+      trust: 'government_or_education',
+      discoveredFrom: 'search_activity',
+      createdAt: '2026-08-02T20:00:01.000Z',
+    }],
+    omittedSourceCount: 0,
+    injectionSignalsDetected: [],
+    contentDigest: 'e'.repeat(64),
+    failureCode: null,
+    startedAt: '2026-08-02T20:00:00.000Z',
+    completedAt: '2026-08-02T20:00:30.000Z',
+    createdAt: '2026-08-02T20:00:00.000Z',
+    updatedAt: '2026-08-02T20:00:30.000Z',
+  }
+}
+
+function makePortableLifecycle(game: DurableGame): LifecycleAggregate {
+  const lifecycle = aggregate('charlotte_complete', 'answer')
+  const portia = makePortablePortiaReview()
+  const facet = game.division?.parts[9]
+  if (!facet) throw new Error('The portable fixture is missing its mapped signal.')
+
+  return {
+    ...lifecycle,
+    terminalFingerprint: 'f'.repeat(64),
+    answerPromptDigest: PORTABLE_PROMPT_DIGEST,
+    answerUserPrompt: PORTABLE_EXACT_INPUT,
+    answerUserPromptSha256: PORTABLE_PROMPT_SHA256,
+    survivors: [{
+      candidateId: 'candidate-white-queen',
+      pieceId: 'white-queen',
+      side: 'white',
+      pieceKind: 'queen',
+      originalPieceKind: 'bishop',
+      pieceRole: 'evidence-bearing survivor',
+      sidePolarity: 'constructive test',
+      finalCoordinate: { ring: 1, sector: 1 },
+      facet,
+      route: [{
+        ply: 1,
+        from: { ring: 2, sector: 1 },
+        to: { ring: 1, sector: 1 },
+        capturedPieceId: 'black-rook',
+        promotedTo: 'queen',
+      }],
+      capturesMade: ['portable-capture-1'],
+      attackedPlies: [1],
+      moveCount: 1,
+      promoted: true,
+      terminalGameId: PORTABLE_GAME_ID,
+      attemptId: PORTABLE_RUN_ID,
+      sourceDigest: 'c'.repeat(64),
+    }],
+    portiaProgress: {
+      currentCandidateId: null,
+      completedCandidateIds: ['candidate-white-queen'],
+      completedAssessments: portia.assessments,
+    },
+    portia,
+    gate: {
+      algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      passed: true,
+      usableCandidateCount: 1,
+      preservedCount: 1,
+      woundedCount: 0,
+      consumedCount: 0,
+      unresolvedCount: 0,
+      independentClusterCount: 1,
+      coverageResults: [{
+        tag: 'evidence_or_reality',
+        satisfied: true,
+        candidateIds: ['candidate-white-queen'],
+      }],
+      severeUnresolvedObjectionCount: 0,
+      contradictionResults: {
+        fatalUnaddressedIds: [],
+        tensionCandidatePairs: [],
+      },
+      missingRequirements: [],
+      recommendedNextTransition: 'answer',
+      explanation: 'Portia permitted the exact board-derived prompt.',
+      inputDigest: 'b'.repeat(64),
+    },
+    research: [makePortableResearch()],
+    versions: {
+      software: CURRENT_LIFECYCLE_VERSIONS.software,
+      lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+      portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+      portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      gateAlgorithm: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      retryPolicy: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+      charlottePrompt: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+      charlotteContract: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+      wilburRecord: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      rules: CURRENT_GAME_VERSIONS.rules,
+      engine: CURRENT_GAME_VERSIONS.engine,
+      cast: CURRENT_GAME_VERSIONS.cast,
+      event: CURRENT_GAME_VERSIONS.event,
+    },
+  }
+}
+
+function renderStage(
+  lifecycle: LifecycleAggregate,
+  options: {
+    busy?: boolean
+    boardAnswer?: GeneratedAnswer | null
+    game?: DurableGame | null
+    gameStatus?: 'completed' | 'answering' | 'answer_failed' | 'answered'
+  } = {},
+) {
+  const onRetry = vi.fn()
+
+  render(
+    <LifecycleStage
+      problem="How should this decision be tested?"
+      parts={[]}
+      pieces={[]}
+      captures={[]}
+      lastMove={null}
+      outcome={{ winner: null, reason: 'move-limit', completedTurn: 113 }}
+      game={options.game ?? null}
+      lifecycle={lifecycle}
+      gameStatus={options.gameStatus ?? 'completed'}
+      boardAnswer={options.boardAnswer ?? null}
+      busy={options.busy ?? false}
+      error=""
+      actionPendingIndex={null}
+      wilburPending={false}
+      onRefresh={vi.fn()}
+      onRetry={onRetry}
+      onCreateAction={vi.fn()}
+      onUpdateAction={vi.fn()}
+      onObserve={vi.fn(async () => true)}
+    />,
+  )
+
+  return { onRetry }
+}
+
+describe('LifecycleStage terminal Gate experience', () => {
+  it.each([
+    ['the Gate recommendation', 'gate_failed' as const, 'insufficient_basis' as const],
+    ['the persisted lifecycle state', 'insufficient_basis' as const, 'retry_game' as const],
+  ])('presents insufficient basis as complete from %s', (_label, state, recommendation) => {
+    renderStage(aggregate(state, recommendation, {
+      sameFieldRetryCount: 1,
+      fieldRegenerationCount: 1,
+    }))
+
+    expect(screen.getByRole('heading', { name: 'The Gate reached a bounded stop.' }))
+      .toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Inquiry complete: insufficient basis' }))
+      .toBeInTheDocument()
+    expect(screen.getByText(/valid WebChess conclusion, not a stalled game/i))
+      .toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /bounded path/i })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('process-graphic')).not.toBeInTheDocument()
+
+    const budget = screen.getByText('Further same-field paths').closest('dl')
+    expect(budget).not.toBeNull()
+    if (!budget) throw new Error('The authorized-path summary was not rendered.')
+    expect(within(budget).getAllByText('0 authorized · Gate stop')).toHaveLength(2)
+    expect(screen.queryByText(/-\d/)).not.toBeInTheDocument()
+  })
+
+  it('disables the retry action and names the pending state while a retry starts', () => {
+    renderStage(aggregate('retry_running', 'retry_game'), { busy: true })
+
+    expect(screen.getByRole('button', { name: 'Starting next bounded path…' }))
+      .toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Starting next bounded path…' }))
+      .toHaveAttribute('aria-busy', 'true')
+  })
+
+  it('shows a bounded technical stop without presenting its retained audit candidate as current', () => {
+    const unavailableLifecycle = {
+      ...aggregate('portia_unavailable', 'retry_game'),
+      answerPromptDigest: 'd'.repeat(64),
+      portiaActiveModelRequestId: null,
+      portiaFailedAttemptCount: 3,
+      portiaFailureLimit: 3,
+      survivors: [
+        {
+          candidateId: 'candidate-1',
+          finalCoordinate: { ring: 0, sector: 0 },
+          facet: { title: 'Reviewed signal one', focus: 'Completed review one' },
+        },
+        {
+          candidateId: 'candidate-2',
+          finalCoordinate: { ring: 1, sector: 1 },
+          facet: { title: 'Reviewed signal two', focus: 'Completed review two' },
+        },
+        {
+          candidateId: 'candidate-3',
+          finalCoordinate: { ring: 2, sector: 2 },
+          facet: { title: 'Stale terminal candidate', focus: 'Must not remain current' },
+        },
+      ],
+      portiaProgress: {
+        currentCandidateId: 'candidate-3',
+        completedCandidateIds: ['candidate-1', 'candidate-2'],
+        completedAssessments: [],
+      },
+      portia: null,
+      gate: null,
+    } as unknown as LifecycleAggregate
+
+    renderStage(unavailableLifecycle)
+
+    const stop = screen.getByRole('status', {
+      name: 'Inquiry complete: prompt validation unavailable',
+    })
+    expect(stop).toHaveTextContent(/bounded technical stop, not a stalled game/i)
+    expect(stop).toHaveTextContent(/after 3 of its 3 provider attempts/i)
+    expect(stop).toHaveTextContent(/No prompt was permitted and no substantive answer was generated/i)
+    expect(screen.getByTestId('radial-board')).toHaveAttribute(
+      'data-portia-status',
+      'unavailable',
+    )
+    expect(screen.getByTestId('radial-board')).toHaveTextContent(
+      /2 of 3 board signals have saved reviews; no answer was generated/i,
+    )
+    expect(screen.getByTestId('radial-board'))
+      .not.toHaveAttribute('data-portia-current-cell')
+    expect(screen.getByTestId('radial-board'))
+      .not.toHaveAttribute('data-portia-current-label')
+    expect(screen.getByTestId('radial-board')).toHaveAttribute(
+      'data-portia-reviewed-cells',
+      '0:0,1:1',
+    )
+    expect(screen.getByTestId('radial-board')).not.toHaveTextContent(/Current signal:/i)
+    expect(screen.getByTestId('radial-board')).not.toHaveTextContent(
+      /Stale terminal candidate/i,
+    )
+    expect(screen.queryByRole('heading', {
+      name: 'The substantive board-derived answer',
+    })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', {
+      name: 'The answer, qualified for people and action',
+    })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('process-graphic')).not.toBeInTheDocument()
+
+    const budget = screen.getByText('Further same-field paths').closest('dl')
+    expect(budget).not.toBeNull()
+    if (!budget) throw new Error('The Portia-stop budget summary was not rendered.')
+    expect(within(budget).getAllByText('0 authorized · Portia stop')).toHaveLength(2)
+  })
+
+  it('shows the board-derived Answer before Charlotte’s separate qualification', () => {
+    const lifecycle = aggregate('charlotte_complete', 'answer')
+    const exactQualifications = [
+      'Use this wounded signal only as a bounded hypothesis until direct observation confirms it.',
+      'Keep the affected stakeholder visible and reverse course if the stated harm signal appears.',
+    ] as const
+    const completedLifecycle = {
+      ...lifecycle,
+      gate: {
+        ...lifecycle.gate,
+        passed: true,
+        missingRequirements: [],
+        recommendedNextTransition: 'answer' as const,
+        explanation: 'Portia permitted the exact board-derived prompt.',
+      },
+      charlotte: {
+        supportingCandidateIds: ['candidate-wounded-1', 'candidate-wounded-2'],
+        qualificationsByCandidateId: {
+          'candidate-wounded-1': exactQualifications[0],
+          'candidate-wounded-2': exactQualifications[1],
+        },
+        exactlyThreeNextActions: [],
+      },
+      charlotteRenderedAnswer: 'Charlotte preserves the claim while naming its limits.',
+    } as unknown as LifecycleAggregate
+
+    renderStage(completedLifecycle, {
+      boardAnswer: {
+        answer: 'The weighted board supports a small, reversible trial.',
+        model: 'test-model',
+        prompt: 'approved board prompt',
+      },
+    })
+
+    const boardHeading = screen.getByRole('heading', {
+      name: 'The substantive board-derived answer',
+    })
+    const charlotteHeading = screen.getByRole('heading', {
+      name: 'The answer, qualified for people and action',
+    })
+
+    expect(screen.getByText(/weighted board supports a small, reversible trial/i))
+      .toBeInTheDocument()
+    expect(screen.getByText(/Generated only after Portia reviewed the candidate prompt/i))
+      .toBeInTheDocument()
+    expect(screen.getByText(/Charlotte preserves the claim while naming its limits/i))
+      .toBeInTheDocument()
+    const charlotteCard = charlotteHeading.closest('section')
+    expect(charlotteCard).not.toBeNull()
+    if (!charlotteCard) throw new Error('The completed Charlotte card was not rendered.')
+    const structuredSupport = charlotteCard.querySelector<HTMLElement>('.charlotte-support')
+    expect(structuredSupport).not.toBeNull()
+    if (!structuredSupport) throw new Error('Charlotte’s structured support was not rendered.')
+    for (const exactQualification of exactQualifications) {
+      expect(within(structuredSupport).getByText(exactQualification)).toBeInTheDocument()
+      expect(within(charlotteCard).getAllByText(exactQualification)).toHaveLength(1)
+    }
+    expect(
+      boardHeading.compareDocumentPosition(charlotteHeading)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it('reveals the exact durable user prompt in a collapsed Portia-to-Answer handoff', () => {
+    const exactUserPrompt = JSON.stringify({
+      reviewed_prompt: {
+        game_evidence: {
+          original_problem: 'How should this decision be tested?',
+        },
+      },
+      portia_authorization: {
+        usable_candidates: [{ candidate: 'candidate-wounded-1', weight: 83 }],
+      },
+    }, null, 2)
+    const promptSha256 = 'a'.repeat(64)
+    const lifecycle = aggregate('charlotte_complete', 'answer')
+    const completedLifecycle = {
+      ...lifecycle,
+      answerUserPrompt: exactUserPrompt,
+      answerUserPromptSha256: promptSha256,
+      gate: {
+        ...lifecycle.gate,
+        passed: true,
+        missingRequirements: [],
+        recommendedNextTransition: 'answer' as const,
+        explanation: 'Portia permitted the exact board-derived prompt.',
+      },
+    } as unknown as LifecycleAggregate
+
+    renderStage(completedLifecycle, {
+      boardAnswer: {
+        answer: 'The weighted board supports a small, reversible trial.',
+        model: 'test-model',
+        prompt: 'Internal provider request fixture.',
+      },
+    })
+
+    const disclosureLabel = screen.getByText(
+      'Inspect player-visible Answer input',
+    )
+    const disclosure = disclosureLabel.closest('details')
+    expect(disclosure).not.toBeNull()
+    if (!disclosure) throw new Error('The final answer prompt disclosure was not rendered.')
+
+    const promptRegion = disclosure.querySelector<HTMLElement>(
+      '.answer-prompt-disclosure__prompt',
+    )
+    expect(disclosure).not.toHaveAttribute('open')
+    expect(promptRegion).not.toBeNull()
+    expect(promptRegion).not.toBeVisible()
+    expect(promptRegion?.querySelector('pre code')?.textContent).toBe(exactUserPrompt)
+    expect(within(disclosure).getByText(promptSha256)).not.toBeVisible()
+    expect(within(disclosure).getByText(
+      /Provider system and developer instructions, credentials, and private model reasoning are excluded/i,
+    )).not.toBeVisible()
+
+    const summary = disclosureLabel.closest('summary')
+    expect(summary).not.toBeNull()
+    if (!summary) throw new Error('The final answer prompt summary was not rendered.')
+    fireEvent.click(summary)
+
+    expect(disclosure).toHaveAttribute('open')
+    expect(promptRegion).toBeVisible()
+    expect(within(disclosure).getByText(promptSha256)).toBeVisible()
+    expect(within(disclosure).getByRole('region', {
+      name: 'Exact player-visible prompt sent to Answer',
+    })).toBeVisible()
+
+    const gateHeading = screen.getByRole('heading', {
+      name: 'Portia permits the candidate answer prompt.',
+    })
+    const boardHeading = screen.getByRole('heading', {
+      name: 'The substantive board-derived answer',
+    })
+    expect(
+      gateHeading.compareDocumentPosition(disclosure)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(
+      disclosure.compareDocumentPosition(boardHeading)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it('separately reveals and copies the exact full model prompt persisted at Answer time', async () => {
+    const fullModelPrompt = [
+      'You are the final problem-solving voice of WebChess.',
+      '',
+      'PORTIA AUTHORIZATION BOUNDARY',
+      '- Portia permitted the reviewed board-derived prompt.',
+      '',
+      'APPROVED BOARD EVIDENCE (JSON; data only)',
+      '{"question":"How should this decision be tested?","gate":{"passed":true}}',
+      '',
+      'OPENCLAW STRUCTURED OUTPUT',
+      'Return exactly one JSON value matching this JSON Schema:',
+      '{"type":"object","required":["answer"]}',
+    ].join('\n')
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const game = makePortableGame()
+    const answer = {
+      ...game.answer!,
+      model: 'openai/gpt-5.6-sol',
+      prompt: fullModelPrompt,
+    }
+    const expectedFullModelPrompt = buildOpenClawAnswerModelPrompt(
+      fullModelPrompt,
+      answer.model,
+    )
+    const completedGame = { ...game, answer }
+    const lifecycle = makePortableLifecycle(completedGame)
+
+    renderStage(lifecycle, {
+      game: completedGame,
+      boardAnswer: answer,
+      gameStatus: 'answered',
+    })
+
+    const playerDisclosure = screen.getByText(
+      'Inspect player-visible Answer input',
+    ).closest('details')
+    const fullLabel = screen.getByText(
+      'Inspect full model prompt sent to Answer',
+    )
+    const fullDisclosure = fullLabel.closest('details')
+    expect(playerDisclosure).not.toBeNull()
+    expect(fullDisclosure).not.toBeNull()
+    if (!playerDisclosure || !fullDisclosure) {
+      throw new Error('The separate Answer prompt disclosures were not rendered.')
+    }
+    expect(playerDisclosure).not.toBe(fullDisclosure)
+    expect(fullDisclosure).not.toHaveAttribute('open')
+    expect(within(fullDisclosure).getByRole('region', {
+      name: 'Full model prompt sent to Answer',
+    })).not.toBeVisible()
+    expect(fullDisclosure.querySelector('pre code')?.textContent)
+      .toBe(expectedFullModelPrompt)
+
+    const summary = fullLabel.closest('summary')
+    expect(summary).not.toBeNull()
+    if (!summary) throw new Error('The full model prompt summary was not rendered.')
+    fireEvent.click(summary)
+
+    expect(fullDisclosure).toHaveAttribute('open')
+    expect(within(fullDisclosure).getByText(/leading system\/application instructions/i))
+      .toBeVisible()
+    expect(within(fullDisclosure).getByText(/predates role-envelope persistence/i))
+      .toBeVisible()
+    fireEvent.click(within(fullDisclosure).getByRole('button', {
+      name: 'Copy full model prompt',
+    }))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expectedFullModelPrompt))
+    const copiedArtifact = JSON.parse(expectedFullModelPrompt) as {
+      systemPrompt: string
+      messages: Array<{ content: string }>
+    }
+    expect(copiedArtifact.systemPrompt).toBe(OPENCLAW_LOCAL_MODEL_RUN_SYSTEM_PROMPT)
+    expect(copiedArtifact.messages[0]?.content).toBe(fullModelPrompt)
+    expect(within(fullDisclosure).getByRole('status')).toHaveTextContent(
+      'Full model prompt copied to the clipboard.',
+    )
+  })
+
+  it('copies a self-contained portable prompt from the actual durable game record', async () => {
+    const copiedValues: string[] = []
+    const writeText = vi.fn(async (text: string) => {
+      copiedValues.push(text)
+    })
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const game = makePortableGame()
+    const lifecycle = makePortableLifecycle(game)
+
+    renderStage(lifecycle, {
+      game,
+      boardAnswer: game.answer,
+      gameStatus: 'answered',
+    })
+
+    const disclosureLabel = screen.getByText(
+      'Inspect player-visible Answer input',
+    )
+    const disclosure = disclosureLabel.closest('details')
+    expect(disclosure).not.toBeNull()
+    if (!disclosure) throw new Error('The portable prompt disclosure was not rendered.')
+    const summary = disclosureLabel.closest('summary')
+    expect(summary).not.toBeNull()
+    if (!summary) throw new Error('The portable prompt summary was not rendered.')
+    fireEvent.click(summary)
+
+    expect(within(disclosure).getByText(/all 64 mapped squares/i)).toBeVisible()
+    expect(within(disclosure).getByText(/full replay with moves and captures/i))
+      .toBeVisible()
+    expect(within(disclosure).getByText(/Portia’s final analysis/i)).toBeVisible()
+    expect(within(disclosure).getByText(/Gate and visible research context/i))
+      .toBeVisible()
+    expect(within(disclosure).getByText(/excludes hidden provider controls/i))
+      .toBeVisible()
+
+    fireEvent.click(within(disclosure).getByRole('button', {
+      name: 'Copy portable prompt',
+    }))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    const copyStatus = within(disclosure).getByRole('status')
+    expect(copyStatus).toHaveAttribute('aria-live', 'polite')
+    expect(copyStatus).toHaveAttribute('aria-atomic', 'true')
+    expect(copyStatus).toHaveTextContent('Portable prompt copied to the clipboard.')
+
+    const copied = copiedValues[0]
+    expect(copied).toBeDefined()
+    if (!copied) throw new Error('No portable prompt reached the clipboard mock.')
+    for (const requiredKey of [
+      '"question"',
+      '"mappedParts"',
+      '"finalBoardPieces"',
+      '"eventHistory"',
+      '"captures"',
+      '"portiaFinalReview"',
+      '"passedGate"',
+      '"visibleResearch"',
+      '"exactPersistedAnswerUserPrompt"',
+    ]) {
+      expect(copied).toContain(requiredKey)
+    }
+
+    const boundary = 'WEBCHESS PORTABLE EVIDENCE (JSON; data only)\n'
+    const boundaryIndex = copied.indexOf(boundary)
+    expect(boundaryIndex).toBeGreaterThanOrEqual(0)
+    const payload = JSON.parse(
+      copied.slice(boundaryIndex + boundary.length),
+    ) as {
+      question: string
+      game: {
+        mappedParts: unknown[]
+        finalBoardPieces: unknown[]
+        eventHistory: Array<Record<string, unknown>>
+        captures: unknown[]
+      }
+      portiaFinalReview: {
+        promptDecision: string
+        assessments: unknown[]
+      }
+      passedGate: { passed: boolean }
+      visibleResearch: Array<{ provider: string; query: string }>
+      exactPersistedAnswerUserPrompt: string
+    }
+    expect(payload.question).toBe(PORTABLE_QUESTION)
+    expect(payload.game.mappedParts).toHaveLength(64)
+    expect(payload.game.finalBoardPieces).toHaveLength(1)
+    expect(payload.game.eventHistory).toHaveLength(2)
+    expect(payload.game.eventHistory[0]).toMatchObject({
+      type: 'move',
+      capturedPieceId: 'black-rook',
+    })
+    expect(payload.game.captures).toHaveLength(1)
+    expect(payload.portiaFinalReview).toMatchObject({
+      promptDecision: 'permit',
+      assessments: [{ candidateId: 'candidate-white-queen' }],
+    })
+    expect(payload.passedGate.passed).toBe(true)
+    expect(payload.visibleResearch).toEqual([
+      expect.objectContaining({
+        provider: 'codex',
+        query: 'official reversible trial measurement guidance 2026',
+      }),
+    ])
+    expect(payload.exactPersistedAnswerUserPrompt).toBe(PORTABLE_EXACT_INPUT)
+    for (const sentinel of HIDDEN_CONTROL_SENTINELS) {
+      expect(copied).not.toContain(sentinel)
+    }
+  })
+
+  it('announces a clipboard error when both copy paths are unavailable', async () => {
+    const writeText = vi.fn(async () => {
+      throw new Error('Clipboard permission denied')
+    })
+    const execCommand = vi.fn(() => false)
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    })
+    const game = makePortableGame()
+    const lifecycle = makePortableLifecycle(game)
+
+    renderStage(lifecycle, { game })
+
+    const disclosureLabel = screen.getByText(
+      'Inspect player-visible Answer input',
+    )
+    const disclosure = disclosureLabel.closest('details')
+    expect(disclosure).not.toBeNull()
+    if (!disclosure) throw new Error('The portable prompt disclosure was not rendered.')
+    const summary = disclosureLabel.closest('summary')
+    expect(summary).not.toBeNull()
+    if (!summary) throw new Error('The portable prompt summary was not rendered.')
+    fireEvent.click(summary)
+    fireEvent.click(within(disclosure).getByRole('button', {
+      name: 'Copy portable prompt',
+    }))
+
+    const copyStatus = within(disclosure).getByRole('status')
+    await waitFor(() => expect(copyStatus).toHaveTextContent(
+      'The portable prompt could not be copied.',
+    ))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(execCommand).toHaveBeenCalledWith('copy')
+    expect(copyStatus).toHaveAttribute('aria-live', 'polite')
+    expect(copyStatus).toHaveAttribute('aria-atomic', 'true')
+  })
+
+  it('does not show a final prompt disclosure before the durable user prompt exists', () => {
+    const lifecycle = aggregate('gate_passed', 'answer')
+    const passedLifecycle = {
+      ...lifecycle,
+      gate: {
+        ...lifecycle.gate,
+        passed: true,
+        missingRequirements: [],
+        recommendedNextTransition: 'answer' as const,
+      },
+    } as unknown as LifecycleAggregate
+
+    renderStage(passedLifecycle)
+
+    expect(screen.queryByText('Inspect player-visible Answer input'))
+      .not.toBeInTheDocument()
+    expect(screen.queryByText('Inspect full model prompt sent to Answer'))
+      .not.toBeInTheDocument()
+  })
+
+  it('keeps the board Answer visible when Charlotte exhausts its bounded attempts', () => {
+    const lifecycle = aggregate('charlotte_unavailable', 'answer')
+    const unavailableLifecycle = {
+      ...lifecycle,
+      gate: {
+        ...lifecycle.gate,
+        passed: true,
+        missingRequirements: [],
+        recommendedNextTransition: 'answer' as const,
+        explanation: 'Portia permitted the exact board-derived prompt.',
+      },
+      charlotteActiveModelRequestId: null,
+      charlotteFailedAttemptCount: 3,
+      charlotteFailureLimit: 3,
+      charlotte: null,
+      charlotteRenderedAnswer: null,
+      wilburActions: [],
+      wilburObservations: [],
+    } as unknown as LifecycleAggregate
+
+    renderStage(unavailableLifecycle, {
+      boardAnswer: {
+        answer: 'The weighted board supports a small, reversible trial.',
+        model: 'test-model',
+        prompt: 'approved board prompt',
+      },
+      busy: true,
+      gameStatus: 'answered',
+    })
+
+    expect(screen.getByRole('heading', {
+      name: 'The substantive board-derived answer',
+    })).toBeInTheDocument()
+    expect(screen.getByText(/weighted board supports a small, reversible trial/i))
+      .toBeInTheDocument()
+    const unavailable = screen.getByRole('status', {
+      name: 'Charlotte qualification is unavailable',
+    })
+    expect(unavailable).toHaveTextContent(/after 3 of 3 bounded provider attempts/i)
+    expect(unavailable).toHaveTextContent(
+      /Answer above remains available exactly as generated.*not Charlotte-qualified/i,
+    )
+    expect(unavailable).toHaveTextContent(/No Wilbur actions were issued/i)
+    expect(screen.queryByRole('heading', { name: /Let the web meet reality/i }))
+      .not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Track with Wilbur/i }))
+      .not.toBeInTheDocument()
+    expect(screen.queryByTestId('process-graphic')).not.toBeInTheDocument()
+  })
+
+  it('nests visible research inside the seven stages and preserves its record IDs in Web provenance', () => {
+    const research: ResearchRecord = {
+      id: '81000000-0000-4000-8000-000000000001',
+      lifecycleRunId: '72000000-0000-4000-8000-000000000001',
+      gameId: '73000000-0000-4000-8000-000000000001',
+      stage: 'portia',
+      requestedBy: 'research-policy',
+      policyVersion: 'research-policy/1',
+      materiality: 'required',
+      reason: 'The prompt depends on a current external benchmark.',
+      query: 'official LLM inference latency benchmark 2026',
+      status: 'completed',
+      provider: 'codex',
+      transport: 'local',
+      model: 'gpt-5.4-search',
+      bounds: {
+        invocationLimit: 1,
+        resultLimit: 5,
+        sourceLimit: 3,
+        timeoutMs: 30_000,
+        synthesisCharacterLimit: 4_000,
+      },
+      attemptCount: 1,
+      executedQueries: ['official LLM inference latency benchmark 2026'],
+      searchSynthesis: 'The available links separate latency from throughput.',
+      directPageTextFetched: false,
+      retrievedFacts: [],
+      sources: [{
+        id: '82000000-0000-4000-8000-000000000001',
+        citationId: 'source-1',
+        ordinal: 1,
+        title: 'Measurement guidance',
+        url: 'https://www.nist.gov/example',
+        hostname: 'www.nist.gov',
+        trust: 'government_or_education',
+        discoveredFrom: 'search_activity',
+        createdAt: '2026-08-02T20:00:01.000Z',
+      }],
+      omittedSourceCount: 0,
+      injectionSignalsDetected: [],
+      contentDigest: 'a'.repeat(64),
+      failureCode: null,
+      startedAt: '2026-08-02T20:00:00.000Z',
+      completedAt: '2026-08-02T20:00:30.000Z',
+      createdAt: '2026-08-02T20:00:00.000Z',
+      updatedAt: '2026-08-02T20:00:30.000Z',
+    }
+    const lifecycle = {
+      ...aggregate('portia_complete', 'answer'),
+      research: [research],
+      activities: [{
+        id: '83000000-0000-4000-8000-000000000001',
+        sequence: 4,
+        stage: 'portia',
+        activityType: 'research_completed',
+        stateFrom: 'portia_running',
+        stateTo: 'portia_complete',
+        inputEntityIds: [research.id],
+        outputEntityIds: [research.sources[0]!.id],
+        responsibleAgentIds: ['research-broker'],
+        configurationDigest: 'b'.repeat(64),
+        status: 'completed',
+        eventVersion: 1,
+        createdAt: '2026-08-02T20:00:30.000Z',
+      }],
+    } as unknown as LifecycleAggregate
+
+    renderStage(lifecycle)
+
+    const railLabels = Array.from(
+      document.querySelectorAll('.lifecycle-step > strong'),
+      (node) => node.textContent,
+    )
+    expect(railLabels).toEqual([
+      'Anansi',
+      'Chess',
+      'Portia',
+      'Answer',
+      'Charlotte',
+      'Wilbur',
+      'Web',
+    ])
+    expect(railLabels).not.toContain('Research')
+    expect(screen.getByRole('heading', { name: 'Automatic web research' }))
+      .toBeInTheDocument()
+    expect(screen.getAllByText('official LLM inference latency benchmark 2026'))
+      .toHaveLength(2)
+    expect(screen.getByText(/available links separate latency from throughput/i))
+      .toBeInTheDocument()
+
+    const provenance = document.querySelector<HTMLElement>('.research-provenance')
+    expect(provenance).not.toBeNull()
+    if (!provenance) throw new Error('The research provenance detail was not rendered.')
+    expect(within(provenance).getByText(/Portia research · terminal completed/i))
+      .toBeInTheDocument()
+    expect(provenance).toHaveTextContent(research.id)
+    expect(provenance).toHaveTextContent(research.sources[0]!.id)
+  })
+})

@@ -295,9 +295,9 @@ export function captureAttentionWeight(
 }
 
 /**
- * Selects a move with the search engine. Ties are broken from the seed so the
- * same problem always replays the same game, while equally strong moves still
- * vary between different problems.
+ * Selects a move with the search engine. Ties are broken from the seed so one
+ * saved game replays deterministically, while equally strong moves can vary
+ * across bounded trajectories that use different durable seeds.
  */
 export function chooseAutoMove(
   pieces: readonly Piece[],

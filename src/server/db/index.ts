@@ -22,9 +22,12 @@ export {
   gameEventKindSchema,
   gameEventRowSchema,
   gameEventSourceSchema,
+  gateDecisionRowSchema,
   gameRowSchema,
   gameSideSchema,
   gameStatusSchema,
+  lifecycleEventRowSchema,
+  lifecycleRunRowSchema,
   modelConcurrencySlotRowSchema,
   modelOperationSchema,
   modelRequestRowSchema,
@@ -32,9 +35,13 @@ export {
   parseOptionalResultRow,
   parseResultRows,
   parseSingleResultRow,
+  portiaReviewRowSchema,
   rateBucketRowSchema,
+  charlotteResultRowSchema,
   usageBucketRowSchema,
   userControlsRowSchema,
+  wilburActionRowSchema,
+  wilburObservationRowSchema,
 } from './rows'
 export type {
   GameEventRow,
@@ -44,12 +51,21 @@ export type {
   DeletedUserTombstoneRow,
   ModelConcurrencySlotRow,
   ModelRequestRow,
+  LifecycleRunRow,
+  LifecycleEventRow,
+  PortiaReviewRow,
+  GateDecisionRow,
+  CharlotteResultRow,
+  WilburActionRow,
+  WilburObservationRow,
   RateBucketRow,
   UsageBucketRow,
   UserControlsRow,
 } from './rows'
 
 export { createNeonSqlAdapter, getDatabase } from './sql'
+export { createPostgresSqlAdapter } from './postgres'
+export type { PostgresSqlAdapter } from './postgres'
 export type {
   SqlAdapter,
   SqlResult,

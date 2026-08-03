@@ -1,5 +1,10 @@
 import { z } from 'zod'
 
+import {
+  ASSUMPTION_RESULTS,
+  LIFECYCLE_STATES,
+  WILBUR_ACTION_STATUSES,
+} from '../../lib/lifecycle/contracts'
 import type { SqlResult } from './sql'
 
 const uuidSchema = z.string().uuid()
@@ -242,7 +247,12 @@ export const gameEventRowSchema = z
     }
   })
 
-export const modelOperationSchema = z.enum(['division', 'answer'])
+export const modelOperationSchema = z.enum([
+  'division',
+  'answer',
+  'portia',
+  'charlotte',
+])
 export const modelRequestStatusSchema = z.enum([
   'reserved',
   'in_progress',
@@ -359,9 +369,13 @@ export const rateBucketRowSchema = z
       'model',
       'division',
       'answer',
+      'portia',
+      'charlotte',
       'game_start',
       'game_move',
       'account_export',
+      'wilbur_action',
+      'wilbur_observation',
     ]),
     window_start: timestampSchema,
     window_seconds: z.number().int().positive(),
@@ -403,6 +417,147 @@ export const modelConcurrencySlotRowSchema = z
     },
   )
 
+export const lifecycleRunRowSchema = z.object({
+  id: uuidSchema,
+  clerk_user_id: z.string().min(3).max(255),
+  game_id: uuidSchema,
+  root_run_id: uuidSchema,
+  parent_run_id: uuidSchema.nullable(),
+  state: z.enum(LIFECYCLE_STATES),
+  revision: nonnegativeBigintSchema,
+  field_generation: z.number().int().positive(),
+  game_attempt: z.number().int().positive(),
+  same_field_retry_count: z.number().int().min(0).max(2),
+  field_regeneration_count: z.number().int().min(0).max(1),
+  division_seed: z.string().min(1).max(512),
+  cast_seed: z.string().min(1).max(512),
+  trajectory_seed: z.string().min(1).max(512),
+  retry_reason: z.string().min(8).max(2_000).nullable(),
+  terminal_fingerprint: sha256Schema.nullable(),
+  answer_prompt_digest: sha256Schema.nullable(),
+  survivor_set: z.array(z.unknown()).nullable(),
+  portia_current_candidate_id: z.string().min(3).max(220).nullable(),
+  portia_active_model_request_id: uuidSchema.nullable(),
+  portia_failed_attempt_count: z.number().int().min(0).max(10),
+  portia_failure_limit: z.number().int().min(1).max(10),
+  portia_completed_candidate_ids: z.array(z.string().min(3).max(220)),
+  portia_assessment_drafts: z.array(z.unknown()),
+  charlotte_active_model_request_id: uuidSchema.nullable(),
+  charlotte_failed_attempt_count: z.number().int().min(0).max(10),
+  charlotte_failure_limit: z.number().int().min(1).max(10),
+  software_version: z.string().min(1).max(120),
+  lifecycle_version: z.string().min(1).max(80),
+  rules_version: z.string().min(1).max(80),
+  engine_version: z.string().min(1).max(80),
+  cast_version: z.string().min(1).max(80),
+  event_version: z.number().int().positive(),
+  portia_prompt_version: z.string().min(1).max(80),
+  portia_contract_version: z.string().min(1).max(80),
+  gate_algorithm_version: z.string().min(1).max(80),
+  retry_policy_version: z.string().min(1).max(80),
+  charlotte_prompt_version: z.string().min(1).max(80),
+  charlotte_contract_version: z.string().min(1).max(80),
+  wilbur_record_version: z.string().min(1).max(80),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+})
+
+export const portiaReviewRowSchema = z.object({
+  id: uuidSchema,
+  clerk_user_id: z.string().min(3).max(255),
+  lifecycle_run_id: uuidSchema,
+  model_request_id: uuidSchema,
+  input_digest: sha256Schema,
+  output_digest: sha256Schema,
+  prompt_version: z.string().min(1).max(80),
+  contract_version: z.string().min(1).max(80),
+  review: jsonObjectSchema,
+  created_at: timestampSchema,
+})
+
+export const gateDecisionRowSchema = z.object({
+  id: uuidSchema,
+  clerk_user_id: z.string().min(3).max(255),
+  lifecycle_run_id: uuidSchema,
+  algorithm_version: z.string().min(1).max(80),
+  input_digest: sha256Schema,
+  passed: z.boolean(),
+  result: jsonObjectSchema,
+  answer_user_prompt: z.string().min(1).max(200_000).nullable(),
+  answer_user_prompt_sha256: sha256Schema.nullable(),
+  created_at: timestampSchema,
+})
+
+export const charlotteResultRowSchema = z.object({
+  id: uuidSchema,
+  clerk_user_id: z.string().min(3).max(255),
+  lifecycle_run_id: uuidSchema,
+  model_request_id: uuidSchema,
+  input_digest: sha256Schema,
+  output_digest: sha256Schema,
+  prompt_version: z.string().min(1).max(80),
+  contract_version: z.string().min(1).max(80),
+  result: jsonObjectSchema,
+  rendered_answer: z.string().min(100).max(20_000),
+  created_at: timestampSchema,
+})
+
+export const wilburActionRowSchema = z.object({
+  id: uuidSchema,
+  clerk_user_id: z.string().min(3).max(255),
+  lifecycle_run_id: uuidSchema,
+  charlotte_action_index: z.number().int().min(0).max(2).nullable(),
+  idempotency_key: uuidSchema,
+  request_digest: sha256Schema,
+  actor: z.string().min(2).max(240),
+  action: z.string().min(8).max(2_000),
+  tested_assumption: z.string().min(8).max(1_000),
+  expected_observation: z.string().min(8).max(1_000),
+  decision_threshold: z.string().min(8).max(1_000),
+  review_horizon: z.string().min(2).max(240),
+  status: z.enum(WILBUR_ACTION_STATUSES),
+  revision: nonnegativeBigintSchema,
+  record_version: z.string().min(1).max(80),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+})
+
+export const wilburObservationRowSchema = z.object({
+  id: uuidSchema,
+  clerk_user_id: z.string().min(3).max(255),
+  action_id: uuidSchema,
+  idempotency_key: uuidSchema,
+  request_digest: sha256Schema,
+  observed_at: timestampSchema,
+  observation: z.string().min(3).max(4_000),
+  evidence_classification: z.string().min(3).max(240),
+  expected_effect: z.string().min(1).max(2_000),
+  unexpected_effect: z.string().min(1).max(2_000),
+  stakeholder_response: z.string().min(1).max(2_000),
+  assumption_result: z.enum(ASSUMPTION_RESULTS),
+  next_decision: z.string().min(3).max(2_000),
+  record_version: z.string().min(1).max(80),
+  created_at: timestampSchema,
+})
+
+export const lifecycleEventRowSchema = z.object({
+  id: uuidSchema,
+  clerk_user_id: z.string().min(3).max(255),
+  lifecycle_run_id: uuidSchema,
+  sequence: positiveBigintSchema,
+  stage: z.string().min(1).max(40),
+  activity_type: z.string().min(1).max(80),
+  state_from: z.string().min(1).max(40).nullable(),
+  state_to: z.string().min(1).max(40),
+  input_entity_ids: z.array(z.unknown()),
+  output_entity_ids: z.array(z.unknown()),
+  responsible_agent_ids: z.array(z.unknown()),
+  configuration_digest: sha256Schema,
+  status: z.enum(['started', 'completed', 'failed', 'refused']),
+  event_version: z.number().int().positive(),
+  created_at: timestampSchema,
+})
+
 export type UserControlsRow = z.infer<typeof userControlsRowSchema>
 export type DeletedUserTombstoneRow = z.infer<
   typeof deletedUserTombstoneRowSchema
@@ -417,6 +572,13 @@ export type RateBucketRow = z.infer<typeof rateBucketRowSchema>
 export type ModelConcurrencySlotRow = z.infer<
   typeof modelConcurrencySlotRowSchema
 >
+export type LifecycleRunRow = z.infer<typeof lifecycleRunRowSchema>
+export type PortiaReviewRow = z.infer<typeof portiaReviewRowSchema>
+export type GateDecisionRow = z.infer<typeof gateDecisionRowSchema>
+export type CharlotteResultRow = z.infer<typeof charlotteResultRowSchema>
+export type WilburActionRow = z.infer<typeof wilburActionRowSchema>
+export type WilburObservationRow = z.infer<typeof wilburObservationRowSchema>
+export type LifecycleEventRow = z.infer<typeof lifecycleEventRowSchema>
 
 export function parseResultRows<Output>(
   result: SqlResult,

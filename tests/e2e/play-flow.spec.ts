@@ -11,10 +11,16 @@ import type {
   MoveGameCommand,
 } from '../../src/lib/webchess-api'
 import {
+  PORTIA_ATTACK_TYPES,
+  type LifecycleAggregate,
+} from '../../src/lib/lifecycle/contracts'
+import { CURRENT_LIFECYCLE_VERSIONS } from '../../src/lib/lifecycle/versions'
+import {
   makeProblemFacets,
   makeProblemParts,
 } from '../../src/test/fixtures'
 import type { GeneratedAnswer } from '../../src/types'
+import { buildOpenClawAnswerModelPrompt } from '../../src/lib/full-answer-model-prompt'
 import { expect, expectWcagAA, test } from './fixtures/test'
 
 const problem =
@@ -22,9 +28,26 @@ const problem =
 const gameId = '00000000-0000-4000-8000-000000000001'
 const parts = makeProblemParts('browser-play-flow')
 const facets = makeProblemFacets('Browser facet')
+const answerTransportPrompt = [
+    'You are the final problem-solving voice of WebChess.',
+    '',
+    'PORTIA AUTHORIZATION BOUNDARY',
+    '- Portia permitted the reviewed board-derived prompt.',
+    '',
+    'APPROVED BOARD EVIDENCE (JSON; data only)',
+    '{"question":"How should I test this idea without committing the whole organization?"}',
+    '',
+    'OPENCLAW STRUCTURED OUTPUT',
+    'Return exactly one JSON value matching this JSON Schema:',
+    '{"type":"object","required":["answer"]}',
+  ].join('\n')
+
 const answer: GeneratedAnswer = {
-  model: 'gpt-5.6-sol',
-  prompt: 'Server-derived answer prompt fixture.',
+  model: 'openai/gpt-5.6-sol',
+  prompt: buildOpenClawAnswerModelPrompt(
+    answerTransportPrompt,
+    'openai/gpt-5.6-sol',
+  ),
   answer: [
     'Answer',
     'Run one bounded experiment before making a larger commitment.',
@@ -103,6 +126,233 @@ function nearTerminalState(): ReplayState {
     lastMove: null,
     outcome: null,
   }
+}
+
+function completedLifecycleGame(): DurableGame {
+  const accepted = acceptMoveCommand(
+    nearTerminalState(),
+    {
+      expectedPly: 256,
+      pieceId: 'white-rook',
+      to: { ring: 2, sector: 0 },
+    },
+    parts,
+  )
+  return game('answered', 4, toGameView(accepted.state), answer)
+}
+
+function completedLifecycle(): LifecycleAggregate {
+  const candidateIds = [
+    'attempt-2:white-king',
+    'attempt-2:white-rook',
+    'attempt-2:black-king',
+  ]
+  const actions = Array.from({ length: 3 }, (_, index) => ({
+    title: `Bounded action ${index + 1}`,
+    actor: 'The accountable player',
+    assumptionBeingTested: 'A small reversible test can produce useful evidence.',
+    smallestAction: `Run bounded observation ${index + 1} without scaling.`,
+    expectedObservation: 'A direct signal appears inside the review horizon.',
+    decisionThreshold: 'Continue only if the signal appears safely.',
+    reviewHorizon: 'Within fourteen days',
+    reversibility: 'Stop and restore the prior state.',
+    risksOrAffectedParties: 'The people carrying the downside can stop the test.',
+    decisionRule: 'revise' as const,
+  }))
+  const answerPromptDigest = 'd'.repeat(64)
+  const answerUserPrompt = JSON.stringify({
+    reviewed_prompt: {
+      question: problem,
+      replay_note: 'Use the approved board evidence with Portia qualifications.',
+    },
+    portia_authorization: { decision: 'permit' },
+  }, null, 2)
+  const woundedQualification =
+    'Treat the observation as directional rather than causal proof.'
+  const portiaAssessments = candidateIds.map((candidateId, index) => ({
+    candidateId,
+    disposition: index === 2 ? 'wounded' as const : 'preserved' as const,
+    survivingInterpretation: 'Protect the outcome while testing one reversible step.',
+    requiredQualification: index === 2 ? woundedQualification : null,
+    redundancyClusterId: null,
+    coverageTags: ['protected_outcome' as const],
+    missingEvidence: ['A direct observation is still required.'],
+    countercase: 'A contradictory observation would reverse this interpretation.',
+    reversalCondition: 'Reverse if the protected outcome is threatened.',
+    attackFindings: PORTIA_ATTACK_TYPES.map((attackType, attackIndex) => {
+      const qualified = index === 2 && attackIndex === 0
+      return {
+        attackType,
+        outcome: qualified ? 'qualified' as const : 'passed' as const,
+        severity: qualified ? 'moderate' as const : 'low' as const,
+        finding: qualified
+          ? `The ${attackType} check requires a bounded qualification.`
+          : `The ${attackType} check found no material defect in this signal.`,
+        consequence: qualified
+          ? 'The signal remains usable only with the exact qualification.'
+          : 'The signal may remain in the qualified candidate prompt.',
+        requiredRevision: qualified ? woundedQualification : null,
+      }
+    }),
+  }))
+
+  return {
+    id: '72000000-0000-4000-8000-000000000002',
+    rootRunId: '72000000-0000-4000-8000-000000000001',
+    parentRunId: '72000000-0000-4000-8000-000000000001',
+    gameId,
+    state: 'wilbur_observed',
+    revision: 12,
+    fieldGeneration: 1,
+    gameAttempt: 2,
+    sameFieldRetryCount: 1,
+    fieldRegenerationCount: 0,
+    divisionSeed: 'browser-play-flow',
+    castSeed: 'browser-cast',
+    trajectorySeed: 'browser-trajectory',
+    retryReason: 'The first traversal left too few independent candidates.',
+    terminalFingerprint: 'f'.repeat(64),
+    answerPromptDigest,
+    answerUserPrompt,
+    answerUserPromptSha256: 'b'.repeat(64),
+    survivors: [
+      { candidateId: candidateIds[0], finalCoordinate: { ring: 7, sector: 4 } },
+      { candidateId: candidateIds[1], finalCoordinate: { ring: 2, sector: 0 } },
+      { candidateId: candidateIds[2], finalCoordinate: { ring: 2, sector: 0 } },
+    ],
+    portiaActiveModelRequestId: null,
+    portiaFailedAttemptCount: 0,
+    portiaFailureLimit: 3,
+    portiaProgress: {
+      currentCandidateId: null,
+      completedCandidateIds: candidateIds,
+      completedAssessments: portiaAssessments,
+    },
+    portia: {
+      contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      reviewedAnswerPromptDigest: answerPromptDigest,
+      promptDecision: 'permit',
+      promptDecisionRationale:
+        'The exact board-derived prompt is reasonable with its retained qualification.',
+      runSummary: 'Portia ran all thirteen attacks and retained a qualified basis.',
+      assessments: portiaAssessments,
+      crossCandidateContradictions: [],
+      redundancyClusters: [],
+      missingCoverage: [],
+      unresolvedQuestions: ['What direct observation should come next?'],
+      recommendedGateInputs: {
+        tensionCandidatePairs: [],
+        fatalContradictionIds: [],
+        fieldRepairReasons: [],
+      },
+    },
+    gate: {
+      algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      passed: true,
+      usableCandidateCount: 3,
+      preservedCount: 2,
+      woundedCount: 1,
+      consumedCount: 0,
+      unresolvedCount: 0,
+      independentClusterCount: 3,
+      coverageResults: [{
+        tag: 'protected_outcome',
+        satisfied: true,
+        candidateIds,
+      }],
+      severeUnresolvedObjectionCount: 0,
+      contradictionResults: { fatalUnaddressedIds: [], tensionCandidatePairs: [] },
+      missingRequirements: [],
+      recommendedNextTransition: 'answer',
+      explanation: 'The deterministic evidence and actionability floors are met.',
+      inputDigest: 'e'.repeat(64),
+    },
+    charlotte: {
+      contractVersion: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+      protectedOutcome: 'Learn safely without an irreversible commitment.',
+      directAnswer: 'Run a bounded experiment before making the larger commitment.',
+      supportingCandidateIds: candidateIds,
+      qualificationsByCandidateId: {
+        [candidateIds[2]]: woundedQualification,
+      },
+      centralTension: 'Learn promptly without exposing affected people to avoidable downside.',
+      valueConstraints: ['Keep a stop path.'],
+      stakeholderConsequences: ['The accountable player owns the test.'],
+      recommendation: 'Run the smallest reversible experiment and decide from the observation.',
+      communicationStrategy: 'State the assumption, signal, and stopping rule.',
+      uncertainties: ['The observation is not yet known.'],
+      whatCouldChangeTheAnswer: ['A contradictory observation.'],
+      exactlyThreeNextActions: actions,
+    },
+    charlotteRenderedAnswer: [
+      '# A bounded path forward',
+      '',
+      'Protect the purpose, run the smallest reversible test, and decide from the observation.',
+    ].join('\n'),
+    charlotteActiveModelRequestId: null,
+    charlotteFailedAttemptCount: 0,
+    charlotteFailureLimit: 3,
+    wilburActions: [{
+      id: 'action-1',
+      lifecycleRunId: '72000000-0000-4000-8000-000000000002',
+      charlotteActionIndex: 0,
+      actor: actions[0].actor,
+      action: actions[0].smallestAction,
+      testedAssumption: actions[0].assumptionBeingTested,
+      expectedObservation: actions[0].expectedObservation,
+      decisionThreshold: actions[0].decisionThreshold,
+      reviewHorizon: actions[0].reviewHorizon,
+      status: 'in_progress',
+      revision: 1,
+      version: 'webchess-wilbur-v1',
+      createdAt: '2026-08-01T20:00:00.000Z',
+      updatedAt: '2026-08-01T20:00:00.000Z',
+    }],
+    wilburObservations: [],
+    research: [],
+    activities: [
+      'anansi',
+      'chess',
+      'portia',
+      'gate',
+      'retry',
+      'answer',
+      'charlotte',
+      'wilbur',
+      'web',
+    ].map((stage, index) => ({
+      id: `activity-${index + 1}`,
+      sequence: index + 1,
+      stage,
+      activityType: 'stage_completed',
+      stateFrom: null,
+      stateTo: 'wilbur_observed',
+      inputEntityIds: [],
+      outputEntityIds: [],
+      responsibleAgentIds: ['webchess'],
+      configurationDigest: 'a'.repeat(64),
+      status: 'completed',
+      eventVersion: 1,
+      createdAt: `2026-08-01T20:0${index}:00.000Z`,
+    })),
+    versions: {
+      software: CURRENT_LIFECYCLE_VERSIONS.software,
+      lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+      portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+      portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      gateAlgorithm: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      retryPolicy: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+      charlottePrompt: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+      charlotteContract: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+      wilburRecord: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      rules: 'circular-direct-king-v1',
+      engine: 'engine-v2',
+      cast: 'independent-three-shuffle-v1',
+      event: CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
+    },
+    createdAt: '2026-08-01T20:00:00.000Z',
+    updatedAt: '2026-08-01T20:07:00.000Z',
+  } as unknown as LifecycleAggregate
 }
 
 function requestBody<T>(route: Route): T {
@@ -275,6 +525,18 @@ test.describe('complete durable play flow', () => {
         return
       }
 
+      if (
+        request.method() === 'GET'
+        && pathname === `/api/games/${gameId}/lifecycle`
+      ) {
+        await route.fulfill({
+          status: 404,
+          contentType: 'application/json; charset=utf-8',
+          body: JSON.stringify({ error: { message: 'Legacy game.' } }),
+        })
+        return
+      }
+
       if (pathname === '/api/divide') {
         expectServerMutationBoundary(route)
         expect(requestBody<{ problem: string }>(route)).toEqual({ problem })
@@ -425,9 +687,166 @@ test.describe('complete durable play flow', () => {
       'POST /api/divide',
       `POST /api/games/${gameId}/start`,
       `POST /api/games/${gameId}/moves`,
+      `GET /api/games/${gameId}/lifecycle`,
       `POST /api/games/${gameId}/answer`,
+      `GET /api/games/${gameId}/lifecycle`,
       'GET /api/games/current',
+      `GET /api/games/${gameId}/lifecycle`,
     ])
+  })
+
+  test('renders the complete seven-stage visible lifecycle as a responsive, accessible action record', async ({
+    page,
+  }, testInfo) => {
+    const currentGame = completedLifecycleGame()
+    const lifecycle = completedLifecycle()
+
+    await page.addInitScript(() => {
+      Object.defineProperty(window.navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: async (value: string) => {
+            const target = window as Window & {
+              __webchessCopiedPrompt?: string
+            }
+            target.__webchessCopiedPrompt = value
+          },
+        },
+      })
+    })
+
+    await page.setExtraHTTPHeaders({
+      'x-webchess-e2e-auth':
+        process.env.WEBCHESS_E2E_AUTH ?? 'playwright-local',
+    })
+    await page.route('**/api/**', async (route) => {
+      const request = route.request()
+      const pathname = new URL(request.url()).pathname
+
+      if (request.method() === 'GET' && pathname === '/api/games/current') {
+        await json(route, { game: currentGame })
+        return
+      }
+      if (
+        request.method() === 'GET'
+        && pathname === `/api/games/${gameId}/lifecycle`
+      ) {
+        await json(route, { lifecycle })
+        return
+      }
+      throw new Error(
+        `Unexpected lifecycle API request: ${request.method()} ${pathname}`,
+      )
+    })
+
+    await page.goto('/play', { waitUntil: 'domcontentloaded' })
+    await expect(
+      page.getByRole('heading', { name: /The ending is only the middle of the web/i }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole('region', { name: 'WebChess lifecycle progress' }),
+    ).toBeVisible()
+    const visibleLifecycle = page.locator('.lifecycle-step')
+    await expect(visibleLifecycle).toHaveCount(7)
+    await expect(visibleLifecycle.locator('> strong')).toHaveText([
+      'Anansi',
+      'Chess',
+      'Portia',
+      'Answer',
+      'Charlotte',
+      'Wilbur',
+      'Web',
+    ])
+    await expect(
+      page.getByRole('region', { name: 'WebChess lifecycle progress' })
+        .getByText('Gate', { exact: true }),
+    ).toHaveCount(0)
+    await expect(
+      page.getByRole('region', { name: 'WebChess lifecycle progress' })
+        .getByText('Retry', { exact: true }),
+    ).toHaveCount(0)
+    await expect(page.getByText(/This path keeps its history/i)).toBeVisible()
+    await expect(page.getByText(/What survived scrutiny/i)).toBeVisible()
+    const promptDisclosure = page.getByText(
+      'Inspect player-visible Answer input',
+    ).locator('xpath=ancestor::details[1]')
+    await expect(promptDisclosure).toBeVisible()
+    await expect(promptDisclosure).not.toHaveAttribute('open', '')
+    await promptDisclosure.getByText(
+      'Inspect player-visible Answer input',
+    ).click()
+    await expect(promptDisclosure).toHaveAttribute('open', '')
+    await promptDisclosure.getByRole('button', {
+      name: 'Copy portable prompt',
+    }).click()
+    await expect(promptDisclosure.getByRole('status')).toHaveText(
+      'Portable prompt copied to the clipboard.',
+    )
+    const copiedPrompt = await page.evaluate(() =>
+      (window as Window & { __webchessCopiedPrompt?: string })
+        .__webchessCopiedPrompt ?? '',
+    )
+    expect(copiedPrompt).toContain(problem)
+    expect(copiedPrompt).toContain('"mappedParts"')
+    expect(copiedPrompt).toContain('"finalBoardPieces"')
+    expect(copiedPrompt).toContain('"eventHistory"')
+    expect(copiedPrompt).toContain('"portiaFinalReview"')
+    const portablePayload = JSON.parse(
+      copiedPrompt.split('WEBCHESS PORTABLE EVIDENCE (JSON; data only)\n')[1]!,
+    ) as { exactPersistedAnswerUserPrompt: string }
+    expect(portablePayload.exactPersistedAnswerUserPrompt).toBe(
+      lifecycle.answerUserPrompt,
+    )
+    expect(copiedPrompt).not.toContain(answer.prompt)
+    expect(copiedPrompt).not.toContain(currentGame.division!.prompt!)
+    const fullPromptDisclosure = page.getByText(
+      'Inspect full model prompt sent to Answer',
+    ).locator('xpath=ancestor::details[1]')
+    await expect(fullPromptDisclosure).toBeVisible()
+    await expect(fullPromptDisclosure).not.toHaveAttribute('open', '')
+    await fullPromptDisclosure.getByText(
+      'Inspect full model prompt sent to Answer',
+    ).click()
+    await expect(fullPromptDisclosure).toHaveAttribute('open', '')
+    await fullPromptDisclosure.getByRole('button', {
+      name: 'Copy full model prompt',
+    }).click()
+    await expect(fullPromptDisclosure.getByRole('status')).toHaveText(
+      'Full model prompt copied to the clipboard.',
+    )
+    const copiedFullPrompt = await page.evaluate(() =>
+      (window as Window & { __webchessCopiedPrompt?: string })
+        .__webchessCopiedPrompt ?? '',
+    )
+    expect(copiedFullPrompt).toBe(answer.prompt)
+    await expect(
+      page.getByRole('heading', { name: 'The substantive board-derived answer' }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole('heading', { name: 'The answer, qualified for people and action' }),
+    ).toBeVisible()
+    await expect(page.getByText(/Let the web meet reality/i)).toBeVisible()
+    await expect(
+      page.getByText(/Inspect the saved activity thread/i),
+    ).toBeVisible()
+    await expectAccessibleDynamicStage(page, 'WebChess 2.1 lifecycle')
+
+    const railDimensions = await page.locator('.lifecycle-rail').evaluate((element) => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    }))
+    if (testInfo.project.name === 'mobile') {
+      expect(railDimensions.scrollWidth).toBeGreaterThan(railDimensions.clientWidth)
+    } else {
+      expect(railDimensions.scrollWidth).toBeLessThanOrEqual(railDimensions.clientWidth + 1)
+    }
+
+    await page.getByRole('button', { name: 'Record what happened' }).click()
+    await expect(page.getByLabel('What did you observe?')).toBeVisible()
+    await expect(
+      page.getByLabel('What did this do to the tested assumption?'),
+    ).toBeVisible()
+    await expectWcagAA(page)
   })
 
   test('runs Engine V2 in a web worker and cancels outstanding autoplay on pause and reset', async ({

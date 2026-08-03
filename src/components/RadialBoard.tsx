@@ -17,6 +17,13 @@ export interface RadialBoardProps {
   legalMoves?: readonly CellCoord[]
   capturedCellKeys?: ReadonlySet<string> | readonly string[]
   highlightedCellKeys?: ReadonlySet<string> | readonly string[]
+  portiaActivity?: {
+    status: 'waiting' | 'running' | 'summarizing' | 'complete' | 'unavailable'
+    currentCell: CellCoord | null
+    currentLabel: string | null
+    reviewedCellKeys: ReadonlySet<string> | readonly string[]
+    announcement: string
+  }
   lastMove?: LastMove | null
   disabled?: boolean
   onPieceSelect?: (pieceId: string) => void
@@ -36,22 +43,12 @@ const SECTOR_GAP = 0.7
 const RING_GAP = 1.2
 
 const PIECE_GLYPHS = {
-  white: {
-    king: '\u2654',
-    queen: '\u2655',
-    rook: '\u2656',
-    bishop: '\u2657',
-    knight: '\u2658',
-    pawn: '\u2659',
-  },
-  black: {
-    king: '\u265A',
-    queen: '\u265B',
-    rook: '\u265C',
-    bishop: '\u265D',
-    knight: '\u265E',
-    pawn: '\u265F',
-  },
+  king: '\u265A',
+  queen: '\u265B',
+  rook: '\u265C',
+  bishop: '\u265D',
+  knight: '\u265E',
+  pawn: '\u265F',
 } as const
 
 const SECTOR_LABELS = ['North', 'North-east', 'East', 'South-east', 'South', 'South-west', 'West', 'North-west']
@@ -178,6 +175,7 @@ export function RadialBoard({
   legalMoves = [],
   capturedCellKeys,
   highlightedCellKeys,
+  portiaActivity,
   lastMove = null,
   disabled = false,
   onPieceSelect,
@@ -198,6 +196,31 @@ export function RadialBoard({
   )
   const capturedKeys = useMemo(() => toKeySet(capturedCellKeys), [capturedCellKeys])
   const highlightedKeys = useMemo(() => toKeySet(highlightedCellKeys), [highlightedCellKeys])
+  const portiaReviewedKeys = useMemo(
+    () => toKeySet(portiaActivity?.reviewedCellKeys),
+    [portiaActivity?.reviewedCellKeys],
+  )
+  const [displayedPortiaCell, setDisplayedPortiaCell] = useState<CellCoord | null>(null)
+  const activePortiaCell = portiaActivity?.status === 'running'
+    ? portiaActivity.currentCell
+    : null
+  const portiaTargetRing = activePortiaCell
+    ? activePortiaCell.ring
+    : null
+  const portiaTargetSector = activePortiaCell
+    ? activePortiaCell.sector
+    : null
+  const hasPortiaActivity = portiaActivity !== undefined
+  useEffect(() => {
+    if (!hasPortiaActivity) return
+    const target = portiaTargetRing === null || portiaTargetSector === null
+      ? null
+      : { ring: portiaTargetRing, sector: portiaTargetSector }
+    const frame = window.requestAnimationFrame(() => {
+      setDisplayedPortiaCell(target)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [hasPortiaActivity, portiaTargetRing, portiaTargetSector])
   // One pass over the pieces instead of a scan of every piece for all 64 cells.
   const pieceByCell = useMemo(() => {
     const occupants = new Map<string, Piece>()
@@ -305,6 +328,8 @@ export function RadialBoard({
               const isLegal = legalMoveKeys.has(key)
               const isCaptured = capturedKeys.has(key)
               const isHighlighted = highlightedKeys.has(key)
+              const isPortiaCurrent = sameCell(activePortiaCell ?? undefined, coordinate)
+              const isPortiaReviewed = portiaReviewedKeys.has(key)
               const isLastMove = sameCell(lastMove?.from, coordinate) || sameCell(lastMove?.to, coordinate)
               const occupant = pieceByCell.get(key)
               const isMapped = stage !== 'question' && (stage !== 'mapping' || index < mappedCount)
@@ -317,6 +342,8 @@ export function RadialBoard({
                 isLegal ? 'legal move' : null,
                 isCaptured ? 'capture focus' : null,
                 isHighlighted ? 'highlighted focus' : null,
+                isPortiaCurrent ? 'Portia is currently reviewing this signal' : null,
+                isPortiaReviewed ? 'Portia review completed for this signal' : null,
                 isLastMove ? 'part of the last move' : null,
                 stage === 'mapping' && !isMapped ? 'not mapped yet' : null,
               ]
@@ -330,6 +357,8 @@ export function RadialBoard({
                 isLegal ? 'is-legal' : '',
                 isCaptured ? 'is-captured' : '',
                 isHighlighted ? 'is-highlighted' : '',
+                isPortiaCurrent ? 'is-portia-current' : '',
+                isPortiaReviewed ? 'is-portia-reviewed' : '',
                 isLastMove ? 'is-last-move' : '',
               ]
                 .filter(Boolean)
@@ -385,15 +414,26 @@ export function RadialBoard({
 
           <g className="radial-board__hub" aria-hidden="true">
             <circle cx={BOARD_CENTER} cy={BOARD_CENTER} r={INNER_RADIUS - 8} className="radial-board__hub-disc" />
-            <path
-              className="radial-board__yin"
-              d={`M ${BOARD_CENTER} ${BOARD_CENTER - INNER_RADIUS + 8}
-                  A ${INNER_RADIUS - 8} ${INNER_RADIUS - 8} 0 0 1 ${BOARD_CENTER} ${BOARD_CENTER + INNER_RADIUS - 8}
-                  A ${(INNER_RADIUS - 8) / 2} ${(INNER_RADIUS - 8) / 2} 0 0 1 ${BOARD_CENTER} ${BOARD_CENTER}
-                  A ${(INNER_RADIUS - 8) / 2} ${(INNER_RADIUS - 8) / 2} 0 0 0 ${BOARD_CENTER} ${BOARD_CENTER - INNER_RADIUS + 8} Z`}
-            />
-            <circle cx={BOARD_CENTER} cy={BOARD_CENTER - (INNER_RADIUS - 8) / 2} r="8" className="radial-board__yang-dot" />
-            <circle cx={BOARD_CENTER} cy={BOARD_CENTER + (INNER_RADIUS - 8) / 2} r="8" className="radial-board__yin-dot" />
+            <g className="radial-board__hub-web">
+              <circle cx={BOARD_CENTER} cy={BOARD_CENTER} r="48" />
+              <circle cx={BOARD_CENTER} cy={BOARD_CENTER} r="30" />
+              {Array.from({ length: 8 }, (_, index) => {
+                const point = polarPoint(50, index * 45)
+                return <path key={index} d={`M ${BOARD_CENTER} ${BOARD_CENTER} L ${point.x} ${point.y}`} />
+              })}
+            </g>
+            {!portiaActivity ? (
+              <g className="radial-board__hub-spider">
+                <ellipse cx={BOARD_CENTER} cy={BOARD_CENTER + 7} rx="15" ry="20" />
+                <circle cx={BOARD_CENTER} cy={BOARD_CENTER - 13} r="10" />
+                {[-1, 1].flatMap((side) => [0, 1, 2, 3].map((leg) => (
+                  <path
+                    key={`${side}-${leg}`}
+                    d={`M ${BOARD_CENTER + side * 10} ${BOARD_CENTER - 6 + leg * 8} Q ${BOARD_CENTER + side * (28 + leg * 2)} ${BOARD_CENTER - 20 + leg * 14} ${BOARD_CENTER + side * (40 + leg * 3)} ${BOARD_CENTER - 13 + leg * 17}`}
+                  />
+                )))}
+              </g>
+            ) : null}
           </g>
 
           <g className="radial-board__labels" aria-hidden="true">
@@ -458,12 +498,41 @@ export function RadialBoard({
                   else onPieceSelect?.(piece.id)
                 }}
               >
-                <span aria-hidden="true">{PIECE_GLYPHS[piece.side][piece.kind]}</span>
+                <span aria-hidden="true">{PIECE_GLYPHS[piece.kind]}</span>
               </button>
             )
           })}
         </div>
+        {portiaActivity ? (() => {
+          const visiblePortiaCell = portiaActivity.status === 'running'
+            ? displayedPortiaCell
+            : null
+          const point = visiblePortiaCell
+            ? cellCenter(visiblePortiaCell)
+            : { x: BOARD_CENTER, y: BOARD_CENTER }
+          return (
+            <div
+              className={`radial-board__portia-spider is-${portiaActivity.status}`}
+              data-portia-cell={visiblePortiaCell ? cellKey(visiblePortiaCell) : 'center'}
+              style={{
+                '--portia-x': `${(point.x / BOARD_SIZE) * 100}%`,
+                '--portia-y': `${(point.y / BOARD_SIZE) * 100}%`,
+              } as BoardStyle}
+              aria-hidden="true"
+            >
+              <i /><i /><i /><i /><b /><span />
+            </div>
+          )
+        })() : null}
       </div>
+      {portiaActivity ? (
+        <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {portiaActivity.announcement}
+          {portiaActivity.status === 'running' && portiaActivity.currentLabel
+            ? ` Current signal: ${portiaActivity.currentLabel}.`
+            : ''}
+        </p>
+      ) : null}
     </section>
   )
 }

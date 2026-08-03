@@ -35,6 +35,190 @@ const mappedPart: ProblemPart = {
 }
 
 describe('RadialBoard interaction', () => {
+  it('uses Portia the spider in the center instead of the former yin-yang mark', () => {
+    const { container } = render(
+      <RadialBoard
+        parts={[]}
+        pieces={[]}
+      />,
+    )
+
+    expect(container.querySelector('.radial-board__hub-spider')).toBeInTheDocument()
+    expect(container.querySelector('.radial-board__hub-web')).toBeInTheDocument()
+    expect(container.querySelector('.radial-board__yin-yang')).not.toBeInTheDocument()
+    expect(container.querySelector('.radial-board__yin-dot')).not.toBeInTheDocument()
+    expect(container.querySelector('.radial-board__yang-dot')).not.toBeInTheDocument()
+  })
+
+  it('moves Portia to the actual current signal and exposes reviewed progress', async () => {
+    const { container } = render(
+      <RadialBoard
+        parts={[mappedPart]}
+        pieces={[]}
+        stage="reading"
+        revealParts
+        disabled
+        portiaActivity={{
+          status: 'running',
+          currentCell: { ring: 0, sector: 0 },
+          currentLabel: 'Strategic tension: Balance the options without forcing certainty.',
+          reviewedCellKeys: ['0:1'],
+          announcement: 'Portia is reviewing signal 2 of 7 with all 13 checks.',
+        }}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(container.querySelector('.radial-board__portia-spider'))
+        .toHaveAttribute('data-portia-cell', '0:0')
+    })
+    expect(container.querySelector('.radial-board__portia-spider')).toHaveClass('is-running')
+    expect(container.querySelector('.radial-board__hub-spider')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('listitem', {
+        name: /ring 1, north.*Portia is currently reviewing this signal/i,
+      }),
+    ).toHaveClass('is-portia-current')
+    expect(
+      screen.getByRole('listitem', {
+        name: /ring 1, north-east.*Portia review completed for this signal/i,
+      }),
+    ).toHaveClass('is-portia-reviewed')
+    expect(screen.getByRole('status')).toHaveAttribute('aria-atomic', 'true')
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /reviewing signal 2 of 7.*Current signal: Strategic tension/i,
+    )
+  })
+
+  it('follows persisted Portia progress rather than choosing a decorative square', async () => {
+    const activity = (
+      currentCell: { ring: number; sector: number },
+      reviewedCellKeys: readonly string[],
+    ) => ({
+      status: 'running' as const,
+      currentCell,
+      currentLabel: `Signal at ${currentCell.ring}:${currentCell.sector}`,
+      reviewedCellKeys,
+      announcement: `Portia advanced to ${currentCell.ring}:${currentCell.sector}.`,
+    })
+    const { container, rerender } = render(
+      <RadialBoard
+        parts={[]}
+        pieces={[]}
+        stage="reading"
+        disabled
+        portiaActivity={activity({ ring: 2, sector: 3 }, [])}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(container.querySelector('.radial-board__portia-spider'))
+        .toHaveAttribute('data-portia-cell', '2:3')
+    })
+
+    rerender(
+      <RadialBoard
+        parts={[]}
+        pieces={[]}
+        stage="reading"
+        disabled
+        portiaActivity={activity({ ring: 5, sector: 6 }, ['2:3'])}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(container.querySelector('.radial-board__portia-spider'))
+        .toHaveAttribute('data-portia-cell', '5:6')
+    })
+    expect(container.querySelector('[data-cell="2:3"]')).toHaveClass('is-portia-reviewed')
+    expect(container.querySelector('[data-cell="5:6"]')).toHaveClass('is-portia-current')
+  })
+
+  it('returns Portia to a stable center state after all signal reviews complete', () => {
+    const { container } = render(
+      <RadialBoard
+        parts={[]}
+        pieces={[]}
+        stage="reading"
+        disabled
+        portiaActivity={{
+          status: 'complete',
+          currentCell: null,
+          currentLabel: null,
+          reviewedCellKeys: ['0:0', '2:3'],
+          announcement: 'Portia completed the review of 2 board signals.',
+        }}
+      />,
+    )
+
+    expect(container.querySelector('.radial-board__portia-spider'))
+      .toHaveAttribute('data-portia-cell', 'center')
+    expect(container.querySelector('.radial-board__portia-spider')).toHaveClass('is-complete')
+    expect(container.querySelectorAll('.is-portia-current')).toHaveLength(0)
+    expect(container.querySelectorAll('.is-portia-reviewed')).toHaveLength(2)
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Portia completed the review of 2 board signals.',
+    )
+  })
+
+  it('ignores a stale terminal candidate while preserving saved reviewed highlights', () => {
+    const { container } = render(
+      <RadialBoard
+        parts={[]}
+        pieces={[]}
+        stage="reading"
+        disabled
+        portiaActivity={{
+          status: 'unavailable',
+          currentCell: { ring: 2, sector: 2 },
+          currentLabel: 'Stale persisted candidate',
+          reviewedCellKeys: ['0:0', '2:3'],
+          announcement:
+            'Portia could not complete prompt validation after 3 provider attempts. 2 of 3 board signals have saved reviews; no answer was generated.',
+        }}
+      />,
+    )
+
+    const spider = container.querySelector('.radial-board__portia-spider')
+    expect(spider).toHaveAttribute('data-portia-cell', 'center')
+    expect(spider).toHaveClass('is-unavailable')
+    expect(spider).not.toHaveClass('is-running')
+    expect((spider as HTMLElement | null)?.style.getPropertyValue('--portia-x'))
+      .toBe('50%')
+    expect((spider as HTMLElement | null)?.style.getPropertyValue('--portia-y'))
+      .toBe('50%')
+    expect(container.querySelectorAll('.is-portia-current')).toHaveLength(0)
+    expect(container.querySelectorAll('.is-portia-reviewed')).toHaveLength(2)
+    expect(screen.getByRole('listitem', {
+      name: /ring 1, north.*Portia review completed for this signal/i,
+    })).toHaveClass('is-portia-reviewed')
+    expect(container.querySelector('[data-cell="2:2"]')?.getAttribute('aria-label'))
+      .not.toMatch(/Portia is currently reviewing this signal/i)
+    expect(screen.getByRole('status')).toHaveAttribute('aria-atomic', 'true')
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /could not complete prompt validation after 3 provider attempts.*2 of 3 board signals have saved reviews.*no answer was generated/i,
+    )
+    expect(screen.getByRole('status')).not.toHaveTextContent(/Current signal:/i)
+    expect(screen.getByRole('status')).not.toHaveTextContent(/Stale persisted candidate/i)
+  })
+
+  it('uses bold cameo silhouettes on contrasting side medallions', () => {
+    render(
+      <RadialBoard
+        parts={[]}
+        pieces={pieces}
+      />,
+    )
+
+    const whiteRookPiece = screen.getByRole('button', { name: /^white rook,/i })
+    const blackPawnPiece = screen.getByRole('button', { name: /^black pawn,/i })
+
+    expect(whiteRookPiece).toHaveClass('radial-board__piece--white')
+    expect(whiteRookPiece).toHaveTextContent('♜')
+    expect(blackPawnPiece).toHaveClass('radial-board__piece--black')
+    expect(blackPawnPiece).toHaveTextContent('♟')
+  })
+
   it('routes a click on an occupied legal destination through the cell capture handler', () => {
     const onCellSelect = vi.fn()
     const onPieceSelect = vi.fn()

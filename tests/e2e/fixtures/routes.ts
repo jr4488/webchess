@@ -15,6 +15,7 @@ export const PUBLIC_ROUTES: readonly RouteFixture[] = [
   { path: '/', label: 'home' },
   { path: '/white-paper', label: 'white paper' },
   { path: '/install', label: 'installation' },
+  { path: '/operations', label: 'operator guide' },
   { path: '/license', label: 'license' },
   { path: '/contributing', label: 'contributing' },
   { path: '/security', label: 'security' },

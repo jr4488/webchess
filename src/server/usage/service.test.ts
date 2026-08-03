@@ -1059,11 +1059,15 @@ describe('usage summaries', () => {
       REQUEST_ID,
       USER_ID,
       'answer',
+      null,
+      null,
     ])
     expect(db.queries[3]?.values).toEqual([
       REQUEST_ID,
       USER_ID,
       'answer',
+      null,
+      null,
     ])
   })
 

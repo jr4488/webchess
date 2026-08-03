@@ -7,9 +7,9 @@ access separate so that each has an inspectable provenance and failure mode.
 
 1. **Question** — preserve the authenticated user's normalized 12–240
    character problem as the governing reference.
-2. **Division** — a server-only structured OpenAI request proposes 64 bounded
-   perspective facets. Deterministic checks reject known structural and lexical
-   failure patterns; they do not prove truth, relevance, or distinctness.
+2. **Division** — a structured model request proposes 64 bounded perspective
+   facets. Deterministic checks reject known structural and lexical failure
+   patterns; they do not prove truth, relevance, or distinctness.
 3. **Independent cast** — the server creates a seed and independently
    permutes facets, I Ching-inspired change lenses, and completed pair
    positions. The exact field and provenance are persisted.
@@ -20,11 +20,75 @@ access separate so that each has an inspectable provenance and failure mode.
 5. **Authoritative replay** — every requested move is checked by replaying the
    immutable starting state and ordered event log. The server derives captures,
    forced passes, promotion, counters, and outcomes.
-6. **Synthesis** — only a server-proven ending may trigger the second
-   structured OpenAI request. The answer remains traceable to the persisted
-   question, cast, outcome, and capture trail.
+6. **Board-derived answer prompt** — replay-derived weights, values, routes,
+   captures, and terminal survivors are assembled into the concrete prompt
+   package that would generate the substantive answer.
+7. **Portia** — before any answer exists, a strict structured model operation
+   validates that exact prompt by attacking every survivor with the complete
+   versioned taxonomy. Each accepted per-signal assessment is persisted. Three
+   failed provider-started attempts end at the technical `portia_unavailable`
+   state without authorizing an answer.
+8. **Internal Gate and Retry** — deterministic code checks usable count,
+   independent clusters, coverage, tension, severe objections, and fatal
+   contradictions. A stored semantic policy permits at most two same-field
+   games and one regenerated field, then ends at `insufficient_basis`.
+9. **Answer, then Charlotte** — Portia permission and a persisted Gate pass
+   authorize generation from the exact reviewed board prompt. Charlotte then
+   qualifies that exact generated answer for evidence boundaries, values,
+   stakeholders, audience, and reversible action; it cannot substitute an
+   unrelated answer.
+10. **Wilbur and Web** — the player owns action status and appends observations
+    to the immutable genealogy; model output cannot declare real-world success.
 
-## Runtime topology
+## Runtime topologies
+
+The local plugin and hosted service share the visual experience, rules engine,
+cast construction, replay, model prompts, and output validation. They do not
+share identity, persistence, credentials, or model billing.
+
+### Local OpenClaw plugin
+
+```text
+OpenClaw CLI
+  |
+  | startup-lazy `webchess` command
+  v
+Foreground Next.js process bound to 127.0.0.1
+  |-- /openclaw visual application
+  |-- /api/openclaw/status
+  |-- shared /api/divide and /api/games/* handlers
+  |
+  +--> dedicated loopback PostgreSQL 17
+  |      +--> games, events, usage ledger, lifecycle, actions, observations
+  |
+  +--> `openclaw infer model run --local --json --thinking medium`
+         +--> user's configured default provider, model, and authentication
+```
+
+The plugin is the install and launch boundary; it includes the complete
+browser application rather than exposing a headless agent tool. It registers no
+background service and starts no process until the user runs
+`openclaw webchess`. The launcher disables Next.js telemetry, clears hosted
+Clerk/generic database settings, requires a dedicated loopback PostgreSQL URL,
+blocks a repository `.env.local` from introducing an OpenAI key, binds only to
+IPv4 loopback, prints and optionally opens the local URL, and remains in the
+foreground until Ctrl-C. For a managed install, it
+stages the bundled application code in an operating-system temporary directory,
+links the installed dependency tree, and removes that working directory on
+exit. Persistent game and lifecycle data remains in the local database.
+
+The browser animates shared, server-accepted moves but cannot make arbitrary
+saved state authoritative. The shared service recomposes the cast from its
+facets and seed and canonically replays the durable event log before every
+mutation and lifecycle transition.
+
+There is no Clerk login, cloud database, hosted WebChess request, sync, or
+shared operator credential. A stable installation-scoped principal owns local
+records; the browser header is a mode discriminator within the same-OS trust
+boundary, not a reusable hosted credential. The configured model provider may
+be remote; that network boundary belongs to the user's OpenClaw configuration.
+
+### Hosted service
 
 ```text
 Unauthenticated browser
@@ -75,12 +139,14 @@ back; it does not rewrite or reverse migration history.
 The migration owner explicitly revokes and grants the reviewed per-table
 runtime allowlist after each migration. The runtime role has database
 `CONNECT`, schema `USAGE`, ledger `SELECT`, and only the table operations used
-by the application. It has no schema `CREATE`, object ownership, owner-role
+by the application. The only column-scoped exception is `UPDATE` on
+`gate_decisions.answer_user_prompt` and
+`gate_decisions.answer_user_prompt_sha256`. It has no schema `CREATE`, object ownership, owner-role
 membership, or sequence privileges.
 
 Every configured Vercel build checks the runtime connection in a
 repeatable-read, read-only transaction. The check requires exact migration IDs
-and checksums; exactly the expected ten tables and their column names, types, and
+and checksums; exactly the expected seventeen tables and their column names, types, and
 nullability; valid and ready definitions for the two critical partial unique
 indexes; and the exact effective schema/table privilege allowlist, including
 access inherited through memberships or `PUBLIC`. Missing or extra application
@@ -111,7 +177,7 @@ then wins over reserved or in-progress work and deletes the raw-ID record and
 all remaining content. Late provider finalization cannot recreate the deleted
 rows. A browser request cannot impersonate that event.
 
-## Durable data model
+## Hosted durable data model
 
 ### `user_controls`
 
@@ -162,7 +228,8 @@ replay rather than trusted as event input.
 
 ### `model_requests`
 
-The authoritative model-call ledger. Each division or answer records an
+The authoritative model-call ledger. Each Division, Portia, approved Answer,
+Charlotte, or legacy-answer operation records an
 idempotency key, request digest, status, model and prompt provenance, provider
 response ID, bounded token counts, timestamps, and a safe failure code.
 Provider output that is refused, incomplete, malformed, or schema-invalid is
@@ -170,6 +237,28 @@ not persisted; WebChess keeps only a syntactically sanitized provider response
 ID, safe failure classification, HTTP status when applicable, and normalized
 token usage when the provider supplied it. Prompts and secrets are not copied
 into operational logs.
+
+### Lifecycle genealogy
+
+`lifecycle_runs` is the versioned state and ancestry authority behind the
+visible Anansi → Chess → Portia → Answer → Charlotte → Wilbur → Web sequence.
+Gate and Retry remain inspectable internal decision branches rather than
+player-facing stages. The run stores independent seeds, semantic retry counters,
+parent/root relationships, survivor sets, terminal fingerprints, the exact
+reviewed answer-prompt digest, resumable per-signal Portia assessments, its
+active provider-attempt fence and three-attempt technical budget, Charlotte's
+separate active-request fence and three-attempt qualification budget, and all
+contract/algorithm versions. Exhausting Charlotte's budget preserves the
+Portia-approved generated Answer in a stable `charlotte_unavailable` state; it
+does not silently present that Answer as Charlotte-qualified.
+
+`portia_reviews`, `gate_decisions`, and `charlotte_results` are immutable
+attempt artifacts. The generated Answer and its lifecycle-run, reviewed-prompt,
+and Gate-input provenance are stored through the durable game/model-result
+boundary. `wilbur_actions` is revisioned; `wilbur_observations` and
+`lifecycle_events` are append-only. Every table is owner-scoped and cascades
+through the existing account/game deletion boundary. Account export v2 reads
+the complete genealogy in the same bounded repeatable-read snapshot.
 
 ### `usage_buckets`
 
@@ -263,10 +352,13 @@ committed result or reports the existing `reserved`/`in_progress` operation as
 pending rather than creating another provider call. A reservation whose lease
 expires before provider start becomes terminally failed and its reservation is
 refunded. A provider-started request whose lease expires before definitive
-settlement becomes terminally `indeterminate`; that intent is never called
-again automatically, and the user must create a new intent and idempotency key.
-If settlement committed but final game attachment was interrupted, the durable
-result payload is the recovery authority.
+settlement becomes terminally `indeterminate`; that same intent is not called
+again. Portia may create a new fenced attempt while resuming its persisted
+per-signal prefix, but only until its run-wide limit of three failed or
+indeterminate provider-started attempts. Exhaustion produces
+`portia_unavailable`, not a fabricated review, Gate decision, or answer. If
+settlement committed but final attachment was interrupted, the durable result
+payload is the recovery authority.
 
 The application quotas and concurrency leases are the primary cost controls.
 OpenAI spend alerts are notifications, not caps. An explicitly enabled OpenAI
@@ -311,16 +403,27 @@ without introducing a separate queue or cache as an authority.
 - Randomization generates variation, not evidence.
 - Board events create salience, not factual warrant.
 - The original question and every transformation remain inspectable.
-- Visitors never supply model credentials.
-- OpenAI calls occur only in authenticated server routes.
+- The local plugin never receives model credentials; OpenClaw owns provider
+  authentication and may contact the user's configured remote provider.
+- Hosted visitors never supply model credentials.
+- Hosted OpenAI calls occur only in authenticated server routes.
 - The server is authoritative for ownership, moves, passes, captures, endings,
   prompts, quota, and usage.
 - No correctness or security property depends on Function memory.
-- Final synthesis is allowed only after canonical replay proves an ending.
+- Portia is allowed only after canonical replay proves an ending and assembles
+  the exact board-derived answer prompt.
+- Answer generation is allowed only after Portia permits that exact prompt and
+  the deterministic Gate passes it.
+- Charlotte is allowed only after the approved Answer is durably stored; it
+  qualifies that exact generated answer and cannot replace its provenance.
+- Portia progress is persisted per signal and technical failure is bounded to
+  three provider-started attempts before `portia_unavailable`.
+- Retry is bounded to two same-field games and one regenerated field.
+- Model output cannot author or rewrite a Wilbur observation.
 - A replay preserves the cast; a new division creates a new cast.
 - Model and prompt provenance are recorded without logging secrets.
 - A replay start is cloned and accounted atomically.
 - Forced deletion retains no raw Clerk ID in application tables.
 
-See the [technical white paper](WEBCHESS_WHITE_PAPER.md) for the intellectual
+See the [WebChess 2.0 technical white paper](WEBCHESS_WHITE_PAPER_V2.md) for the intellectual
 lineage, evidence matrix, limitations, and evaluation agenda.

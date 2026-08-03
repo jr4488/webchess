@@ -175,6 +175,25 @@ describe('ReadingStage final answer', () => {
     expect(screen.getByTestId('radial-board')).toHaveAttribute('data-highlighted', '2:3')
   })
 
+  it('shows the original question before the outcome, generated answer, and captured-signal reading', () => {
+    const { container } = renderReading()
+    const question = container.querySelector('.reading-question')
+    const outcomeBanner = container.querySelector('.outcome-banner')
+    const answerCard = container.querySelector('.ai-answer-card')
+    const readingHeader = container.querySelector('.reading-sheet__header')
+
+    expect(question).toHaveTextContent('How should this plan move into its next useful phase?')
+    expect(question?.compareDocumentPosition(outcomeBanner as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(question?.compareDocumentPosition(answerCard as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(question?.compareDocumentPosition(readingHeader as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
   it('renders the five-section contract and consecutive actions without blank-line dependencies', () => {
     const { container } = renderReading()
     const answerText = container.querySelector('.ai-answer-text')

@@ -1,21 +1,113 @@
 # Installing and deploying WebChess
 
-This guide covers local development and the approved Vercel architecture. It
-does not authorize production promotion, billing changes, secret disclosure,
-or DNS changes.
+This guide covers the installable local OpenClaw plugin, hosted-service
+development, and the approved Vercel architecture. It does not authorize
+production promotion, billing changes, secret disclosure, or DNS changes.
+
+## Install the local OpenClaw plugin
+
+The plugin includes and launches the complete visual WebChess application. It
+requires OpenClaw 2026.7.1 or later, one of the Node.js versions supported by
+that OpenClaw release, npm 11, PostgreSQL 17 on loopback, and a usable default
+model already configured in OpenClaw. It does **not** require a WebChess
+account, Clerk, hosted Neon, Vercel, `OPENAI_API_KEY`, or an operator-owned
+service.
+
+For a source checkout, install the locked dependencies, build the small plugin
+entry, and register the checkout as a linked OpenClaw plugin:
+
+```bash
+git clone https://github.com/jr4488/webchess.git
+cd webchess
+npm ci
+npm run plugin:build
+npm run verify:openclaw
+openclaw plugins install --link .
+openclaw plugins inspect webchess --runtime --json
+export WEBCHESS_OPENCLAW_DATABASE_URL=postgresql://webchess:password@127.0.0.1:55432/webchess
+openclaw webchess
+```
+
+`plugins install` registers and enables the plugin; there is no separate
+Gateway service or WebChess account to configure. The manifest is startup-lazy:
+OpenClaw loads it when `openclaw webchess` is invoked. The command launches the
+app in the foreground at `http://127.0.0.1:3210/openclaw`, opens the default
+browser, and remains attached so Ctrl-C cleanly stops the local server.
+The database must be dedicated to this local WebChess installation; the
+launcher rejects non-PostgreSQL and non-loopback URLs. It applies the bundled
+canonical migrations before reporting readiness. `npm run verify:openclaw`
+checks the packaged plugin and UI path; `npm run test:integration` uses a
+disposable PostgreSQL 17 database to verify persistence.
+
+Useful launch options are:
+
+```bash
+openclaw webchess --no-open
+openclaw webchess --port 4312
+```
+
+For a self-contained local install rather than a source link, build a standard
+npm package archive and give that archive to OpenClaw's managed installer:
+
+```bash
+npm ci
+npm run plugin:build
+npm run verify:openclaw
+npm pack
+openclaw plugins install npm-pack:./webchess-2.1.0.tgz
+```
+
+OpenClaw installs production dependencies with lifecycle scripts disabled.
+The package therefore contains both the compiled plugin entry and the source
+needed by the bundled local Next.js application. Rebuild the archive after any
+source change. At launch, the plugin stages that bundled source in an
+operating-system temporary working directory, links the managed installation's
+dependencies, and removes the directory when the foreground command exits.
+The temporary directory contains application code only; game history remains
+in the dedicated local database.
+
+The launch is intentionally local-only:
+
+- Next.js listens on `127.0.0.1`, not the LAN;
+- questions, casts, moves, lifecycle artifacts, actions, and observations are
+  stored in the dedicated loopback PostgreSQL database;
+- the loopback process invokes `openclaw infer model run --local` without a
+  model override, so OpenClaw resolves the user's default model and existing
+  authentication;
+- hosted Clerk and generic database variables are cleared for the launched
+  process; only `WEBCHESS_OPENCLAW_DATABASE_URL` is admitted;
+  provider environment already present in the user's shell remains available
+  to that user's OpenClaw, while a repository `.env.local` cannot introduce a
+  missing OpenAI key into the child process; and
+- no WebChess account, telemetry service, sync service, or hosted WebChess
+  proxy is contacted.
+
+The user's configured model provider may still be remote. In that case,
+OpenClaw sends the division prompt and final game-derived prompt to that
+provider under the user's own account and data controls. Credentials remain in
+OpenClaw/provider configuration and are never sent to the browser or a
+WebChess-operated service.
+
+The dedicated local database is the persistence boundary: browser refreshes
+and profiles on the same loopback installation see the same owner-scoped game,
+while another machine does not. Concurrent tabs use durable revision checks.
+The server recomputes the cast from its seed and replays the event log before
+accepting a saved position or running later lifecycle stages.
+
+## Hosted-service development and deployment
 
 ## Prerequisites
 
-- Node.js 22.x
+- Node.js 22.22.3 or later in the supported 22.x line
 - npm 11.x
 - a Clerk application
 - a Neon Postgres database
 - an OpenAI Platform project and server API key
 - a Vercel account that can create an independent project named `webchess`
 
-WebChess does not accept visitor-supplied API keys and does not use ChatGPT
-account allowances. Clerk handles identity; the WebChess OpenAI Platform
-project pays for model calls.
+The hosted service does not accept visitor-supplied API keys and does not use
+ChatGPT account allowances. Clerk handles identity; the WebChess OpenAI
+Platform project pays for hosted model calls.
 
 ## 1. Install the locked dependencies
 
@@ -156,7 +248,11 @@ runtime-role allowlist:
 - `SELECT` and `UPDATE` on `model_concurrency_slots`; and
 - `SELECT`, `INSERT`, `UPDATE`, and `DELETE` on `user_controls`, `games`,
   `model_requests`, `game_start_requests`, `usage_buckets`, and
-  `rate_buckets`.
+  `rate_buckets`;
+- `SELECT`, `INSERT`, and `UPDATE` on `lifecycle_runs` and `wilbur_actions`;
+  and
+- `SELECT` and `INSERT` on `portia_reviews`, `gate_decisions`,
+  `charlotte_results`, `wilbur_observations`, and `lifecycle_events`.
 
 Grant no sequence privileges. Remove any role membership that would let the
 runtime login assume an owner, and remove excess access inherited from another
@@ -180,13 +276,15 @@ That command opens a repeatable-read, read-only transaction and fails unless:
 
 - the migration ledger contains exactly the release's ordered IDs and
   checksums;
-- the application schema contains exactly the ten expected tables, with the
+- the application schema contains exactly the seventeen expected tables, with the
   expected column names, types, and nullability;
 - `games_one_current_per_user` and
   `model_requests_one_succeeded_operation_per_game` are valid, ready, unique
   partial indexes with the expected predicates; and
 - the connected runtime role has schema `USAGE` but not `CREATE`, has exactly
-  the effective per-table privileges above, owns none of the expected tables,
+  the effective per-table privileges above, plus column-scoped `UPDATE` only
+  on `gate_decisions.answer_user_prompt` and
+  `gate_decisions.answer_user_prompt_sha256`, owns none of the expected tables,
   and cannot assume an owner role.
 
 The privilege check includes access obtained through membership or `PUBLIC`.
@@ -205,6 +303,13 @@ The migration creates:
 - `usage_buckets`
 - `rate_buckets`
 - `model_concurrency_slots`
+- `lifecycle_runs`
+- `portia_reviews`
+- `gate_decisions`
+- `charlotte_results`
+- `wilbur_actions`
+- `wilbur_observations`
+- `lifecycle_events`
 
 The owner command is idempotent for already-recorded, matching files. Once
 `0001_durable_webchess.sql` has been applied to the first durable database, its
@@ -387,8 +492,12 @@ npm run test:links
 Do not create a preview until all gates pass. Automated tests and CI must use
 deterministic OpenAI stubs and must never spend live model tokens. After those
 gates pass, the owner's bounded manual Preview inspection may use the dedicated
-Preview OpenAI key for one complete game: one division call and, after a real
-ending, one answer call. Durable application quotas remain enabled throughout.
+Preview OpenAI key for one complete v2 game: one division call and, after a
+real ending, one successful Portia review and one successful Charlotte review.
+Either review has a persisted ceiling of three technical provider attempts; a
+failed Gate may add only the bounded Retry work described in
+[the operator guide](docs/WEBCHESS_2_0_OPERATIONS.md). Durable application
+quotas remain enabled throughout.
 
 ## 8. Create the independent Vercel project
 

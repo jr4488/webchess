@@ -5,6 +5,11 @@ import type { WebChessApiServices } from './ports'
 let apiServicesPromise: Promise<WebChessApiServices> | null = null
 
 async function loadApiServices(): Promise<WebChessApiServices> {
+  const { isOpenClawLocalModeEnabled } = await import('../openclaw/config')
+  if (isOpenClawLocalModeEnabled()) {
+    const { getOpenClawApiServices } = await import('../openclaw/services')
+    return getOpenClawApiServices()
+  }
   const { createApiServices } = await import('./service-adapter')
   return createApiServices()
 }

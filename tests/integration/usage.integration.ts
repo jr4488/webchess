@@ -322,6 +322,8 @@ describe('durable usage accounting against PostgreSQL', () => {
       requestId: REQUEST_ID,
       gameId: REQUEST_ID,
       operation: 'division',
+      requestSha256: SHA256,
+      promptVersion: 'division-v1',
       status: 'succeeded',
       resultPayload: {
         kind: 'division',

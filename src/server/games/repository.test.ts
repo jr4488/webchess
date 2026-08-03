@@ -358,6 +358,7 @@ describe('durable game lifecycle', () => {
       CURRENT_GAME_VERSIONS.engine,
       CURRENT_GAME_VERSIONS.cast,
       '0.2.0-test',
+      null,
     ])
     expect(database.calls[0]?.text).not.toContain(
       'INSERT INTO user_controls',

@@ -1,4 +1,12 @@
 import type { DurableGame } from '../../lib/webchess-api'
+import type {
+  AssumptionResult,
+  LifecycleActivity,
+  LifecycleAggregate,
+  WilburAction,
+  WilburActionStatus,
+  WilburObservation,
+} from '../../lib/lifecycle'
 import type { GeneratedAnswer } from '../../types'
 
 export type JsonPrimitive = boolean | number | string | null
@@ -60,6 +68,40 @@ export interface MoveCommand extends RevisionCommand {
   }
 }
 
+export interface CreateWilburActionCommand extends ApiOperationContext {
+  ownerId: string
+  gameId: string
+  charlotteActionIndex: number | null
+  actor: string
+  action: string
+  testedAssumption: string
+  expectedObservation: string
+  decisionThreshold: string
+  reviewHorizon: string
+}
+
+export interface UpdateWilburActionCommand extends ApiOperationContext {
+  ownerId: string
+  gameId: string
+  actionId: string
+  expectedRevision: number
+  status: WilburActionStatus
+}
+
+export interface AppendWilburObservationCommand extends ApiOperationContext {
+  ownerId: string
+  gameId: string
+  actionId: string
+  observedAt: string
+  observation: string
+  evidenceClassification: string
+  expectedEffect: string
+  unexpectedEffect: string
+  stakeholderResponse: string
+  assumptionResult: AssumptionResult
+  nextDecision: string
+}
+
 export interface WebChessApiServices {
   divide(input: {
     ownerId: string
@@ -85,6 +127,35 @@ export interface WebChessApiServices {
     answer: GeneratedAnswer
   }>
 
+  getLifecycle(input: OwnerContext & {
+    gameId: string
+  }): Promise<LifecycleAggregate>
+
+  runPortia(input: RevisionCommand): Promise<LifecycleAggregate>
+
+  retryLifecycle(input: RevisionCommand): Promise<{
+    game: DurableGameDto | null
+    lifecycle: LifecycleAggregate
+  }>
+
+  runCharlotte(input: RevisionCommand): Promise<LifecycleAggregate>
+
+  getProvenance(input: OwnerContext & {
+    gameId: string
+  }): Promise<readonly LifecycleActivity[]>
+
+  createWilburAction(
+    input: CreateWilburActionCommand,
+  ): Promise<WilburAction>
+
+  updateWilburAction(
+    input: UpdateWilburActionCommand,
+  ): Promise<WilburAction>
+
+  appendWilburObservation(
+    input: AppendWilburObservationCommand,
+  ): Promise<WilburObservation>
+
   replay(input: RevisionCommand): Promise<DurableGameDto>
 
   abandon(input: RevisionCommand): Promise<DurableGameDto>
@@ -107,7 +178,7 @@ export interface WebChessApiServices {
 
 export interface AuthenticatedApiUser {
   userId: string
-  source: 'clerk' | 'local-e2e'
+  source: 'clerk' | 'local-e2e' | 'local-openclaw'
 }
 
 export interface HttpDependencies {

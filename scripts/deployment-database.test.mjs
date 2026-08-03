@@ -41,6 +41,7 @@ const compatibleRuntimeInspection = () => ({
   tables_exact: true,
   columns_exact: true,
   privileges_exact: true,
+  column_privileges_exact: true,
   owner_isolated: true,
   indexes_exact: true,
 })
@@ -91,10 +92,118 @@ describe('deployment database migration tooling', () => {
 
     expect(migrations.map((migration) => migration.id)).toEqual([
       '0001_durable_webchess',
+      '0002_webchess_2_lifecycle',
+      '0003_prompt_review_answer_stage',
+      '0004_detached_provider_recovery',
+      '0005_align_completed_portia_progress',
+      '0006_permitted_portia_amendments',
+      '0007_bounded_charlotte_attempts',
+      '0008_visible_research_broker',
+      '0009_expand_research_timeout_ceiling',
+      '0010_player_visible_answer_prompt',
     ])
     expect(migrations[0].sql).toContain(
       'CREATE TABLE IF NOT EXISTS games',
     )
+    const researchMigration = migrations.find(
+      (migration) => migration.id === '0008_visible_research_broker',
+    )
+    const timeoutMigration = migrations.find(
+      (migration) => migration.id === '0009_expand_research_timeout_ceiling',
+    )
+    const answerPromptMigration = migrations.find(
+      (migration) => migration.id === '0010_player_visible_answer_prompt',
+    )
+    expect(researchMigration?.sql).toContain(
+      'CREATE TABLE IF NOT EXISTS research_requests',
+    )
+    expect(researchMigration?.sql).toContain(
+      'CREATE TABLE IF NOT EXISTS research_sources',
+    )
+    expect(timeoutMigration?.sql).toContain(
+      'CHECK (timeout_ms BETWEEN 1000 AND 120000)',
+    )
+    expect(answerPromptMigration?.sql).toContain(
+      'answer_user_prompt_sha256',
+    )
+  })
+
+  it('pins the visible research broker runtime schema and privileges', async () => {
+    const migrations = exampleMigrations()
+    const client = new FakeClient(ledgerFor(migrations))
+
+    await checkCanonicalMigrationsReadOnly(client, migrations)
+
+    const probe = client.queries.find((query) =>
+      query.text.includes('webchess_runtime_compatibility_probe'),
+    )
+    const columns = JSON.parse(probe.values[0])
+    const privileges = JSON.parse(probe.values[1])
+    const indexes = JSON.parse(probe.values[2])
+    const columnPrivileges = JSON.parse(probe.values[3])
+
+    const requestColumns = columns.filter(({ table_name }) =>
+      table_name === 'research_requests')
+    expect(requestColumns).toHaveLength(32)
+    expect(requestColumns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          column_name: 'stage',
+          data_type: 'text',
+          not_null: true,
+        }),
+        expect.objectContaining({
+          column_name: 'content_digest',
+          data_type: 'character(64)',
+          not_null: false,
+        }),
+      ]),
+    )
+    expect(columns.filter(({ table_name }) =>
+      table_name === 'research_sources')).toHaveLength(11)
+
+    const allowedPrivileges = (tableName) => privileges
+      .filter(({ table_name, allowed }) =>
+        table_name === tableName && allowed)
+      .map(({ privilege }) => privilege)
+    expect(allowedPrivileges('research_requests')).toEqual([
+      'SELECT',
+      'INSERT',
+      'UPDATE',
+    ])
+    expect(allowedPrivileges('research_sources')).toEqual([
+      'SELECT',
+      'INSERT',
+    ])
+
+    const gateUpdateColumns = columnPrivileges
+      .filter(({ table_name, privilege, allowed }) =>
+        table_name === 'gate_decisions' && privilege === 'UPDATE' && allowed)
+      .map(({ column_name }) => column_name)
+    expect(gateUpdateColumns).toEqual([
+      'answer_user_prompt',
+      'answer_user_prompt_sha256',
+    ])
+
+    expect(indexes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        index_name:
+          'research_requests_game_id_stage_policy_version_key',
+        table_name: 'research_requests',
+        key_columns: 'game_id,stage,policy_version',
+      }),
+      expect.objectContaining({
+        index_name:
+          'research_sources_research_request_id_ordinal_key',
+        table_name: 'research_sources',
+        key_columns: 'research_request_id,ordinal',
+      }),
+      expect.objectContaining({
+        index_name: 'research_sources_research_request_id_url_key',
+        table_name: 'research_sources',
+        key_columns: 'research_request_id,url',
+      }),
+    ]))
   })
 
   it('uses the existing migration runner checksum semantics exactly', () => {
@@ -210,6 +319,7 @@ describe('deployment database migration tooling', () => {
     ['indexes_exact', false, /critical index contract/],
     ['owner_isolated', false, /assume ownership/],
     ['privileges_exact', false, /least-privilege contract/],
+    ['column_privileges_exact', false, /column privileges/],
   ])(
     'fails closed when runtime compatibility field %s is %s',
     async (field, failedValue, message) => {

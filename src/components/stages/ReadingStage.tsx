@@ -280,6 +280,8 @@ export function ReadingStage({
       </div>
 
       <article className="reading-sheet">
+        <blockquote className="reading-question">“{problem}”</blockquote>
+
         <div className="outcome-banner">
           <small>How the board ended</small>
           <h1>{outcomeTitle}</h1>
@@ -301,6 +303,7 @@ export function ReadingStage({
               activity={answerActivity}
               modelLabel={answerModelLabel}
               providerLabel={provider.label}
+              runtimeKind={provider.kind}
               summary={`Weighing ${captures.length} captured signals across ${outcome.completedTurn} moves, then composing the five checked answer sections.`}
               metrics={[
                 { label: 'Captured signals', value: captures.length },
@@ -374,7 +377,6 @@ export function ReadingStage({
           </div>
         </header>
 
-        <blockquote className="reading-question">“{problem}”</blockquote>
         <p className="reading-summary">{reading.summary}</p>
 
         <div className="reading-sections">

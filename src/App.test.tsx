@@ -9,6 +9,10 @@ import { acceptMoveCommand, createReplayState, toGameView } from './lib/game-rep
 import type { EngineOptions } from './lib/engine'
 import { composeProblemParts } from './lib/division'
 import { WebChessApiError } from './lib/webchess-api'
+import { PORTIA_ATTACK_TYPES } from './lib/lifecycle/contracts'
+import type { LifecycleAggregate } from './lib/lifecycle/contracts'
+import { CURRENT_LIFECYCLE_VERSIONS } from './lib/lifecycle/versions'
+import type { ResearchRecord } from './lib/research'
 import type {
   DurableGame,
   DurableGameStatus,
@@ -59,10 +63,13 @@ const apiHarness = vi.hoisted(() => ({
   createIdempotencyKey: vi.fn(() => '018f47b2-4b0c-7b9e-8f24-123456789000'),
   divideProblem: vi.fn(),
   getCurrentGame: vi.fn(),
+  getGameLifecycle: vi.fn(),
   getOwnedGame: vi.fn(),
   recoverDivisionIntent: vi.fn(),
   replayGame: vi.fn(),
   requestGameAnswer: vi.fn(),
+  runCharlotte: vi.fn(),
+  runPortia: vi.fn(),
   startGame: vi.fn(),
   submitMove: vi.fn(),
 }))
@@ -105,10 +112,13 @@ vi.mock('./lib/webchess-api', async (importOriginal) => {
     createIdempotencyKey: apiHarness.createIdempotencyKey,
     divideProblem: apiHarness.divideProblem,
     getCurrentGame: apiHarness.getCurrentGame,
+    getGameLifecycle: apiHarness.getGameLifecycle,
     getOwnedGame: apiHarness.getOwnedGame,
     recoverDivisionIntent: apiHarness.recoverDivisionIntent,
     replayGame: apiHarness.replayGame,
     requestGameAnswer: apiHarness.requestGameAnswer,
+    runCharlotte: apiHarness.runCharlotte,
+    runPortia: apiHarness.runPortia,
     startGame: apiHarness.startGame,
     submitMove: apiHarness.submitMove,
   }
@@ -270,6 +280,191 @@ function makeAnswerFailedGame(): DurableGame {
   }
 }
 
+function makeResearchRecord(
+  status: 'searching' | 'completed',
+  overrides: Partial<ResearchRecord> = {},
+): ResearchRecord {
+  return {
+    id: '81000000-0000-4000-8000-000000000001',
+    lifecycleRunId: '72000000-0000-4000-8000-000000000001',
+    gameId: GAME_ID,
+    stage: 'portia',
+    requestedBy: 'research-policy',
+    policyVersion: 'webchess-visible-research-v1',
+    materiality: 'required',
+    reason: 'The candidate prompt depends on a current external benchmark.',
+    query: 'official LLM inference latency benchmark 2026',
+    status,
+    provider: 'codex',
+    transport: 'local',
+    model: 'gpt-5.4-search',
+    bounds: {
+      invocationLimit: 1,
+      resultLimit: 5,
+      sourceLimit: 3,
+      timeoutMs: 30_000,
+      synthesisCharacterLimit: 4_000,
+    },
+    attemptCount: 1,
+    executedQueries: ['official LLM inference latency benchmark 2026'],
+    searchSynthesis: 'Current sources distinguish prefill latency from decode throughput.',
+    directPageTextFetched: false,
+    retrievedFacts: [],
+    sources: [],
+    omittedSourceCount: 0,
+    injectionSignalsDetected: [],
+    contentDigest: 'a'.repeat(64),
+    failureCode: null,
+    startedAt: '2026-08-02T18:01:30.000Z',
+    completedAt: status === 'completed' ? '2026-08-02T18:02:00.000Z' : null,
+    createdAt: '2026-08-02T18:01:30.000Z',
+    updatedAt: status === 'completed'
+      ? '2026-08-02T18:02:00.000Z'
+      : '2026-08-02T18:01:30.000Z',
+    ...overrides,
+  }
+}
+
+function makeLifecycle(
+  state: LifecycleAggregate['state'],
+  options: {
+    portia?: boolean
+    gate?: boolean
+    gatePassed?: boolean
+    gateRecommendation?: 'answer' | 'retry_game' | 'retry_field' | 'insufficient_basis'
+    charlotte?: boolean
+  } = {},
+): LifecycleAggregate {
+  const candidateId = 'attempt-1:white-rook-1'
+  const answerPromptDigest = 'd'.repeat(64)
+  const portia = options.portia ? {
+    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    reviewedAnswerPromptDigest: answerPromptDigest,
+    promptDecision: 'permit',
+    promptDecisionRationale:
+      'The exact weighted board prompt is reasonable with the retained qualification.',
+    runSummary: 'Portia tested every survivor and retained the bounded interpretation.',
+    assessments: [{
+      candidateId,
+      disposition: 'preserved',
+      survivingInterpretation: 'The protected outcome remains a useful constraint.',
+      requiredQualification: null,
+      redundancyClusterId: null,
+      coverageTags: ['protected_outcome'],
+      missingEvidence: ['A direct observation is still required.'],
+      countercase: 'A contradictory observation would reverse the interpretation.',
+      reversalCondition: 'Reverse if the declared observation contradicts it.',
+      attackFindings: PORTIA_ATTACK_TYPES.map((attackType) => ({
+        attackType,
+        outcome: 'passed',
+        severity: 'low',
+        finding: `The ${attackType} check found no material defect in this signal.`,
+        consequence: 'The signal may remain in the qualified candidate prompt.',
+        requiredRevision: null,
+      })),
+    }],
+    crossCandidateContradictions: [],
+    redundancyClusters: [],
+    missingCoverage: [],
+    unresolvedQuestions: ['What direct observation should come next?'],
+    recommendedGateInputs: {
+      tensionCandidatePairs: [],
+      fatalContradictionIds: [],
+      fieldRepairReasons: [],
+    },
+  } : null
+  const charlotte = options.charlotte ? {
+    contractVersion: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+    protectedOutcome: 'Protect the purpose while learning safely.',
+    directAnswer: 'Run a bounded test before making the larger commitment.',
+    supportingCandidateIds: [candidateId],
+    qualificationsByCandidateId: {},
+    centralTension: 'Learn promptly without exposing affected people to avoidable downside.',
+    valueConstraints: ['Keep a stop path.'],
+    stakeholderConsequences: ['The accountable player owns the test.'],
+    recommendation: 'Run the smallest reversible experiment and decide from the observation.',
+    communicationStrategy: 'State the assumption, signal, and stopping rule.',
+    uncertainties: ['The observation is not yet known.'],
+    whatCouldChangeTheAnswer: ['A contradictory observation.'],
+    exactlyThreeNextActions: Array.from({ length: 3 }, (_, index) => ({
+      title: `Action ${index + 1}`,
+      actor: 'The accountable player',
+      assumptionBeingTested: 'A bounded action can produce useful evidence.',
+      smallestAction: 'Run one limited observation without scaling.',
+      expectedObservation: 'A direct signal appears inside the review horizon.',
+      decisionThreshold: 'Continue only if the signal appears safely.',
+      reviewHorizon: 'Within fourteen days',
+      reversibility: 'Stop and restore the prior state.',
+      risksOrAffectedParties: 'Stop if the protected outcome is threatened.',
+      decisionRule: 'revise' as const,
+    })),
+  } : null
+  return {
+    id: '72000000-0000-4000-8000-000000000001',
+    rootRunId: '72000000-0000-4000-8000-000000000001',
+    parentRunId: null,
+    gameId: GAME_ID,
+    state,
+    revision: 4,
+    fieldGeneration: 1,
+    gameAttempt: 1,
+    sameFieldRetryCount: 0,
+    fieldRegenerationCount: 0,
+    divisionSeed: 'division-seed',
+    castSeed: 'cast-seed',
+    trajectorySeed: 'trajectory-seed',
+    retryReason: null,
+    terminalFingerprint: 'f'.repeat(64),
+    answerPromptDigest: options.portia ? answerPromptDigest : null,
+    answerUserPrompt: null,
+    answerUserPromptSha256: null,
+    survivors: [{
+      candidateId,
+      finalCoordinate: { ring: 0, sector: 4 },
+    }],
+    portiaAttemptCount: options.portia ? 1 : 0,
+    portiaActiveModelRequestId: null,
+    portiaFailedAttemptCount: 0,
+    portiaFailureLimit: 3,
+    portiaProgress: {
+      currentCandidateId: null,
+      completedCandidateIds: options.portia ? [candidateId] : [],
+      completedAssessments: portia?.assessments ?? [],
+    },
+    portia,
+    gate: options.gate ? {
+      passed: options.gatePassed ?? true,
+      usableCandidateCount: options.gatePassed === false ? 3 : 4,
+      independentClusterCount: options.gatePassed === false ? 2 : 4,
+      contradictionResults: { fatalUnaddressedIds: [], tensionCandidatePairs: [] },
+      missingRequirements: options.gatePassed === false
+        ? [
+            'At least 4 preserved or wounded candidates are required.',
+            'At least 3 independent candidate clusters are required.',
+          ]
+        : [],
+      recommendedNextTransition: options.gateRecommendation ?? 'answer',
+      explanation: options.gatePassed === false
+        ? 'The Gate failed 2 sufficiency requirements; the bounded retry policy is exhausted.'
+        : 'The deterministic evidence floor is met.',
+    } : null,
+    charlotteActiveModelRequestId: null,
+    charlotteFailedAttemptCount: 0,
+    charlotteFailureLimit: 3,
+    charlotte,
+    charlotteRenderedAnswer: options.charlotte
+      ? 'Protect the purpose, run the smallest reversible test, and decide from the observation.'
+      : null,
+    wilburActions: [],
+    wilburObservations: [],
+    activities: [],
+    research: [],
+    versions: {},
+    createdAt: '2026-08-01T20:00:00.000Z',
+    updatedAt: '2026-08-01T20:00:00.000Z',
+  } as unknown as LifecycleAggregate
+}
+
 function requireServerGame(): DurableGame {
   if (!serverGame) throw new Error('The mock server has no current game.')
   return serverGame
@@ -294,11 +489,23 @@ async function flushAsyncWork(): Promise<void> {
 
 async function renderRestoredApp(): Promise<ReturnType<typeof render>> {
   const previousRestoreCalls = apiHarness.getCurrentGame.mock.calls.length
+  const previousLifecycleCalls = apiHarness.getGameLifecycle.mock.calls.length
   const result = render(<App />)
   await waitFor(() => {
     expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(previousRestoreCalls + 1)
   })
   await flushAsyncWork()
+  if (
+    serverGame &&
+    ['completed', 'answering', 'answer_failed', 'answered'].includes(serverGame.status)
+  ) {
+    await waitFor(() => {
+      expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(
+        previousLifecycleCalls + 1,
+      )
+    })
+    await flushAsyncWork()
+  }
   return result
 }
 
@@ -328,6 +535,12 @@ beforeEach(() => {
   for (const mock of Object.values(apiHarness)) mock.mockClear()
 
   apiHarness.getCurrentGame.mockImplementation(async () => serverGame)
+  apiHarness.getGameLifecycle.mockRejectedValue(
+    new WebChessApiError('This saved game predates the v2 lifecycle.', {
+      kind: 'not-found',
+      status: 404,
+    }),
+  )
   apiHarness.getOwnedGame.mockImplementation(async (gameId: string) => {
     if (serverGame?.id === gameId) return serverGame
     throw new WebChessApiError('That saved game was not found.', {
@@ -465,6 +678,23 @@ describe('durable WebChess client flow', () => {
     expect(apiHarness.submitMove).not.toHaveBeenCalled()
   })
 
+  it('restores the original question above a completed game outcome and answer', async () => {
+    serverGame = makeAnsweredGame()
+
+    const { container } = await renderRestoredApp()
+    const question = container.querySelector('.reading-question')
+    const outcomeBanner = container.querySelector('.outcome-banner')
+    const answerCard = container.querySelector('.ai-answer-card')
+
+    expect(question).toHaveTextContent(PROBLEM)
+    expect(question?.compareDocumentPosition(outcomeBanner as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(question?.compareDocumentPosition(answerCard as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
   it('keeps polling a restored division across unchanged and transient responses', async () => {
     vi.useFakeTimers()
     const dividing = makeDividingGame()
@@ -519,6 +749,8 @@ describe('durable WebChess client flow', () => {
     render(<App />)
     await act(() => vi.advanceTimersByTimeAsync(0))
     await flushAsyncWork()
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await flushAsyncWork()
 
     expect(apiHarness.getCurrentGame).toHaveBeenCalledOnce()
     expect(
@@ -564,6 +796,8 @@ describe('durable WebChess client flow', () => {
       .mockResolvedValue(answered)
 
     render(<App />)
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await flushAsyncWork()
     await act(() => vi.advanceTimersByTimeAsync(0))
     await flushAsyncWork()
 
@@ -918,7 +1152,7 @@ describe('durable WebChess client flow', () => {
     expect(engineHarness.chooseMove).toHaveBeenCalledWith(
       expect.any(Array),
       'white',
-      `${PROBLEM}/1`,
+      `${GAME_ID}/1`,
       { completedPlies: 0, quietPlies: 0 },
     )
 
@@ -1106,6 +1340,203 @@ describe('durable WebChess client flow', () => {
       idempotencyKey: expect.any(String),
       signal: expect.any(AbortSignal),
     })
+  })
+
+  it('advances a v2 terminal game through Portia, board Answer, and Charlotte', async () => {
+    const completed = moveGame(
+      makeTerminalReadyGame(),
+      'white-rook-1',
+      { ring: 0, sector: 4 },
+    )
+    serverGame = completed
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('chess_terminal'),
+    )
+    apiHarness.runPortia.mockResolvedValue(
+      makeLifecycle('gate_passed', { portia: true, gate: true }),
+    )
+    apiHarness.runCharlotte.mockResolvedValue(
+      makeLifecycle('charlotte_complete', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
+    )
+
+    await renderRestoredApp()
+
+    expect(await screen.findByRole('heading', {
+      name: /The substantive board-derived answer/i,
+    }))
+      .toBeInTheDocument()
+    expect(await screen.findByRole('heading', {
+      name: /The answer, qualified for people and action/i,
+    }))
+      .toBeInTheDocument()
+    expect(screen.getByText(/Protect the purpose, run the smallest reversible test/i))
+      .toBeInTheDocument()
+    expect(apiHarness.runPortia).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: completed.revision },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    )
+    expect(apiHarness.runCharlotte).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: completed.revision + 1 },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    )
+    expect(apiHarness.requestGameAnswer).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: completed.revision },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    )
+    expect(screen.getByRole('region', { name: /WebChess 2\.1 lifecycle/i }))
+      .toBeInTheDocument()
+  })
+
+  it('reveals research-only Portia poll progress without changing lifecycle revision or its seven stages', async () => {
+    vi.useFakeTimers()
+    serverGame = moveGame(
+      makeTerminalReadyGame(),
+      'white-rook-1',
+      { ring: 0, sector: 4 },
+    )
+    const initial = {
+      ...makeLifecycle('portia_running'),
+      research: [makeResearchRecord('searching')],
+    } as LifecycleAggregate
+    const completedResearch = makeResearchRecord('completed', {
+      sources: [{
+        id: '82000000-0000-4000-8000-000000000001',
+        citationId: 'source-1',
+        ordinal: 1,
+        title: 'NIST AI measurement guidance',
+        url: 'https://www.nist.gov/example',
+        hostname: 'www.nist.gov',
+        trust: 'government_or_education',
+        discoveredFrom: 'search_activity',
+        createdAt: '2026-08-02T18:02:00.000Z',
+      }],
+    })
+    const polled = {
+      ...initial,
+      research: [completedResearch],
+    } as LifecycleAggregate
+    const foregroundPortia = createDeferred<LifecycleAggregate>()
+
+    expect(polled.revision).toBe(initial.revision)
+    expect(polled.updatedAt).toBe(initial.updatedAt)
+    expect(polled.research[0]?.status).not.toBe(initial.research[0]?.status)
+    expect(polled.research[0]?.updatedAt).not.toBe(initial.research[0]?.updatedAt)
+    expect(polled.research[0]?.sources).toHaveLength(1)
+    expect(initial.research[0]?.sources).toHaveLength(0)
+
+    apiHarness.getGameLifecycle
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValue(polled)
+    apiHarness.runPortia.mockReturnValue(foregroundPortia.promise)
+
+    render(<App />)
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await flushAsyncWork()
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await flushAsyncWork()
+
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledOnce()
+    expect(screen.getByRole('heading', { name: 'Searching now' })).toBeInTheDocument()
+    expect(screen.getByText('0 linked of 3 allowed · 0 omitted')).toBeInTheDocument()
+
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    await flushAsyncWork()
+    expect(apiHarness.runPortia).toHaveBeenCalledOnce()
+
+    await act(() => vi.advanceTimersByTimeAsync(750))
+    await flushAsyncWork()
+
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('heading', { name: 'Completed' })).toBeInTheDocument()
+    expect(screen.getByText('1 linked of 3 allowed · 0 omitted')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /NIST AI measurement guidance/i }))
+      .toBeInTheDocument()
+
+    const rail = screen.getByRole('region', { name: 'WebChess lifecycle progress' })
+    const railLabels = Array.from(
+      rail.querySelectorAll('.lifecycle-step > strong'),
+      (node) => node.textContent,
+    )
+    expect(railLabels).toEqual([
+      'Anansi',
+      'Chess',
+      'Portia',
+      'Answer',
+      'Charlotte',
+      'Wilbur',
+      'Web',
+    ])
+    expect(railLabels).not.toContain('Research')
+
+    foregroundPortia.resolve(polled)
+    await flushAsyncWork()
+  })
+
+  it('stops Charlotte auto-advance after the bounded terminal result', async () => {
+    serverGame = makeAnsweredGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('charlotte_pending', { portia: true, gate: true }),
+    )
+    apiHarness.runCharlotte.mockResolvedValue({
+      ...makeLifecycle('charlotte_unavailable', { portia: true, gate: true }),
+      charlotteActiveModelRequestId: null,
+      charlotteFailedAttemptCount: 3,
+      charlotteFailureLimit: 3,
+    } as LifecycleAggregate)
+
+    await renderRestoredApp()
+
+    expect(await screen.findByRole('heading', {
+      name: 'Charlotte qualification is unavailable',
+    })).toBeInTheDocument()
+    expect(screen.getByRole('heading', {
+      name: 'The substantive board-derived answer',
+    })).toBeInTheDocument()
+    expect(screen.getByText(ANSWER.answer)).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /Let the web meet reality/i }))
+      .not.toBeInTheDocument()
+    expect(apiHarness.runCharlotte).toHaveBeenCalledOnce()
+
+    vi.useFakeTimers()
+    await act(() => vi.advanceTimersByTimeAsync(30_000))
+    await flushAsyncWork()
+
+    expect(apiHarness.runCharlotte).toHaveBeenCalledOnce()
+    expect(screen.queryByText(/qualifying the generated answer/i))
+      .not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /new question/i })).toBeEnabled()
+  })
+
+  it('restores an exhausted v2 lifecycle as an honest terminal result without locking reset', async () => {
+    serverGame = moveGame(
+      makeTerminalReadyGame(),
+      'white-rook-1',
+      { ring: 0, sector: 4 },
+    )
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('insufficient_basis', {
+        portia: true,
+        gate: true,
+        gatePassed: false,
+        gateRecommendation: 'insufficient_basis',
+      }),
+    )
+
+    await renderRestoredApp()
+
+    expect(await screen.findByRole('heading', { name: /insufficient basis/i }))
+      .toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /try another bounded path/i }))
+      .not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /new question/i })).toBeEnabled()
+    expect(apiHarness.requestGameAnswer).not.toHaveBeenCalled()
   })
 
   it('retries an ambiguous answer with the same idempotency key', async () => {
