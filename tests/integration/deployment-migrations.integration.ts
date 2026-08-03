@@ -172,7 +172,8 @@ describe('deployment migration owner on PostgreSQL 17', () => {
       await administrator.query(
         `GRANT SELECT, INSERT, UPDATE ON TABLE
           "${compatibilitySchema}".lifecycle_runs,
-          "${compatibilitySchema}".wilbur_actions
+          "${compatibilitySchema}".wilbur_actions,
+          "${compatibilitySchema}".research_requests
         TO "${runtimeRole}"`,
       )
       await administrator.query(
@@ -181,8 +182,14 @@ describe('deployment migration owner on PostgreSQL 17', () => {
           "${compatibilitySchema}".gate_decisions,
           "${compatibilitySchema}".charlotte_results,
           "${compatibilitySchema}".wilbur_observations,
-          "${compatibilitySchema}".lifecycle_events
+          "${compatibilitySchema}".lifecycle_events,
+          "${compatibilitySchema}".research_sources
         TO "${runtimeRole}"`,
+      )
+      await administrator.query(
+        `GRANT UPDATE (answer_user_prompt, answer_user_prompt_sha256)
+          ON TABLE "${compatibilitySchema}".gate_decisions
+          TO "${runtimeRole}"`,
       )
 
       const runtime = runtimeClient()
@@ -194,6 +201,30 @@ describe('deployment migration owner on PostgreSQL 17', () => {
             canonicalMigrations,
           ),
         ).resolves.toBeUndefined()
+
+        await expect(runtime.query(
+          'UPDATE gate_decisions SET answer_user_prompt = answer_user_prompt WHERE false',
+        )).resolves.toMatchObject({ rowCount: 0 })
+        await expect(runtime.query(
+          'UPDATE gate_decisions SET result = result WHERE false',
+        )).rejects.toMatchObject({ code: '42501' })
+
+        await administrator.query(
+          `REVOKE UPDATE (answer_user_prompt_sha256)
+            ON TABLE "${compatibilitySchema}".gate_decisions
+            FROM "${runtimeRole}"`,
+        )
+        await expect(
+          checkCanonicalMigrationsReadOnly(
+            runtime,
+            canonicalMigrations,
+          ),
+        ).rejects.toThrow('column privileges')
+        await administrator.query(
+          `GRANT UPDATE (answer_user_prompt_sha256)
+            ON TABLE "${compatibilitySchema}".gate_decisions
+            TO "${runtimeRole}"`,
+        )
 
         await administrator.query(
           `REVOKE UPDATE ON TABLE "${compatibilitySchema}".deleted_user_tombstones FROM "${runtimeRole}"`,

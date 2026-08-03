@@ -1,4 +1,4 @@
-export type AuthSource = 'clerk' | 'local-e2e'
+export type AuthSource = 'clerk' | 'local-e2e' | 'local-openclaw'
 
 export interface AuthenticatedUser {
   userId: string

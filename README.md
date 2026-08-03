@@ -7,10 +7,13 @@ from many angles before acting. It combines:
 2. independent, seeded placement of those facets and 64 I Ching-inspired
    change lenses on an eight-ring by eight-sector board;
 3. a complete circular-chess game whose captures create an inspectable trail
-   of attention; and
-4. Portia, a structured adversarial pass over the terminal survivors;
-5. a deterministic sufficiency Gate with a bounded Retry policy;
-6. Charlotte, a traceable synthesis with exactly three reversible actions; and
+   of attention;
+4. a concrete answer-generation prompt assembled from the board-derived
+   weights, values, routes, and terminal survivors;
+5. Portia, a pre-generation adversarial validation of that exact prompt, backed
+   by a deterministic Gate and bounded internal Retry policy;
+6. an Answer generated only after approval, followed by Charlotte's
+   audience-aware qualification and exactly three reversible actions; and
 7. Wilbur, a human-owned action and observation record that lets the Web learn
    from what actually happened.
 
@@ -21,20 +24,30 @@ limitations, and proposed validation program are documented in the
 
 ## Project status
 
-This repository is the sole canonical WebChess product. It is being rebuilt as
-an independent Next.js application for a new Vercel project named `webchess`.
-It is not part of MadnessBot.
+The current product release is **WebChess 2.1** (`2.1.0`). It implements the
+WebChess 2.0 method and lifecycle described by the technical white paper.
 
-The public repository and GitHub Discussions are available now. A production
-WebChess deployment is **not** claimed by this document. The release process
-requires a passing preview deployment, owner inspection, and explicit approval
-before production promotion or domain attachment.
+This repository is the sole canonical WebChess product. The same rules and
+visual game now have two deliberately separate runtime surfaces:
+
+- an installable, startup-lazy OpenClaw plugin that launches the complete app
+  on the user's own machine, uses that user's configured OpenClaw model and
+  provider authentication, and keeps games and lifecycle provenance in a
+  dedicated local PostgreSQL 17 database; and
+- the existing account-backed service architecture for a future independent
+  Vercel project named `webchess`.
+
+It is not part of MadnessBot. The public repository and GitHub Discussions are
+available now. A production hosted deployment is **not** claimed by this
+document. The hosted release process still requires a passing preview,
+owner inspection, and explicit approval before production promotion or domain
+attachment.
 
 ## The real method
 
 ### 1. Divide the question
 
-The first server-side OpenAI request receives the user's question and proposes
+The first structured model request receives the user's question and proposes
 one facet for each intersection of eight practical dimensions and eight
 movements of change:
 
@@ -50,15 +63,16 @@ distinctness, correctness, or completeness.
 
 ### 2. Cast the field
 
-The server creates a fresh random seed and derives three domain-separated,
+WebChess creates a fresh random seed and derives three domain-separated,
 deterministic permutations:
 
 - the 64 facets;
 - the 64 I Ching-inspired lenses; and
 - the completed facet–lens pairs' board locations.
 
-The resulting field is persisted with its seed and version provenance. A
-replay uses the same field; a new division creates a new field.
+The resulting field is saved with its seed and version provenance in the
+runtime's owner-scoped PostgreSQL database. A replay uses the same field; a new
+division creates a new field.
 
 ### 3. Play the complete circular game
 
@@ -92,39 +106,121 @@ pass-enabled rules; it is not Stockfish and does not claim an Elo rating.
 
 ### 4. Replay and validate
 
-The browser sends only a requested piece and destination plus the expected
-game revision. It does not supply authoritative pieces, captures, passes,
-outcomes, attention weights, or answers.
+In both runtimes, the browser sends only a requested piece and destination plus
+the expected game revision. The shared server handler reconstructs the board
+from the durable event log, validates the move, and commits the derived event.
+The local plugin replaces Clerk with a loopback-only installation principal,
+Neon with dedicated local PostgreSQL, and hosted OpenAI calls with OpenClaw;
+the game and lifecycle authority remain the same.
 
-The authenticated server loads the persisted division and append-only event
-log, reconstructs the board from the canonical initial position, checks every
-move, derives forced passes and captures, applies ending precedence, and
-commits the next event with an idempotency key and compare-and-swap revision.
-This event-sourced record lets an unfinished game survive refresh and lets the
-server reject stale or fabricated state.
+Neither runtime trusts supplied pieces, captures, passes, outcomes, attention
+weights, or answers. Both reconstruct the board from the canonical initial
+position, check moves, derive forced passes and captures, apply ending
+precedence, and reject stale or fabricated state.
 
 ### 5. Test what survives, then act
 
 Only after server replay proves a terminal position does WebChess derive the
-terminal survivor set and send it to Portia. Portia performs all thirteen
-versioned attack types against every survivor and classifies each as
-`preserved`, `wounded`, `consumed`, or `unresolved`. Survival is explicitly not
-treated as truth.
+terminal survivor set. The original question and the board's weights, values,
+routes, captures, and survivor ecology are assembled into one concrete
+answer-generation prompt package. Portia receives that exact package before any
+answer exists. It performs all thirteen versioned attack types against every
+survivor and classifies each as `preserved`, `wounded`, `consumed`, or
+`unresolved`. Survival is explicitly not treated as truth.
 
-A deterministic Gate then requires enough usable, independent, covered
-material, a non-redundant tension, and no fatal unaddressed contradiction. A
-failed Gate can authorize no more than two same-field replays and one fresh
-field generation. Exhaustion ends visibly as `insufficient_basis`; it never
-silently invokes Charlotte.
+Each validated per-signal assessment is persisted as Portia advances, so a
+recovered attempt resumes from saved work instead of starting a decorative or
+random traversal. Provider-started technical failures are bounded to three
+attempts for the run. If the third cannot complete prompt validation, the
+lifecycle ends visibly as `portia_unavailable`, preserves completed checks, and
+generates no answer.
 
-After a Gate pass, Charlotte may cite only preserved or wounded candidates and
-must retain every wound used as support. It produces a qualified answer and
-exactly three bounded, reversible experiments. Wilbur lets the authenticated
-player select an action, mark it in progress, and append a real-world
-observation. The lifecycle, retry ancestry, artifacts, versions, actions, and
-observations remain in an owner-scoped provenance record.
+After a complete Portia review, the internal deterministic Gate requires enough
+usable, independent, covered material, a non-redundant tension, and no fatal
+unaddressed contradiction. A failed Gate can authorize no more than two
+same-field replays and one fresh field generation. Semantic exhaustion ends as
+`insufficient_basis`; it never silently reaches Answer or Charlotte.
 
-## Production architecture
+Only Portia's permission and a persisted Gate pass authorize the Answer model
+to receive the exact reviewed board prompt. The generated answer is saved with
+that prompt and Gate provenance. Charlotte then reviews and qualifies that
+exact answer for truthfulness, uncertainty, stakeholder impact, and audience
+fit; it does not replace the approved answer with an unrelated synthesis.
+Charlotte cites only the smallest material subset of Portia-approved signals,
+retains every cited wound exactly once, and has its own durable three-attempt
+technical budget so a provider or contract failure cannot leave the web
+spinning forever. The already generated Answer remains visible if that budget
+is exhausted, clearly marked as not Charlotte-qualified.
+Wilbur lets the authenticated player select one of exactly three bounded,
+reversible actions, mark it in progress, and append a real-world observation.
+The lifecycle, retry ancestry, artifacts, versions, actions, and observations
+remain in an owner-scoped provenance record.
+
+## Local OpenClaw plugin
+
+The OpenClaw package is the installation and launch layer for the full visual
+WebChess application. It is not a headless game tool. The command starts a
+foreground Next.js process bound only to `127.0.0.1`, opens the animated board
+in the user's browser, and stops when the user presses Ctrl-C:
+
+```text
+openclaw webchess
+  |
+  +--> local Next.js process at http://127.0.0.1:3210/openclaw
+         |-- visual Anansi → Chess → Portia → Answer → Charlotte → Wilbur → Web lifecycle
+         |-- shared durable game, replay, usage, and lifecycle handlers
+         |
+         +--> dedicated PostgreSQL 17 on loopback
+         |      +--> question, cast, events, Portia progress, Gate, Answer, Charlotte, Wilbur
+         |
+         +--> openclaw infer model run --local
+                +--> the user's configured model, provider, and authentication
+```
+
+It needs no Clerk account, hosted Neon database, Vercel deployment, hosted
+WebChess service, or operator-owned API key. It does require a dedicated
+PostgreSQL 17 database exposed only on loopback through
+`WEBCHESS_OPENCLAW_DATABASE_URL`. The launcher disables hosted identity and
+database settings for this process, disables Next.js telemetry, and never puts
+a provider credential in the browser. OpenClaw's configured provider may
+itself be remote, so model prompts may leave the machine under that provider's
+own settings. WebChess does not add a hosted proxy, account, or sync service.
+For managed installs, the launcher stages the bundled application in an
+operating-system temporary directory, links the plugin's installed
+dependencies, and removes that working directory when the command exits. Game
+data is never stored there; it remains in the dedicated local database.
+
+The board shows piece movement, the understandable public lifecycle, and the
+status of each model request. During Portia it shows the actual persisted
+current signal and completed-signal count, moves the spider only when that
+durable progress advances, and settles into a stable `portia_unavailable` stop
+if the technical budget is exhausted. Answer generation and Charlotte
+qualification have their own visible states. Every animation has a text
+equivalent and reduced-motion behavior. The interface displays validated facets,
+model attribution, elapsed
+status, and the final structured reading; it does not request or expose private
+chain-of-thought.
+
+From a source checkout:
+
+```bash
+npm ci
+npm run plugin:build
+npm run verify:openclaw
+openclaw plugins install --link .
+openclaw plugins inspect webchess --runtime --json
+export WEBCHESS_OPENCLAW_DATABASE_URL=postgresql://webchess:password@127.0.0.1:55432/webchess
+openclaw webchess
+```
+
+Use `openclaw webchess --no-open` to print the URL without opening a browser,
+or `--port 4312` to choose another loopback port. See
+[Installation](INSTALL.md) for source-link and packed-plugin workflows.
+`verify:openclaw` exercises the packaged plugin and UI path. Run
+`npm run test:integration` with `DATABASE_URL` pointed at a disposable
+PostgreSQL 17 database to verify the shared persistence contract.
+
+## Hosted architecture
 
 ```text
 Browser
@@ -138,7 +234,7 @@ Next.js on Vercel
   |
   +--> Clerk: Google, email, and passkey authentication
   +--> Neon Postgres: games, events, usage, quotas, rate limits, leases
-  +--> OpenAI: fixed gpt-5.6-sol division, Portia, and Charlotte calls; store: false
+  +--> OpenAI: fixed gpt-5.6-sol Division, Portia, Answer, and Charlotte calls; store: false
 ```
 
 The OpenAI key is a Vercel server secret owned by WebChess. Visitors never
@@ -164,11 +260,13 @@ non-sensitive help through GitHub Discussions, without a promise of a custom
 data handoff or response time.
 
 A same-key model retry recovers an already committed result or the existing
-pending request. If a provider-started lease expires without definitive
-settlement, the request is terminally `indeterminate` and a new user intent is
-required; WebChess does not silently issue a second provider call. Rejected
-provider responses retain only sanitized provider identifiers, safe statuses,
-and normalized usage values when available.
+pending request; WebChess never silently replays the same provider intent. If a
+provider-started Portia lease expires without definitive settlement, that
+request becomes `indeterminate`. A distinct fenced Portia attempt may resume
+from persisted per-signal work, but only within the run's three-attempt
+technical budget; exhaustion becomes `portia_unavailable` and blocks Answer.
+Rejected provider responses retain only sanitized provider identifiers, safe
+statuses, and normalized usage values when available.
 
 The previous Express prototype kept access sessions, CSRF state, revocations,
 rate counters, daily quotas, and concurrency in one Node process. That state
@@ -197,9 +295,9 @@ No correctness, security, quota, or ownership decision may depend on Vercel
 Function memory. See [Architecture](docs/ARCHITECTURE.md) and
 [Security](SECURITY.md).
 
-## Run locally
+## Hosted-service development
 
-The supported local environment is Node.js 22 and npm 11.
+The hosted-service development environment remains Node.js 22 and npm 11.
 
 ```bash
 npm ci
@@ -229,6 +327,7 @@ Install exactly from the lockfile, then run:
 ```bash
 npm run lint
 npm run typecheck
+npm run plugin:build
 npm run test
 npm run test:coverage
 npm run test:integration
@@ -245,8 +344,8 @@ redirects, the complete play flow, refresh recovery, downloads, GitHub links,
 keyboard operation, accessibility, reduced motion, mobile layout, and desktop
 layout. Automated tests must stub OpenAI deterministically, and CI must not
 spend live model tokens. After every gate passes, the owner's bounded manual
-Preview smoke may use the dedicated Preview key for one complete game—one
-division and one post-ending answer—under the normal durable quotas.
+Preview smoke may use the dedicated Preview key for one complete game and its
+approved Portia → Answer → Charlotte ending under the normal durable quotas.
 
 The complete Playwright play fixture uses a loopback-only test principal and
 stubbed API responses. That principal is disabled on Vercel by design. Preview

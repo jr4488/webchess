@@ -21,6 +21,7 @@ const compatibleRuntimeInspection = {
   tables_exact: true,
   columns_exact: true,
   privileges_exact: true,
+  column_privileges_exact: true,
   owner_isolated: true,
   indexes_exact: true,
 }

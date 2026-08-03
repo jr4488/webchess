@@ -1,0 +1,22 @@
+{
+  "id": "webchess",
+  "name": "WebChess",
+  "description": "Launches the visual local WebChess experience with your configured OpenClaw model.",
+  "activation": {
+    "onStartup": false,
+    "onCommands": [
+      "webchess"
+    ]
+  },
+  "commandAliases": [
+    {
+      "name": "webchess",
+      "kind": "cli"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

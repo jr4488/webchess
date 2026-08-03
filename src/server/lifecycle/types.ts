@@ -4,6 +4,7 @@ import type {
   LifecycleActivity,
   LifecycleAggregate,
   LifecycleState,
+  PortiaCandidateAssessment,
   PortiaReview,
   SurvivorCandidate,
   WilburAction,
@@ -46,11 +47,47 @@ export interface StorePortiaInput {
   readonly configurationDigest: string
 }
 
+export interface UpdatePortiaProgressInput {
+  readonly ownerId: string
+  readonly gameId: string
+  readonly expectedRevision: number
+  readonly modelRequestId: string
+  readonly answerPromptDigest: string
+  readonly currentCandidateId: string | null
+  readonly completedCandidateIds: readonly string[]
+  readonly completedAssessments: readonly PortiaCandidateAssessment[]
+}
+
+export interface BeginPortiaAttemptInput {
+  readonly ownerId: string
+  readonly gameId: string
+  readonly expectedRevision: number
+  readonly modelRequestId: string
+  readonly requestDigest: string
+  readonly answerPromptDigest: string
+  readonly configurationDigest: string
+  readonly activityType: 'adversarial_review_started' | 'adversarial_review_recovered'
+}
+
+export interface FailPortiaAttemptInput {
+  readonly ownerId: string
+  readonly gameId: string
+  readonly expectedRevision: number
+  readonly modelRequestId: string
+  readonly requestDigest: string
+  readonly configurationDigest: string
+  readonly activityType:
+    | 'adversarial_review_failed'
+    | 'adversarial_review_recovered_for_retry'
+}
+
 export interface StoreGateInput {
   readonly ownerId: string
   readonly gameId: string
   readonly expectedRevision: number
   readonly result: GateResult
+  /** Exact player-visible Answer input; required only when the Gate passes. */
+  readonly answerUserPrompt: string | null
   readonly configurationDigest: string
 }
 
@@ -64,6 +101,28 @@ export interface StoreCharlotteInput {
   readonly result: CharlotteResult
   readonly renderedAnswer: string
   readonly configurationDigest: string
+}
+
+export interface BeginCharlotteAttemptInput {
+  readonly ownerId: string
+  readonly gameId: string
+  readonly expectedRevision: number
+  readonly modelRequestId: string
+  readonly requestDigest: string
+  readonly configurationDigest: string
+  readonly activityType: 'qualification_started' | 'qualification_recovered'
+}
+
+export interface FailCharlotteAttemptInput {
+  readonly ownerId: string
+  readonly gameId: string
+  readonly expectedRevision: number
+  readonly modelRequestId: string
+  readonly requestDigest: string
+  readonly configurationDigest: string
+  readonly activityType:
+    | 'qualification_failed'
+    | 'qualification_recovered_for_retry'
 }
 
 export interface CreateRetryRunInput {
@@ -123,8 +182,13 @@ export interface LifecycleRepositoryPort {
   ensureForGame(input: EnsureLifecycleInput): Promise<LifecycleAggregate>
   getForGame(ownerId: string, gameId: string): Promise<LifecycleAggregate | null>
   transition(input: TransitionLifecycleInput): Promise<LifecycleAggregate>
+  beginPortiaAttempt(input: BeginPortiaAttemptInput): Promise<LifecycleAggregate>
+  updatePortiaProgress(input: UpdatePortiaProgressInput): Promise<LifecycleAggregate>
+  failPortiaAttempt(input: FailPortiaAttemptInput): Promise<LifecycleAggregate>
   storePortia(input: StorePortiaInput): Promise<LifecycleAggregate>
   storeGate(input: StoreGateInput): Promise<LifecycleAggregate>
+  beginCharlotteAttempt(input: BeginCharlotteAttemptInput): Promise<LifecycleAggregate>
+  failCharlotteAttempt(input: FailCharlotteAttemptInput): Promise<LifecycleAggregate>
   storeCharlotte(input: StoreCharlotteInput): Promise<LifecycleAggregate>
   createRetryRun(input: CreateRetryRunInput): Promise<LifecycleAggregate>
   hasPriorTerminalFingerprint(

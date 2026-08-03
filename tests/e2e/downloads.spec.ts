@@ -36,6 +36,11 @@ test.describe('download artifacts', () => {
         expect(redirect.headers().location ?? '').toMatch(
           download.redirectLocation,
         )
+
+        // The archive route contract ends at the reviewed GitHub redirect.
+        // Anonymous access to that external repository is covered by the
+        // dedicated link check and can legitimately differ by environment.
+        return
       }
 
       const response = await request.get(download.path, {

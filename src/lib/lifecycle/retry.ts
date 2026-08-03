@@ -34,12 +34,24 @@ export function decideRetry(input: RetryPolicyInput): RetryDecision {
     0,
     RETRY_LIMITS.fieldRegenerations - input.fieldRegenerationCount,
   )
-  const fieldRetryRequested =
-    input.duplicateTerminalFingerprint ||
-    input.gate.recommendedNextTransition === 'retry_field' ||
-    remainingSameFieldRetries === 0
 
-  if (fieldRetryRequested && remainingFieldRegenerations > 0) {
+  if (input.gate.recommendedNextTransition === 'insufficient_basis') {
+    return {
+      policyVersion: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+      mode: 'insufficient_basis',
+      reason: 'The Gate found that the available basis cannot be repaired within the bounded Retry policy.',
+      sameFieldRetryCount: input.sameFieldRetryCount,
+      fieldRegenerationCount: input.fieldRegenerationCount,
+      remainingSameFieldRetries,
+      remainingFieldRegenerations,
+    }
+  }
+
+  const fieldRetryRequired =
+    input.duplicateTerminalFingerprint ||
+    input.gate.recommendedNextTransition === 'retry_field'
+
+  if (fieldRetryRequired && remainingFieldRegenerations > 0) {
     return {
       policyVersion: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
       mode: 'regenerate_field',
@@ -53,11 +65,43 @@ export function decideRetry(input: RetryPolicyInput): RetryDecision {
     }
   }
 
-  if (!fieldRetryRequested && remainingSameFieldRetries > 0) {
+  if (fieldRetryRequired) {
+    return {
+      policyVersion: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+      mode: 'insufficient_basis',
+      reason: input.duplicateTerminalFingerprint
+        ? 'The terminal ecology duplicates a prior attempt and the bounded field-regeneration allowance is exhausted.'
+        : 'The Gate requires field regeneration, but the bounded field-regeneration allowance is exhausted.',
+      sameFieldRetryCount: input.sameFieldRetryCount,
+      fieldRegenerationCount: input.fieldRegenerationCount,
+      remainingSameFieldRetries,
+      remainingFieldRegenerations,
+    }
+  }
+
+  if (
+    input.gate.recommendedNextTransition === 'retry_game' &&
+    remainingSameFieldRetries > 0
+  ) {
     return {
       policyVersion: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
       mode: 'replay_game',
       reason: 'The semantic field remains usable, but this trajectory did not leave a sufficient terminal ecology.',
+      sameFieldRetryCount: input.sameFieldRetryCount,
+      fieldRegenerationCount: input.fieldRegenerationCount,
+      remainingSameFieldRetries,
+      remainingFieldRegenerations,
+    }
+  }
+
+  if (
+    input.gate.recommendedNextTransition === 'retry_game' &&
+    remainingFieldRegenerations > 0
+  ) {
+    return {
+      policyVersion: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+      mode: 'regenerate_field',
+      reason: 'The same-field replay allowance is exhausted, so Retry is using its one bounded field regeneration.',
       sameFieldRetryCount: input.sameFieldRetryCount,
       fieldRegenerationCount: input.fieldRegenerationCount,
       remainingSameFieldRetries,

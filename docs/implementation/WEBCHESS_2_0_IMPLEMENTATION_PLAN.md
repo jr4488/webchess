@@ -7,12 +7,15 @@
 ## Delivery boundary
 
 This branch upgrades the existing authenticated, server-authoritative WebChess
-application to the eight-stage lifecycle described by the WebChess 2.0 white
-paper:
+application to this seven-stage visible lifecycle:
 
 ```text
-Anansi -> Chess -> Portia -> Gate -> Retry -> Charlotte -> Wilbur -> Web
+Anansi -> Chess -> Portia -> Answer -> Charlotte -> Wilbur -> Web
 ```
+
+The deterministic Gate and bounded semantic Retry policy remain authoritative,
+inspectable internal branches between Portia and Answer; they are not separate
+steps on the player-facing rail.
 
 The circular-chess rules and Engine V2 remain semantically blind and retain
 their current versions. Existing v1 games retain their saved event and answer
@@ -53,7 +56,7 @@ The integration failure is a missing test database, not a baseline application
 regression. Completion reporting will keep database-backed results separate
 unless an explicitly disposable PostgreSQL 17 URL becomes available.
 
-## Current end-to-end flow
+## Authoritative end-to-end flow
 
 1. `POST /api/divide` validates the problem, reserves a durable `division`
    model request, creates a `games` shell, calls OpenAI with `store:false`,
@@ -66,22 +69,40 @@ unless an explicitly disposable PostgreSQL 17 URL becomes available.
    compare-and-swap semantics.
 4. `GET /api/games/:id` and `/api/games/current` rebuild the public board from
    the canonical initial state and ordered append-only event history.
-5. `POST /api/games/:id/answer` currently permits synthesis only after terminal
-   replay, reserves an `answer` model request, sends the capture trail, and
-   stores the rendered answer on `games.answer_payload`.
-6. `POST /api/games/:id/replay` atomically clones the field and accounts for a
+5. After canonical replay proves the ending, the server derives the survivor
+   ecology and assembles the exact candidate Answer prompt from the original
+   question and replay-derived board weights, values, routes, captures, and
+   signal provenance.
+6. `POST /api/games/:id/portia` validates that exact prompt before generation.
+   Each schema-valid per-signal assessment, the current signal, completed IDs,
+   and prompt digest are persisted. Recovery resumes only unfinished signals.
+   Three failed or indeterminate provider-started attempts end in the technical
+   `portia_unavailable` state without fabricating a review or downstream result.
+7. The internal deterministic Gate evaluates a complete Portia review. A failed
+   Gate may authorize a bounded same-field or regenerated-field Retry; semantic
+   exhaustion becomes `insufficient_basis`.
+8. `POST /api/games/:id/answer` generates from the exact reviewed prompt only
+   after Portia permits it and the Gate passes. The stored Answer carries the
+   lifecycle-run, prompt-digest, and Gate-input provenance.
+9. `POST /api/games/:id/charlotte` qualifies that exact persisted Answer for
+   truthfulness, uncertainty, values, stakeholders, audience, and reversible
+   action. It cannot substitute an unrelated synthesis.
+10. Wilbur records the user's action and observation; Web provenance preserves
+    the genealogy and versioned artifacts.
+11. `POST /api/games/:id/replay` atomically clones the field and accounts for a
    counted game start through `game_start_requests`, usage, and rate buckets.
-7. Account export uses a bounded repeatable-read snapshot; deletion is guarded
+12. Account export uses a bounded repeatable-read snapshot; deletion is guarded
    by durable provider leases and Clerk's signed deletion webhook.
 
-For v2, step 5 becomes Portia -> deterministic Gate -> bounded Retry or
-Charlotte. Wilbur and the Web then extend the case after the recommendation.
+Legacy v1 games without a v2 lifecycle retain their stored answer semantics;
+the v2 path never falls back to them when Portia, Gate, Answer, or Charlotte is
+unavailable.
 
 ## Affected-surface map
 
 ### Contracts and versions
 
-- `package.json` and lockfile: software version `2.0.0`.
+- `package.json` and lockfile: software version `2.1.0`.
 - `src/types.ts` and `src/lib/game-contract.ts`: public lifecycle DTOs and
   version constants. Rules, engine, cast, and event versions do not change.
 - New `src/lib/lifecycle/` modules: strict contracts, state transitions,
@@ -91,18 +112,22 @@ Charlotte. Wilbur and the Web then extend the case after the recommendation.
 
 ### Model operations and accounting
 
-- `src/server/openai/`: new Portia and Charlotte structured operations with
-  bounded prompts/outputs, fixed model configuration, `store:false`, prompt
-  injection framing, and no hidden reasoning field.
+- `src/server/openai/`: Portia prompt validation, approved Answer generation,
+  and Charlotte exact-answer qualification as distinct structured operations
+  with bounded prompts/outputs, fixed model configuration, `store:false`,
+  prompt-injection framing, and no hidden reasoning field.
 - `src/server/usage/types.ts`, `service.ts`, and `queries.ts`: recognize
   `portia` and `charlotte` as distinct operations while retaining the existing
   reservation, lease, settlement, idempotency, deletion, and quota behavior.
 - `model_requests.operation` and `rate_buckets.action` constraints expand
-  forward-only. Legacy `answer` remains valid for v1 games only.
+  forward-only. The `answer` operation carries v2 Portia/Gate approval
+  provenance while the stored legacy-v1 path remains readable.
 
 ### Persistence and exact schema verification
 
-- Add `db/migrations/0002_webchess_2_lifecycle.sql`; never alter `0001`.
+- Add `db/migrations/0002_webchess_2_lifecycle.sql` and later forward-only
+  lifecycle migrations such as `0003_prompt_review_answer_stage.sql`; never
+  alter applied migration bytes.
 - Small relational lifecycle design:
   - `lifecycle_runs`
   - `portia_reviews`
@@ -112,11 +137,15 @@ Charlotte. Wilbur and the Web then extend the case after the recommendation.
   - `wilbur_observations`
   - `lifecycle_events`
 - Runs link to authoritative games and preserve root/parent ancestry, lifecycle
-  state, independent seeds, retry counters, terminal fingerprints, survivor
-  packages, and every required contract/algorithm version.
-- Portia, Gate, and Charlotte artifacts are immutable per attempt. Wilbur
-  observations are append-only. Lifecycle events preserve transition
-  genealogy without storing hidden chain-of-thought.
+  state, independent seeds, semantic retry counters, terminal fingerprints,
+  survivor packages, the reviewed Answer-prompt digest, current and completed
+  Portia signals, validated assessment drafts, the active-attempt fence, the
+  persisted three-attempt failure budget, and every required
+  contract/algorithm version.
+- Final Portia reviews, Gate decisions, generated Answer approval provenance,
+  and Charlotte qualifications are immutable per attempt. Wilbur observations
+  are append-only. Lifecycle events preserve transition genealogy without
+  storing hidden chain-of-thought.
 - `scripts/deployment-database.mjs` exact table/column/index and least-privilege
   allowlists expand for all new tables.
 - Row schemas in `src/server/db/rows.ts` validate new tables and expanded model
@@ -129,18 +158,27 @@ Charlotte. Wilbur and the Web then extend the case after the recommendation.
 - Terminal survivors are derived from canonical replay, including stable IDs,
   final square/facet/lens, piece role and polarity, route, captures, promotion,
   move count, attempt IDs, and immutable digests.
-- Portia input is derived server-side. Output must contain exactly one
-  assessment per survivor and use the controlled disposition, attack, and
-  coverage taxonomies.
+- Portia input is the complete server-derived candidate Answer prompt package,
+  bound to its canonical digest. Output must contain exactly one assessment per
+  survivor and use the controlled disposition, attack, and coverage taxonomies.
+  Each accepted assessment is persisted in deterministic traversal order; an
+  active model-request fence prevents a late attempt from overwriting it.
+- Portia technical execution is bounded separately from semantic Retry. The
+  third failed or indeterminate provider-started attempt produces
+  `portia_unavailable`, preserves partial progress, and creates no Portia
+  review, Gate decision, Answer, or Charlotte result.
 - The Gate is deterministic and versioned. Initial hard floors are four usable
   candidates, three independent clusters, required purpose/evidence/risk/action
   coverage, an explicit non-redundant tension, and no fatal contradiction.
 - Retry permits at most two same-field replays and one field regeneration.
   Duplicate terminal/survivor fingerprints escalate toward regeneration.
-  Exhaustion produces `insufficient_basis`; Charlotte remains inaccessible.
-- Charlotte can cite only preserved or wounded candidates, preserves every
-  wound used as support, exposes uncertainty/reversal conditions, and returns
-  exactly three structured reversible experiments.
+  Exhaustion produces `insufficient_basis`; Answer and Charlotte remain
+  inaccessible.
+- Answer generation receives only the exact Portia-permitted, Gate-passed board
+  prompt and stores its approval provenance.
+- Charlotte receives that exact persisted Answer plus its Portia/Gate source,
+  preserves every wound used as support, exposes uncertainty and reversal
+  conditions, and returns exactly three structured reversible experiments.
 - Wilbur actions and observations remain human-owned, owner-scoped, revisioned,
   and idempotent. A model cannot mark an action successful.
 
@@ -150,6 +188,7 @@ Charlotte. Wilbur and the Web then extend the case after the recommendation.
   production adapter with operations equivalent to:
   - `GET /api/games/:id/lifecycle`
   - `POST /api/games/:id/portia`
+  - `POST /api/games/:id/answer`
   - `POST /api/games/:id/retry`
   - `POST /api/games/:id/charlotte`
   - `POST /api/games/:id/wilbur/actions`
@@ -158,8 +197,9 @@ Charlotte. Wilbur and the Web then extend the case after the recommendation.
 - Every mutation retains Clerk authentication, same-origin checks, strict JSON,
   owner-scoped lookup, idempotency, expected revision, rate/quota enforcement,
   and safe public errors.
-- The old answer route remains compatible only for a game without a v2 run and
-  fails closed for v2.
+- The Answer route retains legacy compatibility for a game without a v2 run.
+  For v2 it fails closed unless the exact prompt has a persisted Portia permit
+  and Gate pass; Charlotte then requires the exact persisted generated Answer.
 
 ### Export, deletion, and integrity
 
@@ -174,16 +214,25 @@ Charlotte. Wilbur and the Web then extend the case after the recommendation.
 
 - `src/App.tsx` restores and advances v2 lifecycle state instead of requesting
   the legacy answer immediately.
-- A compact lifecycle rail shows Anansi, Chess, Portia, Gate, Retry, Charlotte,
-  Wilbur, and Web.
+- A compact lifecycle rail shows Anansi, Chess, Portia, Answer, Charlotte,
+  Wilbur, and Web. Gate and Retry details remain visible inside the Portia and
+  retry explanation without displacing Answer from the sequence.
 - The terminal view includes an accessible survivor ecology, Portia
-  dispositions and reasons, deterministic Gate explanation, retry ancestry and
-  remaining budget, traceable Charlotte recommendation, Wilbur action tracking,
-  and a provenance timeline.
+  traversal driven by persisted current/completed signals, dispositions and
+  reasons, deterministic Gate explanation, retry ancestry and remaining
+  budget, a distinct Answer generation state, Charlotte's exact-answer review,
+  Wilbur action tracking, and a provenance timeline.
 - Motion is ornamental to no state: every transition has a text equivalent,
   keyboard path, semantic landmark, live status, and reduced-motion behavior.
 - `insufficient_basis` is a first-class visible result and never a generic
   model error.
+- `portia_unavailable` is a stable accessible technical terminal after three
+  provider-started failures; the spider remains at the last persisted signal
+  without implying continued work, and no Answer stage is activated.
+- `charlotte_unavailable` is a separate stable terminal after three fenced
+  qualification failures. The already generated board Answer remains visible
+  with an explicit not-qualified warning; Charlotte stops, and Wilbur/Web do
+  not imply that a reviewed intervention exists.
 
 ### Documentation
 
@@ -200,18 +249,19 @@ Charlotte. Wilbur and the Web then extend the case after the recommendation.
 
 1. `Define WebChess 2.0 lifecycle contracts`
    - versions, typed state machine, survivor extraction, Portia schemas, Gate,
-     Retry, Charlotte, Wilbur, and unit tests.
+     Retry, Answer, Charlotte, Wilbur, and unit tests.
 2. `Persist the WebChess 2.0 genealogy`
    - forward migration, exact schema contract, lifecycle repository, export,
      deletion, and persistence tests.
-3. `Add Portia Gate Retry and Charlotte services`
-   - model operations, durable ledger integration, routes, idempotency, and
-     service/security tests.
+3. `Add Portia, internal Gate/Retry, Answer, and Charlotte services`
+   - prompt-bound model operations, resumable Portia progress, durable ledger
+     integration, routes, idempotency, and service/security tests.
 4. `Add Wilbur actions and Web provenance`
    - action/observation routes, genealogy query, and authorization tests.
-5. `Build the eight-stage WebChess interface`
-   - lifecycle rail, survivor/Portia/Gate/Retry/Charlotte/Wilbur/Web views,
-     refresh recovery, accessibility, reduced motion, and end-to-end fixtures.
+5. `Build the seven-stage visible WebChess interface`
+   - Anansi/Chess/Portia/Answer/Charlotte/Wilbur/Web rail, internal Gate/Retry
+     detail, refresh recovery, accessibility, reduced motion, and end-to-end
+     fixtures.
 6. `Document WebChess 2.0`
    - canonical paper, archive, architecture, research, security, installation,
      privacy, terms, operator guide, and version bump.
@@ -236,6 +286,18 @@ npm run test:e2e
 npm run test:links
 npm run verify
 ```
+
+Lifecycle acceptance also covers exact prompt/digest binding, crash recovery
+from persisted Portia assessments without repeating completed signals, the
+third technical failure reaching `portia_unavailable` across restart, no Answer
+or Charlotte call after either terminal refusal, and the visible
+Portia → Answer → Charlotte order with equivalent reduced-motion and text
+status.
+
+Charlotte acceptance separately covers selected material support, byte-exact
+wounded qualifications displayed once, restart-safe active-request fencing,
+and the third technical failure reaching `charlotte_unavailable` without a
+fourth automatic request.
 
 No test or CI path may make a live model request. Database-backed results will
 be reported as environment-blocked unless a disposable PostgreSQL 17 test

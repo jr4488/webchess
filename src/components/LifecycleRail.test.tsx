@@ -1,8 +1,16 @@
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { LifecycleAggregate, LifecycleState } from '../lib/lifecycle/contracts'
+import type {
+  GateRecommendation,
+  LifecycleAggregate,
+  LifecycleState,
+} from '../lib/lifecycle/contracts'
 import { LifecycleRail } from './LifecycleRail'
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 function aggregate(
   state: LifecycleState,
@@ -10,28 +18,30 @@ function aggregate(
     sameFieldRetryCount: 0,
     fieldRegenerationCount: 0,
   },
+  recommendation: GateRecommendation = 'retry_game',
 ): LifecycleAggregate {
   return {
     state,
     ...retryCounts,
     gate: state === 'gate_passed'
       ? { passed: true }
-      : state === 'gate_failed'
-        ? { passed: false }
+      : state === 'gate_failed' || state === 'insufficient_basis'
+        ? { passed: false, recommendedNextTransition: recommendation }
         : null,
   } as unknown as LifecycleAggregate
 }
 
 describe('LifecycleRail', () => {
-  it('shows all eight named lifecycle stages and exposes the active step', () => {
-    render(<LifecycleRail lifecycle={aggregate('charlotte_running')} />)
+  it('shows the corrected seven-stage lifecycle and exposes the active step', () => {
+    const { container } = render(
+      <LifecycleRail lifecycle={aggregate('charlotte_running')} gameStatus="answered" />,
+    )
 
     for (const label of [
       'Anansi',
       'Chess',
       'Portia',
-      'Gate',
-      'Retry',
+      'Answer',
       'Charlotte',
       'Wilbur',
       'Web',
@@ -45,29 +55,185 @@ describe('LifecycleRail', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       /Charlotte: charlotte running/i,
     )
+    expect(container.querySelectorAll('.lifecycle-step')).toHaveLength(7)
+    expect(screen.queryByText('Gate')).not.toBeInTheDocument()
+    expect(screen.queryByText('Retry')).not.toBeInTheDocument()
   })
 
-  it('marks Retry as not needed after a Gate pass', () => {
-    render(<LifecycleRail lifecycle={aggregate('gate_passed')} />)
+  it.each([
+    [
+      'ready',
+      'completed' as const,
+      'ready to generate',
+      /approved board prompt is ready.*generation has not started/i,
+    ],
+    [
+      'generating',
+      'answering' as const,
+      'generation in progress',
+      /board-derived answer generation is in progress/i,
+    ],
+    [
+      'failed and retryable',
+      'answer_failed' as const,
+      'generation failed',
+      /board-derived answer generation failed and is ready to retry/i,
+    ],
+  ])('keeps Answer active while the permitted board answer is %s', (
+    _label,
+    gameStatus,
+    detail,
+    announcement,
+  ) => {
+    render(
+      <LifecycleRail lifecycle={aggregate('gate_passed')} gameStatus={gameStatus} />,
+    )
 
-    expect(screen.getByText('Retry').closest('li')).toHaveClass('is-skipped')
-    expect(screen.getByText('not needed')).toBeInTheDocument()
+    const answer = screen.getByText('Answer').closest('li')
+    expect(answer).toHaveClass('is-active')
+    expect(answer).toHaveAttribute('aria-current', 'step')
+    expect(answer).toHaveTextContent(detail)
+    expect(screen.getByText('Charlotte').closest('li')).toHaveClass('is-waiting')
+    expect(screen.getByRole('status')).toHaveTextContent(announcement)
   })
 
-  it('keeps Retry in the completed thread when an ancestor used the budget', () => {
-    render(<LifecycleRail lifecycle={aggregate('wilbur_observed', {
-      sameFieldRetryCount: 1,
-      fieldRegenerationCount: 0,
-    })} />)
+  it('advances from Answer to Charlotte only after the board answer exists', () => {
+    render(
+      <LifecycleRail lifecycle={aggregate('gate_passed')} gameStatus="answered" />,
+    )
 
-    expect(screen.getByText('Retry').closest('li')).toHaveClass('is-complete')
-    expect(screen.queryByText('not needed')).not.toBeInTheDocument()
+    expect(screen.getByText('Answer').closest('li')).toHaveClass('is-complete')
+    expect(screen.getByText('Charlotte').closest('li')).toHaveClass('is-active')
+    expect(screen.getByText('Charlotte').closest('li')).toHaveAttribute(
+      'aria-current',
+      'step',
+    )
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /Charlotte: the generated board answer is ready for qualification/i,
+    )
   })
 
-  it('keeps a failed Gate visible rather than presenting it as completion', () => {
-    render(<LifecycleRail lifecycle={aggregate('gate_failed')} />)
+  it.each([
+    ['smoothly', false, 'smooth' as const],
+    ['without motion', true, 'auto' as const],
+  ])('brings a newly active step into a narrow rail %s', (
+    _label,
+    reducedMotion,
+    behavior,
+  ) => {
+    vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: reducedMotion }))
+    const { rerender } = render(
+      <LifecycleRail lifecycle={aggregate('anansi_pending')} />,
+    )
+    const rail = screen.getByRole('region', { name: 'WebChess lifecycle progress' })
+    const charlotte = screen.getByText('Charlotte').closest('li')
+    if (!charlotte) throw new Error('Charlotte lifecycle step was not rendered.')
+    const scrollTo = vi.fn()
 
-    expect(screen.getByText('Gate').closest('li')).toHaveClass('is-failed')
-    expect(screen.getByText('Gate').closest('li')).toHaveTextContent('failed')
+    Object.defineProperties(rail, {
+      clientWidth: { configurable: true, value: 320 },
+      scrollWidth: { configurable: true, value: 680 },
+      scrollTo: { configurable: true, value: scrollTo },
+    })
+    Object.defineProperties(charlotte, {
+      clientWidth: { configurable: true, value: 80 },
+      offsetLeft: { configurable: true, value: 500 },
+    })
+
+    rerender(
+      <LifecycleRail lifecycle={aggregate('charlotte_running')} gameStatus="answered" />,
+    )
+
+    expect(scrollTo).toHaveBeenCalledWith({ left: 380, behavior })
+  })
+
+  it.each([
+    ['a persisted terminal state', 'insufficient_basis' as const, 'retry_game' as const],
+    ['an insufficient Gate recommendation', 'gate_failed' as const, 'insufficient_basis' as const],
+  ])('settles at Portia with no generated answer for %s', (_label, state, recommendation) => {
+    const { container } = render(
+      <LifecycleRail lifecycle={aggregate(state, {
+        sameFieldRetryCount: 3,
+        fieldRegenerationCount: 2,
+      }, recommendation)} />,
+    )
+
+    const rail = screen.getByRole('region', { name: 'WebChess lifecycle progress' })
+    const portia = screen.getByText('Portia').closest('li')
+    const answer = screen.getByText('Answer').closest('li')
+    const spider = container.querySelector<HTMLElement>('.lifecycle-spider')
+    const prey = container.querySelector<HTMLElement>('.lifecycle-prey')
+
+    expect(rail).toHaveAttribute('data-lifecycle-terminal', 'true')
+    expect(portia).toHaveClass('is-terminal')
+    expect(portia).toHaveAttribute('aria-current', 'step')
+    expect(portia).toHaveTextContent('bounded stop')
+    expect(answer).toHaveClass('is-waiting')
+    expect(spider?.style.getPropertyValue('--lifecycle-position')).toBe(
+      prey?.style.getPropertyValue('--lifecycle-position'),
+    )
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /ended after Portia.*insufficient basis.*No answer was generated/i,
+    )
+  })
+
+  it('terminates at Portia when prompt validation is operationally unavailable', () => {
+    const { container } = render(
+      <LifecycleRail lifecycle={aggregate('portia_unavailable')} />,
+    )
+
+    const rail = screen.getByRole('region', { name: 'WebChess lifecycle progress' })
+    const portia = screen.getByText('Portia').closest('li')
+    const answer = screen.getByText('Answer').closest('li')
+    const charlotte = screen.getByText('Charlotte').closest('li')
+    const spider = container.querySelector<HTMLElement>('.lifecycle-spider')
+    const prey = container.querySelector<HTMLElement>('.lifecycle-prey')
+
+    expect(rail).toHaveAttribute('data-lifecycle-terminal', 'true')
+    expect(portia).toHaveClass('is-terminal')
+    expect(portia).toHaveAttribute('aria-current', 'step')
+    expect(portia).toHaveTextContent('validation unavailable')
+    expect(answer).toHaveClass('is-waiting')
+    expect(answer).not.toHaveClass('is-complete')
+    expect(charlotte).toHaveClass('is-waiting')
+    expect(charlotte).not.toHaveClass('is-complete')
+    expect(spider?.style.getPropertyValue('--lifecycle-position')).toBe(
+      prey?.style.getPropertyValue('--lifecycle-position'),
+    )
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /stopped at Portia.*prompt validation was unavailable.*bounded provider-attempt budget.*No answer was generated/i,
+    )
+  })
+
+  it('settles at Charlotte while preserving the completed board Answer', () => {
+    const { container } = render(
+      <LifecycleRail
+        lifecycle={aggregate('charlotte_unavailable')}
+        gameStatus="answered"
+      />,
+    )
+
+    const rail = screen.getByRole('region', { name: 'WebChess lifecycle progress' })
+    const answer = screen.getByText('Answer').closest('li')
+    const charlotte = screen.getByText('Charlotte').closest('li')
+    const wilbur = screen.getByText('Wilbur').closest('li')
+    const web = screen.getByText('Web').closest('li')
+    const spider = container.querySelector<HTMLElement>('.lifecycle-spider')
+    const prey = container.querySelector<HTMLElement>('.lifecycle-prey')
+
+    expect(rail).toHaveAttribute('data-lifecycle-terminal', 'true')
+    expect(answer).toHaveClass('is-complete')
+    expect(answer).toHaveTextContent('generated from the board')
+    expect(charlotte).toHaveClass('is-terminal')
+    expect(charlotte).toHaveAttribute('aria-current', 'step')
+    expect(charlotte).toHaveTextContent('qualification unavailable')
+    expect(wilbur).toHaveClass('is-waiting')
+    expect(web).toHaveClass('is-waiting')
+    expect(spider?.style.getPropertyValue('--lifecycle-position')).toBe(
+      prey?.style.getPropertyValue('--lifecycle-position'),
+    )
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /stopped at Charlotte.*audience qualification was unavailable.*board-derived Answer remains available.*not Charlotte-qualified.*Wilbur and Web are waiting/i,
+    )
   })
 })

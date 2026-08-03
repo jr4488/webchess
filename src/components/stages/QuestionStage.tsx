@@ -31,7 +31,12 @@ export function QuestionStage({
   return (
     <section className="question-layout stage-enter" aria-label="Name your problem">
       <div className="question-copy">
-        <p className="eyebrow"><span /> A circular game of perspective</p>
+        <p className="eyebrow">
+          <span />
+          {provider.kind === 'openclaw'
+            ? 'WebChess 2.1 · OpenClaw local web'
+            : 'A circular game of perspective'}
+        </p>
         <h1><span>Bring a problem.</span><br /><em>Play toward clarity.</em></h1>
         <p className="lede">
           A difficult question becomes 64 candidate perspectives. White moves from the world inward;
@@ -65,13 +70,33 @@ export function QuestionStage({
               : 'Use 12–240 characters.'}
           </p>
           <p className="form-data-note" id="problem-data-note">
-            Your question is saved to your WebChess account and sent from the server through{' '}
-            {provider.label} using {provider.model} to build the 64-part map. After play, the server
-            replays the saved move log and sends only the original question, verified ending, and
-            capture-derived record for the answer. WebChess supplies the provider credential;
-            your browser never sends an API key.{' '}
+            {provider.kind === 'openclaw' ? (
+              <>
+                Your game, verified move log, and seven-stage visible WebChess 2.1 lifecycle stay
+                in a dedicated PostgreSQL database on this machine. A loopback-only WebChess
+                process sends model turns through {provider.label} using {provider.model}.
+                OpenClaw uses your configured provider and provider authentication—which may
+                contact a remote model—but those credentials never enter the browser or a
+                WebChess-operated service. After play, Portia validates the board-derived answer
+                prompt, the internal Gate checks sufficiency, Answer generation runs only after
+                permission, Charlotte reviews and qualifies it, and Wilbur carries the result into
+                action.{' '}
+              </>
+            ) : (
+              <>
+                Your question is saved to your WebChess account and sent from the server through{' '}
+                {provider.label} using {provider.model} to build the 64-part map. After play, the
+                server replays the saved move log and sends only the original question, verified
+                ending, and capture-derived record for the answer. WebChess supplies the provider
+                credential; your browser never sends an API key.{' '}
+              </>
+            )}
             <a href={provider.dataControlsUrl} target="_blank" rel="noreferrer">
-              OpenAI Platform data controls
+              {provider.dataControlsLabel ?? (
+                provider.kind === 'openclaw'
+                  ? 'How OpenClaw runs model requests'
+                  : 'OpenAI Platform data controls'
+              )}
             </a>
           </p>
         </form>

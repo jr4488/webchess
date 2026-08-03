@@ -16,38 +16,20 @@ import {
 } from './lib/game'
 import { createAutoPlayEngine } from './lib/auto-play'
 import type { AutoPlayEngine } from './lib/auto-play'
-import { HOSTED_WEBCHESS_PROVIDER } from './lib/hosted-provider'
 import { normalizeProblemInput, problemPartAt } from './lib/problem'
 import { PIECE_METAPHORS, synthesizeReading } from './lib/reading'
 import { beginModelActivity } from './lib/model-activity'
-import {
-  abandonGame,
-  appendWilburObservation,
-  createWilburAction,
-  createIdempotencyKey,
-  divideProblem,
-  getCurrentGame,
-  getGameLifecycle,
-  getOwnedGame,
-  isWebChessApiError,
-  recoverDivisionIntent,
-  replayGame,
-  retryLifecycle,
-  runCharlotte,
-  runPortia,
-  requestGameAnswer,
-  startGame,
-  submitMove,
-  updateWilburAction,
-} from './lib/webchess-api'
-import type {
-  AppendWilburObservationCommand,
-  DurableGame,
-} from './lib/webchess-api'
+import { isWebChessApiError } from './lib/webchess-api'
+import type { AppendWilburObservationCommand, DurableGame } from './lib/webchess-api'
 import type {
   LifecycleAggregate,
   WilburAction,
 } from './lib/lifecycle/contracts'
+import {
+  HOSTED_WEBCHESS_RUNTIME,
+  OPENCLAW_WEBCHESS_RUNTIME,
+} from './lib/webchess-runtime'
+import type { WebChessRuntime } from './lib/webchess-runtime'
 import type {
   AnswerStatus,
   CaptureRecord,
@@ -64,9 +46,16 @@ import type {
 } from './types'
 
 const EMPTY_SET = new Set<string>()
-const PLAY_SIGN_IN_PATH = '/sign-in?return_url=%2Fplay'
 const CAST_REVEAL_INTERVAL_MS = 90
 const DIVISION_PHASE_DURATION_MS = 780
+
+function researchProgressFingerprint(
+  lifecycle: LifecycleAggregate | null,
+): string {
+  return lifecycle?.research.map((record) =>
+    `${record.id}:${record.status}:${record.updatedAt}:${record.sources.length}`,
+  ).join('|') ?? ''
+}
 
 type EngineSearchMode = 'manual' | 'autoplay'
 
@@ -108,6 +97,14 @@ function outcomeNotice(outcome: GameOutcome): string {
 }
 
 export function App() {
+  return <WebChessExperience runtime={HOSTED_WEBCHESS_RUNTIME} />
+}
+
+export function OpenClawApp() {
+  return <WebChessExperience runtime={OPENCLAW_WEBCHESS_RUNTIME} />
+}
+
+function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   const [game, setGame] = useState<DurableGame | null>(null)
   const [restoring, setRestoring] = useState(true)
   const [restoreError, setRestoreError] = useState('')
@@ -166,6 +163,7 @@ export function App() {
   const portiaIntentRef = useRef<{ gameId: string; key: string } | null>(null)
   const charlotteIntentRef = useRef<{ gameId: string; key: string } | null>(null)
   const lifecycleRetryIntentRef = useRef<{ gameId: string; key: string } | null>(null)
+  const lifecycleBackoffMsRef = useRef(0)
   const activeGameMutationRef = useRef<ActiveGameMutation | null>(null)
   const gameFinishing = outcome !== null && stage === 'playing'
   const thinking = engineSearchMode !== null || movePending
@@ -223,6 +221,7 @@ export function App() {
     portiaIntentRef.current = null
     charlotteIntentRef.current = null
     lifecycleRetryIntentRef.current = null
+    lifecycleBackoffMsRef.current = 0
     movePendingRef.current = false
     invalidateEngineRequest(true)
     setStage('question')
@@ -267,7 +266,11 @@ export function App() {
 
   const applyDurableGame = useCallback((
     nextGame: DurableGame,
-    options: { animateMapping?: boolean; preserveAutoPlay?: boolean } = {},
+    options: {
+      animateMapping?: boolean
+      preserveAutoPlay?: boolean
+      preserveLifecycle?: boolean
+    } = {},
   ) => {
     const division = nextGame.division
     const state = nextGame.state
@@ -339,16 +342,15 @@ export function App() {
       nextGame.status === 'answering' ||
       nextGame.status === 'answer_failed' ||
       nextGame.status === 'answered'
-    const isLegacyAnswerState =
-      nextGame.status === 'answering' ||
-      nextGame.status === 'answer_failed' ||
-      nextGame.status === 'answered'
-    setLifecycle(null)
-    setLifecycleMode(
-      isLegacyAnswerState ? 'legacy' : isTerminal ? 'loading' : 'v2',
-    )
-    setLifecycleBusy(false)
-    setLifecycleError('')
+    if (!options.preserveLifecycle) {
+      setLifecycle(null)
+      setLifecycleMode(isTerminal ? 'loading' : 'v2')
+      setLifecycleBusy(false)
+      setLifecycleError('')
+    } else {
+      setLifecycleMode('v2')
+      setLifecycleError('')
+    }
 
     setAnswer(storedAnswer?.answer ?? '')
     setAnswerModel(storedAnswer?.model ?? '')
@@ -452,7 +454,7 @@ export function App() {
     }
 
     try {
-      const current = await getCurrentGame({ signal: controller.signal })
+      const current = await runtime.api.getCurrentGame({ signal: controller.signal })
       if (
         controller.signal.aborted ||
         restoreRequestGenerationRef.current !== generation ||
@@ -475,7 +477,7 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind === 'authentication-required'
       ) {
-        window.location.assign(PLAY_SIGN_IN_PATH)
+        if (runtime.signInPath) window.location.assign(runtime.signInPath)
         return
       }
       setRestoreError(
@@ -492,7 +494,13 @@ export function App() {
         if (!silent) setRestoring(false)
       }
     }
-  }, [applyDurableGame, invalidateRestoreRequest, resetGameState])
+  }, [
+    applyDurableGame,
+    invalidateRestoreRequest,
+    resetGameState,
+    runtime.api,
+    runtime.signInPath,
+  ])
 
   useEffect(() => {
     const restoreTimer = window.setTimeout(() => void restoreCurrentGame(), 0)
@@ -609,12 +617,12 @@ export function App() {
       movePendingRef.current = true
       setMovePending(true)
       try {
-        const saved = await submitMove(game.id, {
+        const saved = await runtime.api.submitMove(game.id, {
           expectedRevision: game.revision,
           pieceId,
           to: destination,
         }, {
-          idempotencyKey: createIdempotencyKey(),
+          idempotencyKey: runtime.api.createIdempotencyKey(),
         })
         const nextState = saved.state
         if (!nextState) throw new Error('The server did not return the saved board.')
@@ -661,7 +669,7 @@ export function App() {
           isWebChessApiError(error) &&
           error.kind === 'authentication-required'
         ) {
-          window.location.assign(PLAY_SIGN_IN_PATH)
+          if (runtime.signInPath) window.location.assign(runtime.signInPath)
           return false
         }
         if (
@@ -691,12 +699,17 @@ export function App() {
       parts,
       pieces,
       restoreCurrentGame,
+      runtime.api,
+      runtime.signInPath,
       turn,
     ],
   )
 
+  const activeGameId = game?.id
+
   const playOneTurn = useCallback(async (mode: EngineSearchMode) => {
     if (
+      !activeGameId ||
       stage !== 'playing' ||
       outcome ||
       movePendingRef.current ||
@@ -709,7 +722,10 @@ export function App() {
     engineRequestGenerationRef.current = generation
     activeEngineRequestRef.current = { generation, mode }
     setEngineSearchMode(mode)
-    const result = await getEngine().chooseMove(pieces, turn, `${problem}/${turnNumber}`, {
+    // A game id is durable across refreshes and unique for every bounded replay.
+    // Including it in the engine seed keeps one saved trajectory reproducible
+    // without forcing every retry of the same question down the same path.
+    const result = await getEngine().chooseMove(pieces, turn, `${activeGameId}/${turnNumber}`, {
       completedPlies: Math.max(0, turnNumber - 1),
       quietPlies,
     })
@@ -751,11 +767,11 @@ export function App() {
     }
   }, [
     autoPlaying,
+    activeGameId,
     getEngine,
     movePiece,
     outcome,
     pieces,
-    problem,
     quietPlies,
     restoreCurrentGame,
     stage,
@@ -781,7 +797,7 @@ export function App() {
     setLifecycleBusy(true)
     setLifecycleError('')
     try {
-      const restored = await getGameLifecycle(current.id, {
+      const restored = await runtime.api.getGameLifecycle(current.id, {
         signal: controller.signal,
       })
       if (controller.signal.aborted) return
@@ -790,6 +806,15 @@ export function App() {
       if (restored.charlotteRenderedAnswer) {
         setAnswer(restored.charlotteRenderedAnswer)
         setAnswerStatus('success')
+        setAnswerActivity(null)
+      } else if (current.answer) {
+        setAnswer(current.answer.answer)
+        setAnswerModel(current.answer.model)
+        setAnswerPrompt(current.answer.prompt)
+        setAnswerStatus('success')
+        setAnswerActivity(null)
+      } else {
+        setAnswerStatus('idle')
         setAnswerActivity(null)
       }
     } catch (error) {
@@ -802,7 +827,7 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind === 'authentication-required'
       ) {
-        window.location.assign(PLAY_SIGN_IN_PATH)
+        if (runtime.signInPath) window.location.assign(runtime.signInPath)
         return
       }
       setLifecycleError(
@@ -816,7 +841,7 @@ export function App() {
         setLifecycleBusy(false)
       }
     }
-  }, [game, outcome])
+  }, [game, outcome, runtime.api, runtime.signInPath])
 
   useEffect(() => {
     if (
@@ -835,68 +860,127 @@ export function App() {
       lifecycleMode !== 'v2' ||
       !lifecycle ||
       !game ||
-      !outcome ||
-      lifecycleBusy ||
-      lifecycleError
+      !outcome
     ) return
+
+    if (lifecycle.state === 'charlotte_unavailable') {
+      charlotteIntentRef.current = null
+      lifecycleBackoffMsRef.current = 0
+      lifecycleRequestRef.current?.abort()
+      return
+    }
+
+    if (lifecycleBusy || lifecycleError) return
 
     const portiaState =
       lifecycle.state === 'chess_terminal' ||
       lifecycle.state === 'portia_pending' ||
       lifecycle.state === 'portia_running' ||
       lifecycle.state === 'portia_complete'
+    const answerState =
+      lifecycle.state === 'gate_passed' && game.status !== 'answered'
     const charlotteState =
-      lifecycle.state === 'gate_passed' ||
+      (lifecycle.state === 'gate_passed' && game.status === 'answered') ||
       lifecycle.state === 'charlotte_pending' ||
       lifecycle.state === 'charlotte_running'
-    if (!portiaState && !charlotteState) return
+    if (!portiaState && !answerState && !charlotteState) return
 
-    const delay =
+    const delay = Math.max(
+      lifecycleBackoffMsRef.current,
       lifecycle.state === 'portia_running' ||
       lifecycle.state === 'charlotte_running'
         ? 1_500
-        : 0
+        : 0,
+    )
     const timer = window.setTimeout(() => {
       const controller = new AbortController()
       lifecycleRequestRef.current = controller
       setLifecycleBusy(true)
       const existingIntent = portiaState
         ? portiaIntentRef.current
-        : charlotteIntentRef.current
+        : answerState
+          ? answerIntentRef.current
+          : charlotteIntentRef.current
       const intent = existingIntent?.gameId === game.id
         ? existingIntent
-        : { gameId: game.id, key: createIdempotencyKey() }
+        : { gameId: game.id, key: runtime.api.createIdempotencyKey() }
       if (portiaState) portiaIntentRef.current = intent
+      else if (answerState) answerIntentRef.current = intent
       else charlotteIntentRef.current = intent
 
-      const operation = portiaState
-        ? runPortia(game.id, { expectedRevision: game.revision }, {
-            idempotencyKey: intent.key,
-            signal: controller.signal,
-          })
-        : runCharlotte(game.id, { expectedRevision: game.revision }, {
-            idempotencyKey: intent.key,
-            signal: controller.signal,
-          })
-      void operation.then((advanced) => {
+      const advance = async () => {
+        if (portiaState) {
+          const advanced = await runtime.api.runPortia(
+            game.id,
+            { expectedRevision: game.revision },
+            { idempotencyKey: intent.key, signal: controller.signal },
+          )
+          if (controller.signal.aborted) return
+          portiaIntentRef.current = null
+          lifecycleBackoffMsRef.current = 0
+          setLifecycle(advanced)
+          return
+        }
+        if (answerState) {
+          const generated = await runtime.api.requestGameAnswer(
+            game.id,
+            { expectedRevision: game.revision },
+            { idempotencyKey: intent.key, signal: controller.signal },
+          )
+          if (controller.signal.aborted) return
+          answerIntentRef.current = null
+          lifecycleBackoffMsRef.current = 0
+          applyDurableGame(generated.game, { preserveLifecycle: true })
+          setAnswer(generated.answer.answer)
+          setAnswerModel(generated.answer.model)
+          setAnswerPrompt(generated.answer.prompt)
+          setAnswerStatus('success')
+          setAnswerActivity(null)
+          return
+        }
+        const advanced = await runtime.api.runCharlotte(
+          game.id,
+          { expectedRevision: game.revision },
+          { idempotencyKey: intent.key, signal: controller.signal },
+        )
         if (controller.signal.aborted) return
-        if (portiaState) portiaIntentRef.current = null
-        else charlotteIntentRef.current = null
+        charlotteIntentRef.current = null
+        lifecycleBackoffMsRef.current = 0
         setLifecycle(advanced)
         if (advanced.charlotteRenderedAnswer) {
           setAnswer(advanced.charlotteRenderedAnswer)
           setAnswerStatus('success')
           setAnswerActivity(null)
         }
-      }).catch((error: unknown) => {
+      }
+
+      void advance().catch((error: unknown) => {
         if (controller.signal.aborted) return
-        if (isWebChessApiError(error) && error.kind === 'conflict') {
+        const recoverable = isWebChessApiError(error) && (
+          error.kind === 'conflict' ||
+          error.kind === 'rate-limited' ||
+          error.kind === 'transport' ||
+          (error.kind === 'http-error' &&
+            (error.status === 502 || error.status === 504))
+        )
+        if (recoverable) {
+          const requestedDelay = isWebChessApiError(error)
+            ? (error.retryAfterSeconds ?? 0) * 1_000
+            : 0
+          lifecycleBackoffMsRef.current = Math.min(
+            10_000,
+            Math.max(
+              requestedDelay,
+              lifecycleBackoffMsRef.current > 0
+                ? lifecycleBackoffMsRef.current * 2
+                : 1_500,
+            ),
+          )
           return
         }
-        if (!isWebChessApiError(error) || error.kind !== 'transport') {
-          if (portiaState) portiaIntentRef.current = null
-          else charlotteIntentRef.current = null
-        }
+        if (portiaState) portiaIntentRef.current = null
+        else if (answerState) answerIntentRef.current = null
+        else charlotteIntentRef.current = null
         setLifecycleError(
           error instanceof Error
             ? error.message
@@ -912,11 +996,71 @@ export function App() {
     return () => window.clearTimeout(timer)
   }, [
     game,
+    applyDurableGame,
     lifecycle,
     lifecycleBusy,
     lifecycleError,
     lifecycleMode,
     outcome,
+    runtime.api,
+    stage,
+  ])
+
+  useEffect(() => {
+    const pollingGameId = game?.id ?? null
+    const pollingLifecycleState = lifecycle?.state ?? null
+    if (
+      stage !== 'reading' ||
+      lifecycleMode !== 'v2' ||
+      !lifecycleBusy ||
+      pollingGameId === null ||
+      !(
+        pollingLifecycleState === 'chess_terminal' ||
+        pollingLifecycleState === 'portia_pending' ||
+        pollingLifecycleState === 'portia_running' ||
+        pollingLifecycleState === 'charlotte_pending' ||
+        pollingLifecycleState === 'charlotte_running'
+      )
+    ) return
+
+    let cancelled = false
+    let timer: number | null = null
+    const controller = new AbortController()
+    const poll = () => {
+      timer = window.setTimeout(() => {
+        void runtime.api.getGameLifecycle(pollingGameId, {
+          signal: controller.signal,
+        }).then((latest) => {
+          if (!cancelled) {
+            setLifecycle((current) =>
+              current?.id === latest.id &&
+              current.revision === latest.revision &&
+              current.updatedAt === latest.updatedAt &&
+              researchProgressFingerprint(current) ===
+                researchProgressFingerprint(latest)
+                ? current
+                : latest)
+          }
+        }).catch(() => {
+          // The foreground mutation owns user-facing errors. This poll exists
+          // only to reveal durable progress while that request is in flight.
+        }).finally(() => {
+          if (!cancelled) poll()
+        })
+      }, 750)
+    }
+    poll()
+    return () => {
+      cancelled = true
+      controller.abort()
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [
+    game?.id,
+    lifecycle?.state,
+    lifecycleBusy,
+    lifecycleMode,
+    runtime.api,
     stage,
   ])
 
@@ -955,9 +1099,9 @@ export function App() {
         const existingIntent = answerIntentRef.current
         const intent = existingIntent?.gameId === game.id
           ? existingIntent
-          : { gameId: game.id, key: createIdempotencyKey() }
+          : { gameId: game.id, key: runtime.api.createIdempotencyKey() }
         answerIntentRef.current = intent
-        const generated = await requestGameAnswer(game.id, {
+        const generated = await runtime.api.requestGameAnswer(game.id, {
           expectedRevision: game.revision,
         }, {
           idempotencyKey: intent.key,
@@ -972,7 +1116,7 @@ export function App() {
           isWebChessApiError(error) &&
           error.kind === 'authentication-required'
         ) {
-          window.location.assign(PLAY_SIGN_IN_PATH)
+          if (runtime.signInPath) window.location.assign(runtime.signInPath)
           return
         }
         if (!isWebChessApiError(error) || error.kind !== 'transport') {
@@ -1007,6 +1151,8 @@ export function App() {
     lifecycleMode,
     outcome,
     restoreCurrentGame,
+    runtime.api,
+    runtime.signInPath,
     stage,
   ])
 
@@ -1028,7 +1174,7 @@ export function App() {
     const existingIntent = divisionIntentRef.current
     const intent = existingIntent?.problem === subject
       ? existingIntent
-      : { problem: subject, key: createIdempotencyKey() }
+      : { problem: subject, key: runtime.api.createIdempotencyKey() }
     divisionIntentRef.current = intent
     const activity = beginModelActivity('division')
 
@@ -1043,7 +1189,7 @@ export function App() {
     setDivisionTargetUnresolved(true)
 
     try {
-      const divided = await divideProblem(subject, {
+      const divided = await runtime.api.divideProblem(subject, {
         idempotencyKey: intent.key,
         signal: controller.signal,
       })
@@ -1057,7 +1203,7 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind === 'authentication-required'
       ) {
-        window.location.assign(PLAY_SIGN_IN_PATH)
+        if (runtime.signInPath) window.location.assign(runtime.signInPath)
         return
       }
 
@@ -1067,7 +1213,7 @@ export function App() {
       let recoveryError: unknown
 
       try {
-        const recovered = await recoverDivisionIntent(intent.key, {
+        const recovered = await runtime.api.recoverDivisionIntent(intent.key, {
           signal: controller.signal,
         })
         if (controller.signal.aborted || divisionRequestRef.current !== controller) return
@@ -1098,7 +1244,7 @@ export function App() {
           isWebChessApiError(recoveryFailure) &&
           recoveryFailure.kind === 'authentication-required'
         ) {
-          window.location.assign(PLAY_SIGN_IN_PATH)
+          if (runtime.signInPath) window.location.assign(runtime.signInPath)
           return
         }
         recoveryError = recoveryFailure
@@ -1108,10 +1254,12 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind !== 'transport' &&
         error.kind !== 'invalid-response'
-      const targetDefinitelyAbsent =
-        originalFailureWasDefinitive &&
+      const recoveryReportedAbsent =
         isWebChessApiError(recoveryError) &&
         recoveryError.kind === 'not-found'
+      const targetDefinitelyAbsent =
+        recoveryReportedAbsent &&
+        (runtime.kind === 'openclaw' || originalFailureWasDefinitive)
 
       setDivisionTargetUnresolved(!targetDefinitelyAbsent)
       if (targetDefinitelyAbsent) divisionIntentRef.current = null
@@ -1169,12 +1317,12 @@ export function App() {
       : {
           gameId: current.id,
           expectedRevision: current.revision,
-          key: createIdempotencyKey(),
+          key: runtime.api.createIdempotencyKey(),
         }
     startIntentRef.current = intent
 
     try {
-      const started = await startGame(current.id, {
+      const started = await runtime.api.startGame(current.id, {
         expectedRevision: current.revision,
       }, {
         idempotencyKey: intent.key,
@@ -1191,7 +1339,7 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind === 'authentication-required'
       ) {
-        window.location.assign(PLAY_SIGN_IN_PATH)
+        if (runtime.signInPath) window.location.assign(runtime.signInPath)
         return
       }
       if (!isWebChessApiError(error) || error.kind !== 'transport') {
@@ -1277,12 +1425,12 @@ export function App() {
     const existingIntent = lifecycleRetryIntentRef.current
     const intent = existingIntent?.gameId === current.id
       ? existingIntent
-      : { gameId: current.id, key: createIdempotencyKey() }
+      : { gameId: current.id, key: runtime.api.createIdempotencyKey() }
     lifecycleRetryIntentRef.current = intent
     setLifecycleBusy(true)
     setLifecycleError('')
     try {
-      const retried = await retryLifecycle(current.id, {
+      const retried = await runtime.api.retryLifecycle(current.id, {
         expectedRevision: current.revision,
       }, {
         idempotencyKey: intent.key,
@@ -1326,7 +1474,7 @@ export function App() {
     setActionPendingIndex(index)
     setLifecycleError('')
     try {
-      await createWilburAction(current.id, {
+      await runtime.api.createWilburAction(current.id, {
         charlotteActionIndex: index,
         actor: suggestion.actor,
         action: suggestion.smallestAction,
@@ -1335,7 +1483,7 @@ export function App() {
         decisionThreshold: suggestion.decisionThreshold,
         reviewHorizon: suggestion.reviewHorizon,
       }, {
-        idempotencyKey: createIdempotencyKey(),
+        idempotencyKey: runtime.api.createIdempotencyKey(),
       })
       await refreshLifecycle()
     } catch (error) {
@@ -1359,11 +1507,11 @@ export function App() {
     setWilburPending(true)
     setLifecycleError('')
     try {
-      await updateWilburAction(current.id, action.id, {
+      await runtime.api.updateWilburAction(current.id, action.id, {
         expectedRevision: action.revision,
         status,
       }, {
-        idempotencyKey: createIdempotencyKey(),
+        idempotencyKey: runtime.api.createIdempotencyKey(),
       })
       await refreshLifecycle()
     } catch (error) {
@@ -1391,8 +1539,8 @@ export function App() {
     setWilburPending(true)
     setLifecycleError('')
     try {
-      await appendWilburObservation(current.id, action.id, observation, {
-        idempotencyKey: createIdempotencyKey(),
+      await runtime.api.appendWilburObservation(current.id, action.id, observation, {
+        idempotencyKey: runtime.api.createIdempotencyKey(),
       })
       await refreshLifecycle()
       return true
@@ -1420,13 +1568,13 @@ export function App() {
     const existingIntent = replayIntentRef.current
     const intent = existingIntent?.gameId === current.id
       ? existingIntent
-      : { gameId: current.id, key: createIdempotencyKey() }
+      : { gameId: current.id, key: runtime.api.createIdempotencyKey() }
     replayIntentRef.current = intent
     replayPendingRef.current = true
     setReplayPending(true)
     setReplayError('')
     try {
-      const replayed = await replayGame(current.id, {
+      const replayed = await runtime.api.replayGame(current.id, {
         expectedRevision: current.revision,
       }, {
         idempotencyKey: intent.key,
@@ -1443,7 +1591,7 @@ export function App() {
         isWebChessApiError(error) &&
         error.kind === 'authentication-required'
       ) {
-        window.location.assign(PLAY_SIGN_IN_PATH)
+        if (runtime.signInPath) window.location.assign(runtime.signInPath)
         return
       }
 
@@ -1458,7 +1606,7 @@ export function App() {
           // Replay creation atomically uses its replay idempotency UUID as the
           // child ID. Division recovery must use the separate intent endpoint
           // because division games are identified by a server request UUID.
-          const recovered = await getOwnedGame(intent.key)
+          const recovered = await runtime.api.getOwnedGame(intent.key)
           if (recovered.sourceGameId !== current.id) {
             throw new Error(
               'The recovered replay does not belong to this source game.',
@@ -1483,7 +1631,7 @@ export function App() {
             isWebChessApiError(recoveryError) &&
             recoveryError.kind === 'authentication-required'
           ) {
-            window.location.assign(PLAY_SIGN_IN_PATH)
+            if (runtime.signInPath) window.location.assign(runtime.signInPath)
             return
           }
           setReplayTargetUnresolved(true)
@@ -1550,11 +1698,11 @@ export function App() {
         : {
             gameId: current.id,
             expectedRevision: current.revision,
-            key: createIdempotencyKey(),
+            key: runtime.api.createIdempotencyKey(),
           }
       resetIntentRef.current = intent
 
-      await abandonGame(current.id, {
+      await runtime.api.abandonGame(current.id, {
         expectedRevision: current.revision,
       }, {
         idempotencyKey: intent.key,
@@ -1595,11 +1743,21 @@ export function App() {
     wilburPending ||
     game?.status === 'dividing' ||
     game?.status === 'answering' ||
-    answerStatus === 'loading' ||
+    (lifecycleMode === 'legacy' && answerStatus === 'loading') ||
     divisionTargetUnresolved ||
     (!game && divisionStatus === 'loading')
   const resetDisabled = sharedActionDisabled || replayTargetUnresolved
   const replayDisabled = sharedActionDisabled
+  const lifecycleGameStatus =
+    lifecycleBusy &&
+    lifecycle?.state === 'gate_passed' &&
+    game?.status !== 'answered'
+      ? 'answering'
+      : game?.status === 'answering' ||
+          game?.status === 'answer_failed' ||
+          game?.status === 'answered'
+        ? game.status
+        : 'completed'
 
   return (
     <div className={`app-shell stage-${visibleStage}`}>
@@ -1607,6 +1765,7 @@ export function App() {
         stage={visibleStage}
         resetDisabled={resetDisabled}
         onReset={reset}
+        localMode={runtime.kind === 'openclaw'}
       />
 
       <main className="main-content">
@@ -1614,7 +1773,7 @@ export function App() {
           <div className="session-banner" role="alert">
             <span>{restoreError}</span>
             <button type="button" className="text-button" onClick={() => void restoreCurrentGame()}>
-              Restore again
+              {runtime.restoreActionLabel}
             </button>
           </div>
         )}
@@ -1628,14 +1787,14 @@ export function App() {
               <p className="eyebrow"><span /> Saved game</p>
               <h1>Restoring your board…</h1>
               <p className="lede" role="status">
-                WebChess is replaying the durable move log before play continues.
+                {runtime.restoreDescription}
               </p>
             </div>
           </section>
         ) : stage === 'question' ? (
           <QuestionStage
             problem={problem}
-            provider={HOSTED_WEBCHESS_PROVIDER}
+            provider={runtime.provider}
             setProblem={setProblem}
             onSubmit={beginMapping}
           />
@@ -1644,7 +1803,7 @@ export function App() {
         {!restoring && stage === 'mapping' && (
           <MappingStage
             problem={problem}
-            provider={HOSTED_WEBCHESS_PROVIDER}
+            provider={runtime.provider}
             parts={parts}
             progress={mappingProgress}
             divisionStatus={divisionStatus}
@@ -1687,6 +1846,7 @@ export function App() {
 
         {!restoring && stage === 'reading' && outcome && lifecycleMode !== 'legacy' && (
           <LifecycleStage
+            game={game}
             problem={problem}
             parts={parts}
             pieces={pieces}
@@ -1694,6 +1854,8 @@ export function App() {
             lastMove={lastMove}
             outcome={outcome}
             lifecycle={lifecycle}
+            gameStatus={lifecycleGameStatus}
+            boardAnswer={game?.answer ?? null}
             busy={lifecycleBusy}
             error={lifecycleError}
             actionPendingIndex={actionPendingIndex}
@@ -1709,7 +1871,7 @@ export function App() {
         {!restoring && stage === 'reading' && outcome && lifecycleMode === 'legacy' && (
           <ReadingStage
             problem={problem}
-            provider={HOSTED_WEBCHESS_PROVIDER}
+            provider={runtime.provider}
             parts={parts}
             pieces={pieces}
             captures={captures}
@@ -1736,7 +1898,13 @@ export function App() {
       <footer className="site-footer">
         <span>WebChess</span>
         <span>A thinking game inspired by change, not a prediction.</span>
-        <a className="text-button" href="/account">Account and usage</a>
+        {runtime.footerAction ? (
+          <a className="text-button" href={runtime.footerAction.href}>
+            {runtime.footerAction.label}
+          </a>
+        ) : (
+          <span>Runs locally through your OpenClaw configuration.</span>
+        )}
       </footer>
     </div>
   )

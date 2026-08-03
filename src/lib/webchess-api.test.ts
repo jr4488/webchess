@@ -5,6 +5,7 @@ import {
   createIdempotencyKey,
   divideProblem,
   getCurrentGame,
+  getGameLifecycle,
   getOwnedGame,
   isWebChessApiError,
   recoverDivisionIntent,
@@ -71,6 +72,97 @@ const FULL_GAME = {
   answer: ANSWER,
 }
 
+const CHARLOTTE_UNAVAILABLE_LIFECYCLE = {
+  id: '72000000-0000-4000-8000-000000000001',
+  rootRunId: '72000000-0000-4000-8000-000000000001',
+  parentRunId: null,
+  gameId: GAME_ID,
+  state: 'charlotte_unavailable',
+  revision: 12,
+  fieldGeneration: 1,
+  gameAttempt: 1,
+  sameFieldRetryCount: 0,
+  fieldRegenerationCount: 0,
+  divisionSeed: 'division-seed',
+  castSeed: 'cast-seed',
+  trajectorySeed: 'trajectory-seed',
+  retryReason: null,
+  terminalFingerprint: 'f'.repeat(64),
+  answerPromptDigest: 'd'.repeat(64),
+  answerUserPrompt: null,
+  answerUserPromptSha256: null,
+  survivors: [],
+  portiaActiveModelRequestId: null,
+  portiaFailedAttemptCount: 0,
+  portiaFailureLimit: 3,
+  portiaProgress: {
+    currentCandidateId: null,
+    completedCandidateIds: [],
+    completedAssessments: [],
+  },
+  portia: null,
+  gate: null,
+  charlotteActiveModelRequestId: null,
+  charlotteFailedAttemptCount: 3,
+  charlotteFailureLimit: 3,
+  charlotte: null,
+  charlotteRenderedAnswer: null,
+  wilburActions: [],
+  wilburObservations: [],
+  activities: [],
+  research: [],
+  versions: {},
+  createdAt: '2026-08-02T18:00:00.000Z',
+  updatedAt: '2026-08-02T18:03:00.000Z',
+}
+
+const COMPLETED_CODEX_RESEARCH = {
+  id: '81000000-0000-4000-8000-000000000001',
+  lifecycleRunId: CHARLOTTE_UNAVAILABLE_LIFECYCLE.id,
+  gameId: GAME_ID,
+  stage: 'portia',
+  requestedBy: 'research-policy',
+  policyVersion: 'webchess-visible-research-v1',
+  materiality: 'required',
+  reason: 'The candidate prompt depends on a current external benchmark.',
+  query: 'official LLM inference latency benchmark 2026',
+  status: 'completed',
+  provider: 'codex',
+  transport: 'local',
+  model: 'gpt-5.4-search',
+  bounds: {
+    invocationLimit: 1,
+    resultLimit: 5,
+    sourceLimit: 3,
+    timeoutMs: 30_000,
+    synthesisCharacterLimit: 4_000,
+  },
+  attemptCount: 1,
+  executedQueries: ['official LLM inference latency benchmark 2026'],
+  searchSynthesis: 'Current sources distinguish prefill latency from decode throughput.',
+  directPageTextFetched: false,
+  retrievedFacts: [],
+  sources: [{
+    id: '82000000-0000-4000-8000-000000000001',
+    citationId: 'source-1',
+    ordinal: 1,
+    title: 'NIST AI measurement guidance',
+    url: 'https://www.nist.gov/example',
+    hostname: 'www.nist.gov',
+    trust: 'government_or_education',
+    discoveredFrom: 'search_activity',
+    createdAt: '2026-08-02T18:02:00.000Z',
+  }],
+  omittedSourceCount: 0,
+  injectionSignalsDetected: ['instruction-like phrase removed'],
+  contentDigest: 'a'.repeat(64),
+  failureCode: null,
+  startedAt: '2026-08-02T18:01:30.000Z',
+  completedAt: '2026-08-02T18:02:00.000Z',
+  createdAt: '2026-08-02T18:01:30.000Z',
+  updatedAt: '2026-08-02T18:02:00.000Z',
+}
+
 function jsonResponse(value: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -96,6 +188,14 @@ async function gameFailure(game: unknown): Promise<unknown> {
     vi.fn().mockResolvedValue(jsonResponse({ game })),
   )
   return getOwnedGame(GAME_ID).catch((error: unknown) => error)
+}
+
+async function lifecycleFailure(lifecycle: unknown): Promise<unknown> {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(jsonResponse({ lifecycle })),
+  )
+  return getGameLifecycle(GAME_ID).catch((error: unknown) => error)
 }
 
 describe('durable WebChess browser API', () => {
@@ -346,6 +446,157 @@ describe('durable WebChess browser API', () => {
     )
 
     await expect(getCurrentGame()).resolves.toEqual(FULL_GAME)
+  })
+
+  it('accepts Charlotte bounded-terminal metadata from the lifecycle API', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({ lifecycle: CHARLOTTE_UNAVAILABLE_LIFECYCLE }),
+      ),
+    )
+
+    await expect(getGameLifecycle(GAME_ID)).resolves.toEqual(
+      CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+    )
+  })
+
+  it('accepts the exact player-visible Answer prompt with Gate provenance', async () => {
+    const lifecycle = {
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      state: 'gate_passed',
+      answerUserPrompt: '{\n  "reviewed_prompt": "exact approved input"\n}',
+      answerUserPromptSha256: 'e'.repeat(64),
+      gate: { passed: true },
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ lifecycle })),
+    )
+
+    await expect(getGameLifecycle(GAME_ID)).resolves.toEqual(lifecycle)
+  })
+
+  it.each([
+    [
+      'missing digest',
+      { answerUserPrompt: '{"approved":true}', answerUserPromptSha256: null, gate: { passed: true } },
+      'Lifecycle player-visible answer prompt provenance is incomplete.',
+    ],
+    [
+      'failed Gate',
+      { answerUserPrompt: '{"approved":true}', answerUserPromptSha256: 'e'.repeat(64), gate: { passed: false } },
+      'Lifecycle player-visible answer prompt was not authorized by the Gate.',
+    ],
+  ])('rejects player-visible prompt provenance with %s', async (_label, overrides, message) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({
+        lifecycle: {
+          ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+          ...overrides,
+        },
+      })),
+    )
+
+    await expect(getGameLifecycle(GAME_ID)).rejects.toMatchObject({
+      kind: 'invalid-response',
+      message,
+    })
+  })
+
+  it('accepts a completed, bounded Codex research record from the lifecycle API', async () => {
+    const lifecycle = {
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      research: [COMPLETED_CODEX_RESEARCH],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ lifecycle })),
+    )
+
+    const parsed = await getGameLifecycle(GAME_ID)
+
+    expect(parsed.research).toEqual([COMPLETED_CODEX_RESEARCH])
+    expect(parsed.research[0]).toMatchObject({
+      status: 'completed',
+      provider: 'codex',
+      model: 'gpt-5.4-search',
+      directPageTextFetched: false,
+      retrievedFacts: [],
+    })
+  })
+
+  it.each([
+    [
+      'status',
+      { status: 'background_hidden' },
+      'Lifecycle research stage or status is invalid.',
+    ],
+    [
+      'provider',
+      { provider: 'openai' },
+      'Lifecycle research attribution is invalid.',
+    ],
+    [
+      'unsafe source URL',
+      {
+        sources: [{
+          ...COMPLETED_CODEX_RESEARCH.sources[0],
+          url: 'http://127.0.0.1/private',
+          hostname: '127.0.0.1',
+        }],
+      },
+      'Lifecycle research source is unsafe or repeated.',
+    ],
+    [
+      'invented retrieved facts',
+      { retrievedFacts: ['This was not directly fetched.'] },
+      'Lifecycle research evidence labels are invalid.',
+    ],
+  ])('rejects malformed research %s', async (_label, override, message) => {
+    const failure = await lifecycleFailure({
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      research: [{ ...COMPLETED_CODEX_RESEARCH, ...override }],
+    })
+
+    expect(failure).toMatchObject({
+      kind: 'invalid-response',
+      message,
+    })
+  })
+
+  it.each([
+    [
+      'active request id',
+      { charlotteActiveModelRequestId: 'not-a-uuid' },
+      'Lifecycle active Charlotte request id is invalid.',
+    ],
+    [
+      'negative failure count',
+      { charlotteFailedAttemptCount: -1 },
+      'Charlotte failed attempt count must be a non-negative integer.',
+    ],
+    [
+      'zero failure limit',
+      { charlotteFailureLimit: 0 },
+      'Charlotte failure budget is invalid.',
+    ],
+    [
+      'overspent failure budget',
+      { charlotteFailedAttemptCount: 4 },
+      'Charlotte failure budget is invalid.',
+    ],
+  ])('rejects invalid Charlotte %s metadata', async (_label, override, message) => {
+    const failure = await lifecycleFailure({
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      ...override,
+    })
+
+    expect(failure).toMatchObject({
+      kind: 'invalid-response',
+      message,
+    })
   })
 
   it.each([

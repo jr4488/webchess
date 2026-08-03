@@ -1,5 +1,7 @@
 // @vitest-environment node
 
+import { createHash } from 'node:crypto'
+
 import { APIConnectionTimeoutError } from 'openai'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -9,6 +11,7 @@ import {
   CURRENT_LIFECYCLE_VERSIONS,
   evaluateGate,
   PORTIA_ATTACK_TYPES,
+  terminalFingerprint,
 } from '../../lib/lifecycle'
 import type {
   CharlotteResult,
@@ -19,7 +22,8 @@ import type {
 } from '../../lib/lifecycle'
 import { makeProblemFacets } from '../../test/fixtures'
 import type { CaptureRecord, GeneratedAnswer } from '../../types'
-import type { SqlAdapter, SqlResult, SqlRow } from '../db'
+import { hashCanonicalJson } from '../db'
+import type { CanonicalJson, SqlAdapter, SqlResult, SqlRow } from '../db'
 import {
   GameRepositoryError,
   type DurableGameSnapshot,
@@ -27,10 +31,14 @@ import {
 } from '../games'
 import type { LifecycleRepositoryPort } from '../lifecycle'
 import {
+  buildBoardAnswerPromptPackage,
+  DIVISION_PROMPT_VERSION,
   ModelContractError,
   ModelResponseError,
+  normalizeDivisionRepairContext,
   OPENAI_MODEL,
 } from '../openai'
+import type { PortiaInput, PortiaRequestContext } from '../openai'
 import type {
   ModelResultPayload,
   ModelRequestStatus,
@@ -56,7 +64,8 @@ const PROMPT = 'Canonical server-side division prompt.'
 const NOW = new Date('2026-07-26T20:00:00.000Z')
 
 const STORED_ANSWER: GeneratedAnswer = {
-  answer: 'Use the durable evidence to make one reversible next move.',
+  answer:
+    'Use the durable board evidence to make one reversible next move, then compare the observed result with the stated threshold before expanding the commitment.',
   model: OPENAI_MODEL,
   prompt: 'Canonical answer prompt built only from the replay.',
 }
@@ -163,7 +172,9 @@ function terminalSnapshot(
         terminalCapture: recordedCapture,
       },
     },
+    answer: status === 'answered' ? STORED_ANSWER : null,
     completedAt: NOW,
+    answeredAt: status === 'answered' ? NOW : null,
   }) as TerminalGameSnapshot
 }
 
@@ -181,6 +192,61 @@ function answerResultPayload() {
   return {
     format: 'webchess-answer-result/1' as const,
     answer: STORED_ANSWER,
+  }
+}
+
+function approvedAnswerResultPayload(lifecycle: LifecycleAggregate) {
+  if (!lifecycle.answerPromptDigest || !lifecycle.gate) {
+    throw new Error('Approved answer fixtures require Portia and Gate provenance.')
+  }
+  return {
+    format: 'webchess-answer-result/2' as const,
+    answer: STORED_ANSWER,
+    approval: {
+      lifecycleRunId: lifecycle.id,
+      reviewedPromptDigest: lifecycle.answerPromptDigest,
+      gateInputDigest: lifecycle.gate.inputDigest,
+    },
+  }
+}
+
+type CharlotteSourceOverrides = Partial<{
+  lifecycleRunId: string
+  boardAnswerDigest: string
+  reviewedPromptDigest: string
+  gateInputDigest: string
+}>
+
+function approvedCharlotteResultPayload(
+  lifecycle: LifecycleAggregate,
+  sourceOverrides: CharlotteSourceOverrides = {},
+) {
+  if (!lifecycle.answerPromptDigest || !lifecycle.gate || !lifecycle.portia) {
+    throw new Error('Approved Charlotte fixtures require complete lifecycle provenance.')
+  }
+  return {
+    format: 'webchess-charlotte-result/3' as const,
+    structured: lifecycleCharlotte(lifecycle.portia as PortiaReview),
+    renderedAnswer: 'Charlotte preserves the qualified evidence boundary. '.repeat(12),
+    wordCount: 500,
+    source: {
+      lifecycleRunId: lifecycle.id,
+      boardAnswerDigest: hashCanonicalJson(
+        STORED_ANSWER as unknown as CanonicalJson,
+      ),
+      reviewedPromptDigest: lifecycle.answerPromptDigest,
+      gateInputDigest: lifecycle.gate.inputDigest,
+      ...sourceOverrides,
+    },
+  }
+}
+
+function legacyCharlotteResultPayload(portia: PortiaReview) {
+  return {
+    format: 'webchess-charlotte-result/1' as const,
+    structured: lifecycleCharlotte(portia),
+    renderedAnswer: 'Charlotte preserves the qualified evidence boundary. '.repeat(12),
+    wordCount: 500,
   }
 }
 
@@ -402,6 +468,31 @@ const LIFECYCLE_SURVIVORS = Array.from(
   (_, index) => lifecycleCandidate(index),
 )
 
+function terminalAnswerPromptDigest(): string {
+  const recordedCapture = capture()
+  return hashCanonicalJson(buildBoardAnswerPromptPackage(
+    {
+      problem: PROBLEM,
+      turnCount: 1,
+      outcome: {
+        winner: null,
+        reason: 'no-moves',
+        completedTurn: 1,
+      },
+      captures: [{
+        turn: 1,
+        resonance: 73,
+        cell: { ring: 4, sector: 0 },
+        attacker: { side: 'white', kind: 'rook' },
+        captured: { side: 'black', kind: 'pawn' },
+        part: recordedCapture.part,
+      }],
+    },
+    LIFECYCLE_SURVIVORS,
+    terminalFingerprint(LIFECYCLE_SURVIVORS),
+  ) as unknown as CanonicalJson)
+}
+
 function lifecycleAssessment(
   candidate: SurvivorCandidate,
   index: number,
@@ -425,18 +516,25 @@ function lifecycleAssessment(
     reversalCondition: 'Stop when the protected outcome or evidence threshold fails.',
     attackFindings: PORTIA_ATTACK_TYPES.map((attackType) => ({
       attackType,
-      severity: 'moderate',
+      outcome: index === 1 ? 'qualified' : 'passed',
+      severity: index === 1 ? 'moderate' : 'low',
       finding: `The ${attackType} attack identifies a bounded uncertainty.`,
       consequence: 'Preserve uncertainty and a credible stopping rule.',
-      requiredRevision: 'State the tested assumption and evidence threshold.',
+      requiredRevision: null,
     })),
   }
 }
 
-function lifecycleReview(): PortiaReview {
+function lifecycleReview(
+  answerPromptDigest = terminalAnswerPromptDigest(),
+): PortiaReview {
   const assessments = LIFECYCLE_SURVIVORS.map(lifecycleAssessment)
   return {
     contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    reviewedAnswerPromptDigest: answerPromptDigest,
+    promptDecision: 'permit',
+    promptDecisionRationale:
+      'The exact board-derived prompt is reasonable under the retained qualifications.',
     runSummary: 'Portia examined every terminal survivor without treating survival as proof.',
     assessments,
     crossCandidateContradictions: [],
@@ -450,6 +548,26 @@ function lifecycleReview(): PortiaReview {
       ]],
       fatalContradictionIds: [],
       fieldRepairReasons: [],
+    },
+  }
+}
+
+function exhaustedLifecycleReview(): PortiaReview {
+  const portia = lifecycleReview()
+  return {
+    ...portia,
+    assessments: portia.assessments.map((assessment) => ({
+      ...assessment,
+      disposition: 'consumed',
+      survivingInterpretation: null,
+      requiredQualification: null,
+    })),
+    missingCoverage: ['agency_or_action'],
+    recommendedGateInputs: {
+      ...portia.recommendedGateInputs,
+      fieldRepairReasons: [
+        'The prior semantic field did not produce an independent action path.',
+      ],
     },
   }
 }
@@ -504,16 +622,30 @@ function lifecycleAggregate(
     castSeed: 'adapter-cast-seed',
     trajectorySeed: 'adapter-trajectory-seed',
     retryReason: null,
-    terminalFingerprint: 'f'.repeat(64),
+    terminalFingerprint: terminalFingerprint(LIFECYCLE_SURVIVORS),
+    answerPromptDigest: null,
+    answerUserPrompt: null,
+    answerUserPromptSha256: null,
     survivors: LIFECYCLE_SURVIVORS,
+    portiaActiveModelRequestId: null,
+    portiaFailedAttemptCount: 0,
+    portiaFailureLimit: 3,
+    portiaProgress: {
+      currentCandidateId: null,
+      completedCandidateIds: [],
+      completedAssessments: [],
+    },
     portia: null,
     gate: null,
+    charlotteActiveModelRequestId: null,
+    charlotteFailedAttemptCount: 0,
+    charlotteFailureLimit: 3,
     charlotte: null,
     charlotteRenderedAnswer: null,
     wilburActions: [],
     wilburObservations: [],
     versions: {
-      software: '2.0.0',
+      software: CURRENT_LIFECYCLE_VERSIONS.software,
       lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
       portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
       portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
@@ -531,6 +663,7 @@ function lifecycleAggregate(
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
     ...overrides,
+    research: overrides.research ?? [],
   }
 }
 
@@ -552,21 +685,107 @@ function createLifecycleRepository(
       }
       return current
     }),
+    beginPortiaAttempt: vi.fn(async (input) => {
+      current = {
+        ...current,
+        revision: current.revision + 1,
+        state: 'portia_running',
+        portiaActiveModelRequestId: input.modelRequestId,
+        answerPromptDigest:
+          current.answerPromptDigest ?? input.answerPromptDigest,
+        portiaProgress: {
+          ...current.portiaProgress,
+          currentCandidateId: null,
+        },
+      }
+      return current
+    }),
+    updatePortiaProgress: vi.fn(async (input) => {
+      current = {
+        ...current,
+        answerPromptDigest: input.answerPromptDigest,
+        portiaProgress: {
+          currentCandidateId: input.currentCandidateId,
+          completedCandidateIds: input.completedCandidateIds,
+          completedAssessments: input.completedAssessments,
+        },
+      }
+      return current
+    }),
+    failPortiaAttempt: vi.fn(async () => {
+      const failedAttemptCount = current.portiaFailedAttemptCount + 1
+      const exhausted = failedAttemptCount >= current.portiaFailureLimit
+      current = {
+        ...current,
+        revision: current.revision + 1,
+        state: exhausted ? 'portia_unavailable' : 'portia_pending',
+        portiaActiveModelRequestId: null,
+        portiaFailedAttemptCount: failedAttemptCount,
+        portiaProgress: {
+          ...current.portiaProgress,
+          currentCandidateId: exhausted
+            ? current.portiaProgress.currentCandidateId
+            : null,
+        },
+      }
+      return current
+    }),
     storePortia: vi.fn(async (input) => {
       current = {
         ...current,
         revision: current.revision + 1,
         state: 'portia_complete',
+        portiaActiveModelRequestId: null,
         portia: input.review,
+        answerPromptDigest: input.review.reviewedAnswerPromptDigest,
+        portiaProgress: {
+          currentCandidateId: null,
+          completedCandidateIds: current.survivors.map(
+            (candidate) => candidate.candidateId,
+          ),
+          completedAssessments: input.review.assessments,
+        },
       }
       return current
     }),
     storeGate: vi.fn(async (input) => {
+      const targetState = input.result.passed ? 'gate_passed' : 'gate_failed'
+      const extendsHistoricalGate =
+        current.state === targetState &&
+        current.gate?.inputDigest === input.result.inputDigest &&
+        current.answerUserPrompt === null &&
+        current.answerUserPromptSha256 === null &&
+        input.answerUserPrompt !== null
+      current = {
+        ...current,
+        revision: current.revision + (extendsHistoricalGate ? 0 : 1),
+        state: targetState,
+        gate: input.result,
+        answerUserPrompt: input.answerUserPrompt,
+        answerUserPromptSha256: input.answerUserPrompt === null
+          ? null
+          : createHash('sha256').update(input.answerUserPrompt, 'utf8').digest('hex'),
+      }
+      return current
+    }),
+    beginCharlotteAttempt: vi.fn(async (input) => {
       current = {
         ...current,
         revision: current.revision + 1,
-        state: input.result.passed ? 'gate_passed' : 'gate_failed',
-        gate: input.result,
+        state: 'charlotte_running',
+        charlotteActiveModelRequestId: input.modelRequestId,
+      }
+      return current
+    }),
+    failCharlotteAttempt: vi.fn(async () => {
+      const failedAttemptCount = current.charlotteFailedAttemptCount + 1
+      const exhausted = failedAttemptCount >= current.charlotteFailureLimit
+      current = {
+        ...current,
+        revision: current.revision + 1,
+        state: exhausted ? 'charlotte_unavailable' : 'charlotte_pending',
+        charlotteActiveModelRequestId: null,
+        charlotteFailedAttemptCount: failedAttemptCount,
       }
       return current
     }),
@@ -575,6 +794,7 @@ function createLifecycleRepository(
         ...current,
         revision: current.revision + 1,
         state: 'charlotte_complete',
+        charlotteActiveModelRequestId: null,
         charlotte: input.result,
         charlotteRenderedAnswer: input.renderedAnswer,
       }
@@ -650,21 +870,35 @@ function lifecycleDependencies(
   initial = lifecycleAggregate(),
 ): ApiServiceAdapterDependencies {
   const dependencies = createDependencies()
-  const portiaGenerator = vi.fn(async () => ({
-    providerId: 'resp_portia',
-    model: OPENAI_MODEL,
-    prompt: 'Canonical Portia prompt.',
-    result: lifecycleReview(),
-    usage: {
-      reported: true,
-      inputTokens: 300,
-      outputTokens: 120,
-      totalTokens: 450,
-      cachedInputTokens: 20,
-      cacheWriteInputTokens: 0,
-      reasoningOutputTokens: 30,
-    },
-  }))
+  const portiaGenerator = vi.fn(async (
+    input: PortiaInput,
+    context: PortiaRequestContext,
+  ) => {
+    const result = lifecycleReview(input.answerPromptDigest)
+    await context.onProgress?.({
+      currentCandidateId: null,
+      completedCandidateIds: input.survivors.map(
+        (candidate) => candidate.candidateId,
+      ),
+      completedAssessments: result.assessments,
+      totalCandidateCount: input.survivors.length,
+    })
+    return {
+      providerId: 'resp_portia',
+      model: OPENAI_MODEL,
+      prompt: 'Canonical Portia prompt.',
+      result,
+      usage: {
+        reported: true,
+        inputTokens: 300,
+        outputTokens: 120,
+        totalTokens: 450,
+        cachedInputTokens: 20,
+        cacheWriteInputTokens: 0,
+        reasoningOutputTokens: 30,
+      },
+    }
+  })
   const charlotteGenerator = vi.fn(async () => ({
     providerId: 'resp_charlotte',
     model: OPENAI_MODEL,
@@ -701,6 +935,48 @@ function operationInput() {
     requestId: REQUEST_ID,
     signal: new AbortController().signal,
   }
+}
+
+function arrangeRecoveredCharlotteWinner(
+  dependencies: ApiServiceAdapterDependencies,
+  lifecycle: LifecycleAggregate,
+  charlottePayload: unknown,
+): void {
+  vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+    terminalSnapshot('answered'),
+  )
+  vi.mocked(dependencies.usage.reserveModelRequest).mockResolvedValue({
+    ok: true,
+    kind: 'existing',
+    requestId: REQUEST_ID,
+    gameId: GAME_ID,
+    status: 'rejected',
+    leaseToken: null,
+    leaseExpiresAt: null,
+  })
+  vi.mocked(dependencies.usage.getModelRequestResult).mockResolvedValue({
+    found: true,
+    requestId: REQUEST_ID,
+    gameId: GAME_ID,
+    operation: 'charlotte',
+    status: 'rejected',
+    resultPayload: null,
+  })
+  vi.mocked(
+    dependencies.usage.getSucceededModelResultForGame,
+  ).mockImplementation(async (input) => ({
+    found: true,
+    requestId: input.operation === 'answer'
+      ? '77777777-7777-4777-8777-777777777777'
+      : '88888888-8888-4888-8888-888888888888',
+    gameId: GAME_ID,
+    operation: input.operation,
+    status: 'succeeded',
+    resultPayload: (input.operation === 'answer'
+      ? approvedAnswerResultPayload(lifecycle)
+      : charlottePayload
+    ) as ModelResultPayload,
+  }))
 }
 
 describe('durable HTTP service adapter', () => {
@@ -812,6 +1088,21 @@ describe('durable HTTP service adapter', () => {
     expect(providerContext?.userId).toBe(OWNER_ID)
     expect(providerContext?.idempotencyKey).toMatch(/^[0-9a-f]{64}$/)
     expect(providerContext?.idempotencyKey).not.toBe(IDEMPOTENCY_KEY)
+  })
+
+  it('uses the durable game id as the initial lifecycle trajectory seed', async () => {
+    dependencies = lifecycleDependencies()
+
+    await createApiServicesWithDependencies(dependencies).divide(
+      operationInput(),
+    )
+
+    expect(dependencies.lifecycleRepository?.ensureForGame).toHaveBeenCalledWith(
+      expect.objectContaining({
+        game: expect.objectContaining({ id: REQUEST_ID }),
+        trajectorySeed: REQUEST_ID,
+      }),
+    )
   })
 
   it('does not recreate a game after forced deletion wins during a division provider call', async () => {
@@ -1483,11 +1774,13 @@ describe('durable HTTP service adapter', () => {
     expect(result.answer).toEqual(STORED_ANSWER)
     expect(
       dependencies.usage.getSucceededModelResultForGame,
-    ).toHaveBeenCalledWith({
+    ).toHaveBeenCalledWith(expect.objectContaining({
       userId: OWNER_ID,
       gameId: GAME_ID,
       operation: 'answer',
-    })
+      requestSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      promptVersion: expect.any(String),
+    }))
     expect(dependencies.answerGenerator).not.toHaveBeenCalled()
   })
 
@@ -1738,7 +2031,7 @@ describe('durable HTTP service adapter', () => {
     })
 
     expect(exported).toMatchObject({
-      format: 'webchess-account-export/2',
+      format: 'webchess-account-export/3',
       controls: { suspended: false },
       games: [{ id: GAME_ID, revision: '3' }],
       events: [{ gameId: GAME_ID, ply: 1 }],
@@ -1765,13 +2058,15 @@ describe('durable HTTP service adapter', () => {
     const statements = vi.mocked(
       dependencies.database.transaction,
     ).mock.calls[0]?.[0]
-    expect(statements).toHaveLength(14)
+    expect(statements).toHaveLength(16)
     expect(statements?.[0]?.text).toContain('pg_column_size')
     expect(statements?.[6]?.text).toContain(
       'activated_at AS "activatedAt"',
     )
     expect(statements?.[7]?.text).toContain('FROM lifecycle_runs')
-    expect(statements?.[13]?.text).toContain('FROM lifecycle_events')
+    expect(statements?.[8]?.text).toContain('FROM research_requests')
+    expect(statements?.[9]?.text).toContain('FROM research_sources')
+    expect(statements?.[15]?.text).toContain('FROM lifecycle_events')
     expect(
       statements
         ?.slice(1)
@@ -1872,7 +2167,7 @@ describe('durable HTTP service adapter', () => {
     })
   })
 
-  it('runs Portia, commits the deterministic Gate, and authorizes Charlotte', async () => {
+  it('runs Portia, commits the deterministic Gate, and authorizes board answer generation', async () => {
     dependencies = lifecycleDependencies()
     const services = createApiServicesWithDependencies(dependencies)
 
@@ -1883,19 +2178,34 @@ describe('durable HTTP service adapter', () => {
     })
 
     expect(lifecycle).toMatchObject({
-      state: 'charlotte_pending',
+      state: 'gate_passed',
       portia: { contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract },
-      gate: { passed: true, recommendedNextTransition: 'charlotte' },
+      gate: { passed: true, recommendedNextTransition: 'answer' },
+      answerPromptDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      answerUserPrompt: expect.stringContaining('"reviewed_prompt"'),
+      answerUserPromptSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      portiaProgress: {
+        currentCandidateId: null,
+        completedCandidateIds: LIFECYCLE_SURVIVORS.map(
+          (candidate) => candidate.candidateId,
+        ),
+      },
     })
     expect(dependencies.portiaGenerator).toHaveBeenCalledWith(
-      {
+      expect.objectContaining({
         problem: PROBLEM,
         survivors: LIFECYCLE_SURVIVORS,
-      },
+        answerPromptPackage: expect.objectContaining({
+          promptVersion: 'webchess-answer-v3',
+          evidence: expect.objectContaining({ problem: PROBLEM }),
+        }),
+        answerPromptDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      }),
       expect.objectContaining({
         userId: OWNER_ID,
         apiKey: 'server-test-key',
         idempotencyKey: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        onProgress: expect.any(Function),
       }),
     )
     expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
@@ -1907,17 +2217,598 @@ describe('durable HTTP service adapter', () => {
       }),
     )
     expect(dependencies.lifecycleRepository?.storePortia).toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.storeGate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        answerUserPrompt: lifecycle.answerUserPrompt,
+      }),
+    )
+    expect(lifecycle.answerUserPrompt).toContain(PROBLEM)
+    expect(lifecycle.answerUserPrompt).toContain('"portia_authorization"')
+    expect(lifecycle.answerUserPrompt).toContain('"gate"')
+    expect(lifecycle.answerUserPrompt).not.toContain('PORTIA AUTHORIZATION BOUNDARY')
+    expect(lifecycle.answerUserPrompt).not.toContain('OUTPUT CONTRACT')
+    expect(lifecycle.answerUserPrompt).not.toContain('server-test-key')
+  })
+
+  it('safely backfills the exact player-visible prompt for an unfinished historical Gate pass', async () => {
+    const primingDependencies = lifecycleDependencies()
+    const approved = await createApiServicesWithDependencies(
+      primingDependencies,
+    ).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+    if (!approved.portia || !approved.gate || !approved.answerPromptDigest) {
+      throw new Error('The primed lifecycle is missing its approval provenance.')
+    }
+    const historicalRevision = approved.revision
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      ...approved,
+      answerUserPrompt: null,
+      answerUserPromptSha256: null,
+    }))
+    vi.mocked(dependencies.repository.storeAnswer).mockImplementation(
+      async (input) => ({
+        ...terminalSnapshot('answered'),
+        revision: 4,
+        answer: input.answer,
+      }),
+    )
+
+    const result = await createApiServicesWithDependencies(dependencies).answer({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      expectedRevision: 2,
+      ipAddress: '203.0.113.17',
+      idempotencyKey: IDEMPOTENCY_KEY,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })
+
+    expect(result.answer).toEqual(STORED_ANSWER)
     expect(dependencies.lifecycleRepository?.storeGate).toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.storeGate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedRevision: historicalRevision,
+        result: approved.gate,
+        answerUserPrompt: expect.stringContaining(PROBLEM),
+      }),
+    )
+    const backfilled = await dependencies.lifecycleRepository?.getForGame(
+      OWNER_ID,
+      GAME_ID,
+    )
+    expect(backfilled).toMatchObject({
+      revision: historicalRevision,
+      state: 'gate_passed',
+      answerUserPrompt: expect.stringContaining('"reviewed_prompt"'),
+      answerUserPromptSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    })
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+  })
+
+  it('rejects an already-answered current run when its persisted player-visible prompt was changed', async () => {
+    const primingDependencies = lifecycleDependencies()
+    const approved = await createApiServicesWithDependencies(
+      primingDependencies,
+    ).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      ...approved,
+      answerUserPrompt: '{"tampered":true}',
+      answerUserPromptSha256: createHash('sha256')
+        .update('{"tampered":true}', 'utf8')
+        .digest('hex'),
+    }))
+    vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+      terminalSnapshot('answered'),
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies).answer({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      expectedRevision: 2,
+      ipAddress: '203.0.113.17',
+      idempotencyKey: IDEMPOTENCY_KEY,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+    expect(dependencies.lifecycleRepository?.storeGate).not.toHaveBeenCalled()
+    expect(dependencies.answerGenerator).not.toHaveBeenCalled()
+  })
+
+  it('binds visible Codex research into the exact prompt before Portia adjudicates it', async () => {
+    const researchRecord = {
+      id: '91919191-9191-4191-8191-919191919191',
+      lifecycleRunId: '55555555-5555-4555-8555-555555555555',
+      gameId: GAME_ID,
+      stage: 'portia' as const,
+      requestedBy: 'research-policy' as const,
+      policyVersion: 'webchess-visible-research-v1',
+      materiality: 'required' as const,
+      reason: 'Portia needs current external evidence before reviewing this exact board-derived prompt.',
+      query: `${PROBLEM} current authoritative evidence`,
+      status: 'completed' as const,
+      provider: 'codex' as const,
+      transport: 'local' as const,
+      model: 'gpt-5.6-sol',
+      bounds: {
+        invocationLimit: 1 as const,
+        resultLimit: 5,
+        sourceLimit: 5,
+        timeoutMs: 45_000,
+        synthesisCharacterLimit: 12_000,
+      },
+      attemptCount: 1,
+      executedQueries: [`${PROBLEM} current authoritative evidence`],
+      searchSynthesis:
+        'Codex Search found current source links. This remains model-generated synthesis for Portia to assess.',
+      directPageTextFetched: false as const,
+      retrievedFacts: [] as const,
+      sources: [{
+        id: '92929292-9292-4292-8292-929292929292',
+        citationId: 'R1',
+        ordinal: 1,
+        title: 'Current primary source',
+        url: 'https://example.gov/current-source',
+        hostname: 'example.gov',
+        trust: 'government_or_education' as const,
+        discoveredFrom: 'synthesis_link' as const,
+        createdAt: NOW.toISOString(),
+      }],
+      omittedSourceCount: 0,
+      injectionSignalsDetected: [],
+      contentDigest: '9'.repeat(64),
+      failureCode: null,
+      startedAt: NOW.toISOString(),
+      completedAt: NOW.toISOString(),
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+    }
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      research: [researchRecord],
+    }))
+    dependencies = {
+      ...dependencies,
+      researchBroker: {
+        ensureForStage: vi.fn(async () => researchRecord),
+        getForGame: vi.fn(async () => [researchRecord]),
+      },
+    }
+
+    const completed = await createApiServicesWithDependencies(
+      dependencies,
+    ).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(dependencies.researchBroker?.ensureForStage).toHaveBeenCalledWith({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      lifecycleRunId: researchRecord.lifecycleRunId,
+      lifecycleState: 'portia_pending',
+      stage: 'portia',
+      problem: PROBLEM,
+    })
+    expect(dependencies.portiaGenerator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        answerPromptPackage: expect.objectContaining({
+          researchEvidence: [expect.objectContaining({
+            recordId: researchRecord.id,
+            status: 'completed',
+            provider: 'codex',
+            contentKind: 'model_generated_search_synthesis',
+            directPageTextFetched: false,
+            searchSynthesis: researchRecord.searchSynthesis,
+            sourceLinks: [expect.objectContaining({
+              citationId: 'R1',
+              url: 'https://example.gov/current-source',
+            })],
+          })],
+        }),
+      }),
+      expect.any(Object),
+    )
+    expect(completed.survivors).toEqual(LIFECYCLE_SURVIVORS)
+    expect(completed.research).toEqual([researchRecord])
+    expect(completed.answerPromptDigest).toMatch(/^[0-9a-f]{64}$/u)
+  })
+
+  it('keeps a fenced Portia provider attempt alive after the originating request is aborted', async () => {
+    dependencies = lifecycleDependencies()
+    const requestController = new AbortController()
+    const defaultGenerator = vi.mocked(
+      dependencies.portiaGenerator!,
+    ).getMockImplementation()
+    if (!defaultGenerator) {
+      throw new Error('The Portia fixture generator is missing.')
+    }
+    let observedProviderSignal: AbortSignal | undefined
+    vi.mocked(dependencies.portiaGenerator!).mockImplementation(
+      async (input, context) => {
+        expect(dependencies.usage.beginProviderCall).toHaveBeenCalledOnce()
+        expect(dependencies.lifecycleRepository?.beginPortiaAttempt)
+          .toHaveBeenCalledOnce()
+        const providerSignal = context.signal
+        if (!providerSignal) {
+          throw new Error('The fenced Portia call requires a provider signal.')
+        }
+        observedProviderSignal = providerSignal
+        expect(providerSignal).not.toBe(requestController.signal)
+        expect(providerSignal.aborted).toBe(false)
+
+        requestController.abort()
+
+        expect(requestController.signal.aborted).toBe(true)
+        expect(providerSignal.aborted).toBe(false)
+        return defaultGenerator(input, context)
+      },
+    )
+
+    const lifecycle = await createApiServicesWithDependencies(
+      dependencies,
+    ).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+      signal: requestController.signal,
+    })
+
+    expect(requestController.signal.aborted).toBe(true)
+    expect(observedProviderSignal).toBeDefined()
+    expect(observedProviderSignal!.aborted).toBe(false)
+    expect(lifecycle).toMatchObject({
+      state: 'gate_passed',
+      portia: { promptDecision: 'permit' },
+      gate: { passed: true, recommendedNextTransition: 'answer' },
+    })
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'succeeded' }),
+    )
+    expect(dependencies.lifecycleRepository?.storePortia).toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.storeGate).toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.failPortiaAttempt)
+      .not.toHaveBeenCalled()
+  })
+
+  it('reconciles a migrated pre-v2 Portia run with a legacy terminal fingerprint before building the v3 prompt', async () => {
+    const currentFingerprint = terminalFingerprint(LIFECYCLE_SURVIVORS)
+    const legacyFingerprint = 'f'.repeat(64)
+    expect(legacyFingerprint).not.toBe(currentFingerprint)
+    const migratedLifecycle = lifecycleAggregate({
+      state: 'portia_running',
+      terminalFingerprint: legacyFingerprint,
+      answerPromptDigest: null,
+      portiaActiveModelRequestId: null,
+      portiaProgress: {
+        currentCandidateId: null,
+        completedCandidateIds: [],
+        completedAssessments: [],
+      },
+      portia: null,
+      gate: null,
+    })
+    dependencies = lifecycleDependencies(migratedLifecycle)
+    const services = createApiServicesWithDependencies(dependencies)
+
+    const reconciled = await services.getLifecycle({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })
+
+    expect(reconciled).toMatchObject({
+      state: 'portia_pending',
+      portiaActiveModelRequestId: null,
+      portia: null,
+    })
+    expect(dependencies.lifecycleRepository?.transition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'portia_pending',
+        activityType: 'legacy_review_recovered_for_retry',
+      }),
+    )
+    expect(dependencies.lifecycleRepository?.failPortiaAttempt)
+      .not.toHaveBeenCalled()
+    expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+
+    const completed = await services.runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(completed.state).toBe('gate_passed')
+    expect(dependencies.portiaGenerator).toHaveBeenCalledOnce()
+    const generatedInput = vi.mocked(dependencies.portiaGenerator!).mock
+      .calls[0]![0]
+    expect(generatedInput.answerPromptPackage).toMatchObject({
+      terminalFingerprint: currentFingerprint,
+      survivors: LIFECYCLE_SURVIVORS,
+    })
+    expect(generatedInput.answerPromptPackage.terminalFingerprint)
+      .not.toBe(legacyFingerprint)
+    const reservation = vi.mocked(
+      dependencies.usage.reserveModelRequest,
+    ).mock.calls[0]![0]
+    expect(reservation.requestSha256).toBe(hashCanonicalJson({
+      operation: 'portia/v3',
+      gameId: GAME_ID,
+      terminalFingerprint: currentFingerprint,
+      input: {
+        problem: generatedInput.problem,
+        survivors: generatedInput.survivors,
+        answerPromptPackage: generatedInput.answerPromptPackage,
+        answerPromptDigest: generatedInput.answerPromptDigest,
+      },
+      model: OPENAI_MODEL,
+      promptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+      contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    } as unknown as CanonicalJson))
+    expect(dependencies.usage.getLatestModelRequestForGame)
+      .toHaveBeenCalledWith(expect.objectContaining({
+        operation: 'portia',
+        requestSha256: reservation.requestSha256,
+        promptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+      }))
+  })
+
+  it('ends in portia_unavailable after three definitive provider failures without losing completed assessments or invoking Answer', async () => {
+    dependencies = lifecycleDependencies()
+    vi.mocked(dependencies.usage.reserveModelRequest).mockImplementation(
+      async (input) => ({
+        ok: true,
+        kind: 'reserved',
+        requestId: input.requestId,
+        gameId: input.gameId,
+        status: 'reserved',
+        leaseToken: LEASE_TOKEN,
+        leaseExpiresAt: '2026-07-26T20:03:00.000Z',
+      }),
+    )
+    const completedAssessment = lifecycleAssessment(
+      LIFECYCLE_SURVIVORS[0],
+      0,
+    )
+    let providerAttempt = 0
+    vi.mocked(dependencies.portiaGenerator!).mockImplementation(
+      async (input, context) => {
+        expect(input.completedAssessments).toEqual(
+          providerAttempt === 0 ? [] : [completedAssessment],
+        )
+        providerAttempt += 1
+        await context.onProgress?.({
+          currentCandidateId: LIFECYCLE_SURVIVORS[1].candidateId,
+          completedCandidateIds: [LIFECYCLE_SURVIVORS[0].candidateId],
+          completedAssessments: [completedAssessment],
+          totalCandidateCount: LIFECYCLE_SURVIVORS.length,
+        })
+        throw new ModelContractError(
+          'Portia provider returned an invalid candidate assessment.',
+        )
+      },
+    )
+    const services = createApiServicesWithDependencies(dependencies)
+    const attempts = [
+      {
+        requestId: '22222222-2222-4222-8222-222222222221',
+        idempotencyKey: '33333333-3333-4333-8333-333333333331',
+      },
+      {
+        requestId: '22222222-2222-4222-8222-222222222223',
+        idempotencyKey: '33333333-3333-4333-8333-333333333332',
+      },
+      {
+        requestId: '22222222-2222-4222-8222-222222222224',
+        idempotencyKey: '33333333-3333-4333-8333-333333333334',
+      },
+    ] as const
+
+    for (const [index, attempt] of attempts.entries()) {
+      const promise = services.runPortia({
+        ...operationInput(),
+        ...attempt,
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })
+      if (index < 2) {
+        await expect(promise).rejects.toMatchObject({
+          code: 'UPSTREAM_FAILURE',
+          status: 502,
+        })
+        const pending = await dependencies.lifecycleRepository!.getForGame(
+          OWNER_ID,
+          GAME_ID,
+        )
+        expect(pending).toMatchObject({
+          state: 'portia_pending',
+          portiaActiveModelRequestId: null,
+          portiaFailedAttemptCount: index + 1,
+          portiaFailureLimit: 3,
+          portiaProgress: {
+            currentCandidateId: null,
+            completedCandidateIds: [LIFECYCLE_SURVIVORS[0].candidateId],
+            completedAssessments: [completedAssessment],
+          },
+        })
+      } else {
+        await expect(promise).resolves.toMatchObject({
+          state: 'portia_unavailable',
+          portiaActiveModelRequestId: null,
+          portiaFailedAttemptCount: 3,
+          portiaFailureLimit: 3,
+          portiaProgress: {
+            currentCandidateId: LIFECYCLE_SURVIVORS[1].candidateId,
+            completedCandidateIds: [LIFECYCLE_SURVIVORS[0].candidateId],
+            completedAssessments: [completedAssessment],
+          },
+        })
+      }
+    }
+
+    expect(providerAttempt).toBe(3)
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledTimes(3)
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'failed',
+        failureCode: 'provider_contract_invalid',
+      }),
+    )
+    expect(dependencies.lifecycleRepository?.beginPortiaAttempt)
+      .toHaveBeenCalledTimes(3)
+    expect(dependencies.lifecycleRepository?.failPortiaAttempt)
+      .toHaveBeenCalledTimes(3)
+    expect(dependencies.lifecycleRepository?.failPortiaAttempt)
+      .toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          ownerId: OWNER_ID,
+          gameId: GAME_ID,
+          modelRequestId: attempts[2].requestId,
+          requestDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+          activityType: 'adversarial_review_failed',
+        }),
+      )
+    expect(dependencies.lifecycleRepository?.storePortia).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.storeGate).not.toHaveBeenCalled()
+    expect(dependencies.answerGenerator).not.toHaveBeenCalled()
+  })
+
+  it('ends immediately when the Gate commits an exhausted retry recommendation', async () => {
+    const exhaustedPortia = exhaustedLifecycleReview()
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'portia_complete',
+      portia: exhaustedPortia,
+      fieldRegenerationCount: 1,
+    }))
+
+    const lifecycle = await createApiServicesWithDependencies(
+      dependencies,
+    ).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(lifecycle).toMatchObject({
+      state: 'insufficient_basis',
+      gate: {
+        passed: false,
+        recommendedNextTransition: 'insufficient_basis',
+      },
+    })
+    expect(dependencies.lifecycleRepository?.transition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'insufficient_basis',
+        stage: 'retry',
+        activityType: 'retry_budget_exhausted',
+        status: 'refused',
+      }),
+    )
+  })
+
+  it('recovers a persisted terminal Gate decision after an interrupted transition', async () => {
+    const portia = exhaustedLifecycleReview()
+    const gate = evaluateGate(portia, {
+      sameFieldRetryCount: 1,
+      fieldRegenerationCount: 1,
+    })
+    expect(gate.recommendedNextTransition).toBe('insufficient_basis')
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'gate_failed',
+      portia,
+      gate,
+      sameFieldRetryCount: 1,
+      fieldRegenerationCount: 1,
+    }))
+
+    const lifecycle = await createApiServicesWithDependencies(
+      dependencies,
+    ).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(lifecycle.state).toBe('insufficient_basis')
+    expect(dependencies.lifecycleRepository?.transition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'insufficient_basis',
+        activityType: 'retry_budget_exhausted',
+        status: 'refused',
+      }),
+    )
+    expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.storePortia).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.storeGate).not.toHaveBeenCalled()
+  })
+
+  it('normalizes an interrupted terminal Gate decision during lifecycle restore', async () => {
+    const portia = exhaustedLifecycleReview()
+    const gate = evaluateGate(portia, {
+      sameFieldRetryCount: 1,
+      fieldRegenerationCount: 1,
+    })
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'gate_failed',
+      portia,
+      gate,
+      sameFieldRetryCount: 1,
+      fieldRegenerationCount: 1,
+    }))
+
+    const lifecycle = await createApiServicesWithDependencies(
+      dependencies,
+    ).getLifecycle({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })
+
+    expect(lifecycle.state).toBe('insufficient_basis')
+    expect(dependencies.lifecycleRepository?.transition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'insufficient_basis',
+        activityType: 'retry_budget_exhausted',
+        status: 'refused',
+      }),
+    )
+    expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
   })
 
   it('runs Charlotte only from a persisted passed Gate and stores its qualified answer', async () => {
     const portia = lifecycleReview()
     const gate = evaluateGate(portia)
-    dependencies = lifecycleDependencies(lifecycleAggregate({
-      state: 'charlotte_pending',
+    const initialLifecycle = lifecycleAggregate({
+      state: 'gate_passed',
+      answerPromptDigest: portia.reviewedAnswerPromptDigest,
       portia,
       gate,
-    }))
+    })
+    dependencies = lifecycleDependencies(initialLifecycle)
+    vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+      terminalSnapshot('answered'),
+    )
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: '77777777-7777-4777-8777-777777777777',
+      gameId: GAME_ID,
+      operation: 'answer',
+      status: 'succeeded',
+      resultPayload: approvedAnswerResultPayload(
+        initialLifecycle,
+      ) as unknown as ModelResultPayload,
+    })
 
     const lifecycle = await createApiServicesWithDependencies(
       dependencies,
@@ -1935,8 +2826,23 @@ describe('durable HTTP service adapter', () => {
       },
     })
     expect(lifecycle.charlotte?.exactlyThreeNextActions).toHaveLength(3)
+    expect(dependencies.lifecycleRepository?.storeGate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: gate,
+        answerUserPrompt: expect.stringContaining(PROBLEM),
+      }),
+    )
     expect(dependencies.charlotteGenerator).toHaveBeenCalledWith(
-      { problem: PROBLEM, portia, gate },
+      {
+        problem: PROBLEM,
+        boardAnswer: STORED_ANSWER,
+        boardAnswerDigest: hashCanonicalJson(
+          STORED_ANSWER as unknown as CanonicalJson,
+        ),
+        reviewedPromptDigest: portia.reviewedAnswerPromptDigest,
+        portia,
+        gate,
+      },
       expect.objectContaining({
         userId: OWNER_ID,
         apiKey: 'server-test-key',
@@ -1947,12 +2853,240 @@ describe('durable HTTP service adapter', () => {
         modelRequestId: REQUEST_ID,
         renderedAnswer: expect.stringContaining('qualified evidence boundary'),
       }))
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'succeeded',
+        resultPayload: expect.objectContaining({
+          format: 'webchess-charlotte-result/3',
+          source: {
+            lifecycleRunId: initialLifecycle.id,
+            boardAnswerDigest: hashCanonicalJson(
+              STORED_ANSWER as unknown as CanonicalJson,
+            ),
+            reviewedPromptDigest: portia.reviewedAnswerPromptDigest,
+            gateInputDigest: gate.inputDigest,
+          },
+        }),
+      }),
+    )
   })
 
-  it('recovers persisted Portia output and returns completed Charlotte idempotently', async () => {
+  it('ends in charlotte_unavailable after three definitive provider failures and never starts a fourth', async () => {
     const portia = lifecycleReview()
+    const gate = evaluateGate(portia)
+    const initialLifecycle = lifecycleAggregate({
+      state: 'gate_passed',
+      answerPromptDigest: portia.reviewedAnswerPromptDigest,
+      portia,
+      gate,
+    })
+    dependencies = lifecycleDependencies(initialLifecycle)
+    vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+      terminalSnapshot('answered'),
+    )
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: '77777777-7777-4777-8777-777777777777',
+      gameId: GAME_ID,
+      operation: 'answer',
+      status: 'succeeded',
+      resultPayload: approvedAnswerResultPayload(
+        initialLifecycle,
+      ) as unknown as ModelResultPayload,
+    })
+    vi.mocked(dependencies.usage.reserveModelRequest).mockImplementation(
+      async (input) => ({
+        ok: true,
+        kind: 'reserved',
+        requestId: input.requestId,
+        gameId: input.gameId,
+        status: 'reserved',
+        leaseToken: LEASE_TOKEN,
+        leaseExpiresAt: '2026-07-26T20:03:00.000Z',
+      }),
+    )
+    vi.mocked(dependencies.charlotteGenerator!).mockRejectedValue(
+      new ModelContractError(
+        'Charlotte provider returned an invalid qualification result.',
+      ),
+    )
+    const services = createApiServicesWithDependencies(dependencies)
+    const attempts = [
+      {
+        requestId: '22222222-2222-4222-8222-222222222225',
+        idempotencyKey: '33333333-3333-4333-8333-333333333335',
+      },
+      {
+        requestId: '22222222-2222-4222-8222-222222222226',
+        idempotencyKey: '33333333-3333-4333-8333-333333333336',
+      },
+      {
+        requestId: '22222222-2222-4222-8222-222222222227',
+        idempotencyKey: '33333333-3333-4333-8333-333333333337',
+      },
+    ] as const
+
+    for (const [index, attempt] of attempts.entries()) {
+      const promise = services.runCharlotte({
+        ...operationInput(),
+        ...attempt,
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })
+      if (index < 2) {
+        await expect(promise).rejects.toMatchObject({
+          code: 'UPSTREAM_FAILURE',
+          status: 502,
+        })
+      } else {
+        await expect(promise).resolves.toMatchObject({
+          state: 'charlotte_unavailable',
+          charlotteActiveModelRequestId: null,
+          charlotteFailedAttemptCount: 3,
+          charlotteFailureLimit: 3,
+          charlotte: null,
+        })
+      }
+    }
+
+    await expect(services.runCharlotte({
+      ...operationInput(),
+      requestId: '22222222-2222-4222-8222-222222222228',
+      idempotencyKey: '33333333-3333-4333-8333-333333333338',
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })).resolves.toMatchObject({
+      state: 'charlotte_unavailable',
+      charlotteFailedAttemptCount: 3,
+    })
+
+    expect(dependencies.charlotteGenerator).toHaveBeenCalledTimes(3)
+    expect(dependencies.lifecycleRepository?.beginCharlotteAttempt)
+      .toHaveBeenCalledTimes(3)
+    expect(dependencies.lifecycleRepository?.failCharlotteAttempt)
+      .toHaveBeenCalledTimes(3)
+    expect(dependencies.lifecycleRepository?.storeCharlotte)
+      .not.toHaveBeenCalled()
+    expect(dependencies.usage.reserveModelRequest).toHaveBeenCalledTimes(3)
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledTimes(3)
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'failed',
+        failureCode: 'provider_contract_invalid',
+      }),
+    )
+  })
+
+  it('recovers a current Charlotte winner only when its /3 source matches the exact answer lifecycle and Gate', async () => {
+    const portia = lifecycleReview()
+    const initialLifecycle = lifecycleAggregate({
+      state: 'charlotte_pending',
+      answerPromptDigest: portia.reviewedAnswerPromptDigest,
+      portia,
+      gate: evaluateGate(portia),
+    })
+    dependencies = lifecycleDependencies(initialLifecycle)
+    arrangeRecoveredCharlotteWinner(
+      dependencies,
+      initialLifecycle,
+      approvedCharlotteResultPayload(initialLifecycle),
+    )
+
+    const recovered = await createApiServicesWithDependencies(
+      dependencies,
+    ).runCharlotte({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(recovered.state).toBe('charlotte_complete')
+    expect(dependencies.charlotteGenerator).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.storeCharlotte).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a recovered current Charlotte /3 result when any source identity is wrong', async () => {
+    const cases: readonly [string, CharlotteSourceOverrides][] = [
+      ['answer', { boardAnswerDigest: 'e'.repeat(64) }],
+      ['lifecycle', {
+        lifecycleRunId: '99999999-9999-4999-8999-999999999999',
+      }],
+      ['reviewed prompt', { reviewedPromptDigest: 'e'.repeat(64) }],
+      ['Gate', { gateInputDigest: 'e'.repeat(64) }],
+    ]
+
+    for (const [sourceName, sourceOverrides] of cases) {
+      const portia = lifecycleReview()
+      const initialLifecycle = lifecycleAggregate({
+        state: 'charlotte_pending',
+        answerPromptDigest: portia.reviewedAnswerPromptDigest,
+        portia,
+        gate: evaluateGate(portia),
+      })
+      dependencies = lifecycleDependencies(initialLifecycle)
+      arrangeRecoveredCharlotteWinner(
+        dependencies,
+        initialLifecycle,
+        approvedCharlotteResultPayload(initialLifecycle, sourceOverrides),
+      )
+
+      await expect(
+        createApiServicesWithDependencies(dependencies).runCharlotte({
+          ...operationInput(),
+          gameId: GAME_ID,
+          expectedRevision: 2,
+        }),
+        `source mismatch: ${sourceName}`,
+      ).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+      expect(dependencies.lifecycleRepository?.storeCharlotte)
+        .not.toHaveBeenCalled()
+    }
+  })
+
+  it('does not accept a legacy /1 payload as the winner for a current Charlotte run', async () => {
+    const portia = lifecycleReview()
+    const initialLifecycle = lifecycleAggregate({
+      state: 'charlotte_pending',
+      answerPromptDigest: portia.reviewedAnswerPromptDigest,
+      portia,
+      gate: evaluateGate(portia),
+    })
+    dependencies = lifecycleDependencies(initialLifecycle)
+    arrangeRecoveredCharlotteWinner(
+      dependencies,
+      initialLifecycle,
+      legacyCharlotteResultPayload(portia),
+    )
+
+    await expect(
+      createApiServicesWithDependencies(dependencies).runCharlotte({
+        ...operationInput(),
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+    expect(dependencies.lifecycleRepository?.storeCharlotte)
+      .not.toHaveBeenCalled()
+  })
+
+  it('recovers persisted Portia output and verifies completed current Charlotte provenance idempotently', async () => {
+    const primingDependencies = lifecycleDependencies()
+    const primed = await createApiServicesWithDependencies(
+      primingDependencies,
+    ).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+    if (!primed.portia) throw new Error('The primed Portia review is missing.')
+    const portia = primed.portia as PortiaReview
     dependencies = lifecycleDependencies(lifecycleAggregate({
       state: 'portia_complete',
+      answerPromptDigest: portia.reviewedAnswerPromptDigest,
+      answerUserPrompt: null,
+      answerUserPromptSha256: null,
       portia,
     }))
     const recovered = await createApiServicesWithDependencies(
@@ -1963,18 +3097,38 @@ describe('durable HTTP service adapter', () => {
       expectedRevision: 2,
     })
 
-    expect(recovered.state).toBe('charlotte_pending')
+    expect(recovered.state).toBe('gate_passed')
     expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
     expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
 
     const gate = evaluateGate(portia)
     const charlotte = lifecycleCharlotte(portia)
-    dependencies = lifecycleDependencies(lifecycleAggregate({
+    const completedLifecycle = lifecycleAggregate({
       state: 'charlotte_complete',
+      answerPromptDigest: portia.reviewedAnswerPromptDigest,
       portia,
       gate,
       charlotte,
       charlotteRenderedAnswer: 'The persisted Charlotte answer is already complete.',
+    })
+    dependencies = lifecycleDependencies(completedLifecycle)
+    vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+      terminalSnapshot('answered'),
+    )
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockImplementation(async (input) => ({
+      found: true,
+      requestId: input.operation === 'answer'
+        ? '77777777-7777-4777-8777-777777777777'
+        : '88888888-8888-4888-8888-888888888888',
+      gameId: GAME_ID,
+      operation: input.operation,
+      status: 'succeeded',
+      resultPayload: (input.operation === 'answer'
+        ? approvedAnswerResultPayload(completedLifecycle)
+        : approvedCharlotteResultPayload(completedLifecycle)
+      ) as unknown as ModelResultPayload,
     }))
     const completed = await createApiServicesWithDependencies(
       dependencies,
@@ -1985,6 +3139,38 @@ describe('durable HTTP service adapter', () => {
     })
 
     expect(completed.charlotte).toEqual(charlotte)
+    expect(dependencies.charlotteGenerator).not.toHaveBeenCalled()
+  })
+
+  it('keeps completed Charlotte histories from the prior prompt contract readable', async () => {
+    const portia = lifecycleReview()
+    const gate = evaluateGate(portia)
+    const charlotte = lifecycleCharlotte(portia)
+    const legacyLifecycle = lifecycleAggregate({
+      state: 'charlotte_complete',
+      answerPromptDigest: portia.reviewedAnswerPromptDigest,
+      portia,
+      gate,
+      charlotte,
+      charlotteRenderedAnswer: 'The persisted legacy Charlotte answer remains readable.',
+      versions: {
+        ...lifecycleAggregate().versions,
+        charlottePrompt: 'webchess-charlotte-v2',
+      },
+    })
+    dependencies = lifecycleDependencies(legacyLifecycle)
+
+    const completed = await createApiServicesWithDependencies(
+      dependencies,
+    ).runCharlotte({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(completed).toEqual(legacyLifecycle)
+    expect(dependencies.usage.getSucceededModelResultForGame)
+      .not.toHaveBeenCalled()
     expect(dependencies.charlotteGenerator).not.toHaveBeenCalled()
   })
 
@@ -2045,6 +3231,89 @@ describe('durable HTTP service adapter', () => {
     expect(exhausted.game).toBeNull()
     expect(exhausted.lifecycle.state).toBe('insufficient_basis')
     expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+  })
+
+  it('regenerates a deficient field with bounded Gate feedback and durable provenance', async () => {
+    const portia = lifecycleReview()
+    const failedPortia: PortiaReview = {
+      ...portia,
+      assessments: portia.assessments.slice(0, 3),
+      missingCoverage: ['agency_or_action'],
+      recommendedGateInputs: {
+        ...portia.recommendedGateInputs,
+        fieldRepairReasons: [
+          'Add a distinct agency path grounded in an observable action.',
+        ],
+      },
+    }
+    const failedGate = evaluateGate(failedPortia)
+    expect(failedGate.recommendedNextTransition).toBe('retry_field')
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'gate_failed',
+      portia: failedPortia,
+      gate: failedGate,
+    }))
+    const repairContext = normalizeDivisionRepairContext({
+      priorFieldGeneration: 1,
+      gateMissingRequirements: failedGate.missingRequirements,
+      missingCoverage: [
+        ...failedPortia.missingCoverage,
+        ...failedGate.coverageResults
+          .filter((coverage) => !coverage.satisfied)
+          .map((coverage) => coverage.tag),
+      ],
+      fieldRepairReasons:
+        failedPortia.recommendedGateInputs.fieldRepairReasons,
+    })
+
+    const retried = await createApiServicesWithDependencies(
+      dependencies,
+    ).retryLifecycle({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(retried.game).toMatchObject({
+      id: REQUEST_ID,
+      problem: PROBLEM,
+      sourceGameId: null,
+    })
+    expect(retried.lifecycle).toMatchObject({
+      state: 'field_ready',
+      fieldRegenerationCount: 1,
+    })
+    expect(dependencies.divisionGenerator).toHaveBeenCalledWith(
+      { problem: PROBLEM, repairContext },
+      expect.objectContaining({ userId: OWNER_ID }),
+    )
+    expect(dependencies.repository.getOrCreateDivision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        problem: PROBLEM,
+        sourceGameId: GAME_ID,
+      }),
+    )
+    expect(dependencies.usage.reserveModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestSha256: hashCanonicalJson({
+          operation: 'division/v2-field-retry',
+          problem: PROBLEM,
+          repairContext,
+          sourceGameId: GAME_ID,
+          fieldGeneration: 2,
+          model: OPENAI_MODEL,
+          promptVersion: DIVISION_PROMPT_VERSION,
+          softwareVersion: 'webchess-test',
+        } as unknown as CanonicalJson),
+      }),
+    )
+    expect(dependencies.lifecycleRepository?.createRetryRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        childGame: expect.objectContaining({ id: REQUEST_ID }),
+        trajectorySeed: REQUEST_ID,
+        mode: 'regenerate_field',
+      }),
+    )
   })
 
   it('delegates owner-scoped Wilbur actions, statuses, observations, and provenance', async () => {

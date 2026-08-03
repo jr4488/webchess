@@ -4,7 +4,10 @@ import {
   CURRENT_LIFECYCLE_VERSIONS,
   assertLifecycleTransition,
   charlotteResultSchema,
+  legacyPortiaReviewSchema,
+  portiaCandidateAssessmentSchema,
   portiaReviewSchema,
+  terminalFingerprint,
 } from '../../lib/lifecycle'
 import type {
   CharlotteResult,
@@ -13,7 +16,7 @@ import type {
   LifecycleAggregate,
   LifecycleRun,
   LifecycleState,
-  PortiaReview,
+  PersistedPortiaReview,
   SurvivorCandidate,
   WilburAction,
   WilburObservation,
@@ -27,6 +30,7 @@ import {
   parseOptionalResultRow,
   parseResultRows,
   portiaReviewRowSchema,
+  sha256Hex,
   wilburActionRowSchema,
   wilburObservationRowSchema,
 } from '../db'
@@ -41,17 +45,33 @@ import type {
   WilburActionRow,
   WilburObservationRow,
 } from '../db'
+import {
+  researchRecordsFromRows,
+  researchRequestRowSchema,
+  researchSourceRowSchema,
+  SELECT_RESEARCH_REQUEST_COLUMNS,
+  SELECT_RESEARCH_SOURCE_COLUMNS,
+} from '../research/repository'
+import type {
+  ResearchRequestRow,
+  ResearchSourceRow,
+} from '../research/repository'
 import { LifecycleRepositoryError } from './errors'
 import type {
   AppendWilburObservationInput,
+  BeginCharlotteAttemptInput,
+  BeginPortiaAttemptInput,
   CreateRetryRunInput,
   CreateWilburActionInput,
   EnsureLifecycleInput,
+  FailPortiaAttemptInput,
+  FailCharlotteAttemptInput,
   LifecycleRepositoryPort,
   StoreCharlotteInput,
   StoreGateInput,
   StorePortiaInput,
   TransitionLifecycleInput,
+  UpdatePortiaProgressInput,
   UpdateWilburActionInput,
 } from './types'
 
@@ -76,7 +96,17 @@ const SELECT_RUN_COLUMNS = `
   trajectory_seed,
   retry_reason,
   terminal_fingerprint,
+  answer_prompt_digest,
   survivor_set,
+  portia_current_candidate_id,
+  portia_active_model_request_id,
+  portia_failed_attempt_count,
+  portia_failure_limit,
+  portia_completed_candidate_ids,
+  portia_assessment_drafts,
+  charlotte_active_model_request_id,
+  charlotte_failed_attempt_count,
+  charlotte_failure_limit,
   software_version,
   lifecycle_version,
   rules_version,
@@ -115,6 +145,8 @@ const SELECT_GATE_COLUMNS = `
   input_digest,
   passed,
   result,
+  answer_user_prompt,
+  answer_user_prompt_sha256,
   created_at
 `
 
@@ -294,9 +326,13 @@ function survivorArray(value: readonly unknown[] | null): readonly SurvivorCandi
   return value as readonly SurvivorCandidate[]
 }
 
-function portiaFromRow(row: PortiaReviewRow | undefined): PortiaReview | null {
+function portiaFromRow(
+  row: PortiaReviewRow | undefined,
+): PersistedPortiaReview | null {
   if (!row) return null
-  const parsed = portiaReviewSchema.safeParse(row.review)
+  const parsed = row.contract_version === 'webchess-portia-review-v1'
+    ? legacyPortiaReviewSchema.safeParse(row.review)
+    : portiaReviewSchema.safeParse(row.review)
   if (!parsed.success) {
     throw new LifecycleRepositoryError(
       'integrity-error',
@@ -309,6 +345,20 @@ function portiaFromRow(row: PortiaReviewRow | undefined): PortiaReview | null {
 
 function gateFromRow(row: GateDecisionRow | undefined): GateResult | null {
   if (!row) return null
+  if (
+    (row.answer_user_prompt === null) !==
+      (row.answer_user_prompt_sha256 === null) ||
+    (row.answer_user_prompt !== null && !row.passed) ||
+    (
+      row.answer_user_prompt !== null &&
+      sha256Hex(row.answer_user_prompt) !== row.answer_user_prompt_sha256
+    )
+  ) {
+    throw new LifecycleRepositoryError(
+      'integrity-error',
+      'The stored player-visible Answer prompt failed its immutable provenance check.',
+    )
+  }
   const result = row.result as Partial<GateResult>
   if (
     result.algorithmVersion !== row.algorithm_version ||
@@ -403,6 +453,8 @@ function runFromRows(
   charlotte: CharlotteResultRow | undefined,
   actions: readonly WilburActionRow[],
   observations: readonly WilburObservationRow[],
+  researchRequests: readonly ResearchRequestRow[],
+  researchSources: readonly ResearchSourceRow[],
   activities: readonly LifecycleEventRow[],
 ): LifecycleAggregate {
   const run: LifecycleRun = {
@@ -421,9 +473,27 @@ function runFromRows(
     trajectorySeed: row.trajectory_seed,
     retryReason: row.retry_reason,
     terminalFingerprint: row.terminal_fingerprint,
+    answerPromptDigest: row.answer_prompt_digest,
+    answerUserPrompt: gate?.answer_user_prompt ?? null,
+    answerUserPromptSha256: gate?.answer_user_prompt_sha256 ?? null,
     survivors: survivorArray(row.survivor_set),
+    portiaActiveModelRequestId: row.portia_active_model_request_id,
+    portiaFailedAttemptCount: row.portia_failed_attempt_count,
+    portiaFailureLimit: row.portia_failure_limit,
+    portiaProgress: {
+      currentCandidateId: row.portia_current_candidate_id,
+      completedCandidateIds: stringArray(
+        row.portia_completed_candidate_ids,
+        'completed Portia candidates',
+      ),
+      completedAssessments: row.portia_assessment_drafts.map((assessment) =>
+        portiaCandidateAssessmentSchema.parse(assessment)),
+    },
     portia: portiaFromRow(portia),
     gate: gateFromRow(gate),
+    charlotteActiveModelRequestId: row.charlotte_active_model_request_id,
+    charlotteFailedAttemptCount: row.charlotte_failed_attempt_count,
+    charlotteFailureLimit: row.charlotte_failure_limit,
     charlotte: charlotteFromRow(charlotte),
     charlotteRenderedAnswer: charlotte?.rendered_answer ?? null,
     wilburActions: actions.map(actionFromRow),
@@ -446,7 +516,11 @@ function runFromRows(
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   }
-  return { ...run, activities: activities.map(activityFromRow) }
+  return {
+    ...run,
+    activities: activities.map(activityFromRow),
+    research: researchRecordsFromRows(researchRequests, researchSources),
+  }
 }
 
 function stateForGame(input: EnsureLifecycleInput): LifecycleState {
@@ -573,6 +647,14 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
           values: [owner, id],
         },
         {
+          text: `SELECT ${SELECT_RESEARCH_REQUEST_COLUMNS} FROM research_requests WHERE clerk_user_id = $1::text AND game_id = $2::uuid AND lifecycle_run_id = (SELECT id FROM lifecycle_runs WHERE clerk_user_id = $1::text AND game_id = $2::uuid) ORDER BY created_at, id`,
+          values: [owner, id],
+        },
+        {
+          text: `SELECT ${SELECT_RESEARCH_SOURCE_COLUMNS} FROM research_sources WHERE clerk_user_id = $1::text AND research_request_id IN (SELECT id FROM research_requests WHERE clerk_user_id = $1::text AND game_id = $2::uuid AND lifecycle_run_id = (SELECT id FROM lifecycle_runs WHERE clerk_user_id = $1::text AND game_id = $2::uuid)) ORDER BY research_request_id, ordinal`,
+          values: [owner, id],
+        },
+        {
           text: `SELECT ${SELECT_EVENT_COLUMNS} FROM lifecycle_events WHERE clerk_user_id = $1::text AND lifecycle_run_id = (SELECT id FROM lifecycle_runs WHERE clerk_user_id = $1::text AND game_id = $2::uuid) ORDER BY sequence`,
           values: [owner, id],
         },
@@ -589,7 +671,9 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         parseOptionalResultRow(results[3]!, charlotteResultRowSchema),
         parseResultRows(results[4]!, wilburActionRowSchema),
         parseResultRows(results[5]!, wilburObservationRowSchema),
-        parseResultRows(results[6]!, lifecycleEventRowSchema),
+        parseResultRows(results[6]!, researchRequestRowSchema),
+        parseResultRows(results[7]!, researchSourceRowSchema),
+        parseResultRows(results[8]!, lifecycleEventRowSchema),
       )
     } catch (error) {
       if (error instanceof LifecycleRepositoryError) throw error
@@ -726,6 +810,22 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         `Lifecycle revision changed from ${expectedRevision} to ${before.revision.toString()}.`,
       )
     }
+    if (
+      input.to === 'charlotte_running' ||
+      (
+        before.state === 'charlotte_running' &&
+        (
+          input.to === 'charlotte_pending' ||
+          input.to === 'charlotte_unavailable' ||
+          input.to === 'charlotte_complete'
+        )
+      )
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-state',
+        'Charlotte provider transitions require the bounded attempt fence.',
+      )
+    }
     try {
       assertLifecycleTransition(before.state, input.to)
     } catch (error) {
@@ -745,6 +845,30 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
           UPDATE lifecycle_runs
           SET state = $5::text,
               revision = revision + 1,
+              portia_current_candidate_id = CASE
+                WHEN $5::text = 'portia_pending' THEN NULL
+                ELSE portia_current_candidate_id
+              END,
+              portia_active_model_request_id = CASE
+                WHEN $4::text = 'portia_running' AND $5::text <> 'portia_running'
+                  THEN NULL
+                ELSE portia_active_model_request_id
+              END,
+              charlotte_active_model_request_id = CASE
+                WHEN $4::text = 'charlotte_running' AND $5::text <> 'charlotte_running'
+                  THEN NULL
+                ELSE charlotte_active_model_request_id
+              END,
+              portia_completed_candidate_ids = CASE
+                WHEN $5::text = 'portia_pending' AND $4::text <> 'portia_running'
+                  THEN '[]'::jsonb
+                ELSE portia_completed_candidate_ids
+              END,
+              portia_assessment_drafts = CASE
+                WHEN $5::text = 'portia_pending' AND $4::text <> 'portia_running'
+                  THEN '[]'::jsonb
+                ELSE portia_assessment_drafts
+              END,
               terminal_fingerprint = CASE WHEN $14::boolean THEN $12::char(64) ELSE terminal_fingerprint END,
               survivor_set = CASE WHEN $14::boolean THEN $13::jsonb ELSE survivor_set END,
               updated_at = now()
@@ -800,6 +924,275 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     return (await this.getForGame(owner, gameId))!
   }
 
+  async beginPortiaAttempt(
+    input: BeginPortiaAttemptInput,
+  ): Promise<LifecycleAggregate> {
+    const owner = assertOwner(input.ownerId)
+    const gameId = assertUuid(input.gameId, 'Game id')
+    const expectedRevision = assertRevision(input.expectedRevision)
+    const modelRequestId = assertUuid(input.modelRequestId, 'Model request id')
+    assertDigest(input.requestDigest, 'Portia request digest')
+    assertDigest(input.answerPromptDigest, 'Answer prompt digest')
+    assertDigest(input.configurationDigest, 'Configuration digest')
+
+    const result = await this.database.query({
+      text: `
+        WITH eligible_model AS (
+          SELECT id
+          FROM model_requests
+          WHERE id = $4::uuid
+            AND clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND operation = 'portia'
+            AND status IN ('in_progress', 'succeeded')
+            AND request_sha256 = $5::char(64)
+            AND prompt_version = $10::text
+        ),
+        advanced AS (
+          UPDATE lifecycle_runs
+          SET state = 'portia_running',
+              revision = revision + 1,
+              portia_active_model_request_id = $4::uuid,
+              answer_prompt_digest = coalesce(answer_prompt_digest, $6::char(64)),
+              portia_current_candidate_id = NULL,
+              updated_at = now()
+          WHERE clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND revision = $3::bigint
+            AND state = 'portia_pending'
+            AND portia_failed_attempt_count < portia_failure_limit
+            AND (
+              answer_prompt_digest IS NULL
+              OR answer_prompt_digest = $6::char(64)
+            )
+            AND EXISTS (SELECT 1 FROM eligible_model)
+          RETURNING ${SELECT_RUN_COLUMNS}
+        ),
+        activity AS (
+          INSERT INTO lifecycle_events (
+            id, clerk_user_id, lifecycle_run_id, sequence, stage,
+            activity_type, state_from, state_to, input_entity_ids,
+            output_entity_ids, responsible_agent_ids,
+            configuration_digest, status, event_version
+          )
+          SELECT gen_random_uuid(), advanced.clerk_user_id, advanced.id,
+            coalesce((SELECT max(sequence) + 1 FROM lifecycle_events WHERE lifecycle_run_id = advanced.id), 1),
+            'portia', $8::text, 'portia_pending', 'portia_running',
+            jsonb_build_array($2::text), '[]'::jsonb,
+            jsonb_build_array('portia'), $7::char(64), 'started', $9::smallint
+          FROM advanced
+          RETURNING lifecycle_run_id
+        )
+        SELECT ${SELECT_RUN_COLUMNS} FROM advanced
+      `,
+      values: [
+        owner,
+        gameId,
+        expectedRevision,
+        modelRequestId,
+        input.requestDigest,
+        input.answerPromptDigest,
+        input.configurationDigest,
+        input.activityType,
+        CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
+        CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+      ],
+    })
+    if (!parsedOptionalRun(result)) {
+      throw new LifecycleRepositoryError(
+        'conflict',
+        'Portia could not bind the matching active provider request.',
+      )
+    }
+    return (await this.getForGame(owner, gameId))!
+  }
+
+  async updatePortiaProgress(
+    input: UpdatePortiaProgressInput,
+  ): Promise<LifecycleAggregate> {
+    const owner = assertOwner(input.ownerId)
+    const gameId = assertUuid(input.gameId, 'Game id')
+    const expectedRevision = assertRevision(input.expectedRevision)
+    const modelRequestId = assertUuid(input.modelRequestId, 'Model request id')
+    assertDigest(input.answerPromptDigest, 'Answer prompt digest')
+    if (
+      input.currentCandidateId !== null &&
+      (input.currentCandidateId.length < 3 || input.currentCandidateId.length > 220)
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-state',
+        'The current Portia candidate id is invalid.',
+      )
+    }
+    const completed = [...new Set(input.completedCandidateIds)]
+    const assessments = input.completedAssessments.map((assessment) =>
+      portiaCandidateAssessmentSchema.parse(assessment),
+    )
+    if (
+      completed.length !== input.completedCandidateIds.length ||
+      completed.some(
+        (candidateId) => candidateId.length < 3 || candidateId.length > 220,
+      )
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-state',
+        'The completed Portia candidate ids are invalid.',
+      )
+    }
+    if (
+      assessments.length !== completed.length ||
+      assessments.some(
+        (assessment, index) => assessment.candidateId !== completed[index],
+      )
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-state',
+        'Completed Portia assessments must match the persisted traversal order.',
+      )
+    }
+
+    const result = await this.database.query({
+      text: `
+        UPDATE lifecycle_runs
+        SET answer_prompt_digest = coalesce(answer_prompt_digest, $3::char(64)),
+            portia_current_candidate_id = $4::text,
+            portia_completed_candidate_ids = $5::jsonb,
+            portia_assessment_drafts = $6::jsonb,
+            updated_at = now()
+        WHERE clerk_user_id = $1::text
+          AND game_id = $2::uuid
+          AND revision = $7::bigint
+          AND state = 'portia_running'
+          AND portia_active_model_request_id = $8::uuid
+          AND (
+            answer_prompt_digest IS NULL
+            OR answer_prompt_digest = $3::char(64)
+          )
+          AND jsonb_array_length(portia_completed_candidate_ids)
+            <= jsonb_array_length($5::jsonb)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(portia_completed_candidate_ids)
+              WITH ORDINALITY AS prior(candidate_id, position)
+            WHERE ($5::jsonb ->> (prior.position::integer - 1))
+              IS DISTINCT FROM prior.candidate_id
+          )
+        RETURNING ${SELECT_RUN_COLUMNS}
+      `,
+      values: [
+        owner,
+        gameId,
+        input.answerPromptDigest,
+        input.currentCandidateId,
+        json(completed),
+        json(assessments),
+        expectedRevision,
+        modelRequestId,
+      ],
+    })
+    if (!parsedOptionalRun(result)) {
+      throw new LifecycleRepositoryError(
+        'conflict',
+        'Portia progress no longer matches the active reviewed prompt.',
+      )
+    }
+    return (await this.getForGame(owner, gameId))!
+  }
+
+  async failPortiaAttempt(
+    input: FailPortiaAttemptInput,
+  ): Promise<LifecycleAggregate> {
+    const owner = assertOwner(input.ownerId)
+    const gameId = assertUuid(input.gameId, 'Game id')
+    const expectedRevision = assertRevision(input.expectedRevision)
+    const modelRequestId = assertUuid(input.modelRequestId, 'Model request id')
+    assertDigest(input.requestDigest, 'Portia request digest')
+    assertDigest(input.configurationDigest, 'Configuration digest')
+
+    const result = await this.database.query({
+      text: `
+        WITH failed_model AS (
+          SELECT id
+          FROM model_requests
+          WHERE id = $4::uuid
+            AND clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND operation = 'portia'
+            AND status IN ('failed', 'indeterminate')
+            AND request_sha256 = $5::char(64)
+            AND prompt_version = $9::text
+        ),
+        advanced AS (
+          UPDATE lifecycle_runs
+          SET state = CASE
+                WHEN portia_failed_attempt_count + 1 >= portia_failure_limit
+                  THEN 'portia_unavailable'
+                ELSE 'portia_pending'
+              END,
+              revision = revision + 1,
+              portia_active_model_request_id = NULL,
+              portia_failed_attempt_count = portia_failed_attempt_count + 1,
+              portia_current_candidate_id = CASE
+                WHEN portia_failed_attempt_count + 1 >= portia_failure_limit
+                  THEN portia_current_candidate_id
+                ELSE NULL
+              END,
+              updated_at = now()
+          WHERE clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND revision = $3::bigint
+            AND state = 'portia_running'
+            AND portia_active_model_request_id = $4::uuid
+            AND portia_failed_attempt_count < portia_failure_limit
+            AND EXISTS (SELECT 1 FROM failed_model)
+          RETURNING ${SELECT_RUN_COLUMNS}
+        ),
+        activity AS (
+          INSERT INTO lifecycle_events (
+            id, clerk_user_id, lifecycle_run_id, sequence, stage,
+            activity_type, state_from, state_to, input_entity_ids,
+            output_entity_ids, responsible_agent_ids,
+            configuration_digest, status, event_version
+          )
+          SELECT gen_random_uuid(), advanced.clerk_user_id, advanced.id,
+            coalesce((SELECT max(sequence) + 1 FROM lifecycle_events WHERE lifecycle_run_id = advanced.id), 1),
+            'portia',
+            CASE WHEN advanced.state = 'portia_unavailable'
+              THEN 'validation_attempt_budget_exhausted'
+              ELSE $7::text
+            END,
+            'portia_running', advanced.state,
+            jsonb_build_array($2::text), '[]'::jsonb,
+            jsonb_build_array('portia'), $6::char(64),
+            CASE WHEN advanced.state = 'portia_unavailable'
+              THEN 'refused' ELSE 'failed' END,
+            $8::smallint
+          FROM advanced
+          RETURNING lifecycle_run_id
+        )
+        SELECT ${SELECT_RUN_COLUMNS} FROM advanced
+      `,
+      values: [
+        owner,
+        gameId,
+        expectedRevision,
+        modelRequestId,
+        input.requestDigest,
+        input.configurationDigest,
+        input.activityType,
+        CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
+        CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+      ],
+    })
+    if (!parsedOptionalRun(result)) {
+      throw new LifecycleRepositoryError(
+        'conflict',
+        'Portia failure no longer matches the active provider attempt.',
+      )
+    }
+    return (await this.getForGame(owner, gameId))!
+  }
+
   async storePortia(input: StorePortiaInput): Promise<LifecycleAggregate> {
     const owner = assertOwner(input.ownerId)
     const gameId = assertUuid(input.gameId, 'Game id')
@@ -815,7 +1208,8 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     }
     if (
       before.state !== 'portia_running' ||
-      revisionNumber(before.revision) !== expectedRevision
+      revisionNumber(before.revision) !== expectedRevision ||
+      before.portia_active_model_request_id !== modelRequestId
     ) {
       throw new LifecycleRepositoryError(
         'conflict',
@@ -824,11 +1218,39 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     }
     const result = await this.database.query({
       text: `
-        WITH advanced AS (
+        WITH eligible_model AS (
+          SELECT id
+          FROM model_requests
+          WHERE id = $4::uuid
+            AND clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND operation = 'portia'
+            AND status = 'succeeded'
+            AND request_sha256 = $5::char(64)
+            AND response_sha256 = $6::char(64)
+            AND prompt_version = $7::text
+            AND result_payload->>'format' = 'webchess-portia-result/1'
+        ),
+        advanced AS (
           UPDATE lifecycle_runs
-          SET state = 'portia_complete', revision = revision + 1, updated_at = now()
+          SET state = 'portia_complete',
+              revision = revision + 1,
+              portia_current_candidate_id = NULL,
+              portia_active_model_request_id = NULL,
+              portia_completed_candidate_ids = (
+                SELECT coalesce(
+                  jsonb_agg(assessment->>'candidateId' ORDER BY position),
+                  '[]'::jsonb
+                )
+                FROM jsonb_array_elements($9::jsonb->'assessments')
+                  WITH ORDINALITY AS completed(assessment, position)
+              ),
+              portia_assessment_drafts = $9::jsonb->'assessments',
+              updated_at = now()
           WHERE clerk_user_id = $1::text AND game_id = $2::uuid
             AND revision = $3::bigint AND state = 'portia_running'
+            AND portia_active_model_request_id = $4::uuid
+            AND EXISTS (SELECT 1 FROM eligible_model)
           RETURNING ${SELECT_RUN_COLUMNS}
         ),
         artifact AS (
@@ -885,9 +1307,86 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     const expectedRevision = assertRevision(input.expectedRevision)
     assertDigest(input.result.inputDigest, 'Gate input digest')
     assertDigest(input.configurationDigest, 'Configuration digest')
+    if (
+      input.answerUserPrompt !== null &&
+      (
+        typeof input.answerUserPrompt !== 'string' ||
+        input.answerUserPrompt.length < 1 ||
+        input.answerUserPrompt.length > 200_000
+      )
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-input',
+        'The player-visible Answer prompt must contain 1 to 200000 characters.',
+      )
+    }
+    if (
+      (input.result.passed && input.answerUserPrompt === null) ||
+      (!input.result.passed && input.answerUserPrompt !== null)
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-input',
+        'A player-visible Answer prompt is required exactly when the Gate passes.',
+      )
+    }
+    const answerUserPromptSha256 = input.answerUserPrompt === null
+      ? null
+      : sha256Hex(input.answerUserPrompt)
     const target: LifecycleState = input.result.passed ? 'gate_passed' : 'gate_failed'
     const before = await this.ownedRun(owner, gameId)
-    if (before.state === target) return (await this.getForGame(owner, gameId))!
+    if (before.state === target) {
+      let existing = (await this.getForGame(owner, gameId))!
+      if (
+        input.result.passed &&
+        existing.gate?.inputDigest === input.result.inputDigest &&
+        existing.answerUserPrompt === null &&
+        input.answerUserPrompt !== null
+      ) {
+        const backfilled = await this.database.query({
+          text: `
+            UPDATE gate_decisions
+            SET answer_user_prompt = $4::text,
+                answer_user_prompt_sha256 = $5::char(64)
+            WHERE clerk_user_id = $1::text
+              AND lifecycle_run_id = (
+                SELECT id FROM lifecycle_runs
+                WHERE clerk_user_id = $1::text AND game_id = $2::uuid
+              )
+              AND input_digest = $3::char(64)
+              AND passed
+              AND answer_user_prompt IS NULL
+              AND answer_user_prompt_sha256 IS NULL
+          `,
+          values: [
+            owner,
+            gameId,
+            input.result.inputDigest,
+            input.answerUserPrompt,
+            answerUserPromptSha256,
+          ],
+        })
+        if (backfilled.rowCount !== 0 && backfilled.rowCount !== 1) {
+          throw new LifecycleRepositoryError(
+            'conflict',
+            'The historical Gate prompt could not be extended safely.',
+          )
+        }
+        // An identical concurrent backfill may win between the initial read
+        // and this UPDATE. Re-read in both cases and let the immutable exact
+        // prompt comparison below accept only that same winning value.
+        existing = (await this.getForGame(owner, gameId))!
+      }
+      if (
+        existing.gate?.inputDigest !== input.result.inputDigest ||
+        existing.answerUserPrompt !== input.answerUserPrompt
+      ) {
+        throw new LifecycleRepositoryError(
+          'conflict',
+          'The immutable Gate artifact already belongs to a different Answer prompt.',
+        )
+      }
+      return existing
+    }
     if (
       before.state !== 'portia_complete' ||
       revisionNumber(before.revision) !== expectedRevision
@@ -908,10 +1407,12 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         artifact AS (
           INSERT INTO gate_decisions (
             id, clerk_user_id, lifecycle_run_id, algorithm_version,
-            input_digest, passed, result
+            input_digest, passed, result,
+            answer_user_prompt, answer_user_prompt_sha256
           )
           SELECT gen_random_uuid(), advanced.clerk_user_id, advanced.id,
-            $5::text, $6::char(64), $7::boolean, $8::jsonb
+            $5::text, $6::char(64), $7::boolean, $8::jsonb,
+            $11::text, $12::char(64)
           FROM advanced
           RETURNING id, lifecycle_run_id
         ),
@@ -944,10 +1445,176 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         json(input.result),
         input.configurationDigest,
         CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
+        input.answerUserPrompt,
+        answerUserPromptSha256,
       ],
     })
     if (!parsedOptionalRun(result)) {
       throw new LifecycleRepositoryError('conflict', 'Gate commit lost its lifecycle revision race.')
+    }
+    return (await this.getForGame(owner, gameId))!
+  }
+
+  async beginCharlotteAttempt(
+    input: BeginCharlotteAttemptInput,
+  ): Promise<LifecycleAggregate> {
+    const owner = assertOwner(input.ownerId)
+    const gameId = assertUuid(input.gameId, 'Game id')
+    const expectedRevision = assertRevision(input.expectedRevision)
+    const modelRequestId = assertUuid(input.modelRequestId, 'Model request id')
+    assertDigest(input.requestDigest, 'Charlotte request digest')
+    assertDigest(input.configurationDigest, 'Configuration digest')
+
+    const result = await this.database.query({
+      text: `
+        WITH eligible_model AS (
+          SELECT id
+          FROM model_requests
+          WHERE id = $4::uuid
+            AND clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND operation = 'charlotte'
+            AND status IN ('in_progress', 'succeeded')
+            AND request_sha256 = $5::char(64)
+            AND prompt_version = $9::text
+        ),
+        advanced AS (
+          UPDATE lifecycle_runs
+          SET state = 'charlotte_running',
+              revision = revision + 1,
+              charlotte_active_model_request_id = $4::uuid,
+              updated_at = now()
+          WHERE clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND revision = $3::bigint
+            AND state = 'charlotte_pending'
+            AND charlotte_failed_attempt_count < charlotte_failure_limit
+            AND EXISTS (SELECT 1 FROM eligible_model)
+          RETURNING ${SELECT_RUN_COLUMNS}
+        ),
+        activity AS (
+          INSERT INTO lifecycle_events (
+            id, clerk_user_id, lifecycle_run_id, sequence, stage,
+            activity_type, state_from, state_to, input_entity_ids,
+            output_entity_ids, responsible_agent_ids,
+            configuration_digest, status, event_version
+          )
+          SELECT gen_random_uuid(), advanced.clerk_user_id, advanced.id,
+            coalesce((SELECT max(sequence) + 1 FROM lifecycle_events WHERE lifecycle_run_id = advanced.id), 1),
+            'charlotte', $7::text, 'charlotte_pending', 'charlotte_running',
+            jsonb_build_array($2::text), '[]'::jsonb,
+            jsonb_build_array('charlotte'), $6::char(64), 'started', $8::smallint
+          FROM advanced
+          RETURNING lifecycle_run_id
+        )
+        SELECT ${SELECT_RUN_COLUMNS} FROM advanced
+      `,
+      values: [
+        owner,
+        gameId,
+        expectedRevision,
+        modelRequestId,
+        input.requestDigest,
+        input.configurationDigest,
+        input.activityType,
+        CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
+        CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+      ],
+    })
+    if (!parsedOptionalRun(result)) {
+      throw new LifecycleRepositoryError(
+        'conflict',
+        'Charlotte could not bind the matching active provider request.',
+      )
+    }
+    return (await this.getForGame(owner, gameId))!
+  }
+
+  async failCharlotteAttempt(
+    input: FailCharlotteAttemptInput,
+  ): Promise<LifecycleAggregate> {
+    const owner = assertOwner(input.ownerId)
+    const gameId = assertUuid(input.gameId, 'Game id')
+    const expectedRevision = assertRevision(input.expectedRevision)
+    const modelRequestId = assertUuid(input.modelRequestId, 'Model request id')
+    assertDigest(input.requestDigest, 'Charlotte request digest')
+    assertDigest(input.configurationDigest, 'Configuration digest')
+
+    const result = await this.database.query({
+      text: `
+        WITH failed_model AS (
+          SELECT id
+          FROM model_requests
+          WHERE id = $4::uuid
+            AND clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND operation = 'charlotte'
+            AND status IN ('failed', 'indeterminate')
+            AND request_sha256 = $5::char(64)
+            AND prompt_version = $9::text
+        ),
+        advanced AS (
+          UPDATE lifecycle_runs
+          SET state = CASE
+                WHEN charlotte_failed_attempt_count + 1 >= charlotte_failure_limit
+                  THEN 'charlotte_unavailable'
+                ELSE 'charlotte_pending'
+              END,
+              revision = revision + 1,
+              charlotte_active_model_request_id = NULL,
+              charlotte_failed_attempt_count = charlotte_failed_attempt_count + 1,
+              updated_at = now()
+          WHERE clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND revision = $3::bigint
+            AND state = 'charlotte_running'
+            AND charlotte_active_model_request_id = $4::uuid
+            AND charlotte_failed_attempt_count < charlotte_failure_limit
+            AND EXISTS (SELECT 1 FROM failed_model)
+          RETURNING ${SELECT_RUN_COLUMNS}
+        ),
+        activity AS (
+          INSERT INTO lifecycle_events (
+            id, clerk_user_id, lifecycle_run_id, sequence, stage,
+            activity_type, state_from, state_to, input_entity_ids,
+            output_entity_ids, responsible_agent_ids,
+            configuration_digest, status, event_version
+          )
+          SELECT gen_random_uuid(), advanced.clerk_user_id, advanced.id,
+            coalesce((SELECT max(sequence) + 1 FROM lifecycle_events WHERE lifecycle_run_id = advanced.id), 1),
+            'charlotte',
+            CASE WHEN advanced.state = 'charlotte_unavailable'
+              THEN 'qualification_attempt_budget_exhausted'
+              ELSE $7::text
+            END,
+            'charlotte_running', advanced.state,
+            jsonb_build_array($2::text), '[]'::jsonb,
+            jsonb_build_array('charlotte'), $6::char(64),
+            CASE WHEN advanced.state = 'charlotte_unavailable'
+              THEN 'refused' ELSE 'failed' END,
+            $8::smallint
+          FROM advanced
+          RETURNING lifecycle_run_id
+        )
+        SELECT ${SELECT_RUN_COLUMNS} FROM advanced
+      `,
+      values: [
+        owner,
+        gameId,
+        expectedRevision,
+        modelRequestId,
+        input.requestDigest,
+        input.configurationDigest,
+        input.activityType,
+        CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
+        CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+      ],
+    })
+    if (!parsedOptionalRun(result)) {
+      throw new LifecycleRepositoryError(
+        'conflict',
+        'Charlotte failure no longer matches the active provider attempt.',
+      )
     }
     return (await this.getForGame(owner, gameId))!
   }
@@ -973,7 +1640,8 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     }
     if (
       before.state !== 'charlotte_running' ||
-      revisionNumber(before.revision) !== expectedRevision
+      revisionNumber(before.revision) !== expectedRevision ||
+      before.charlotte_active_model_request_id !== modelRequestId
     ) {
       throw new LifecycleRepositoryError(
         'conflict',
@@ -982,10 +1650,29 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     }
     const result = await this.database.query({
       text: `
-        WITH advanced AS (
-          UPDATE lifecycle_runs SET state = 'charlotte_complete', revision = revision + 1, updated_at = now()
+        WITH eligible_model AS (
+          SELECT id
+          FROM model_requests
+          WHERE id = $4::uuid
+            AND clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND operation = 'charlotte'
+            AND status = 'succeeded'
+            AND request_sha256 = $5::char(64)
+            AND response_sha256 = $6::char(64)
+            AND prompt_version = $7::text
+            AND result_payload->>'format' = 'webchess-charlotte-result/3'
+        ),
+        advanced AS (
+          UPDATE lifecycle_runs
+          SET state = 'charlotte_complete',
+              revision = revision + 1,
+              charlotte_active_model_request_id = NULL,
+              updated_at = now()
           WHERE clerk_user_id = $1::text AND game_id = $2::uuid
             AND revision = $3::bigint AND state = 'charlotte_running'
+            AND charlotte_active_model_request_id = $4::uuid
+            AND EXISTS (SELECT 1 FROM eligible_model)
           RETURNING ${SELECT_RUN_COLUMNS}
         ),
         artifact AS (
@@ -1009,7 +1696,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
           )
           SELECT gen_random_uuid(), advanced.clerk_user_id, advanced.id,
             coalesce((SELECT max(sequence) + 1 FROM lifecycle_events WHERE lifecycle_run_id = advanced.id), 1),
-            'charlotte', 'synthesis_completed', 'charlotte_running',
+            'charlotte', 'qualification_completed', 'charlotte_running',
             'charlotte_complete', jsonb_build_array($2::text),
             jsonb_build_array(artifact.id::text), jsonb_build_array('charlotte'),
             $11::char(64), 'completed', $12::smallint
@@ -1144,7 +1831,9 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         parent.id,
         sameField ? parent.fieldGeneration : parent.fieldGeneration + 1,
         sameField ? parent.gameAttempt + 1 : 1,
-        sameField ? parent.sameFieldRetryCount + 1 : 0,
+        sameField
+          ? parent.sameFieldRetryCount + 1
+          : parent.sameFieldRetryCount,
         sameField
           ? parent.fieldRegenerationCount
           : parent.fieldRegenerationCount + 1,
@@ -1186,22 +1875,48 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     fingerprint: string,
     excludingRunId: string,
   ): Promise<boolean> {
-    const result = await this.database.query<{ present: boolean }>({
+    const validatedFingerprint = assertDigest(
+      fingerprint,
+      'Terminal fingerprint',
+    )
+    const result = await this.database.query<{
+      id: string
+      terminal_fingerprint: string | null
+      survivor_set: unknown[] | null
+    }>({
       text: `
-        SELECT EXISTS (
-          SELECT 1 FROM lifecycle_runs
-          WHERE clerk_user_id = $1::text AND root_run_id = $2::uuid
-            AND terminal_fingerprint = $3::char(64) AND id <> $4::uuid
-        ) AS present
+        SELECT id::text, terminal_fingerprint, survivor_set
+        FROM lifecycle_runs
+        WHERE clerk_user_id = $1::text AND root_run_id = $2::uuid
+          AND (terminal_fingerprint IS NOT NULL OR survivor_set IS NOT NULL)
       `,
       values: [
         assertOwner(ownerId),
         assertUuid(rootRunId, 'Root run id'),
-        assertDigest(fingerprint, 'Terminal fingerprint'),
-        assertUuid(excludingRunId, 'Excluded run id'),
       ],
     })
-    return result.rows[0]?.present === true
+    const excludedId = assertUuid(excludingRunId, 'Excluded run id')
+    const acceptedFingerprints = new Set([validatedFingerprint])
+    const currentRow = result.rows.find((row) => row.id === excludedId)
+    if (currentRow?.survivor_set) {
+      acceptedFingerprints.add(
+        terminalFingerprint(survivorArray(currentRow.survivor_set)),
+      )
+    }
+
+    return result.rows.some((row) => {
+      if (row.id === excludedId) return false
+      if (
+        row.terminal_fingerprint &&
+        acceptedFingerprints.has(row.terminal_fingerprint)
+      ) {
+        return true
+      }
+      if (!row.survivor_set) return false
+      return acceptedFingerprints.has(
+        terminalFingerprint(survivorArray(row.survivor_set)),
+      )
+    })
   }
 
   async createWilburAction(input: CreateWilburActionInput): Promise<WilburAction> {

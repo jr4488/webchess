@@ -8,6 +8,11 @@ import type {
   WilburActionStatus,
   WilburObservation,
 } from './lifecycle/contracts'
+import {
+  RESEARCH_STAGES,
+  RESEARCH_STATUSES,
+} from './research/contracts'
+import type { ResearchRecord } from './research/contracts'
 import type {
   CellCoord,
   GeneratedAnswer,
@@ -256,7 +261,7 @@ function parseAnswer(value: unknown): GeneratedAnswer | null {
   }
 }
 
-function parseGame(value: unknown): DurableGame {
+export function parseDurableGame(value: unknown): DurableGame {
   const game = recordOf(value, 'Game')
   const status = nonEmptyString(game.status, 'Game status')
   if (!GAME_STATUSES.has(status)) {
@@ -282,12 +287,12 @@ function parseGame(value: unknown): DurableGame {
 }
 
 function parseGameEnvelope(value: unknown): DurableGame {
-  return parseGame(recordOf(value, 'Response').game)
+  return parseDurableGame(recordOf(value, 'Response').game)
 }
 
 function parseCurrentGameEnvelope(value: unknown): DurableGame | null {
   const game = recordOf(value, 'Response').game
-  return game === null ? null : parseGame(game)
+  return game === null ? null : parseDurableGame(game)
 }
 
 function parseAnswerEnvelope(value: unknown): AnswerGameResult {
@@ -295,12 +300,198 @@ function parseAnswerEnvelope(value: unknown): AnswerGameResult {
   const answer = parseAnswer(response.answer)
   if (!answer) throw invalidResponse('The answer response is incomplete.')
   return {
-    game: parseGame(response.game),
+    game: parseDurableGame(response.game),
     answer,
   }
 }
 
 const LIFECYCLE_STATE_SET = new Set<string>(LIFECYCLE_STATES)
+const RESEARCH_STAGE_SET = new Set<string>(RESEARCH_STAGES)
+const RESEARCH_STATUS_SET = new Set<string>(RESEARCH_STATUSES)
+
+function nullableString(value: unknown, label: string): string | null {
+  return value === null ? null : nonEmptyString(value, label)
+}
+
+function timestampString(value: unknown, label: string): string {
+  const timestamp = nonEmptyString(value, label)
+  if (Number.isNaN(Date.parse(timestamp))) {
+    throw invalidResponse(`${label} is invalid.`)
+  }
+  return timestamp
+}
+
+function parseResearchRecord(value: unknown): ResearchRecord {
+  const research = recordOf(value, 'Lifecycle research')
+  const stage = nonEmptyString(research.stage, 'Research stage')
+  const status = nonEmptyString(research.status, 'Research status')
+  if (!RESEARCH_STAGE_SET.has(stage) || !RESEARCH_STATUS_SET.has(status)) {
+    throw invalidResponse('Lifecycle research stage or status is invalid.')
+  }
+  for (const [label, identifier] of [
+    ['Research id', research.id],
+    ['Research lifecycle run id', research.lifecycleRunId],
+    ['Research game id', research.gameId],
+  ] as const) {
+    if (typeof identifier !== 'string' || !UUID_PATTERN.test(identifier)) {
+      throw invalidResponse(`${label} is invalid.`)
+    }
+  }
+  if (
+    research.requestedBy !== 'research-policy' ||
+    research.provider !== 'codex' ||
+    research.transport !== 'local' ||
+    research.directPageTextFetched !== false
+  ) {
+    throw invalidResponse('Lifecycle research attribution is invalid.')
+  }
+  const materiality = research.materiality
+  if (
+    materiality !== null &&
+    materiality !== 'helpful' &&
+    materiality !== 'required'
+  ) {
+    throw invalidResponse('Lifecycle research materiality is invalid.')
+  }
+  nonEmptyString(research.policyVersion, 'Research policy version')
+  nonEmptyString(research.reason, 'Research reason')
+  const query = nullableString(research.query, 'Research query')
+  const model = nullableString(research.model, 'Research model')
+  const bounds = recordOf(research.bounds, 'Research bounds')
+  if (
+    bounds.invocationLimit !== 1 ||
+    nonnegativeInteger(bounds.resultLimit, 'Research result limit') < 1 ||
+    nonnegativeInteger(bounds.sourceLimit, 'Research source limit') < 1 ||
+    nonnegativeInteger(bounds.timeoutMs, 'Research timeout') < 1_000 ||
+    nonnegativeInteger(
+      bounds.synthesisCharacterLimit,
+      'Research synthesis limit',
+    ) < 500
+  ) {
+    throw invalidResponse('Lifecycle research bounds are invalid.')
+  }
+  const attemptCount = nonnegativeInteger(
+    research.attemptCount,
+    'Research attempt count',
+  )
+  if (attemptCount > 1) {
+    throw invalidResponse('Lifecycle research attempt count is invalid.')
+  }
+  for (const [label, array] of [
+    ['executed queries', research.executedQueries],
+    ['retrieved facts', research.retrievedFacts],
+    ['sources', research.sources],
+    ['injection signals', research.injectionSignalsDetected],
+  ] as const) {
+    if (!Array.isArray(array)) {
+      throw invalidResponse(`Lifecycle research ${label} must be an array.`)
+    }
+  }
+  const executedQueryValues = research.executedQueries as unknown[]
+  const retrievedFactValues = research.retrievedFacts as unknown[]
+  const injectionSignalValues = research.injectionSignalsDetected as unknown[]
+  if (
+    retrievedFactValues.length !== 0 ||
+    executedQueryValues.some(
+      (item: unknown) => typeof item !== 'string' || item.trim().length === 0,
+    ) ||
+    injectionSignalValues.some(
+      (item: unknown) => typeof item !== 'string' || item.trim().length === 0,
+    )
+  ) {
+    throw invalidResponse('Lifecycle research evidence labels are invalid.')
+  }
+  const sourceIds = new Set<string>()
+  for (const sourceValue of research.sources as unknown[]) {
+    const source = recordOf(sourceValue, 'Research source')
+    if (
+      typeof source.id !== 'string' ||
+      !UUID_PATTERN.test(source.id) ||
+      typeof source.citationId !== 'string' ||
+      source.citationId.length < 2 ||
+      !Number.isSafeInteger(source.ordinal) ||
+      (source.ordinal as number) < 1 ||
+      typeof source.title !== 'string' ||
+      source.title.trim().length === 0 ||
+      typeof source.hostname !== 'string' ||
+      source.hostname.trim().length === 0 ||
+      !['government_or_education', 'general_web'].includes(
+        source.trust as string,
+      ) ||
+      !['search_activity', 'synthesis_link'].includes(
+        source.discoveredFrom as string,
+      )
+    ) {
+      throw invalidResponse('Lifecycle research source is invalid.')
+    }
+    let url: URL
+    try {
+      url = new URL(nonEmptyString(source.url, 'Research source URL'))
+    } catch {
+      throw invalidResponse('Lifecycle research source URL is invalid.')
+    }
+    if (
+      url.protocol !== 'https:' ||
+      url.username !== '' ||
+      url.password !== '' ||
+      url.hostname.toLowerCase() !== String(source.hostname).toLowerCase() ||
+      url.hostname.toLowerCase() === 'localhost' ||
+      url.hostname.toLowerCase().endsWith('.localhost') ||
+      url.hostname.toLowerCase().endsWith('.local') ||
+      url.hostname.toLowerCase().endsWith('.internal') ||
+      /^(?:0|10|127|169\.254|172\.(?:1[6-9]|2\d|3[01])|192\.168)\./u.test(
+        url.hostname,
+      ) ||
+      sourceIds.has(source.id)
+    ) {
+      throw invalidResponse('Lifecycle research source is unsafe or repeated.')
+    }
+    sourceIds.add(source.id)
+    timestampString(source.createdAt, 'Research source creation time')
+  }
+  const searchSynthesis = nullableString(
+    research.searchSynthesis,
+    'Research search synthesis',
+  )
+  const contentDigest = nullableString(
+    research.contentDigest,
+    'Research content digest',
+  )
+  if (contentDigest !== null && !/^[0-9a-f]{64}$/u.test(contentDigest)) {
+    throw invalidResponse('Lifecycle research content digest is invalid.')
+  }
+  nullableString(research.failureCode, 'Research failure code')
+  const startedAt = research.startedAt === null
+    ? null
+    : timestampString(research.startedAt, 'Research start time')
+  const completedAt = research.completedAt === null
+    ? null
+    : timestampString(research.completedAt, 'Research completion time')
+  timestampString(research.createdAt, 'Research creation time')
+  timestampString(research.updatedAt, 'Research update time')
+  nonnegativeInteger(research.omittedSourceCount, 'Research omitted source count')
+  if (
+    status === 'not_needed'
+      ? query !== null || materiality !== null || attemptCount !== 0
+      : query === null || materiality === null || attemptCount !== 1
+  ) {
+    throw invalidResponse('Lifecycle research decision shape is invalid.')
+  }
+  if (
+    status === 'searching'
+      ? startedAt === null || completedAt !== null
+      : completedAt === null
+  ) {
+    throw invalidResponse('Lifecycle research timing is invalid.')
+  }
+  if (
+    status === 'completed' &&
+    (model === null || searchSynthesis === null || contentDigest === null)
+  ) {
+    throw invalidResponse('Completed lifecycle research is incomplete.')
+  }
+  return research as unknown as ResearchRecord
+}
 
 function parseLifecycle(value: unknown): LifecycleAggregate {
   const lifecycle = recordOf(value, 'Lifecycle')
@@ -313,6 +504,7 @@ function parseLifecycle(value: unknown): LifecycleAggregate {
     ['wilburActions', lifecycle.wilburActions],
     ['wilburObservations', lifecycle.wilburObservations],
     ['activities', lifecycle.activities],
+    ['research', lifecycle.research],
   ] as const) {
     if (!Array.isArray(item)) {
       throw invalidResponse(`Lifecycle ${field} must be an array.`)
@@ -321,17 +513,153 @@ function parseLifecycle(value: unknown): LifecycleAggregate {
   for (const field of ['versions'] as const) {
     recordOf(lifecycle[field], `Lifecycle ${field}`)
   }
+  if (
+    lifecycle.answerPromptDigest !== null &&
+    (
+      typeof lifecycle.answerPromptDigest !== 'string' ||
+      !/^[0-9a-f]{64}$/u.test(lifecycle.answerPromptDigest)
+    )
+  ) {
+    throw invalidResponse('Lifecycle answer prompt digest is invalid.')
+  }
+  if (
+    lifecycle.answerUserPrompt !== null &&
+    (
+      typeof lifecycle.answerUserPrompt !== 'string' ||
+      lifecycle.answerUserPrompt.length < 1 ||
+      lifecycle.answerUserPrompt.length > 200_000
+    )
+  ) {
+    throw invalidResponse('Lifecycle player-visible answer prompt is invalid.')
+  }
+  if (
+    lifecycle.answerUserPromptSha256 !== null &&
+    (
+      typeof lifecycle.answerUserPromptSha256 !== 'string' ||
+      !/^[0-9a-f]{64}$/u.test(lifecycle.answerUserPromptSha256)
+    )
+  ) {
+    throw invalidResponse('Lifecycle player-visible answer prompt digest is invalid.')
+  }
+  if (
+    (lifecycle.answerUserPrompt === null) !==
+    (lifecycle.answerUserPromptSha256 === null)
+  ) {
+    throw invalidResponse(
+      'Lifecycle player-visible answer prompt provenance is incomplete.',
+    )
+  }
+  const portiaProgress = recordOf(
+    lifecycle.portiaProgress,
+    'Lifecycle Portia progress',
+  )
+  if (
+    portiaProgress.currentCandidateId !== null &&
+    (
+      typeof portiaProgress.currentCandidateId !== 'string' ||
+      portiaProgress.currentCandidateId.length < 3 ||
+      portiaProgress.currentCandidateId.length > 220
+    )
+  ) {
+    throw invalidResponse('Lifecycle current Portia candidate is invalid.')
+  }
+  if (
+    !Array.isArray(portiaProgress.completedCandidateIds) ||
+    portiaProgress.completedCandidateIds.some(
+      (candidateId) =>
+        typeof candidateId !== 'string' ||
+        candidateId.length < 3 ||
+        candidateId.length > 220,
+    ) ||
+    new Set(portiaProgress.completedCandidateIds).size !==
+      portiaProgress.completedCandidateIds.length
+  ) {
+    throw invalidResponse('Lifecycle completed Portia candidates are invalid.')
+  }
+  const completedCandidateIds = portiaProgress.completedCandidateIds as unknown[]
+  if (
+    !Array.isArray(portiaProgress.completedAssessments) ||
+    portiaProgress.completedAssessments.length >
+      portiaProgress.completedCandidateIds.length ||
+    portiaProgress.completedAssessments.some((assessment, index) => {
+      if (!assessment || typeof assessment !== 'object' || Array.isArray(assessment)) {
+        return true
+      }
+      return (assessment as Record<string, unknown>).candidateId !==
+        completedCandidateIds[index]
+    })
+  ) {
+    throw invalidResponse('Lifecycle completed Portia assessments are invalid.')
+  }
   for (const field of ['portia', 'gate', 'charlotte'] as const) {
     if (lifecycle[field] !== null) {
       recordOf(lifecycle[field], `Lifecycle ${field}`)
     }
   }
+  if (
+    lifecycle.answerUserPrompt !== null &&
+    (
+      lifecycle.gate === null ||
+      recordOf(lifecycle.gate, 'Lifecycle gate').passed !== true
+    )
+  ) {
+    throw invalidResponse(
+      'Lifecycle player-visible answer prompt was not authorized by the Gate.',
+    )
+  }
   nonEmptyString(lifecycle.id, 'Lifecycle id')
   nonEmptyString(lifecycle.rootRunId, 'Lifecycle root id')
   nonEmptyString(lifecycle.gameId, 'Lifecycle game id')
   nonnegativeInteger(lifecycle.revision, 'Lifecycle revision')
+  if (
+    lifecycle.portiaActiveModelRequestId !== null &&
+    (
+      typeof lifecycle.portiaActiveModelRequestId !== 'string' ||
+      !UUID_PATTERN.test(lifecycle.portiaActiveModelRequestId)
+    )
+  ) {
+    throw invalidResponse('Lifecycle active Portia request id is invalid.')
+  }
+  nonnegativeInteger(
+    lifecycle.portiaFailedAttemptCount,
+    'Portia failed attempt count',
+  )
+  nonnegativeInteger(lifecycle.portiaFailureLimit, 'Portia failure limit')
+  if (
+    (lifecycle.portiaFailureLimit as number) < 1 ||
+    (lifecycle.portiaFailureLimit as number) > 10 ||
+    (lifecycle.portiaFailedAttemptCount as number) >
+      (lifecycle.portiaFailureLimit as number)
+  ) {
+    throw invalidResponse('Portia failure budget is invalid.')
+  }
+  if (
+    lifecycle.charlotteActiveModelRequestId !== null &&
+    (
+      typeof lifecycle.charlotteActiveModelRequestId !== 'string' ||
+      !UUID_PATTERN.test(lifecycle.charlotteActiveModelRequestId)
+    )
+  ) {
+    throw invalidResponse('Lifecycle active Charlotte request id is invalid.')
+  }
+  nonnegativeInteger(
+    lifecycle.charlotteFailedAttemptCount,
+    'Charlotte failed attempt count',
+  )
+  nonnegativeInteger(lifecycle.charlotteFailureLimit, 'Charlotte failure limit')
+  if (
+    (lifecycle.charlotteFailureLimit as number) < 1 ||
+    (lifecycle.charlotteFailureLimit as number) > 10 ||
+    (lifecycle.charlotteFailedAttemptCount as number) >
+      (lifecycle.charlotteFailureLimit as number)
+  ) {
+    throw invalidResponse('Charlotte failure budget is invalid.')
+  }
   nonnegativeInteger(lifecycle.sameFieldRetryCount, 'Same-field retry count')
   nonnegativeInteger(lifecycle.fieldRegenerationCount, 'Field regeneration count')
+  for (const research of lifecycle.research as unknown[]) {
+    parseResearchRecord(research)
+  }
   return lifecycle as unknown as LifecycleAggregate
 }
 
@@ -342,7 +670,7 @@ function parseLifecycleEnvelope(value: unknown): LifecycleAggregate {
 function parseRetryLifecycleEnvelope(value: unknown): RetryLifecycleResult {
   const response = recordOf(value, 'Response')
   return {
-    game: response.game === null ? null : parseGame(response.game),
+    game: response.game === null ? null : parseDurableGame(response.game),
     lifecycle: parseLifecycle(response.lifecycle),
   }
 }
@@ -462,6 +790,7 @@ async function requestJson<T>(
   try {
     response = await fetch(path, {
       ...init,
+      headers: runtimeHeaders(init.headers),
       credentials: 'same-origin',
       cache: 'no-store',
     })
@@ -485,6 +814,18 @@ async function requestJson<T>(
   }
 
   return parse(payload)
+}
+
+function runtimeHeaders(headers: HeadersInit | undefined): Headers {
+  const resolved = new Headers(headers)
+  if (
+    typeof window !== 'undefined' &&
+    (window.location.pathname === '/openclaw' ||
+      window.location.pathname.startsWith('/openclaw/'))
+  ) {
+    resolved.set('X-WebChess-OpenClaw-Runtime', 'webchess-2')
+  }
+  return resolved
 }
 
 function createMutationHeaders(idempotencyKey?: string): HeadersInit {

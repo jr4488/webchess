@@ -178,7 +178,7 @@ export interface WebChessApiServices {
 
 export interface AuthenticatedApiUser {
   userId: string
-  source: 'clerk' | 'local-e2e'
+  source: 'clerk' | 'local-e2e' | 'local-openclaw'
 }
 
 export interface HttpDependencies {

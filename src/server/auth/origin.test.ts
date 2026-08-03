@@ -1,6 +1,28 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
+import {
+  LOCAL_OPENCLAW_AUTH_HEADER,
+  LOCAL_OPENCLAW_AUTH_VALUE,
+} from './openclaw'
 import { verifySameOriginMutation } from './origin'
+
+const openClawEnvironmentKeys = [
+  'VERCEL',
+  'VERCEL_ENV',
+  'WEBCHESS_OPENCLAW_ENABLED',
+  'WEBCHESS_OPENCLAW_OWNER_ID',
+] as const
+const originalOpenClawEnvironment = Object.fromEntries(
+  openClawEnvironmentKeys.map((key) => [key, process.env[key]]),
+)
+
+afterEach(() => {
+  for (const key of openClawEnvironmentKeys) {
+    const value = originalOpenClawEnvironment[key]
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+})
 
 const mutation = (
   origin: string | null,
@@ -35,6 +57,40 @@ describe('verifySameOriginMutation', () => {
         mutation('https://webchess.anansiportia.com', { fetchSite: null }),
       ),
     ).toBeNull()
+  })
+
+  it('allows an Origin-less mutation only for the established local OpenClaw principal', () => {
+    delete process.env.VERCEL
+    delete process.env.VERCEL_ENV
+    process.env.WEBCHESS_OPENCLAW_ENABLED = 'true'
+    process.env.WEBCHESS_OPENCLAW_OWNER_ID = 'openclaw_origin_test'
+    const request = new Request('http://127.0.0.1:3210/api/divide', {
+      method: 'POST',
+      headers: {
+        host: '127.0.0.1:3210',
+        [LOCAL_OPENCLAW_AUTH_HEADER]: LOCAL_OPENCLAW_AUTH_VALUE,
+      },
+    })
+
+    expect(verifySameOriginMutation(request)).toBeNull()
+  })
+
+  it('accepts loopback hostname normalization for the local OpenClaw principal', () => {
+    delete process.env.VERCEL
+    delete process.env.VERCEL_ENV
+    process.env.WEBCHESS_OPENCLAW_ENABLED = 'true'
+    process.env.WEBCHESS_OPENCLAW_OWNER_ID = 'openclaw_origin_test'
+    const request = new Request('http://localhost:3210/api/divide', {
+      method: 'POST',
+      headers: {
+        host: '127.0.0.1:3210',
+        origin: 'http://127.0.0.1:3210',
+        'sec-fetch-site': 'same-origin',
+        [LOCAL_OPENCLAW_AUTH_HEADER]: LOCAL_OPENCLAW_AUTH_VALUE,
+      },
+    })
+
+    expect(verifySameOriginMutation(request)).toBeNull()
   })
 
   it.each([

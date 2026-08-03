@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import type { CellCoord, PieceKind, ProblemPart, Side } from '../../types'
+import type { ResearchRecord } from '../research'
 import { CURRENT_LIFECYCLE_VERSIONS } from './versions'
 
 export const LIFECYCLE_STATES = [
@@ -12,6 +13,7 @@ export const LIFECYCLE_STATES = [
   'chess_terminal',
   'portia_pending',
   'portia_running',
+  'portia_unavailable',
   'portia_complete',
   'gate_passed',
   'gate_failed',
@@ -19,6 +21,7 @@ export const LIFECYCLE_STATES = [
   'retry_running',
   'charlotte_pending',
   'charlotte_running',
+  'charlotte_unavailable',
   'charlotte_complete',
   'wilbur_planning',
   'wilbur_in_progress',
@@ -78,6 +81,14 @@ export const findingSeveritySchema = z.enum([
   'fatal',
 ])
 
+export const attackOutcomeSchema = z.enum([
+  'passed',
+  'qualified',
+  'failed',
+  'unresolved',
+  'not_applicable',
+])
+
 const boundedText = (minimum: number, maximum: number) =>
   z.string().trim().min(minimum).max(maximum)
 
@@ -87,12 +98,23 @@ const nullableBoundedText = (minimum: number, maximum: number) =>
 export const attackFindingSchema = z
   .strictObject({
     attackType: z.enum(PORTIA_ATTACK_TYPES),
+    outcome: attackOutcomeSchema,
     severity: findingSeveritySchema,
     finding: boundedText(8, 1_200),
     consequence: boundedText(8, 1_200),
     requiredRevision: nullableBoundedText(8, 1_200),
   })
   .superRefine((finding, context) => {
+    if (
+      finding.outcome === 'not_applicable' &&
+      (finding.severity !== 'low' || finding.requiredRevision !== null)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A not-applicable attack must be low severity and require no revision.',
+        path: ['outcome'],
+      })
+    }
     if (
       (finding.severity === 'severe' || finding.severity === 'fatal') &&
       finding.consequence.length < 24
@@ -103,24 +125,39 @@ export const attackFindingSchema = z
         path: ['consequence'],
       })
     }
+    if (
+      (finding.outcome === 'passed' || finding.outcome === 'not_applicable') &&
+      finding.requiredRevision !== null
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A passed or not-applicable attack cannot require a revision.',
+        path: ['requiredRevision'],
+      })
+    }
   })
 
 export type AttackFinding = z.infer<typeof attackFindingSchema>
 
-export const portiaCandidateAssessmentSchema = z
-  .strictObject({
-    candidateId: boundedText(3, 220),
-    disposition: z.enum(PORTIA_DISPOSITIONS),
-    survivingInterpretation: nullableBoundedText(12, 1_500),
-    requiredQualification: nullableBoundedText(8, 1_200),
-    redundancyClusterId: nullableBoundedText(1, 120),
-    coverageTags: z.array(z.enum(COVERAGE_TAGS)).max(COVERAGE_TAGS.length),
-    missingEvidence: z.array(boundedText(3, 500)).max(12),
-    countercase: boundedText(8, 1_200),
-    reversalCondition: boundedText(8, 1_200),
-    attackFindings: z.array(attackFindingSchema).min(1).max(PORTIA_ATTACK_TYPES.length),
-  })
+export const portiaCandidateAssessmentBaseSchema = z.strictObject({
+  candidateId: boundedText(3, 220),
+  disposition: z.enum(PORTIA_DISPOSITIONS),
+  survivingInterpretation: nullableBoundedText(12, 1_500),
+  requiredQualification: nullableBoundedText(8, 1_200),
+  redundancyClusterId: nullableBoundedText(1, 120),
+  coverageTags: z.array(z.enum(COVERAGE_TAGS)).max(COVERAGE_TAGS.length),
+  missingEvidence: z.array(boundedText(3, 500)).max(12),
+  countercase: boundedText(8, 1_200),
+  reversalCondition: boundedText(8, 1_200),
+  attackFindings: z.array(attackFindingSchema).min(1).max(PORTIA_ATTACK_TYPES.length),
+})
+
+export const portiaCandidateAssessmentSchema =
+  portiaCandidateAssessmentBaseSchema
   .superRefine((assessment, context) => {
+    const outcomes = new Set(
+      assessment.attackFindings.map((finding) => finding.outcome),
+    )
     if (
       assessment.disposition === 'consumed' &&
       assessment.survivingInterpretation !== null
@@ -152,6 +189,53 @@ export const portiaCandidateAssessmentSchema = z
         path: ['requiredQualification'],
       })
     }
+    if (
+      assessment.disposition === 'preserved' &&
+      [...outcomes].some(
+        (outcome) => outcome !== 'passed' && outcome !== 'not_applicable',
+      )
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A preserved candidate may contain only passed or not-applicable attacks.',
+        path: ['attackFindings'],
+      })
+    }
+    if (
+      assessment.disposition === 'wounded' &&
+      (
+        !outcomes.has('qualified') ||
+        outcomes.has('failed') ||
+        outcomes.has('unresolved')
+      )
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A wounded candidate requires a qualified attack and cannot retain failed or unresolved attacks.',
+        path: ['attackFindings'],
+      })
+    }
+    if (
+      assessment.disposition === 'unresolved' &&
+      !outcomes.has('unresolved')
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'An unresolved candidate requires at least one unresolved attack.',
+        path: ['attackFindings'],
+      })
+    }
+    if (
+      (assessment.disposition === 'preserved' ||
+        assessment.disposition === 'wounded') &&
+      assessment.attackFindings.some((finding) => finding.severity === 'fatal')
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A candidate with a fatal finding cannot remain usable.',
+        path: ['attackFindings'],
+      })
+    }
   })
 
 export type PortiaCandidateAssessment = z.infer<
@@ -175,6 +259,9 @@ export const portiaRedundancyClusterSchema = z.strictObject({
 
 export const portiaReviewSchema = z.strictObject({
   contractVersion: z.literal(CURRENT_LIFECYCLE_VERSIONS.portiaContract),
+  reviewedAnswerPromptDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  promptDecision: z.enum(['permit', 'retry_game', 'retry_field', 'deny']),
+  promptDecisionRationale: boundedText(20, 2_000),
   runSummary: boundedText(20, 4_000),
   assessments: z.array(portiaCandidateAssessmentSchema).min(1).max(32),
   crossCandidateContradictions: z.array(portiaContradictionSchema).max(24),
@@ -191,6 +278,54 @@ export const portiaReviewSchema = z.strictObject({
 })
 
 export type PortiaReview = z.infer<typeof portiaReviewSchema>
+
+const legacyAttackFindingSchema = z.strictObject({
+  attackType: z.enum(PORTIA_ATTACK_TYPES),
+  severity: findingSeveritySchema,
+  finding: boundedText(8, 1_200),
+  consequence: boundedText(8, 1_200),
+  requiredRevision: nullableBoundedText(8, 1_200),
+})
+
+const legacyPortiaCandidateAssessmentSchema = z.strictObject({
+  candidateId: boundedText(3, 220),
+  disposition: z.enum(PORTIA_DISPOSITIONS),
+  survivingInterpretation: nullableBoundedText(12, 1_500),
+  requiredQualification: nullableBoundedText(8, 1_200),
+  redundancyClusterId: nullableBoundedText(1, 120),
+  coverageTags: z.array(z.enum(COVERAGE_TAGS)).max(COVERAGE_TAGS.length),
+  missingEvidence: z.array(boundedText(3, 500)).max(12),
+  countercase: boundedText(8, 1_200),
+  reversalCondition: boundedText(8, 1_200),
+  attackFindings: z.array(legacyAttackFindingSchema).min(1).max(PORTIA_ATTACK_TYPES.length),
+})
+
+/** Read-only compatibility contract for immutable reviews created before prompt binding. */
+export const legacyPortiaReviewSchema = z.strictObject({
+  contractVersion: z.literal('webchess-portia-review-v1'),
+  runSummary: boundedText(20, 4_000),
+  assessments: z.array(legacyPortiaCandidateAssessmentSchema).min(1).max(32),
+  crossCandidateContradictions: z.array(portiaContradictionSchema).max(24),
+  redundancyClusters: z.array(portiaRedundancyClusterSchema).max(32),
+  missingCoverage: z.array(z.enum(COVERAGE_TAGS)).max(COVERAGE_TAGS.length),
+  unresolvedQuestions: z.array(boundedText(5, 800)).max(24),
+  recommendedGateInputs: z.strictObject({
+    tensionCandidatePairs: z
+      .array(z.array(boundedText(3, 220)).length(2))
+      .max(16),
+    fatalContradictionIds: z.array(boundedText(1, 120)).max(24),
+    fieldRepairReasons: z.array(boundedText(5, 800)).max(24),
+  }),
+})
+
+export type LegacyPortiaReview = z.infer<typeof legacyPortiaReviewSchema>
+export type PersistedPortiaReview = PortiaReview | LegacyPortiaReview
+
+export function isPromptBoundPortiaReview(
+  review: PersistedPortiaReview,
+): review is PortiaReview {
+  return review.contractVersion === CURRENT_LIFECYCLE_VERSIONS.portiaContract
+}
 
 export interface SurvivorRouteStep {
   readonly ply: number
@@ -221,7 +356,7 @@ export interface SurvivorCandidate {
 }
 
 export const GATE_RECOMMENDATIONS = [
-  'charlotte',
+  'answer',
   'retry_game',
   'retry_field',
   'insufficient_basis',
@@ -390,9 +525,35 @@ export interface LifecycleRun {
   readonly trajectorySeed: string
   readonly retryReason: string | null
   readonly terminalFingerprint: string | null
+  /** Digest of the exact board-derived candidate prompt Portia reviewed. */
+  readonly answerPromptDigest: string | null
+  /**
+   * Exact player-visible input authorized by Portia and the Gate for Answer.
+   * Provider/system instructions and credentials are intentionally excluded.
+   */
+  readonly answerUserPrompt: string | null
+  /** SHA-256 of the exact UTF-8 bytes in answerUserPrompt. */
+  readonly answerUserPromptSha256: string | null
   readonly survivors: readonly SurvivorCandidate[]
-  readonly portia: PortiaReview | null
+  /** Exact provider request allowed to advance this resumable Portia review. */
+  readonly portiaActiveModelRequestId: string | null
+  /** Provider-started Portia attempts that settled without a usable review. */
+  readonly portiaFailedAttemptCount: number
+  /** Persisted operational ceiling for this run (currently three). */
+  readonly portiaFailureLimit: number
+  readonly portiaProgress: {
+    readonly currentCandidateId: string | null
+    readonly completedCandidateIds: readonly string[]
+    readonly completedAssessments: readonly PortiaCandidateAssessment[]
+  }
+  readonly portia: PersistedPortiaReview | null
   readonly gate: GateResult | null
+  /** Exact provider request allowed to advance this Charlotte qualification. */
+  readonly charlotteActiveModelRequestId: string | null
+  /** Provider-started Charlotte attempts that settled without a usable result. */
+  readonly charlotteFailedAttemptCount: number
+  /** Persisted operational ceiling for this run (currently three). */
+  readonly charlotteFailureLimit: number
   readonly charlotte: CharlotteResult | null
   readonly charlotteRenderedAnswer: string | null
   readonly wilburActions: readonly WilburAction[]
@@ -420,4 +581,6 @@ export interface LifecycleActivity {
 
 export interface LifecycleAggregate extends LifecycleRun {
   readonly activities: readonly LifecycleActivity[]
+  /** Player-visible research embedded within one of the seven lifecycle stages. */
+  readonly research: readonly ResearchRecord[]
 }

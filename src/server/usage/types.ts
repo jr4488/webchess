@@ -171,6 +171,8 @@ export interface GetLatestModelRequestForGameInput {
   readonly userId: string
   readonly gameId: string
   readonly operation: ModelOperation
+  readonly requestSha256?: string
+  readonly promptVersion?: string
 }
 
 export type GetModelRequestResultResult =
@@ -182,6 +184,8 @@ export type GetModelRequestResultResult =
       readonly requestId: string
       readonly gameId: string | null
       readonly operation: ModelOperation
+      readonly requestSha256?: string
+      readonly promptVersion?: string
       readonly status: ModelRequestStatus
       readonly resultPayload: ModelResultPayload | null
     }
@@ -259,7 +263,7 @@ interface SettleModelRequestBase {
 export interface SettleModelRequestSuccess extends SettleModelRequestBase {
   readonly outcome: 'succeeded'
   readonly usage: ProviderTokenUsage
-  readonly providerResponseId: string
+  readonly providerResponseId?: string
   readonly responseSha256: string
   readonly resultPayload: ModelResultPayload
 }

@@ -64,6 +64,8 @@ export type {
 } from './rows'
 
 export { createNeonSqlAdapter, getDatabase } from './sql'
+export { createPostgresSqlAdapter } from './postgres'
+export type { PostgresSqlAdapter } from './postgres'
 export type {
   SqlAdapter,
   SqlResult,

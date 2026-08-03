@@ -16,10 +16,11 @@ import {
   toGameView,
 } from '../../lib/game-replay'
 import { composeProblemParts } from '../../lib/division'
-import type {
-  GeneratedAnswer,
-  ProblemFacet,
-  ProblemPart,
+import {
+  MAX_PERSISTED_MODEL_PROMPT_CHARS,
+  type GeneratedAnswer,
+  type ProblemFacet,
+  type ProblemPart,
 } from '../../types'
 import {
   gameEventRowSchema,
@@ -100,7 +101,7 @@ const partsSchema = z
 const answerSchema = z.object({
   answer: z.string().trim().min(1).max(100_000),
   model: z.string().trim().min(1).max(120),
-  prompt: z.string().trim().min(1).max(200_000),
+  prompt: z.string().trim().min(1).max(MAX_PERSISTED_MODEL_PROMPT_CHARS),
 })
 
 const SELECT_GAME_COLUMNS = `

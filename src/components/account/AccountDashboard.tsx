@@ -14,7 +14,7 @@ const USER_PROFILE_APPEARANCE = {
   },
 } as const
 
-type IdentityMode = 'clerk' | 'local-e2e'
+type IdentityMode = 'clerk' | 'local-e2e' | 'local-openclaw'
 
 interface AccountDashboardProps {
   identityMode: IdentityMode
@@ -344,19 +344,21 @@ function DataExport() {
   )
 }
 
-function LocalIdentityNotice() {
+function LocalIdentityNotice({ openClaw }: Readonly<{ openClaw: boolean }>) {
   return (
     <section className={styles.card} aria-labelledby="fixture-title">
       <div className={styles.cardHeading}>
         <div>
           <p className={styles.sectionNumber}>03</p>
-          <h2 id="fixture-title">Local test identity</h2>
+          <h2 id="fixture-title">
+            {openClaw ? 'Local OpenClaw identity' : 'Local test identity'}
+          </h2>
         </div>
       </div>
       <p className={styles.bodyCopy}>
-        This session uses WebChess&apos;s test-only local identity. Clerk profile,
-        passkey, sign-out, and account-deletion controls are available only when
-        Clerk is configured.
+        {openClaw
+          ? 'This installation keeps its WebChess data in the dedicated local OpenClaw database. Hosted profile, passkey, sign-out, and account-deletion controls are not used in this mode.'
+          : 'This session uses WebChess\'s test-only local identity. Clerk profile, passkey, sign-out, and account-deletion controls are available only when Clerk is configured.'}
       </p>
     </section>
   )
@@ -560,7 +562,7 @@ export function AccountDashboard({ identityMode }: AccountDashboardProps) {
           <DeleteAccount />
         </>
       ) : (
-        <LocalIdentityNotice />
+        <LocalIdentityNotice openClaw={identityMode === 'local-openclaw'} />
       )}
     </div>
   )

@@ -1504,6 +1504,8 @@ SELECT
   requests.id::text AS request_id,
   requests.game_id::text AS game_id,
   requests.operation,
+  requests.request_sha256,
+  requests.prompt_version,
   requests.status,
   requests.result_payload
 FROM model_requests AS requests
@@ -1526,6 +1528,8 @@ SELECT
   requests.id::text AS request_id,
   requests.game_id::text AS game_id,
   requests.operation,
+  requests.request_sha256,
+  requests.prompt_version,
   requests.status,
   requests.result_payload
 FROM model_requests AS requests
@@ -1549,6 +1553,8 @@ SELECT
   requests.id::text AS request_id,
   requests.game_id::text AS game_id,
   requests.operation,
+  requests.request_sha256,
+  requests.prompt_version,
   requests.status,
   requests.result_payload
 FROM model_requests AS requests
@@ -1559,6 +1565,8 @@ WHERE
   requests.game_id = $1::uuid
   AND requests.clerk_user_id = $2::text
   AND requests.operation = $3::text
+  AND ($4::text IS NULL OR requests.request_sha256 = $4::char(64))
+  AND ($5::text IS NULL OR requests.prompt_version = $5::text)
 ORDER BY requests.created_at DESC, requests.id DESC
 LIMIT 1
 `
@@ -1568,7 +1576,13 @@ export function buildGetLatestModelRequestForGameStatement(
 ): SqlStatement {
   return {
     text: getLatestModelRequestForGameSql,
-    values: [input.gameId, input.userId, input.operation],
+    values: [
+      input.gameId,
+      input.userId,
+      input.operation,
+      input.requestSha256 ?? null,
+      input.promptVersion ?? null,
+    ],
   }
 }
 
@@ -1577,6 +1591,8 @@ SELECT
   requests.id::text AS request_id,
   requests.game_id::text AS game_id,
   requests.operation,
+  requests.request_sha256,
+  requests.prompt_version,
   requests.status,
   requests.result_payload
 FROM model_requests AS requests
@@ -1587,6 +1603,8 @@ WHERE
   requests.game_id = $1::uuid
   AND requests.clerk_user_id = $2::text
   AND requests.operation = $3::text
+  AND ($4::text IS NULL OR requests.request_sha256 = $4::char(64))
+  AND ($5::text IS NULL OR requests.prompt_version = $5::text)
   AND requests.status = 'succeeded'
 ORDER BY requests.completed_at DESC, requests.id DESC
 LIMIT 1
@@ -1597,7 +1615,13 @@ export function buildGetSucceededModelResultForGameStatement(
 ): SqlStatement {
   return {
     text: getSucceededModelResultForGameSql,
-    values: [input.gameId, input.userId, input.operation],
+    values: [
+      input.gameId,
+      input.userId,
+      input.operation,
+      input.requestSha256 ?? null,
+      input.promptVersion ?? null,
+    ],
   }
 }
 
@@ -1897,11 +1921,11 @@ start_request AS (
   UPDATE model_requests AS requests
   SET
     status = 'in_progress',
-    provider_started_at = $4::timestamptz,
+    provider_started_at = coalesce(provider_started_at, $4::timestamptz),
     updated_at = $4::timestamptz
   FROM request_state, decision
   WHERE
-    decision.code = 'ALLOW'
+    decision.code IN ('ALLOW', 'ALREADY_STARTED')
     AND requests.id = request_state.id
   RETURNING requests.id
 ),

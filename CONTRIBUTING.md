@@ -29,6 +29,7 @@ Run:
 
 ```bash
 npm ci
+npm run verify:openclaw
 npm run lint
 npm run typecheck
 npm run test
@@ -41,6 +42,10 @@ npm run test:a11y
 npm run test:e2e
 npm run test:links
 ```
+
+`verify:openclaw` is the source, plugin, UI, and browser gate for the local
+runtime. The separate integration command exercises the disposable PostgreSQL
+database used to validate both hosted and local durable lifecycle behavior.
 
 Changes to circular movement, replay, ending precedence, model prompts,
 structured schemas, authentication, ownership, quota accounting, rate limits,

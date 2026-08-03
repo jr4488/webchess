@@ -13,6 +13,7 @@ const downloadDirectory = join(repositoryRoot, 'public', 'downloads')
 const sourcePaths = {
   installation: join(repositoryRoot, 'INSTALL.md'),
   license: join(repositoryRoot, 'LICENSE'),
+  package: join(repositoryRoot, 'package.json'),
   whitePaper: join(repositoryRoot, 'docs', 'WEBCHESS_WHITE_PAPER_V2.md'),
 }
 
@@ -489,7 +490,7 @@ function textCommand({ color = 0, font, size, text, x, y }) {
   return `${color} g BT /${font} ${size} Tf 1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm (${pdfString(text)}) Tj ET`
 }
 
-function paginateWhitePaper(markdown) {
+function paginateWhitePaper(markdown, softwareVersion) {
   const pageWidth = 595.28
   const pageHeight = 841.89
   const marginX = 54
@@ -591,7 +592,7 @@ function paginateWhitePaper(markdown) {
       color: 0.4,
       font: 'F1',
       size: 7.5,
-      text: `WebChess 2.0.0 | Page ${index + 1} of ${pages.length}`,
+      text: `WebChess ${softwareVersion} | Page ${index + 1} of ${pages.length}`,
       x: marginX,
       y: 28,
     })
@@ -600,8 +601,8 @@ function paginateWhitePaper(markdown) {
   return { pageHeight, pageWidth, pages }
 }
 
-function createPdf(markdown) {
-  const { pageHeight, pageWidth, pages } = paginateWhitePaper(markdown)
+function createPdf(markdown, softwareVersion) {
+  const { pageHeight, pageWidth, pages } = paginateWhitePaper(markdown, softwareVersion)
   const objects = new Map()
   const pageObjectIds = []
   const firstPageObjectId = 6
@@ -690,18 +691,25 @@ function createPdf(markdown) {
 }
 
 async function main() {
-  const [installation, license, whitePaper] = await Promise.all([
+  const [installation, license, packageSource, whitePaper] = await Promise.all([
     readFile(sourcePaths.installation, 'utf8'),
     readFile(sourcePaths.license, 'utf8'),
+    readFile(sourcePaths.package, 'utf8'),
     readFile(sourcePaths.whitePaper, 'utf8'),
   ])
 
   assertDocument('INSTALL.md', installation)
   assertDocument('LICENSE', license)
+  assertDocument('package.json', packageSource)
   assertDocument('docs/WEBCHESS_WHITE_PAPER_V2.md', whitePaper)
 
+  const softwareVersion = JSON.parse(packageSource).version
+  if (typeof softwareVersion !== 'string' || !/^\d+\.\d+\.\d+$/u.test(softwareVersion)) {
+    throw new Error('package.json must provide a semantic software version')
+  }
+
   const whitePaperHtml = renderWhitePaperHtml(whitePaper)
-  const whitePaperPdf = createPdf(whitePaper)
+  const whitePaperPdf = createPdf(whitePaper, softwareVersion)
 
   await mkdir(downloadDirectory, { recursive: true })
   await Promise.all([

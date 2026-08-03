@@ -53,9 +53,17 @@ function assessment(
   candidateId: string,
   overrides: Partial<PortiaCandidateAssessment> = {},
 ): PortiaCandidateAssessment {
+  const disposition = overrides.disposition ?? 'preserved'
+  const attackOutcome = disposition === 'preserved'
+    ? 'passed'
+    : disposition === 'wounded'
+      ? 'qualified'
+      : disposition === 'unresolved'
+        ? 'unresolved'
+        : 'failed'
   return {
     candidateId,
-    disposition: 'preserved',
+    disposition,
     survivingInterpretation: `A bounded interpretation for ${candidateId}.`,
     requiredQualification: null,
     redundancyClusterId: null,
@@ -65,10 +73,13 @@ function assessment(
     reversalCondition: 'A measured contradiction would require reversal.',
     attackFindings: PORTIA_ATTACK_TYPES.map((attackType) => ({
       attackType,
-      severity: 'moderate',
+      outcome: attackOutcome,
+      severity: disposition === 'preserved' ? 'low' : 'moderate',
       finding: `The ${attackType} attack identifies a bounded concern.`,
       consequence: 'The recommendation must preserve uncertainty.',
-      requiredRevision: 'State the assumption and test it before scaling.',
+      requiredRevision: disposition === 'preserved'
+        ? null
+        : 'State the assumption and test it before scaling.',
     })),
     ...overrides,
   }
@@ -80,6 +91,10 @@ function review(
 ): PortiaReview {
   return {
     contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    reviewedAnswerPromptDigest: 'a'.repeat(64),
+    promptDecision: 'permit',
+    promptDecisionRationale:
+      'The reviewed board-derived prompt is reasonable under the stated qualifications.',
     runSummary: 'Portia attacked every terminal survivor without treating survival as proof.',
     assessments: [...assessments],
     crossCandidateContradictions: [],
@@ -112,6 +127,30 @@ describe('lifecycle state machine', () => {
     expect(() =>
       assertLifecycleTransition('abandoned', 'anansi_pending'),
     ).toThrow(LifecycleTransitionError)
+  })
+})
+
+describe('terminal ecology fingerprints', () => {
+  it('ignores retry identities while preserving meaningful ecology changes', () => {
+    const first = candidate('attempt-one:white-rook')
+    const sameEcology = {
+      ...first,
+      candidateId: 'attempt-two:white-rook',
+      terminalGameId: '00000000-0000-4000-8000-000000000099',
+      attemptId: '00000000-0000-4000-8000-000000000098',
+      sourceDigest: 'b'.repeat(64),
+    }
+    const changedEcology = {
+      ...sameEcology,
+      attackedPlies: [12],
+    }
+
+    expect(terminalFingerprint([sameEcology])).toBe(
+      terminalFingerprint([first]),
+    )
+    expect(terminalFingerprint([changedEcology])).not.toBe(
+      terminalFingerprint([first]),
+    )
   })
 })
 
@@ -173,6 +212,10 @@ describe('Portia validation', () => {
       candidateIds: survivors.map((item) => item.candidateId),
       explanation: 'Both candidates depend on the same underlying claim and evidence source.',
     }
+    const clusteredAssessments = validAssessments.map((item) => ({
+      ...item,
+      redundancyClusterId: cluster.id,
+    }))
     const contradiction = {
       id: 'contradiction-1',
       candidateIds: survivors.map((item) => item.candidateId),
@@ -182,16 +225,16 @@ describe('Portia validation', () => {
       addressed: true,
     }
 
-    expect(() => validatePortiaReview(review(validAssessments, {
+    expect(() => validatePortiaReview(review(clusteredAssessments, {
       redundancyClusters: [cluster, { ...cluster }],
     }), survivors)).toThrow(/duplicate redundancy cluster/u)
-    expect(() => validatePortiaReview(review(validAssessments, {
+    expect(() => validatePortiaReview(review(clusteredAssessments, {
       redundancyClusters: [{
         ...cluster,
         candidateIds: [survivors[0].candidateId, survivors[0].candidateId],
       }],
     }), survivors)).toThrow(/repeats a candidate/u)
-    expect(() => validatePortiaReview(review(validAssessments, {
+    expect(() => validatePortiaReview(review(clusteredAssessments, {
       redundancyClusters: [{
         ...cluster,
         candidateIds: [survivors[0].candidateId, 'attempt:unknown'],
@@ -249,11 +292,43 @@ describe('Portia validation', () => {
 
 describe('deterministic Gate', () => {
   const ids = ['a', 'b', 'c', 'd'].map((id) => `attempt:${id}`)
+  const requiredPromptRevision =
+    'State the evidence threshold explicitly before recommending expansion.'
   const covered = [
     assessment(ids[0], { coverageTags: ['protected_outcome'] }),
     assessment(ids[1], { coverageTags: ['evidence_or_reality'] }),
     assessment(ids[2], { coverageTags: ['risk_or_countercase'] }),
     assessment(ids[3], { coverageTags: ['agency_or_action'] }),
+  ]
+  const qualifiedEvidenceBase = assessment(ids[1], {
+    disposition: 'wounded',
+    requiredQualification:
+      'Use this signal only with the explicit evidence threshold.',
+    coverageTags: ['evidence_or_reality'],
+  })
+  const qualifiedEvidence: PortiaCandidateAssessment = {
+    ...qualifiedEvidenceBase,
+    attackFindings: qualifiedEvidenceBase.attackFindings.map(
+      (finding, index) => index === 0
+        ? {
+            ...finding,
+            outcome: 'qualified' as const,
+            severity: 'moderate' as const,
+            requiredRevision: requiredPromptRevision,
+          }
+        : {
+            ...finding,
+            outcome: 'passed' as const,
+            severity: 'low' as const,
+            requiredRevision: null,
+          },
+    ),
+  }
+  const coveredWithRequiredRevision = [
+    covered[0],
+    qualifiedEvidence,
+    covered[2],
+    covered[3],
   ]
 
   it('passes a smaller independent and sufficiently covered set', () => {
@@ -269,9 +344,48 @@ describe('deterministic Gate', () => {
       passed: true,
       usableCandidateCount: 4,
       independentClusterCount: 4,
-      recommendedNextTransition: 'charlotte',
+      recommendedNextTransition: 'answer',
     })
     expect(result.inputDigest).toMatch(/^[0-9a-f]{64}$/u)
+  })
+
+  it('passes a permitted sufficient review whose usable qualified finding requires a prompt revision', () => {
+    const result = evaluateGate(review(coveredWithRequiredRevision, {
+      promptDecision: 'permit',
+      recommendedGateInputs: {
+        tensionCandidatePairs: [[ids[0], ids[2]]],
+        fatalContradictionIds: [],
+        fieldRepairReasons: [],
+      },
+    }))
+
+    expect(result).toMatchObject({
+      passed: true,
+      woundedCount: 1,
+      severeUnresolvedObjectionCount: 0,
+      missingRequirements: [],
+      recommendedNextTransition: 'answer',
+    })
+  })
+
+  it('fails the same sufficient review without a permit and explains why its revision cannot be applied', () => {
+    const result = evaluateGate(review(coveredWithRequiredRevision, {
+      promptDecision: 'retry_game',
+      promptDecisionRationale:
+        'The required amendment is not authorized for this prompt.',
+      recommendedGateInputs: {
+        tensionCandidatePairs: [[ids[0], ids[2]]],
+        fatalContradictionIds: [],
+        fieldRepairReasons: [],
+      },
+    }))
+
+    expect(result.passed).toBe(false)
+    expect(result.recommendedNextTransition).toBe('retry_game')
+    expect(result.missingRequirements).toEqual([
+      'Portia did not permit the reviewed answer prompt: retry_game.',
+      '1 Portia-required prompt revision cannot be applied without a permit decision.',
+    ])
   })
 
   it('fails a numerically large but redundant set', () => {
@@ -328,7 +442,7 @@ describe('bounded Retry policy', () => {
     assessment('attempt:a', { coverageTags: ['protected_outcome'] }),
   ]))
 
-  it('uses no more than two same-field games and one field regeneration', () => {
+  it('replays a requested game only while the root-wide allowance remains', () => {
     expect(decideRetry({
       gate: failedGate,
       sameFieldRetryCount: 0,
@@ -346,6 +460,59 @@ describe('bounded Retry policy', () => {
     expect(decideRetry({
       gate: failedGate,
       sameFieldRetryCount: 2,
+      fieldRegenerationCount: 1,
+      duplicateTerminalFingerprint: false,
+    }).mode).toBe('insufficient_basis')
+  })
+
+  it('honors a Gate insufficient-basis decision before unused budgets', () => {
+    expect(decideRetry({
+      gate: {
+        ...failedGate,
+        recommendedNextTransition: 'insufficient_basis',
+      },
+      sameFieldRetryCount: 0,
+      fieldRegenerationCount: 0,
+      duplicateTerminalFingerprint: false,
+    })).toMatchObject({
+      mode: 'insufficient_basis',
+      remainingSameFieldRetries: 2,
+      remainingFieldRegenerations: 1,
+    })
+  })
+
+  it('regenerates a requested field only while its allowance remains', () => {
+    const retryFieldGate = {
+      ...failedGate,
+      recommendedNextTransition: 'retry_field' as const,
+    }
+
+    expect(decideRetry({
+      gate: retryFieldGate,
+      sameFieldRetryCount: 0,
+      fieldRegenerationCount: 0,
+      duplicateTerminalFingerprint: false,
+    }).mode).toBe('regenerate_field')
+
+    expect(decideRetry({
+      gate: retryFieldGate,
+      sameFieldRetryCount: 0,
+      fieldRegenerationCount: 1,
+      duplicateTerminalFingerprint: false,
+    }).mode).toBe('insufficient_basis')
+  })
+
+  it('never replays a duplicate terminal ecology', () => {
+    expect(decideRetry({
+      gate: failedGate,
+      sameFieldRetryCount: 0,
+      fieldRegenerationCount: 0,
+      duplicateTerminalFingerprint: true,
+    }).mode).toBe('regenerate_field')
+
+    expect(decideRetry({
+      gate: failedGate,
+      sameFieldRetryCount: 0,
       fieldRegenerationCount: 1,
       duplicateTerminalFingerprint: true,
     }).mode).toBe('insufficient_basis')

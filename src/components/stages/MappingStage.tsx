@@ -155,11 +155,15 @@ export function MappingStage({
                   activity={divisionActivity}
                   modelLabel={divisionModel || provider.model}
                   providerLabel={provider.label}
+                  runtimeKind={provider.kind}
                   summary="Looking across purpose, people, resources, timing, risks, values, evidence, and possibilities before arranging exactly 64 candidate facets."
                   metrics={[
                     { label: 'Facets', value: parts.length === 64 ? '64 ready' : '64 requested' },
                     { label: 'Output', value: 'Strict structure' },
-                    { label: 'Runtime', value: 'Server route' },
+                    {
+                      label: 'Runtime',
+                      value: provider.kind === 'openclaw' ? 'Local route' : 'Server route',
+                    },
                   ]}
                 />
               )}

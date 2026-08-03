@@ -9,11 +9,14 @@ Using a deployed WebChess service means agreeing to these terms and the
 ## What the service is
 
 WebChess is an experimental reflection and problem-framing tool. It generates a
-64-facet field, uses a circular-chess game to expose terminal survivors, asks
-Portia to attack those interpretations, applies a deterministic sufficiency
-Gate and bounded Retry policy, and asks Charlotte for a qualified candidate
-answer and reversible next actions. Wilbur records what the user reports
-happened afterward.
+64-facet field and uses a circular-chess game to produce board-derived weights,
+values, and terminal survivors. Those results become the concrete prompt for a
+possible answer. Portia evaluates that exact prompt before generation, while an
+internal deterministic Gate and bounded Retry policy decide whether it may
+proceed. Only an approved prompt generates an Answer. Charlotte then qualifies
+that exact generated answer and proposes reversible next actions. Wilbur
+records what the user reports happened afterward, and Web retains the resulting
+provenance.
 
 WebChess is not divination, prediction, factual verification, professional
 advice, an emergency service, or an autonomous decision maker. A capture,
@@ -40,11 +43,17 @@ or third-party personal information.
 ## Model output and decisions
 
 AI output can be incomplete, incorrect, biased, inconsistent, or unsafe. A
-Portia survival label or Gate pass is not factual verification. A Wilbur
-observation is user-supplied and is not independently verified. Users
-must independently verify factual claims and use qualified professionals for
-medical, legal, financial, safety, employment, education, housing, insurance,
-credit, or other consequential decisions.
+Portia assessment, Gate pass, generated Answer, or Charlotte qualification is
+not factual verification. A Wilbur observation is user-supplied and is not
+independently verified. Users must independently verify factual claims and use
+qualified professionals for medical, legal, financial, safety, employment,
+education, housing, insurance, credit, or other consequential decisions.
+
+Portia saves completed per-signal checks so technical recovery can resume, but
+it does not run without limit. After three failed provider-started attempts,
+the inquiry ends at `portia_unavailable`; no prompt is approved and no Answer
+or Charlotte qualification is generated. This technical stop is distinct from
+the Gate's semantic `insufficient_basis` result.
 
 Users remain responsible for decisions and actions. WebChess should be used to
 generate questions and tests, not to bypass evidence, consent, law, policy, or
@@ -63,9 +72,9 @@ response size. An oversized synchronous export is refused; WebChess does not
 paginate it or prepare it later. The [support path](../SUPPORT.md) can help
 troubleshoot general behavior but does not promise a custom data handoff or
 response time. Retrying an already-recorded idempotent request does not create
-a new operation, but a model request whose provider outcome cannot be
-determined may become terminally indeterminate and require a new
-user-initiated attempt.
+a new operation. Portia may make a new fenced attempt after a failed or
+indeterminate provider-started request, but the persisted three-attempt limit
+prevents an unbounded automatic cycle.
 
 Limits may change to protect availability, security, and cost. The interface
 should disclose the limits that apply to an authenticated user.

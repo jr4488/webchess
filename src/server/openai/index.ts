@@ -2,6 +2,11 @@ import 'server-only'
 
 export {
   ANSWER_MAX_OUTPUT_TOKENS,
+  buildApprovedBoardAnswerPrompt,
+  buildPlayerVisibleAnswerPrompt,
+  buildBoardAnswerPrompt,
+  buildBoardAnswerPromptPlan,
+  buildBoardAnswerPromptPackage,
   buildWebChessInput,
   buildWebChessInstructions,
   buildWebChessPrompt,
@@ -15,7 +20,11 @@ export {
   WebChessAnswerSchema,
 } from './answer'
 export type {
+  AnswerGenerationInput,
   AnswerResult,
+  ApprovedBoardAnswerInput,
+  BoardAnswerPromptPlan,
+  BoardAnswerPromptPackage,
   ServerDerivedEvidence,
   WebChessAnswerSections,
 } from './answer'
@@ -31,8 +40,10 @@ export {
   DivisionOutputSchema,
   FACET_COUNT,
   generateDivision,
+  normalizeDivisionGenerationInput,
   normalizeDivisionFacets,
   normalizeDivisionProblem,
+  normalizeDivisionRepairContext,
 } from './division'
 export type { DivisionFacet, DivisionResult } from './division'
 
@@ -40,18 +51,27 @@ export {
   buildPortiaInput,
   buildPortiaInstructions,
   buildPortiaPrompt,
+  buildPortiaCandidateInput,
+  buildPortiaSummaryInput,
+  buildPortiaSummaryInstructions,
   generatePortiaReview,
+  mergePortiaAssessments,
+  normalizePortiaInput,
+  orderPortiaCandidates,
+  portiaCandidateModelSchema,
+  portiaSummaryModelSchema,
   PORTIA_MAX_OUTPUT_TOKENS,
 } from './portia'
-export type { PortiaInput } from './portia'
+export type { PortiaInput, PortiaProgress, PortiaRequestContext } from './portia'
 
 export {
   buildCharlotteInput,
   buildCharlotteInstructions,
   buildCharlottePrompt,
+  charlotteGenerationResultSchema,
+  CHARLOTTE_MAX_RENDERED_CHARACTERS,
   CHARLOTTE_MAX_OUTPUT_TOKENS,
-  CHARLOTTE_MAX_WORDS,
-  CHARLOTTE_MIN_WORDS,
+  CHARLOTTE_MAX_SUPPORTING_CANDIDATES,
   countCharlotteWords,
   generateCharlotteSynthesis,
   normalizeCharlotteGeneration,
@@ -84,6 +104,9 @@ export {
   OPENAI_REASONING_EFFORT,
 } from './types'
 export type {
+  DivisionGenerationInput,
+  DivisionRepairContext,
+  DivisionRepairRequest,
   ModelGeneration,
   ModelRequestContext,
   NormalizedModelUsage,

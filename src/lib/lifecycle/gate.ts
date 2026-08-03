@@ -10,7 +10,7 @@ import { COVERAGE_TAGS } from './contracts'
 import { CURRENT_LIFECYCLE_VERSIONS } from './versions'
 
 export const GATE_THRESHOLDS = Object.freeze({
-  minimumUsableCandidates: 4,
+  minimumUsableCandidates: 3,
   minimumIndependentClusters: 3,
   requiredCoverage: [
     'protected_outcome',
@@ -45,6 +45,26 @@ function nextRecommendation(
       : 'insufficient_basis'
   }
   return 'retry_game'
+}
+
+function promptRecommendation(
+  review: PortiaReview,
+  context: GateRetryContext,
+  duplicateHeavy: boolean,
+): GateRecommendation {
+  if (review.promptDecision === 'deny') return 'insufficient_basis'
+  if (review.promptDecision === 'retry_field') {
+    return context.fieldRegenerationCount < 1
+      ? 'retry_field'
+      : 'insufficient_basis'
+  }
+  if (review.promptDecision === 'retry_game') {
+    if (context.sameFieldRetryCount < 2) return 'retry_game'
+    return context.fieldRegenerationCount < 1
+      ? 'retry_field'
+      : 'insufficient_basis'
+  }
+  return nextRecommendation(review, context, duplicateHeavy)
 }
 
 export function evaluateGate(
@@ -102,12 +122,27 @@ export function evaluateGate(
         contradiction.severity === 'fatal' && !contradiction.addressed,
     )
     .map((contradiction) => contradiction.id)
-  const severeUnresolvedObjectionCount = assessments.reduce(
+  const severeOrFatalUnaddressedIds = review.crossCandidateContradictions
+    .filter(
+      (contradiction) =>
+        (contradiction.severity === 'severe' ||
+          contradiction.severity === 'fatal') &&
+        !contradiction.addressed,
+    )
+    .map((contradiction) => contradiction.id)
+  const severeUnresolvedObjectionCount = usable.reduce(
     (count, assessment) =>
       count + assessment.attackFindings.filter(
         (finding) =>
           (finding.severity === 'severe' || finding.severity === 'fatal') &&
-          finding.requiredRevision === null,
+          (finding.outcome === 'failed' || finding.outcome === 'unresolved'),
+      ).length,
+    0,
+  )
+  const usableRevisionCount = usable.reduce(
+    (count, assessment) =>
+      count + assessment.attackFindings.filter(
+        (finding) => finding.requiredRevision !== null,
       ).length,
     0,
   )
@@ -124,6 +159,11 @@ export function evaluateGate(
     })
 
   const missingRequirements: string[] = []
+  if (review.promptDecision !== 'permit') {
+    missingRequirements.push(
+      `Portia did not permit the reviewed answer prompt: ${review.promptDecision}.`,
+    )
+  }
   if (usable.length < GATE_THRESHOLDS.minimumUsableCandidates) {
     missingRequirements.push(
       `At least ${GATE_THRESHOLDS.minimumUsableCandidates} preserved or wounded candidates are required.`,
@@ -144,8 +184,29 @@ export function evaluateGate(
       'At least one explicit tension between independent usable candidates is required.',
     )
   }
-  if (fatalUnaddressedIds.length > 0) {
-    missingRequirements.push('An unaddressed fatal contradiction remains.')
+  if (severeOrFatalUnaddressedIds.length > 0) {
+    missingRequirements.push(
+      `${severeOrFatalUnaddressedIds.length} unaddressed severe or fatal contradiction${severeOrFatalUnaddressedIds.length === 1 ? ' remains' : 's remain'}.`,
+    )
+  }
+  if (severeUnresolvedObjectionCount > 0) {
+    missingRequirements.push(
+      `${severeUnresolvedObjectionCount} severe or fatal Portia finding${severeUnresolvedObjectionCount === 1 ? '' : 's'} remain without a required revision.`,
+    )
+  }
+  // A permit decision authorizes the answer stage to append Portia's exact
+  // required revisions to the reviewed board prompt. They therefore become
+  // trusted prompt amendments, not permanently "unapplied" defects. A retry
+  // or deny decision never authorizes those amendments and remains blocked.
+  if (usableRevisionCount > 0 && review.promptDecision !== 'permit') {
+    missingRequirements.push(
+      `${usableRevisionCount} Portia-required prompt revision${usableRevisionCount === 1 ? ' cannot' : 's cannot'} be applied without a permit decision.`,
+    )
+  }
+  if (review.recommendedGateInputs.fieldRepairReasons.length > 0) {
+    missingRequirements.push(
+      'Portia identified field-level defects that require regeneration before an answer can be generated.',
+    )
   }
   for (const wounded of usable.filter(
     (assessment) => assessment.disposition === 'wounded',
@@ -161,10 +222,10 @@ export function evaluateGate(
   const duplicateHeavy = usable.length > 0 &&
     independentClusterCount / usable.length < 0.6
   const recommendedNextTransition = passed
-    ? 'charlotte'
-    : nextRecommendation(review, context, duplicateHeavy)
+    ? 'answer'
+    : promptRecommendation(review, context, duplicateHeavy)
   const explanation = passed
-    ? `The Gate passed with ${usable.length} usable candidates across ${independentClusterCount} independent clusters and all required coverage floors.`
+    ? `Portia's candidate prompt is permitted: ${usable.length} usable candidates remain across ${independentClusterCount} independent clusters and all required coverage floors.`
     : `The Gate failed ${missingRequirements.length} sufficiency requirement${missingRequirements.length === 1 ? '' : 's'}; ${recommendedNextTransition === 'retry_game' ? 'another trajectory is recommended' : recommendedNextTransition === 'retry_field' ? 'the semantic field should be regenerated' : 'the bounded retry policy is exhausted'}.`
 
   return {
@@ -190,6 +251,9 @@ export function evaluateGate(
       assessments,
       contradictions: review.crossCandidateContradictions,
       gateInputs: review.recommendedGateInputs,
+      missingCoverage: review.missingCoverage,
+      promptDecision: review.promptDecision,
+      reviewedAnswerPromptDigest: review.reviewedAnswerPromptDigest,
       context,
       thresholds: GATE_THRESHOLDS,
     }),

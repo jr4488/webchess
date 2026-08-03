@@ -149,9 +149,16 @@ export function terminalFingerprint(
     [...candidates]
       .map((candidate) => ({
         pieceId: candidate.pieceId,
+        side: candidate.side,
+        pieceKind: candidate.pieceKind,
+        originalPieceKind: candidate.originalPieceKind,
         finalCoordinate: candidate.finalCoordinate,
-        facetId: candidate.facet.id,
-        sourceDigest: candidate.sourceDigest,
+        facet: candidate.facet,
+        route: candidate.route,
+        capturesMade: candidate.capturesMade,
+        attackedPlies: candidate.attackedPlies,
+        moveCount: candidate.moveCount,
+        promoted: candidate.promoted,
       }))
       .sort((left, right) => left.pieceId.localeCompare(right.pieceId)),
   )
