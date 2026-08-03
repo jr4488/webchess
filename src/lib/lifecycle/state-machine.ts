@@ -22,7 +22,9 @@ const TRANSITIONS: Readonly<Record<LifecycleState, ReadonlySet<LifecycleState>>>
   wilbur_planning: new Set(['wilbur_in_progress', 'wilbur_observed', 'abandoned']),
   wilbur_in_progress: new Set(['wilbur_observed', 'abandoned']),
   wilbur_observed: new Set(['wilbur_in_progress', 'abandoned']),
-  insufficient_basis: new Set(['abandoned']),
+  // A versioned Gate correction may reopen only the bounded Retry path; the
+  // service still verifies that an unused repair allowance actually exists.
+  insufficient_basis: new Set(['retry_ready', 'abandoned']),
   abandoned: new Set(),
 }
 

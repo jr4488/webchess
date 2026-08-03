@@ -320,7 +320,11 @@ describe('OpenClaw process and response boundary', () => {
   it('uses execFile arguments with no shell and force-terminates timed-out work', async () => {
     vi.useFakeTimers()
     let callback:
-      | ((error: ExecFileException | null, stdout: string) => void)
+      | ((
+        error: ExecFileException | null,
+        stdout: string,
+        stderr: string,
+      ) => void)
       | undefined
     const kill = vi.fn(() => true)
     const invoke: ExecFileInvoker = vi.fn((_file, _args, options, next) => {
@@ -344,6 +348,7 @@ describe('OpenClaw process and response boundary', () => {
         killed: true,
         signal: 'SIGTERM',
       }) as ExecFileException,
+      '',
       '',
     )
     await rejection
@@ -373,6 +378,7 @@ describe('OpenClaw process and response boundary', () => {
         queueMicrotask(() => next(
           testCase.error as ExecFileException,
           '',
+          '',
         ))
         return { kill: vi.fn(() => true) }
       })
@@ -385,9 +391,27 @@ describe('OpenClaw process and response boundary', () => {
     }
   })
 
+  it('classifies OpenClaw hosted-search aborts as timeouts without exposing stderr', async () => {
+    const invoke: ExecFileInvoker = vi.fn((_file, _args, _options, next) => {
+      queueMicrotask(() => next(
+        Object.assign(new Error('private process details'), { code: 1 }),
+        '',
+        'Error: codex app-server hosted search turn aborted',
+      ))
+      return { kill: vi.fn(() => true) }
+    })
+
+    const pending = createOpenClawExecutor(invoke)(
+      ['infer', 'web', 'search'],
+      config(),
+    )
+    await expect(pending).rejects.toMatchObject({ kind: 'timeout' })
+    await expect(pending).rejects.not.toThrow(/private process details/u)
+  })
+
   it('resolves successful execFile output and supports the explicit gateway transport', async () => {
     const invoke: ExecFileInvoker = vi.fn((_file, _args, _options, next) => {
-      queueMicrotask(() => next(null, 'successful output'))
+      queueMicrotask(() => next(null, 'successful output', ''))
       return { kill: vi.fn(() => true) }
     })
     await expect(createOpenClawExecutor(invoke)(

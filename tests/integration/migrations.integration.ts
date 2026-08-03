@@ -32,6 +32,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         '0008_visible_research_broker',
         '0009_expand_research_timeout_ceiling',
         '0010_player_visible_answer_prompt',
+        '0011_extend_research_timeout_ceiling',
       ],
       alreadyApplied: [],
     })
@@ -48,6 +49,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         '0008_visible_research_broker',
         '0009_expand_research_timeout_ceiling',
         '0010_player_visible_answer_prompt',
+        '0011_extend_research_timeout_ceiling',
       ],
     })
 
@@ -192,12 +194,94 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
     }
   })
 
+  it('extends the research broker envelope beyond the provider search window', async () => {
+    const upgrade = await createPostgresTestDatabase(
+      'research_timeout_envelope_upgrade',
+    )
+    try {
+      const envelopeMigrationIndex = durableWebChessMigrations.findIndex(
+        (migration) => migration.id === '0011_extend_research_timeout_ceiling',
+      )
+      const priorMigrations = durableWebChessMigrations.slice(
+        0,
+        envelopeMigrationIndex,
+      )
+      await runMigrations(upgrade.adapter, priorMigrations)
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO user_controls (clerk_user_id)
+          VALUES ('user_research_timeout_envelope_upgrade')
+        `,
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO games (
+            id, clerk_user_id, status, problem, problem_sha256,
+            event_version, rules_version, engine_version, cast_version,
+            software_version
+          )
+          VALUES (
+            '65000000-0000-4000-8000-000000000011',
+            'user_research_timeout_envelope_upgrade', 'dividing',
+            'Which current facts need a complete bounded research envelope?',
+            repeat('b', 64), 1, 'rules-test', 'engine-test',
+            'cast-test', 'software-test'
+          )
+        `,
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO research_requests (
+            id, clerk_user_id, game_id, stage, policy_version,
+            reason, status, result_limit, source_limit, timeout_ms,
+            synthesis_character_limit, completed_at
+          )
+          VALUES (
+            '65000000-0000-4000-8000-000000000012',
+            'user_research_timeout_envelope_upgrade',
+            '65000000-0000-4000-8000-000000000011',
+            'portia', 'research-policy-envelope-upgrade-test',
+            'No search is needed for this migration fixture.',
+            'not_needed', 5, 5, 120000, 12000, now()
+          )
+        `,
+      })
+
+      await expect(runMigrations(
+        upgrade.adapter,
+        durableWebChessMigrations,
+      )).resolves.toEqual({
+        applied: ['0011_extend_research_timeout_ceiling'],
+        alreadyApplied: priorMigrations.map((migration) => migration.id),
+      })
+
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE research_requests
+          SET timeout_ms = 150000
+          WHERE id = '65000000-0000-4000-8000-000000000012'
+        `,
+      })).resolves.toMatchObject({ rowCount: 1 })
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE research_requests
+          SET timeout_ms = 150001
+          WHERE id = '65000000-0000-4000-8000-000000000012'
+        `,
+      })).rejects.toMatchObject({
+        constraint: 'research_requests_timeout_valid',
+      })
+    } finally {
+      await upgrade.dispose()
+    }
+  })
+
   it('refreshes only unfinished Charlotte-capable runs while preserving terminal histories and artifacts', async () => {
     const upgrade = await createPostgresTestDatabase('charlotte_upgrade')
     try {
       await runMigrations(
         upgrade.adapter,
-        durableWebChessMigrations.slice(0, -4),
+        durableWebChessMigrations.slice(0, -5),
       )
       const owner = 'user_charlotte_migration_upgrade'
       await upgrade.adapter.query({
@@ -312,9 +396,10 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
           '0008_visible_research_broker',
           '0009_expand_research_timeout_ceiling',
           '0010_player_visible_answer_prompt',
+          '0011_extend_research_timeout_ceiling',
         ],
         alreadyApplied: durableWebChessMigrations
-          .slice(0, -4)
+          .slice(0, -5)
           .map((migration) => migration.id),
       })
 

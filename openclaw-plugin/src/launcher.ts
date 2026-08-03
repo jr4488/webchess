@@ -270,6 +270,8 @@ export function buildNextLaunchSpec(
       environment,
       installationRoot,
     ),
+    WEBCHESS_OPENCLAW_TIMEOUT_MS:
+      environment.WEBCHESS_OPENCLAW_TIMEOUT_MS ?? '150000',
     WEBCHESS_OPENCLAW_TRANSPORT: 'local',
   })
   return {

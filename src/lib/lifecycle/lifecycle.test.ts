@@ -13,7 +13,7 @@ import { PORTIA_ATTACK_TYPES } from './contracts'
 import { validateCharlotteResult } from './charlotte'
 import { evaluateGate } from './gate'
 import { validatePortiaReview } from './portia'
-import { decideRetry } from './retry'
+import { canReopenInsufficientBasis, decideRetry } from './retry'
 import {
   assertLifecycleTransition,
   canTransitionLifecycle,
@@ -127,6 +127,11 @@ describe('lifecycle state machine', () => {
     expect(() =>
       assertLifecycleTransition('abandoned', 'anansi_pending'),
     ).toThrow(LifecycleTransitionError)
+  })
+
+  it('allows only the bounded Retry path to reopen a corrected insufficient-basis stop', () => {
+    expect(canTransitionLifecycle('insufficient_basis', 'retry_ready')).toBe(true)
+    expect(canTransitionLifecycle('insufficient_basis', 'chess_ready')).toBe(false)
   })
 })
 
@@ -386,6 +391,58 @@ describe('deterministic Gate', () => {
       'Portia did not permit the reviewed answer prompt: retry_game.',
       '1 Portia-required prompt revision cannot be applied without a permit decision.',
     ])
+  })
+
+  it('uses the bounded field repair before treating a Portia denial as terminal', () => {
+    const denied = review(covered, {
+      promptDecision: 'deny',
+      promptDecisionRationale:
+        'The current evidence needs a refreshed, better-scoped semantic field.',
+      recommendedGateInputs: {
+        tensionCandidatePairs: [[ids[0], ids[2]]],
+        fatalContradictionIds: [],
+        fieldRepairReasons: [
+          'Clarify the conflict scope and preserve attributed uncertainty.',
+        ],
+      },
+    })
+
+    expect(evaluateGate(denied, {
+      sameFieldRetryCount: 0,
+      fieldRegenerationCount: 0,
+    }).recommendedNextTransition).toBe('retry_field')
+    expect(evaluateGate(denied, {
+      sameFieldRetryCount: 0,
+      fieldRegenerationCount: 1,
+    }).recommendedNextTransition).toBe('insufficient_basis')
+  })
+
+  it('reopens only a prompt-bound terminal run with its field repair unused', () => {
+    const denied = review(covered, {
+      promptDecision: 'deny',
+      promptDecisionRationale:
+        'The current evidence needs one bounded repair before generation.',
+    })
+    const gate = {
+      ...evaluateGate(denied, {
+        sameFieldRetryCount: 0,
+        fieldRegenerationCount: 1,
+      }),
+      recommendedNextTransition: 'insufficient_basis' as const,
+    }
+
+    expect(canReopenInsufficientBasis({
+      state: 'insufficient_basis',
+      gate,
+      portia: denied,
+      fieldRegenerationCount: 0,
+    })).toBe(true)
+    expect(canReopenInsufficientBasis({
+      state: 'insufficient_basis',
+      gate,
+      portia: denied,
+      fieldRegenerationCount: 1,
+    })).toBe(false)
   })
 
   it('fails a numerically large but redundant set', () => {

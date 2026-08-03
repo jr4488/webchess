@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import {
   CURRENT_LIFECYCLE_VERSIONS,
   assertLifecycleTransition,
+  canReopenInsufficientBasis,
   charlotteResultSchema,
   legacyPortiaReviewSchema,
   portiaCandidateAssessmentSchema,
@@ -1745,6 +1746,24 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     let parent = await this.getForGame(owner, parentGameId)
     if (!parent) {
       throw new LifecycleRepositoryError('not-found', 'Parent lifecycle run not found.')
+    }
+    if (parent.state === 'insufficient_basis') {
+      if (!canReopenInsufficientBasis(parent)) {
+        throw new LifecycleRepositoryError(
+          'invalid-state',
+          'The saved conclusion has no bounded repair path remaining.',
+        )
+      }
+      parent = await this.transition({
+        ownerId: owner,
+        gameId: parentGameId,
+        expectedRevision: parent.revision,
+        to: 'retry_ready',
+        stage: 'retry',
+        activityType: 'bounded_repair_reopened',
+        responsibleAgentIds: ['gate', 'retry-policy'],
+        configurationDigest: input.configurationDigest,
+      })
     }
     if (parent.state === 'gate_failed') {
       parent = await this.transition({

@@ -878,7 +878,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
       lifecycle.state === 'portia_running' ||
       lifecycle.state === 'portia_complete'
     const answerState =
-      lifecycle.state === 'gate_passed' && game.status !== 'answered'
+      lifecycle.state === 'gate_passed' && game.status === 'completed'
     const charlotteState =
       (lifecycle.state === 'gate_passed' && game.status === 'answered') ||
       lifecycle.state === 'charlotte_pending' ||
@@ -954,8 +954,19 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
         }
       }
 
-      void advance().catch((error: unknown) => {
+      void advance().catch(async (error: unknown) => {
         if (controller.signal.aborted) return
+        if (
+          answerState &&
+          isWebChessApiError(error) &&
+          error.kind === 'http-error' &&
+          (error.status === 502 || error.status === 504)
+        ) {
+          answerIntentRef.current = null
+          lifecycleBackoffMsRef.current = 0
+          await restoreCurrentGame({ silent: true })
+          return
+        }
         const recoverable = isWebChessApiError(error) && (
           error.kind === 'conflict' ||
           error.kind === 'rate-limited' ||
@@ -1004,7 +1015,32 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     outcome,
     runtime.api,
     stage,
+    restoreCurrentGame,
   ])
+
+  useEffect(() => {
+    if (
+      stage !== 'reading' ||
+      lifecycleMode !== 'v2' ||
+      lifecycle?.state !== 'gate_passed' ||
+      game?.status !== 'answering'
+    ) return
+
+    let cancelled = false
+    let timer: number | null = null
+    const poll = () => {
+      timer = window.setTimeout(() => {
+        void restoreCurrentGame({ silent: true }).finally(() => {
+          if (!cancelled) poll()
+        })
+      }, 1_500)
+    }
+    poll()
+    return () => {
+      cancelled = true
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [game?.status, lifecycle?.state, lifecycleMode, restoreCurrentGame, stage])
 
   useEffect(() => {
     const pollingGameId = game?.id ?? null
@@ -1416,6 +1452,61 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     setAnswerError('')
     setAnswerActivity(beginModelActivity('answer'))
     setAnswerStatus('loading')
+  }
+
+  const retryBoardAnswer = async () => {
+    const current = game
+    if (
+      !current ||
+      !outcome ||
+      lifecycle?.state !== 'gate_passed' ||
+      current.status !== 'answer_failed' ||
+      lifecycleBusy
+    ) return
+
+    const existingIntent = answerIntentRef.current
+    const intent = existingIntent?.gameId === current.id
+      ? existingIntent
+      : { gameId: current.id, key: runtime.api.createIdempotencyKey() }
+    answerIntentRef.current = intent
+    const controller = new AbortController()
+    lifecycleRequestRef.current = controller
+    setLifecycleBusy(true)
+    setLifecycleError('')
+    setAnswerError('')
+    setAnswerStatus('loading')
+    setAnswerActivity(beginModelActivity('answer'))
+    try {
+      const generated = await runtime.api.requestGameAnswer(
+        current.id,
+        { expectedRevision: current.revision },
+        { idempotencyKey: intent.key, signal: controller.signal },
+      )
+      if (controller.signal.aborted) return
+      answerIntentRef.current = null
+      applyDurableGame(generated.game, { preserveLifecycle: true })
+      setAnswer(generated.answer.answer)
+      setAnswerModel(generated.answer.model)
+      setAnswerPrompt(generated.answer.prompt)
+      setAnswerStatus('success')
+      setAnswerActivity(null)
+    } catch (error) {
+      if (controller.signal.aborted) return
+      if (!isWebChessApiError(error) || error.kind !== 'transport') {
+        answerIntentRef.current = null
+      }
+      setAnswerError(
+        error instanceof Error
+          ? error.message
+          : 'The board-derived answer could not be completed.',
+      )
+      await restoreCurrentGame({ silent: true })
+    } finally {
+      if (lifecycleRequestRef.current === controller) {
+        lifecycleRequestRef.current = null
+        setLifecycleBusy(false)
+      }
+    }
   }
 
   const retryLifecyclePath = async () => {
@@ -1862,6 +1953,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
             wilburPending={wilburPending}
             onRefresh={() => void refreshLifecycle()}
             onRetry={() => void retryLifecyclePath()}
+            onRetryAnswer={() => void retryBoardAnswer()}
             onCreateAction={(index) => void trackCharlotteAction(index)}
             onUpdateAction={(action, status) => void setWilburActionStatus(action, status)}
             onObserve={observeWilburAction}

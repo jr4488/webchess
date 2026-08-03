@@ -256,7 +256,7 @@ const searchExecutor = vi.mocked(runOpenClawWebSearch)
 
 beforeEach(() => {
   vi.stubEnv('WEBCHESS_OPENCLAW_BIN', 'openclaw-research-test')
-  vi.stubEnv('WEBCHESS_OPENCLAW_TIMEOUT_MS', '130000')
+  vi.stubEnv('WEBCHESS_OPENCLAW_TIMEOUT_MS', '150000')
   vi.stubEnv('WEBCHESS_OPENCLAW_TRANSPORT', 'gateway')
   searchExecutor.mockReset()
 })
@@ -509,6 +509,36 @@ describe('durable research broker', () => {
     await expect(broker.ensureForStage(requestContext)).resolves.toBe(existing)
     expect(repository.start).not.toHaveBeenCalled()
     expect(searchExecutor).not.toHaveBeenCalled()
+  })
+
+  it('does not let an obsolete policy decision suppress the current policy', async () => {
+    const obsolete = record({
+      policyVersion: 'webchess-visible-research-v2',
+      status: 'not_needed',
+      materiality: null,
+      query: null,
+      attemptCount: 0,
+      executedQueries: [],
+      searchSynthesis: null,
+      contentDigest: null,
+      startedAt: null,
+    })
+    const repository = new FakeResearchRepository([obsolete])
+    const broker = new DurableResearchBroker(repository)
+    searchExecutor.mockResolvedValue(searchResult(
+      'Current evidence is available from [NIST](https://www.nist.gov/example).',
+    ))
+
+    const result = await broker.ensureForStage(requestContext)
+
+    expect(repository.start).toHaveBeenCalledWith(expect.objectContaining({
+      policyVersion: RESEARCH_POLICY_VERSION,
+    }))
+    expect(searchExecutor).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({
+      policyVersion: RESEARCH_POLICY_VERSION,
+      status: 'completed',
+    })
   })
 
   it('terminally recovers a stale searching record without searching again', async () => {

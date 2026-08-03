@@ -46,6 +46,7 @@ interface ExecFileOptions {
 type ExecFileCallback = (
   error: ExecFileException | null,
   stdout: string,
+  stderr: string,
 ) => void
 
 export type ExecFileInvoker = (
@@ -62,6 +63,7 @@ function classifyExecutionError(
   error: ExecFileException,
   timedOut: boolean,
   signal?: AbortSignal,
+  stderr = '',
 ): OpenClawCliError {
   if (timedOut) {
     return new OpenClawCliError(
@@ -79,6 +81,14 @@ function classifyExecutionError(
     return new OpenClawCliError(
       'not-found',
       'The OpenClaw executable was not found.',
+    )
+  }
+  if (
+    /codex app-server hosted search turn (?:aborted|timed out)/iu.test(stderr)
+  ) {
+    return new OpenClawCliError(
+      'timeout',
+      'Codex Search exceeded its configured OpenClaw time boundary.',
     )
   }
   return new OpenClawCliError(
@@ -111,14 +121,19 @@ export function createOpenClawExecutor(
             signal: options.signal,
             windowsHide: true,
           },
-          (error, stdout) => {
+          (error, stdout, stderr) => {
             if (settled) return
             settled = true
             if (timers.timeout) clearTimeout(timers.timeout)
             if (timers.forceKill) clearTimeout(timers.forceKill)
 
             if (error) {
-              reject(classifyExecutionError(error, timedOut, options.signal))
+              reject(classifyExecutionError(
+                error,
+                timedOut,
+                options.signal,
+                stderr,
+              ))
               return
             }
             if (timedOut) {
