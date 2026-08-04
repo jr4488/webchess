@@ -1,6 +1,10 @@
+import { useEffect, useState } from 'react'
+
 import {
   CircleAlert,
+  Clock3,
   ExternalLink,
+  Globe2,
   Search,
   ShieldCheck,
 } from 'lucide-react'
@@ -98,7 +102,7 @@ function statusExplanation(record: ResearchRecord): string {
     case 'failed':
       return 'The broker failed safely. No synthesis from this request entered the stage.'
     case 'timed_out':
-      return `The broker stopped at its ${formatTimeout(record.bounds.timeoutMs)} limit. No background retry continues.`
+      return `The search exceeded a configured time boundary within the broker’s ${formatTimeout(record.bounds.timeoutMs)} limit. No background retry continues.`
     case 'refused':
       return 'The broker refused this request under its safety policy. No synthesis entered the stage.'
   }
@@ -114,6 +118,131 @@ function liveAnnouncement(records: readonly ResearchRecord[]): string {
   const latest = records.at(-1)
   if (!latest) return 'No automatic research records are present.'
   return `Automatic research for ${stageLabel(latest.stage)} is ${STATUS_LABELS[latest.status].toLowerCase()}. ${latest.sources.length} source links are visible.`
+}
+
+function timestampMs(value: string | null): number | null {
+  if (!value) return null
+  const parsed = new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function researchElapsedSeconds(record: ResearchRecord, nowMs: number): number {
+  const startedMs = timestampMs(record.startedAt)
+  if (startedMs === null) return 0
+  const completedMs = timestampMs(record.completedAt)
+  return Math.max(0, Math.floor(((completedMs ?? nowMs) - startedMs) / 1_000))
+}
+
+function packetStatus(record: ResearchRecord): string {
+  switch (record.status) {
+    case 'searching':
+      return 'Waiting for Codex Search to return one bounded result packet.'
+    case 'completed':
+      return `Packet received with ${record.executedQueries.length} executed queries and ${record.sources.length} citation links.`
+    case 'not_needed':
+      return 'No provider packet was needed for this stage.'
+    case 'failed':
+    case 'timed_out':
+    case 'refused':
+      return 'No result packet was accepted into the lifecycle.'
+  }
+}
+
+function ResearchLiveProgress({ record }: { record: ResearchRecord }) {
+  const active = record.status === 'searching'
+  const [nowMs, setNowMs] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!active) return
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1_000)
+    return () => window.clearInterval(interval)
+  }, [active, record.id, record.startedAt])
+
+  if (record.startedAt === null || record.attemptCount === 0) return null
+
+  const elapsedSeconds = researchElapsedSeconds(record, nowMs)
+  const timeoutSeconds = Math.max(1, Math.ceil(record.bounds.timeoutMs / 1_000))
+  const elapsedWithinBound = Math.min(elapsedSeconds, timeoutSeconds)
+  const nodeCount = Math.min(5, Math.max(1, record.bounds.sourceLimit))
+  const sourceNodes = Array.from({ length: nodeCount }, (_, index) => record.sources[index] ?? null)
+
+  return (
+    <section
+      className={`research-live-progress is-${record.status}`}
+      aria-label="Live Codex Search progress"
+    >
+      <header className="research-live-progress__header">
+        <div>
+          <small>{active ? 'Live provider activity' : 'Saved provider timing'}</small>
+          <h3>{active ? 'The search is moving through the web' : 'The research packet has settled'}</h3>
+        </div>
+        <div className="research-live-progress__timer" role="timer" aria-label="Research elapsed time">
+          <Clock3 size={16} aria-hidden="true" />
+          <strong>{formatInteger(elapsedSeconds)}</strong>
+          <span>seconds elapsed</span>
+        </div>
+      </header>
+
+      <div className="research-live-progress__body">
+        <div
+          className={`research-live-web${active ? ' is-active' : ''}`}
+          aria-hidden="true"
+        >
+          <span className="research-live-web__orbit is-outer" />
+          <span className="research-live-web__orbit is-inner" />
+          <span className="research-live-web__sweep" />
+          <span className="research-live-web__hub">
+            <Globe2 size={23} />
+          </span>
+          {sourceNodes.map((source, index) => (
+            <span
+              className={`research-live-web__node research-live-web__node--${index + 1}${source ? ' has-source' : ''}`}
+              key={source?.id ?? `pending-${index + 1}`}
+            >
+              {source ? source.citationId : index + 1}
+            </span>
+          ))}
+        </div>
+
+        <ol className="research-live-progress__signals">
+          <li className="is-complete">
+            <span aria-hidden="true" />
+            <div><strong>Query sent</strong><small>The exact broker query is visible below.</small></div>
+          </li>
+          <li className={active ? 'is-active' : 'is-complete'}>
+            <span aria-hidden="true" />
+            <div>
+              <strong>{active ? 'Codex Search is working' : 'Provider call ended'}</strong>
+              <small>{active ? 'OpenClaw is keeping the bounded provider request open.' : STATUS_LABELS[record.status]}</small>
+            </div>
+          </li>
+          <li className={record.status === 'completed' ? 'is-complete' : active ? 'is-pending' : 'is-stopped'}>
+            <span aria-hidden="true" />
+            <div><strong>Result packet</strong><small>{packetStatus(record)}</small></div>
+          </li>
+        </ol>
+      </div>
+
+      <div className="research-live-progress__meter">
+        <div>
+          <span>Elapsed time against the broker limit</span>
+          <strong>{formatInteger(elapsedSeconds)} / {formatInteger(timeoutSeconds)} seconds</strong>
+        </div>
+        <progress
+          max={timeoutSeconds}
+          value={elapsedWithinBound}
+          aria-label="Elapsed research time against the broker limit"
+        >
+          {elapsedWithinBound} of {timeoutSeconds} seconds
+        </progress>
+        <p>
+          {record.sources.length} source {record.sources.length === 1 ? 'link' : 'links'} received.
+          {' '}Codex Search returns its search activity and citations together as one validated packet;
+          WebChess does not invent intermediate results while it waits.
+        </p>
+      </div>
+    </section>
+  )
 }
 
 function ResearchSourceItem({ source }: { source: ResearchSource }) {
@@ -175,6 +304,8 @@ function ResearchRecordCard({
       </header>
 
       <p className="research-record__explanation">{statusExplanation(record)}</p>
+
+      <ResearchLiveProgress record={record} />
 
       <dl className="research-record__request">
         <div><dt>Stage</dt><dd>{stageLabel(record.stage)}</dd></div>

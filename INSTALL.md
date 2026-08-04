@@ -24,6 +24,7 @@ npm run plugin:build
 npm run verify:openclaw
 openclaw plugins install --link .
 openclaw plugins inspect webchess --runtime --json
+openclaw config set tools.web.search.timeoutSeconds 120
 export WEBCHESS_OPENCLAW_DATABASE_URL=postgresql://webchess:password@127.0.0.1:55432/webchess
 openclaw webchess
 ```
@@ -38,6 +39,13 @@ launcher rejects non-PostgreSQL and non-loopback URLs. It applies the bundled
 canonical migrations before reporting readiness. `npm run verify:openclaw`
 checks the packaged plugin and UI path; `npm run test:integration` uses a
 disposable PostgreSQL 17 database to verify persistence.
+
+Automatic research uses OpenClaw's configured Codex Search provider. The
+recommended 120-second OpenClaw search window sits inside WebChess's
+150-second broker envelope, leaving bounded time for process startup, output
+validation, and durable settlement. WebChess does not silently change the
+user's global OpenClaw configuration; the explicit `openclaw config set`
+command above is therefore part of local research setup.
 
 Useful launch options are:
 

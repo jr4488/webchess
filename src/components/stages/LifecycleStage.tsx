@@ -30,7 +30,10 @@ import type {
   WilburActionStatus,
 } from '../../lib/lifecycle/contracts'
 import { PORTIA_ATTACK_TYPES } from '../../lib/lifecycle/contracts'
-import { RETRY_LIMITS } from '../../lib/lifecycle/retry'
+import {
+  RETRY_LIMITS,
+  canReopenInsufficientBasis,
+} from '../../lib/lifecycle/retry'
 import type {
   CaptureRecord,
   GeneratedAnswer,
@@ -65,6 +68,7 @@ interface LifecycleStageProps {
   wilburPending: boolean
   onRefresh: () => void
   onRetry: () => void
+  onRetryAnswer: () => void
   onCreateAction: (index: number) => void
   onUpdateAction: (action: WilburAction, status: WilburActionStatus) => void
   onObserve: (
@@ -133,12 +137,18 @@ function activeHeadline(
   if (lifecycle.state === 'charlotte_unavailable') {
     return 'Charlotte reached its bounded qualification limit'
   }
+  if (canReopenInsufficientBasis(lifecycle)) {
+    return 'The web can repair this evidence path'
+  }
   if (hasInsufficientBasis(lifecycle)) return 'The bounded inquiry has reached its limit'
   if (lifecycle.state === 'portia_pending' || lifecycle.state === 'portia_running') {
     return 'Portia is testing every survivor'
   }
   if (lifecycle.state === 'portia_complete') return 'The Gate is checking sufficiency'
   if (lifecycle.state === 'gate_passed' && gameStatus !== 'answered') {
+    if (gameStatus === 'answer_failed') {
+      return 'The approved prompt is waiting for a fresh Answer attempt'
+    }
     return gameStatus === 'answering'
       ? 'The approved board prompt is generating the answer'
       : 'The board-derived answer is ready to generate'
@@ -264,6 +274,7 @@ export function LifecycleStage({
   wilburPending,
   onRefresh,
   onRetry,
+  onRetryAnswer,
   onCreateAction,
   onUpdateAction,
   onObserve,
@@ -323,18 +334,28 @@ export function LifecycleStage({
     ? fullPromptCopyFeedback.status
     : null
   const insufficientBasis = hasInsufficientBasis(lifecycle)
+  const recoverableInsufficientBasis = lifecycle
+    ? canReopenInsufficientBasis(lifecycle)
+    : false
   const portiaValidationUnavailable = Boolean(
     lifecycle?.state === 'portia_unavailable',
   )
-  const portiaTerminalStop = insufficientBasis || portiaValidationUnavailable
+  const portiaTerminalStop = (
+    insufficientBasis && !recoverableInsufficientBasis
+  ) || portiaValidationUnavailable
   const stableTerminal = portiaTerminalStop || charlotteQualificationUnavailable
   const retryPending = busy || lifecycle?.state === 'retry_running'
   const canRetry = Boolean(
     lifecycle?.gate?.passed === false
-    && !insufficientBasis
     && (
-      lifecycle.gate.recommendedNextTransition === 'retry_game'
-      || lifecycle.gate.recommendedNextTransition === 'retry_field'
+      recoverableInsufficientBasis
+      || (
+        !insufficientBasis
+        && (
+          lifecycle.gate.recommendedNextTransition === 'retry_game'
+          || lifecycle.gate.recommendedNextTransition === 'retry_field'
+        )
+      )
     ),
   )
   const remainingSameFieldRetries = lifecycle
@@ -343,7 +364,9 @@ export function LifecycleStage({
   const remainingFieldRegenerations = lifecycle
     ? Math.max(0, RETRY_LIMITS.fieldRegenerations - lifecycle.fieldRegenerationCount)
     : null
-  const authorizedSameFieldPaths = portiaTerminalStop ? 0 : remainingSameFieldRetries
+  const authorizedSameFieldPaths = portiaTerminalStop || recoverableInsufficientBasis
+    ? 0
+    : remainingSameFieldRetries
   const authorizedFieldRebuilds = portiaTerminalStop ? 0 : remainingFieldRegenerations
   const activeIndices = lifecycle?.survivors.map(
     (candidate) => candidate.finalCoordinate.ring * 8 + candidate.finalCoordinate.sector,
@@ -493,6 +516,42 @@ export function LifecycleStage({
             </div>
           ) : null}
 
+          {lifecycle?.gate?.passed && gameStatus === 'answer_failed' && !boardAnswer ? (
+            <section
+              className="lifecycle-card answer-failed-card"
+              role="alert"
+              aria-labelledby="answer-failed-heading"
+            >
+              <div className="lifecycle-card__title">
+                <span><CircleAlert size={17} /></span>
+                <div>
+                  <small>Answer · saved technical stop</small>
+                  <h2 id="answer-failed-heading">The Answer response could not be accepted</h2>
+                </div>
+              </div>
+              <p>
+                Portia approved the board-derived prompt and the Gate passed. The Answer
+                model response did not satisfy WebChess’s required output contract, so the
+                board, prompt, and approval record were preserved without publishing a
+                malformed answer.
+              </p>
+              <p>
+                Automatic retries have stopped. Start one fresh Answer attempt when you are
+                ready; it will reuse the approved prompt with a new request identity.
+              </p>
+              <button
+                className="primary-button"
+                type="button"
+                disabled={busy}
+                aria-busy={busy}
+                onClick={onRetryAnswer}
+              >
+                <RefreshCw size={15} aria-hidden="true" />
+                {busy ? 'Trying the answer again…' : 'Try the answer again'}
+              </button>
+            </section>
+          ) : null}
+
           <ResearchActivityPanel
             records={researchRecords}
             portiaAdjudication={researchPortiaAdjudication}
@@ -613,21 +672,27 @@ export function LifecycleStage({
           ) : null}
 
           {lifecycle?.gate ? (
-            <section className={`lifecycle-card gate-card is-${lifecycle.gate.passed ? 'passed' : insufficientBasis ? 'terminal' : 'failed'}`}>
+            <section className={`lifecycle-card gate-card is-${lifecycle.gate.passed ? 'passed' : portiaTerminalStop ? 'terminal' : 'failed'}`}>
               <div className="lifecycle-card__title">
                 <span><ShieldCheck size={17} /></span>
                 <div>
-                  <small>Deterministic Gate{insufficientBasis ? ' · bounded conclusion' : ''}</small>
+                  <small>Deterministic Gate{portiaTerminalStop ? ' · bounded conclusion' : recoverableInsufficientBasis ? ' · repair available' : ''}</small>
                   <h2>
                     {lifecycle.gate.passed
                       ? 'Portia permits the candidate answer prompt.'
-                      : insufficientBasis
+                      : portiaTerminalStop
                         ? 'The Gate reached a bounded stop.'
+                        : recoverableInsufficientBasis
+                          ? 'This prompt has one bounded repair path.'
                         : 'This prompt cannot support an answer yet.'}
                   </h2>
                 </div>
               </div>
-              <p>{lifecycle.gate.explanation}</p>
+              <p>
+                {recoverableInsufficientBasis
+                  ? 'This saved conclusion stopped before using its field-rebuild allowance. WebChess can now rebuild the evidence field with Portia and Gate feedback instead of discarding the run.'
+                  : lifecycle.gate.explanation}
+              </p>
               {lifecycle.gate.passed && portiaPromptRevisionCount > 0 ? (
                 <p>
                   Portia’s {portiaPromptRevisionCount} required prompt amendment{portiaPromptRevisionCount === 1 ? '' : 's'} will be applied during Answer generation.
@@ -649,7 +714,11 @@ export function LifecycleStage({
                       aria-busy={retryPending}
                       onClick={onRetry}
                     >
-                      {retryPending ? 'Starting next bounded path…' : 'Try another bounded path'}
+                      {retryPending
+                        ? 'Starting next bounded path…'
+                        : recoverableInsufficientBasis
+                          ? 'Try a bounded evidence repair'
+                          : 'Try another bounded path'}
                       <ArrowRight size={16} aria-hidden="true" />
                     </button>
                   ) : null}

@@ -209,6 +209,7 @@ npm run plugin:build
 npm run verify:openclaw
 openclaw plugins install --link .
 openclaw plugins inspect webchess --runtime --json
+openclaw config set tools.web.search.timeoutSeconds 120
 export WEBCHESS_OPENCLAW_DATABASE_URL=postgresql://webchess:password@127.0.0.1:55432/webchess
 openclaw webchess
 ```

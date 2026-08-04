@@ -32,6 +32,25 @@ function aggregate(
 }
 
 describe('LifecycleRail', () => {
+  it('keeps Portia active when a saved stop still has a bounded repair path', () => {
+    const lifecycle = {
+      ...aggregate('insufficient_basis', {
+        sameFieldRetryCount: 0,
+        fieldRegenerationCount: 0,
+      }, 'insufficient_basis'),
+      portia: { promptDecision: 'deny' },
+    } as LifecycleAggregate
+
+    render(<LifecycleRail lifecycle={lifecycle} />)
+
+    const rail = screen.getByRole('region', { name: 'WebChess lifecycle progress' })
+    expect(rail).toHaveAttribute('data-lifecycle-terminal', 'false')
+    expect(screen.getByText('Portia').closest('li')).toHaveClass('is-active')
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /one bounded field rebuild remains before Answer/i,
+    )
+  })
+
   it('shows the corrected seven-stage lifecycle and exposes the active step', () => {
     const { container } = render(
       <LifecycleRail lifecycle={aggregate('charlotte_running')} gameStatus="answered" />,

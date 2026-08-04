@@ -52,7 +52,11 @@ function promptRecommendation(
   context: GateRetryContext,
   duplicateHeavy: boolean,
 ): GateRecommendation {
-  if (review.promptDecision === 'deny') return 'insufficient_basis'
+  if (review.promptDecision === 'deny') {
+    return context.fieldRegenerationCount < 1
+      ? 'retry_field'
+      : 'insufficient_basis'
+  }
   if (review.promptDecision === 'retry_field') {
     return context.fieldRegenerationCount < 1
       ? 'retry_field'

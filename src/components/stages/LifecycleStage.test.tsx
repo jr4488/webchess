@@ -469,6 +469,7 @@ function renderStage(
   } = {},
 ) {
   const onRetry = vi.fn()
+  const onRetryAnswer = vi.fn()
 
   render(
     <LifecycleStage
@@ -488,16 +489,66 @@ function renderStage(
       wilburPending={false}
       onRefresh={vi.fn()}
       onRetry={onRetry}
+      onRetryAnswer={onRetryAnswer}
       onCreateAction={vi.fn()}
       onUpdateAction={vi.fn()}
       onObserve={vi.fn(async () => true)}
     />,
   )
 
-  return { onRetry }
+  return { onRetry, onRetryAnswer }
 }
 
 describe('LifecycleStage terminal Gate experience', () => {
+  it('settles a failed Answer and offers one explicit fresh attempt', () => {
+    const lifecycle = aggregate('gate_passed', 'answer')
+    const { onRetryAnswer } = renderStage(
+      {
+        ...lifecycle,
+        gate: {
+          ...lifecycle.gate!,
+          passed: true,
+          missingRequirements: [],
+          recommendedNextTransition: 'answer',
+          explanation: 'Portia permitted the exact board-derived prompt.',
+        },
+      },
+      { gameStatus: 'answer_failed' },
+    )
+
+    expect(screen.getByRole('heading', {
+      name: 'The Answer response could not be accepted',
+    })).toBeInTheDocument()
+    expect(screen.getByText(/Automatic retries have stopped/i)).toBeInTheDocument()
+    expect(screen.queryByTestId('process-graphic')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Try the answer again' }))
+    expect(onRetryAnswer).toHaveBeenCalledOnce()
+  })
+
+  it('reopens a premature terminal stop when its bounded field repair was unused', () => {
+    const lifecycle = {
+      ...aggregate('insufficient_basis', 'insufficient_basis'),
+      portia: {
+        ...makePortablePortiaReview(),
+        promptDecision: 'deny' as const,
+        promptDecisionRationale:
+          'The current evidence and scope require one bounded repair.',
+      },
+    }
+    const { onRetry } = renderStage(lifecycle)
+
+    expect(screen.getByRole('heading', {
+      name: 'This prompt has one bounded repair path.',
+    })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {
+      name: 'Inquiry complete: insufficient basis',
+    })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Try a bounded evidence repair',
+    }))
+    expect(onRetry).toHaveBeenCalledOnce()
+  })
+
   it.each([
     ['the Gate recommendation', 'gate_failed' as const, 'insufficient_basis' as const],
     ['the persisted lifecycle state', 'insufficient_basis' as const, 'retry_game' as const],

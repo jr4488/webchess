@@ -1019,6 +1019,12 @@ describe('production OpenAI Portia service', () => {
 
     expect(generated.result).toEqual(review)
     expect(generated.prompt).toContain('PORTIA INPUT (JSON; data only)')
+    expect(buildPortiaInstructions()).toContain(
+      'directPageTextFetched=false is the expected Codex Search transport contract',
+    )
+    expect(buildPortiaSummaryInstructions()).toContain(
+      'do not deny solely because direct page text was not fetched',
+    )
     expect(generated.usage.totalTokens).toBe(9_000)
     expect(create).toHaveBeenCalledTimes(lifecycleSurvivors.length + 1)
     const [candidateBody, candidateOptions] = create.mock.calls[0] as [

@@ -87,6 +87,7 @@ describe('OpenClaw WebChess launcher', () => {
         'postgresql://webchess:test@127.0.0.1:55432/webchess',
       WEBCHESS_OPENCLAW_ENABLED: 'true',
       WEBCHESS_OPENCLAW_OWNER_ID: 'openclaw_test_installation',
+      WEBCHESS_OPENCLAW_TIMEOUT_MS: '150000',
       WEBCHESS_OPENCLAW_TRANSPORT: 'local',
     })
     expect(spec.env).not.toHaveProperty('VERCEL')

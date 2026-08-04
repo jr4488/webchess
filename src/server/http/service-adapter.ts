@@ -12,6 +12,7 @@ import { composeProblemParts } from '../../lib/division'
 import { GameRuleError } from '../../lib/game-replay'
 import {
   CURRENT_LIFECYCLE_VERSIONS,
+  canReopenInsufficientBasis,
   charlotteResultSchema,
   decideRetry,
   deriveSurvivorCandidates,
@@ -3935,10 +3936,24 @@ export function createApiServicesWithDependencies(
           input.ownerId,
           terminal,
         )
-        if (lifecycle.state !== 'gate_failed' || !lifecycle.gate) {
+        const promptBoundPortia = lifecycle.portia
+          && isPromptBoundPortiaReview(lifecycle.portia)
+          ? lifecycle.portia
+          : null
+        const reopeningTerminal = canReopenInsufficientBasis(lifecycle)
+          && promptBoundPortia !== null
+        if (
+          (lifecycle.state !== 'gate_failed' && !reopeningTerminal)
+          || !lifecycle.gate
+        ) {
           throw new ApiError('CONFLICT', 409, 'Retry requires a failed deterministic Gate.')
         }
-        const failedGate = lifecycle.gate
+        const failedGate = reopeningTerminal
+          ? evaluateGate(promptBoundPortia, {
+              sameFieldRetryCount: lifecycle.sameFieldRetryCount,
+              fieldRegenerationCount: lifecycle.fieldRegenerationCount,
+            })
+          : lifecycle.gate
         const duplicateTerminalFingerprint = lifecycle.terminalFingerprint
           ? await repository.hasPriorTerminalFingerprint(
               input.ownerId,

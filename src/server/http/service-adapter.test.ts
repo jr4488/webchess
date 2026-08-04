@@ -3316,6 +3316,47 @@ describe('durable HTTP service adapter', () => {
     )
   })
 
+  it('reopens a premature saved stop and uses its unspent field repair', async () => {
+    const portia: PortiaReview = {
+      ...exhaustedLifecycleReview(),
+      promptDecision: 'deny',
+      promptDecisionRationale:
+        'The current evidence and conflict scope require one bounded repair.',
+    }
+    const persistedTerminalGate = evaluateGate(portia, {
+      sameFieldRetryCount: 0,
+      fieldRegenerationCount: 1,
+    })
+    expect(persistedTerminalGate.recommendedNextTransition)
+      .toBe('insufficient_basis')
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'insufficient_basis',
+      portia,
+      gate: persistedTerminalGate,
+      fieldRegenerationCount: 0,
+    }))
+
+    const retried = await createApiServicesWithDependencies(
+      dependencies,
+    ).retryLifecycle({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(retried.game).not.toBeNull()
+    expect(retried.lifecycle).toMatchObject({
+      state: 'field_ready',
+      fieldRegenerationCount: 1,
+    })
+    expect(dependencies.divisionGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.createRetryRun)
+      .toHaveBeenCalledWith(expect.objectContaining({
+        parentGameId: GAME_ID,
+        mode: 'regenerate_field',
+      }))
+  })
+
   it('delegates owner-scoped Wilbur actions, statuses, observations, and provenance', async () => {
     const portia = lifecycleReview()
     dependencies = lifecycleDependencies(lifecycleAggregate({

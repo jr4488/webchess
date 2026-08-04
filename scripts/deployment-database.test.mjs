@@ -101,6 +101,7 @@ describe('deployment database migration tooling', () => {
       '0008_visible_research_broker',
       '0009_expand_research_timeout_ceiling',
       '0010_player_visible_answer_prompt',
+      '0011_extend_research_timeout_ceiling',
     ])
     expect(migrations[0].sql).toContain(
       'CREATE TABLE IF NOT EXISTS games',
@@ -114,6 +115,9 @@ describe('deployment database migration tooling', () => {
     const answerPromptMigration = migrations.find(
       (migration) => migration.id === '0010_player_visible_answer_prompt',
     )
+    const extendedTimeoutMigration = migrations.find(
+      (migration) => migration.id === '0011_extend_research_timeout_ceiling',
+    )
     expect(researchMigration?.sql).toContain(
       'CREATE TABLE IF NOT EXISTS research_requests',
     )
@@ -125,6 +129,9 @@ describe('deployment database migration tooling', () => {
     )
     expect(answerPromptMigration?.sql).toContain(
       'answer_user_prompt_sha256',
+    )
+    expect(extendedTimeoutMigration?.sql).toContain(
+      'CHECK (timeout_ms BETWEEN 1000 AND 150000)',
     )
   })
 

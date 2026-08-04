@@ -1,10 +1,32 @@
-import type { GateResult, RetryDecision } from './contracts'
+import type {
+  GateResult,
+  LifecycleAggregate,
+  RetryDecision,
+} from './contracts'
 import { CURRENT_LIFECYCLE_VERSIONS } from './versions'
 
 export const RETRY_LIMITS = Object.freeze({
   sameFieldReplays: 2,
   fieldRegenerations: 1,
 })
+
+/**
+ * Older Gate versions could persist a terminal stop before consuming the one
+ * repairable field-regeneration path. Reopening is deliberately limited to
+ * prompt-bound Portia runs with that allowance still available.
+ */
+export function canReopenInsufficientBasis(
+  lifecycle: Pick<
+    LifecycleAggregate,
+    'state' | 'gate' | 'portia' | 'fieldRegenerationCount'
+  >,
+): boolean {
+  return lifecycle.state === 'insufficient_basis'
+    && lifecycle.gate?.passed === false
+    && lifecycle.portia != null
+    && 'promptDecision' in lifecycle.portia
+    && lifecycle.fieldRegenerationCount < RETRY_LIMITS.fieldRegenerations
+}
 
 export interface RetryPolicyInput {
   readonly gate: GateResult

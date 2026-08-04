@@ -23,6 +23,32 @@ describe('visible research policy', () => {
     })
   })
 
+  it('requires live research for the exact active-conflict question that was misclassified', () => {
+    const decision = planResearchForStage({
+      stage: 'portia',
+      problem: 'How will the war in Iran end?',
+    })
+
+    expect(decision).toEqual({
+      needed: true,
+      materiality: 'required',
+      query: 'How will the war in Iran end? current conflict status authoritative sources latest evidence',
+      reason: 'portia requires live research because conflict and geopolitical conditions can change rapidly and cannot be answered safely from model memory alone.',
+    })
+  })
+
+  it.each([
+    'Could the current ceasefire hold?',
+    'What are the likely outcomes of these peace talks?',
+    'How could new sanctions change this diplomatic crisis?',
+    'What happens after this military operation?',
+  ])('requires research for volatile world-event wording: %s', (problem) => {
+    expect(planResearchForStage({ stage: 'portia', problem })).toMatchObject({
+      needed: true,
+      materiality: 'required',
+    })
+  })
+
   it('marks bounded research helpful for a technical recommendation', () => {
     const decision = planResearchForStage({
       stage: 'answer',
@@ -41,6 +67,18 @@ describe('visible research policy', () => {
     expect(planResearchForStage({
       stage: 'charlotte',
       problem: 'Explain why this metaphor feels hopeful to a child.',
+    })).toEqual({
+      needed: false,
+      materiality: null,
+      query: null,
+      reason: 'charlotte found no material current or external factual dependency, so the research budget was preserved.',
+    })
+  })
+
+  it('does not mistake an explicitly fictional war for a live geopolitical event', () => {
+    expect(planResearchForStage({
+      stage: 'charlotte',
+      problem: 'How should the war in my novel end?',
     })).toEqual({
       needed: false,
       materiality: null,
@@ -70,12 +108,12 @@ describe('visible research policy', () => {
   })
 
   it('publishes a single-invocation, bounded policy configuration', () => {
-    expect(RESEARCH_POLICY_VERSION).toBe('webchess-visible-research-v1')
+    expect(RESEARCH_POLICY_VERSION).toBe('webchess-visible-research-v3')
     expect(RESEARCH_BOUNDS).toEqual({
       invocationLimit: 1,
       resultLimit: 5,
       sourceLimit: 5,
-      timeoutMs: 120_000,
+      timeoutMs: 150_000,
       synthesisCharacterLimit: 12_000,
     })
   })

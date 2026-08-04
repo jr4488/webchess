@@ -15,6 +15,7 @@ import type {
   LifecycleAggregate,
   LifecycleState,
 } from '../lib/lifecycle/contracts'
+import { canReopenInsufficientBasis } from '../lib/lifecycle/retry'
 
 type StageStatus = 'waiting' | 'active' | 'complete' | 'failed' | 'terminal'
 type AnswerGameStatus = 'completed' | 'answering' | 'answer_failed' | 'answered'
@@ -110,6 +111,9 @@ function lifecycleStatusText(
   gameStatus: AnswerGameStatus,
   currentIndex: number,
 ): string {
+  if (canReopenInsufficientBasis(lifecycle)) {
+    return 'WebChess is ready to repair Portia’s evidence path: one bounded field rebuild remains before Answer.'
+  }
   if (lifecycle.state === 'portia_unavailable') {
     return 'WebChess lifecycle stopped at Portia: prompt validation was unavailable after the bounded provider-attempt budget. No answer was generated.'
   }
@@ -150,7 +154,9 @@ export function LifecycleRail({
       lifecycle.gate?.passed === false
       && lifecycle.gate.recommendedNextTransition === 'insufficient_basis'
     )
-  const portiaTerminal = insufficientBasis || lifecycle.state === 'portia_unavailable'
+  const portiaTerminal = (
+    insufficientBasis && !canReopenInsufficientBasis(lifecycle)
+  ) || lifecycle.state === 'portia_unavailable'
   const charlotteTerminal = lifecycle.state === 'charlotte_unavailable'
   const terminalIndex = portiaTerminal ? 2 : charlotteTerminal ? 4 : null
   const currentIndex = terminalIndex ?? activeIndex(lifecycle, gameStatus)
@@ -260,7 +266,7 @@ export function LifecycleRail({
       </ol>
 
       <p className="sr-only" role="status" aria-live="polite">
-        {insufficientBasis
+        {portiaTerminal && insufficientBasis
           ? 'WebChess ended after Portia and the Gate declined the candidate prompt: insufficient basis. No answer was generated.'
           : lifecycleStatusText(lifecycle, gameStatus, currentIndex)}
       </p>

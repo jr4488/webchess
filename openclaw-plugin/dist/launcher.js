@@ -141,6 +141,7 @@ export function buildNextLaunchSpec(root, options, environment = process.env, ne
         WEBCHESS_OPENCLAW_DATABASE_URL: localDatabaseUrl,
         WEBCHESS_OPENCLAW_ENABLED: 'true',
         WEBCHESS_OPENCLAW_OWNER_ID: installationOwnerId(environment, installationRoot),
+        WEBCHESS_OPENCLAW_TIMEOUT_MS: environment.WEBCHESS_OPENCLAW_TIMEOUT_MS ?? '150000',
         WEBCHESS_OPENCLAW_TRANSPORT: 'local',
     });
     return {

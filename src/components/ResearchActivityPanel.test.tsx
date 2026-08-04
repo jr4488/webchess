@@ -1,5 +1,5 @@
-import { render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { act, render, screen, within } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ResearchRecord, ResearchStatus } from '../lib/research'
 import { ResearchActivityPanel, ResearchProvenanceDetails } from './ResearchActivityPanel'
@@ -69,6 +69,10 @@ function researchRecord(
 }
 
 describe('ResearchActivityPanel', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('shows every bounded query and labels synthesis separately from directly retrieved facts', () => {
     render(<ResearchActivityPanel records={[researchRecord()]} />)
 
@@ -92,6 +96,10 @@ describe('ResearchActivityPanel', () => {
     expect(screen.getByText('1 visible · 2 omitted')).toBeInTheDocument()
     expect(screen.getByText(/Injection signals detected: 1/i)).toBeInTheDocument()
     expect(screen.getByText(/instruction-like content/i)).toBeInTheDocument()
+    expect(screen.getByRole('timer', { name: 'Research elapsed time' }))
+      .toHaveTextContent('30seconds elapsed')
+    expect(screen.getByText(/Packet received with 2 executed queries and 1 citation link/i))
+      .toBeInTheDocument()
 
     const citation = screen.getByRole('link', { name: /NIST AI measurement guidance/i })
     expect(citation).toHaveAttribute('href', 'https://www.nist.gov/example')
@@ -125,7 +133,7 @@ describe('ResearchActivityPanel', () => {
   it.each([
     ['not_needed', 'The research policy found no material current or external fact gap'],
     ['failed', 'The broker failed safely'],
-    ['timed_out', 'The broker stopped at its 30 seconds limit'],
+    ['timed_out', 'The search exceeded a configured time boundary within the broker’s 30 seconds limit'],
     ['refused', 'The broker refused this request under its safety policy'],
   ] as const)('renders a stable %s terminal state', (status, expected) => {
     render(<ResearchActivityPanel records={[researchRecord(status)]} />)
@@ -139,7 +147,9 @@ describe('ResearchActivityPanel', () => {
   })
 
   it('announces one active search politely and shows bounded source progress', () => {
-    render(<ResearchActivityPanel records={[
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-02T20:00:05.000Z'))
+    const { container } = render(<ResearchActivityPanel records={[
       researchRecord('searching', {
         sources: [],
         omittedSourceCount: 0,
@@ -154,6 +164,24 @@ describe('ResearchActivityPanel', () => {
     })).toHaveAttribute('max', '3')
     expect(screen.getByRole('status')).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByRole('status')).toHaveTextContent(/research for Portia is searching/i)
+    expect(screen.getByRole('timer', { name: 'Research elapsed time' }))
+      .toHaveTextContent('5seconds elapsed')
+    expect(screen.getByRole('progressbar', {
+      name: 'Elapsed research time against the broker limit',
+    })).toHaveAttribute('value', '5')
+    expect(screen.getByText('Codex Search is working')).toBeInTheDocument()
+    expect(screen.getByText(/returns its search activity and citations together as one validated packet/i))
+      .toBeInTheDocument()
+    expect(container.querySelector('.research-live-web.is-active')).toBeInTheDocument()
+    expect(container.querySelectorAll('.research-live-web__node')).toHaveLength(3)
+    expect(container.querySelectorAll('.research-live-web__node.has-source')).toHaveLength(0)
+
+    act(() => {
+      vi.advanceTimersByTime(2_000)
+    })
+
+    expect(screen.getByRole('timer', { name: 'Research elapsed time' }))
+      .toHaveTextContent('7seconds elapsed')
   })
 })
 

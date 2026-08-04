@@ -4,21 +4,30 @@ import type {
 } from '../../lib/research'
 import type { ResearchPolicyDecision } from './types'
 
-export const RESEARCH_POLICY_VERSION = 'webchess-visible-research-v1' as const
+export const RESEARCH_POLICY_VERSION = 'webchess-visible-research-v3' as const
 
 export const RESEARCH_BOUNDS: ResearchBounds = Object.freeze({
   invocationLimit: 1,
   resultLimit: 5,
   sourceLimit: 5,
-  timeoutMs: 120_000,
+  timeoutMs: 150_000,
   synthesisCharacterLimit: 12_000,
 })
 
 const REQUIRED_EXTERNAL_PATTERN =
   /\b(?:as of|breaking|ceo|current(?:ly)?|election|exchange rate|financial|health|latest|law|legal|medical|medicine|news|now|president|price|recent|regulation|release|schedule|stock|today|version|weather|202[4-9])\b/iu
 
+const VOLATILE_WORLD_EVENT_PATTERN =
+  /\b(?:armed conflict|ceasefire|civil unrest|coup|diplomatic crisis|geopolitic(?:al|s)|hostage crisis|invasion|military (?:campaign|conflict|operation)|peace talks?|sanctions?|war)\b/iu
+
+const EXPLICIT_FICTION_CONTEXT_PATTERN =
+  /\b(?:fiction(?:al)?|my novel|my screenplay|my story|role[- ]playing|tabletop|video game)\b/iu
+
 const HELPFUL_EXTERNAL_PATTERN =
-  /\b(?:available|best|compare|evidence|faster|improv(?:e|ement)|llm|market|model|novel|optim(?:ise|ize|ization)|product|recommend|research|software|technology|travel)\b/iu
+  /\b(?:available|best|compare|evidence|faster|improv(?:e|ement)|llm|market|model|optim(?:ise|ize|ization)|product|recommend|research|software|technology|travel)\b/iu
+
+const NOVEL_RECOMMENDATION_PATTERN =
+  /\bnovel\s+(?:approach|design|idea|method|strategy|way)\b/iu
 
 function normalizeProblem(value: string): string {
   return value.replace(/\s+/gu, ' ').trim()
@@ -65,6 +74,21 @@ export function planResearchForStage(input: {
     }
   }
 
+  if (
+    VOLATILE_WORLD_EVENT_PATTERN.test(problem) &&
+    !EXPLICIT_FICTION_CONTEXT_PATTERN.test(problem)
+  ) {
+    return {
+      needed: true,
+      materiality: 'required',
+      query: boundedQuery(
+        problem,
+        'current conflict status authoritative sources latest evidence',
+      ),
+      reason: `${input.stage} requires live research because conflict and geopolitical conditions can change rapidly and cannot be answered safely from model memory alone.`,
+    }
+  }
+
   if (REQUIRED_EXTERNAL_PATTERN.test(problem)) {
     return {
       needed: true,
@@ -74,7 +98,10 @@ export function planResearchForStage(input: {
     }
   }
 
-  if (HELPFUL_EXTERNAL_PATTERN.test(problem)) {
+  if (
+    HELPFUL_EXTERNAL_PATTERN.test(problem) ||
+    NOVEL_RECOMMENDATION_PATTERN.test(problem)
+  ) {
     return {
       needed: true,
       materiality: 'helpful',

@@ -333,6 +333,8 @@ function makeLifecycle(
     gatePassed?: boolean
     gateRecommendation?: 'answer' | 'retry_game' | 'retry_field' | 'insufficient_basis'
     charlotte?: boolean
+    sameFieldRetryCount?: number
+    fieldRegenerationCount?: number
   } = {},
 ): LifecycleAggregate {
   const candidateId = 'attempt-1:white-rook-1'
@@ -408,8 +410,8 @@ function makeLifecycle(
     revision: 4,
     fieldGeneration: 1,
     gameAttempt: 1,
-    sameFieldRetryCount: 0,
-    fieldRegenerationCount: 0,
+    sameFieldRetryCount: options.sameFieldRetryCount ?? 0,
+    fieldRegenerationCount: options.fieldRegenerationCount ?? 0,
     divisionSeed: 'division-seed',
     castSeed: 'cast-seed',
     trajectorySeed: 'trajectory-seed',
@@ -1526,6 +1528,7 @@ describe('durable WebChess client flow', () => {
         gate: true,
         gatePassed: false,
         gateRecommendation: 'insufficient_basis',
+        fieldRegenerationCount: 1,
       }),
     )
 
@@ -1537,6 +1540,44 @@ describe('durable WebChess client flow', () => {
       .not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /new question/i })).toBeEnabled()
     expect(apiHarness.requestGameAnswer).not.toHaveBeenCalled()
+  })
+
+  it('settles a durable v2 Answer failure until the player starts one fresh request', async () => {
+    serverGame = makeAnswerFailedGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('gate_passed', { portia: true, gate: true }),
+    )
+    apiHarness.runCharlotte.mockResolvedValue(
+      makeLifecycle('charlotte_complete', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
+    )
+
+    await renderRestoredApp()
+
+    expect(await screen.findByRole('heading', {
+      name: 'The Answer response could not be accepted',
+    })).toBeInTheDocument()
+    expect(apiHarness.requestGameAnswer).not.toHaveBeenCalled()
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 25))
+    })
+    expect(apiHarness.requestGameAnswer).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try the answer again' }))
+    await waitFor(() => expect(apiHarness.requestGameAnswer).toHaveBeenCalledOnce())
+    await waitFor(() => expect(screen.getByText(ANSWER.answer)).toBeInTheDocument())
+    expect(apiHarness.requestGameAnswer).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: makeAnswerFailedGame().revision },
+      expect.objectContaining({
+        idempotencyKey: expect.any(String),
+        signal: expect.any(AbortSignal),
+      }),
+    )
   })
 
   it('retries an ambiguous answer with the same idempotency key', async () => {
