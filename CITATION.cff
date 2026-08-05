@@ -1,11 +1,45 @@
 cff-version: 1.2.0
-message: "If you use WebChess in research, please cite the software and its white paper."
+message: "If you use WebChess in research, please cite both the software release and the journal manuscript."
 title: "WebChess"
 type: software
+version: "2.1.0"
+date-released: "2026-08-03"
 authors:
   - family-names: "Reynolds"
     given-names: "Jack"
+    email: "AnansiPortia@gmail.com"
+    affiliation: "The WebChess Project"
+abstract: >-
+  WebChess is a rule-governed deliberative layer for foundation models. It
+  combines structured 64-facet problem construction, reproducible symbolic
+  casting, circular chess traversal, Portia adversarial prompt examination,
+  deterministic sufficiency gating, bounded retry, Charlotte qualification,
+  human-owned Wilbur actions, and durable provenance.
+keywords:
+  - artificial intelligence
+  - deliberation
+  - AI safety
+  - AI control
+  - human-AI decision support
+  - provenance
+  - adversarial evaluation
 license: Apache-2.0
 repository-code: "https://github.com/jr4488/webchess"
-url: "https://github.com/jr4488/webchess"
-version: 0.1.0
+url: "https://AnansiPortia.com"
+identifiers:
+  - type: other
+    value: "9980328581ba3e6fed6f2c4fc99b555fec4773bc"
+    description: "Evaluated Git commit"
+  - type: other
+    value: "archive/webchess-2.1.0-evaluated-9980328"
+    description: "Fixed archival branch"
+preferred-citation:
+  type: article
+  title: "WebChess: A Rule-Governed Deliberative Layer for Foundation Models"
+  subtitle: "The ANANSI Protocol, Spider-Inspired Adversarial Cognition, and an Auditable Architecture for Problem Solving"
+  authors:
+    - family-names: "Reynolds"
+      given-names: "Jack"
+      email: "AnansiPortia@gmail.com"
+  year: 2026
+  notes: "Audited journal manuscript, version 2.1. DOI pending archival deposit."
