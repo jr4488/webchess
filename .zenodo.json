@@ -1,0 +1,42 @@
+{
+  "title": "WebChess 2.1.0 and the WebChess 2.0 Method: Audited Research Artifact",
+  "upload_type": "software",
+  "description": "Archived source and audited journal manuscript for WebChess, a rule-governed deliberative layer for foundation models. The deposit fixes the evaluated software at commit 9980328581ba3e6fed6f2c4fc99b555fec4773bc and includes the manuscript, implementation-claim audit, reference-verification ledger, figures, citation metadata, and checksums.",
+  "creators": [
+    {
+      "name": "Reynolds, Jack",
+      "affiliation": "The WebChess Project"
+    }
+  ],
+  "access_right": "open",
+  "license": "Apache-2.0",
+  "keywords": [
+    "artificial intelligence",
+    "AI safety",
+    "AI control",
+    "deliberation",
+    "provenance",
+    "human-AI decision support",
+    "ANANSI protocol"
+  ],
+  "version": "2.1.0",
+  "publication_date": "2026-08-05",
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/jr4488/webchess",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    },
+    {
+      "identifier": "https://github.com/jr4488/webchess/commit/9980328581ba3e6fed6f2c4fc99b555fec4773bc",
+      "relation": "isVersionOf",
+      "scheme": "url"
+    },
+    {
+      "identifier": "https://AnansiPortia.com",
+      "relation": "isDocumentedBy",
+      "scheme": "url"
+    }
+  ],
+  "notes": "DOI must be minted by the external archive at deposit time. No DOI has been fabricated or preclaimed."
+}
