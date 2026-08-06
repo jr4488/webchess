@@ -69,7 +69,7 @@ export function ResearchHome() {
       </section>
 
       <section className={styles.section} aria-labelledby="principles-title">
-        <header className={styles.sectionHeading}>
+        <div className={styles.sectionHeading}>
           <div>
             <p className={styles.sectionIndex}>Research posture</p>
             <h2 id="principles-title">Architecture first. Evidence next.</h2>
@@ -78,7 +78,7 @@ export function ResearchHome() {
             The paper makes a design-science claim: computation outside model parameters may add
             value by governing representations, authorities, refusal, action, and memory.
           </p>
-        </header>
+        </div>
         <div className={styles.proofGrid}>
           {PRINCIPLES.map(({ icon: Icon, title, body }) => (
             <article key={title}>
@@ -113,7 +113,7 @@ export function ResearchHome() {
       </section>
 
       <section className={styles.section} aria-labelledby="lineage-title">
-        <header className={styles.sectionHeading}>
+        <div className={styles.sectionHeading}>
           <div>
             <p className={styles.sectionIndex}>Intellectual lineage</p>
             <h2 id="lineage-title">Influence without counterfeit endorsement.</h2>
@@ -122,7 +122,7 @@ export function ResearchHome() {
             Wilhelm and the Yijing, Jung, Turing, Fischer, Portia spiders, Anansi, and Charlotte
             illuminate different computational functions. None anticipated or endorsed this software.
           </p>
-        </header>
+        </div>
         <div className={styles.lineageList}>
           <span>Richard Wilhelm</span>
           <span>C. G. Jung</span>
