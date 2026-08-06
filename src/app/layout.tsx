@@ -14,8 +14,27 @@ export const metadata: Metadata = {
     template: '%s · WebChess',
   },
   description:
-    'A circular chess method that divides a difficult question into 64 perspectives, plays the tensions, and turns the resulting trail into practical next moves.',
+    'A rule-governed deliberative layer that expands difficult questions, forces perspectives into conflict, attacks what survives, and records what happens next.',
   metadataBase: new URL(resolveSiteOrigin()),
+  authors: [{ name: 'Jack Reynolds', url: 'https://anansiportia.com' }],
+  creator: 'The WebChess Project',
+  keywords: [
+    'WebChess',
+    'ANANSI protocol',
+    'AI deliberation',
+    'safe AI',
+    'adversarial reasoning',
+    'circular chess',
+    'problem solving',
+  ],
+  openGraph: {
+    siteName: 'WebChess',
+    type: 'website',
+  },
+  robots: {
+    index: true,
+    follow: true,
+  },
 }
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
