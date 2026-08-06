@@ -13,6 +13,7 @@ export interface DownloadFixture extends RouteFixture {
 
 export const PUBLIC_ROUTES: readonly RouteFixture[] = [
   { path: '/', label: 'home' },
+  { path: '/research', label: 'research' },
   { path: '/white-paper', label: 'white paper' },
   { path: '/install', label: 'installation' },
   { path: '/operations', label: 'operator guide' },
