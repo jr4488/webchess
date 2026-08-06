@@ -3,6 +3,7 @@ import {
   BookOpenText,
   Braces,
   CircleDotDashed,
+  Download,
   GitBranch,
   OctagonX,
   ShieldCheck,
@@ -88,7 +89,7 @@ export function ProductHome() {
       </section>
 
       <section className={styles.section} id="method" aria-labelledby="method-title">
-        <header className={styles.sectionHeading}>
+        <div className={styles.sectionHeading}>
           <div>
             <p className={styles.sectionIndex}>01 · Method</p>
             <h2 id="method-title">One question. Four visible transformations.</h2>
@@ -97,7 +98,7 @@ export function ProductHome() {
             WebChess does not ask one model call to generate, criticize, authorize, persuade,
             and declare success. Those powers are separated and recorded.
           </p>
-        </header>
+        </div>
         <ol className={styles.methodGrid}>
           {METHOD.map((step) => (
             <li key={step.number}>
@@ -145,7 +146,7 @@ export function ProductHome() {
       </section>
 
       <section className={styles.section} aria-labelledby="anansi-title">
-        <header className={styles.sectionHeading}>
+        <div className={styles.sectionHeading}>
           <div>
             <p className={styles.sectionIndex}>03 · ANANSI</p>
             <h2 id="anansi-title">A recursive protocol for thinking before concluding.</h2>
@@ -155,7 +156,7 @@ export function ProductHome() {
             plural intelligence and strategic indirection; the software turns that image into
             explicit operations.
           </p>
-        </header>
+        </div>
         <ol className={styles.anansiRail} aria-label="ANANSI protocol">
           {ANANSI.map(([letter, word]) => (
             <li key={`${letter}-${word}`}>
@@ -167,7 +168,7 @@ export function ProductHome() {
       </section>
 
       <section className={styles.section} aria-labelledby="proof-title">
-        <header className={styles.sectionHeading}>
+        <div className={styles.sectionHeading}>
           <div>
             <p className={styles.sectionIndex}>04 · Inspection</p>
             <h2 id="proof-title">A result with a chain of custody.</h2>
@@ -176,7 +177,7 @@ export function ProductHome() {
             Seeds, board state, moves, attacks, Gate decisions, model prompts, qualifications,
             actions, and observations remain linked in a replayable genealogy.
           </p>
-        </header>
+        </div>
         <div className={styles.proofGrid}>
           <article>
             <GitBranch aria-hidden="true" />
@@ -213,7 +214,12 @@ export function ProductHome() {
           </Link>
           <a href="https://github.com/jr4488/webchess">
             <Braces aria-hidden="true" />
-            <span><strong>Source code</strong><small>Apache-2.0 implementation</small></span>
+            <span><strong>Source code</strong><small>Browse the Apache-2.0 implementation</small></span>
+            <ArrowRight aria-hidden="true" />
+          </a>
+          <a href="/downloads/webchess-source.zip" download>
+            <Download aria-hidden="true" />
+            <span><strong>Source archive</strong><small>Download the reviewed repository snapshot</small></span>
             <ArrowRight aria-hidden="true" />
           </a>
         </div>
