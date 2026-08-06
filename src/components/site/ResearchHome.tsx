@@ -1,8 +1,8 @@
 import {
   ArrowRight,
   BookOpenText,
+  Braces,
   FlaskConical,
-  Github,
   Scale,
   ShieldAlert,
 } from 'lucide-react'
@@ -55,7 +55,7 @@ export function ResearchHome() {
           </Link>
         </article>
         <article>
-          <Github aria-hidden="true" />
+          <Braces aria-hidden="true" />
           <p>Implementation</p>
           <h2>Canonical source</h2>
           <span>
