@@ -26,7 +26,14 @@ export function TextDocument({
         <div className={styles.markdown}>
           <h1>{title}</h1>
         </div>
-        <pre className={styles.plainDocument}>{source}</pre>
+        <pre
+          className={styles.plainDocument}
+          role="region"
+          tabIndex={0}
+          aria-label={`${title} text`}
+        >
+          {source}
+        </pre>
       </article>
     </PublicShell>
   )
