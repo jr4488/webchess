@@ -4,7 +4,6 @@ import {
   Braces,
   CircleDotDashed,
   GitBranch,
-  Github,
   OctagonX,
   ShieldCheck,
 } from 'lucide-react'
@@ -213,7 +212,7 @@ export function ProductHome() {
             <ArrowRight aria-hidden="true" />
           </Link>
           <a href="https://github.com/jr4488/webchess">
-            <Github aria-hidden="true" />
+            <Braces aria-hidden="true" />
             <span><strong>Source code</strong><small>Apache-2.0 implementation</small></span>
             <ArrowRight aria-hidden="true" />
           </a>
