@@ -1,0 +1,5 @@
+/* Preserve the canonical dark palette while keeping microcopy at WCAG AA
+   contrast on both public background surfaces. */
+.wc-site {
+  --wc-faint: #858680;
+}
