@@ -2,19 +2,20 @@ name: Lockfile security fix
 
 on:
   push:
+    branches:
+      - site/webchess-public-launch
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   generate:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -30,12 +31,11 @@ jobs:
         run: |
           npm audit --omit=dev --audit-level=high
           npm audit --audit-level=high
-      - name: Upload corrected package metadata
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: patched-package-metadata
-          path: |
-            package.json
-            package-lock.json
-          if-no-files-found: error
-          retention-days: 1
+      - name: Commit corrected package metadata
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Pin patched nanoid transitive dependency"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
