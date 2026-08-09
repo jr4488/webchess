@@ -1,55 +1,49 @@
 import Link from 'next/link'
 
-import styles from './PublicSite.module.css'
-
 export function SiteFooter() {
   return (
-    <footer className={styles.footer}>
-      <div className={styles.footerInner}>
-        <div className={styles.footerLead}>
-          <Link className={styles.brand} href="/">
-            <span className={styles.brandMark} aria-hidden="true"><i /><i /><i /></span>
-            <span>WebChess<small>Deliberative AI</small></span>
-          </Link>
-          <p>
-            An open-source, rule-governed method for examining difficult questions before acting.
-          </p>
-          <a href="mailto:AnansiPortia@gmail.com">AnansiPortia@gmail.com</a>
+    <footer className="wc-footer">
+      <div className="wc-wrap">
+        <div className="wc-foot-grid">
+          <div>
+            <div className="wc-foot-mark">Web<span>Chess</span></div>
+            <p>
+              An independent research project in Sierra Madre, California. Prepared with AI
+              assistance under human direction; the author is responsible for all claims. The
+              Anansi and <em>Yijing</em> borrowings are documented functional analogies, not claims
+              of cultural authority.
+            </p>
+          </div>
+
+          <nav aria-label="WebChess project links">
+            <h2>Project</h2>
+            <ul className="wc-footer-links">
+              <li><Link href="/#method">Method</Link></li>
+              <li><Link href="/#episode">Episode</Link></li>
+              <li><Link href="/#lifecycle">Lifecycle</Link></li>
+              <li><Link href="/research">Research program</Link></li>
+              <li><Link href="/white-paper">White paper</Link></li>
+              <li><a href="https://github.com/jr4488/webchess">Source repository</a></li>
+            </ul>
+          </nav>
+
+          <nav aria-label="WebChess contact and policies">
+            <h2>Contact & policies</h2>
+            <ul className="wc-footer-links">
+              <li><a href="mailto:AnansiPortia@gmail.com">AnansiPortia@gmail.com</a></li>
+              <li><a href="https://github.com/jr4488/webchess/discussions">Discussions</a></li>
+              <li><Link href="/security">Security</Link></li>
+              <li><Link href="/privacy">Privacy</Link></li>
+              <li><Link href="/terms">Terms</Link></li>
+              <li><Link href="/acceptable-use">Acceptable use</Link></li>
+            </ul>
+          </nav>
         </div>
 
-        <nav className={styles.footerGroup} aria-label="Explore WebChess">
-          <h2>Explore</h2>
-          <ul className={styles.footerLinks}>
-            <li><Link href="/#method">Method</Link></li>
-            <li><Link href="/research">Research</Link></li>
-            <li><Link href="/white-paper">White paper</Link></li>
-            <li><Link href="/install">Install</Link></li>
-          </ul>
-        </nav>
-
-        <nav className={styles.footerGroup} aria-label="Project resources">
-          <h2>Project</h2>
-          <ul className={styles.footerLinks}>
-            <li><a href="https://github.com/jr4488/webchess">Source</a></li>
-            <li><a href="https://github.com/jr4488/webchess/discussions">Discussions</a></li>
-            <li><Link href="/security">Security</Link></li>
-            <li><Link href="/support">Support</Link></li>
-          </ul>
-        </nav>
-
-        <nav className={styles.footerGroup} aria-label="WebChess policies">
-          <h2>Policies</h2>
-          <ul className={styles.footerLinks}>
-            <li><Link href="/privacy">Privacy</Link></li>
-            <li><Link href="/terms">Terms</Link></li>
-            <li><Link href="/acceptable-use">Acceptable use</Link></li>
-            <li><Link href="/license">Apache-2.0</Link></li>
-          </ul>
-        </nav>
-
-        <p className={styles.footerMeta}>
-          Board events generate salience, not evidence. WebChess is a research instrument—not prophecy, proof, or an autonomous decision maker.
-        </p>
+        <div className="wc-foot-note">
+          <span>© 2026 The WebChess Project · Apache-2.0</span>
+          <span>Not a validated safety technology. Not for medical, legal, financial, or emergency decisions.</span>
+        </div>
       </div>
     </footer>
   )
