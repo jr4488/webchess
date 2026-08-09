@@ -14,7 +14,7 @@ export function TextDocument({
 }: TextDocumentProps) {
   return (
     <PublicShell>
-      <article className={styles.document}>
+      <article className={styles.document} data-public-document>
         <aside className={styles.documentUtility} aria-label="Document resources">
           <p>Repository-backed document</p>
           <div className={styles.documentActions}>
