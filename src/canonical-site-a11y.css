@@ -1,20 +1,18 @@
-/* Preserve the canonical dark palette while keeping public text at WCAG AA
-   contrast. Repository documents deliberately switch back to a light paper
-   surface and therefore receive an explicit dark heading reset. */
+/* Preserve the canonical dark palette while keeping public microcopy and
+   unstyled headings at WCAG AA contrast. Accent headings retain their gold,
+   red, and violet roles from canonical-site.css. */
 .wc-site {
   --wc-faint: #858680;
 }
 
-.wc-site h1,
-.wc-site h2,
-.wc-site h3,
-.wc-site h4 {
+.wc-site .wc-hero h1,
+.wc-site .wc-rule h2,
+.wc-site .wc-sec,
+.wc-site .wc-ep-side h2,
+.wc-site .wc-stage h3,
+.wc-site .wc-phase h4,
+.wc-site .wc-paper-left h3,
+.wc-site .wc-research-hero h1,
+.wc-site .wc-research-document h2 {
   color: var(--wc-silk);
-}
-
-.wc-site [data-public-document] h1,
-.wc-site [data-public-document] h2,
-.wc-site [data-public-document] h3,
-.wc-site [data-public-document] h4 {
-  color: #101715;
 }
