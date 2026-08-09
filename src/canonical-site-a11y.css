@@ -1,0 +1,29 @@
+/* Preserve the canonical dark palette while keeping public microcopy and
+   unstyled headings at WCAG AA contrast. Accent headings retain their gold,
+   red, and violet roles from canonical-site.css. This file also supplies the
+   small compatibility variable set used by repository-backed documents. */
+.wc-site {
+  --wc-faint: #858680;
+  --soft: #1b212c;
+  --accent: #c8a24b;
+  --accent-dark: #7a6730;
+}
+
+.wc-site .wc-hero h1,
+.wc-site .wc-rule h2,
+.wc-site .wc-sec,
+.wc-site .wc-ep-side h2,
+.wc-site .wc-stage h3,
+.wc-site .wc-phase h4,
+.wc-site .wc-paper-left h3,
+.wc-site .wc-research-hero h1,
+.wc-site .wc-research-document h2 {
+  color: var(--wc-silk);
+}
+
+.wc-site [data-public-document] {
+  --soft: #e9eeea;
+  --accent: #0b5b43;
+  --accent-dark: #074633;
+  --focus: #005fcc;
+}

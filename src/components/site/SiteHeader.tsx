@@ -1,25 +1,23 @@
 import Link from 'next/link'
 
-import styles from './PublicSite.module.css'
-
 const NAVIGATION = [
   { href: '/#method', label: 'Method' },
+  { href: '/#episode', label: 'Episode' },
+  { href: '/#lifecycle', label: 'Lifecycle' },
+  { href: '/research', label: 'Research' },
   { href: '/white-paper', label: 'White paper' },
-  { href: '/install', label: 'Install' },
-  { href: '/support', label: 'Support' },
 ] as const
 
 export function SiteHeader() {
   return (
-    <header className={styles.header}>
-      <div className={styles.headerInner}>
-        <Link className={styles.brand} href="/">
-          WebChess
-          <span className={styles.brandDescriptor}>Circular problem solving</span>
+    <header className="wc-nav" data-wc-nav data-scrolled="false">
+      <div className="wc-nav-in">
+        <Link className="wc-wordmark" href="/" aria-label="WebChess home">
+          Web<span>Chess</span>
         </Link>
 
-        <nav className={styles.nav} aria-label="Primary navigation">
-          <ul className={styles.navList}>
+        <nav aria-label="Primary navigation">
+          <ul className="wc-nav-links">
             {NAVIGATION.map((item) => (
               <li key={item.href}>
                 <Link href={item.href}>{item.label}</Link>
@@ -28,13 +26,9 @@ export function SiteHeader() {
           </ul>
         </nav>
 
-        <div className={styles.headerActions}>
-          <Link className={styles.textAction} href="/sign-in">
-            Sign in
-          </Link>
-          <Link className={styles.primaryAction} href="/play">
-            Play WebChess
-          </Link>
+        <div className="wc-nav-actions">
+          <Link className="wc-nav-signin" href="/sign-in">Sign in</Link>
+          <Link className="wc-nav-play" href="/play">Play WebChess</Link>
         </div>
       </div>
     </header>

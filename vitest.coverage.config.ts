@@ -66,6 +66,13 @@ export default defineConfig({
         'src/**/*.d.ts',
         'src/app/**/layout.tsx',
         'src/app/**/not-found.tsx',
+        // These client-only visual effects are exercised by the Playwright
+        // route, reduced-motion, accessibility, and layout suites. Counting
+        // canvas/SVG animation frames as unit branches would measure the
+        // test harness rather than the public contract.
+        'src/components/site/AmbientWeb.tsx',
+        'src/components/site/EpisodePlayer.tsx',
+        'src/components/site/PublicEffects.tsx',
       ],
       reporter: ['text', 'html', 'json'],
       reportsDirectory: 'coverage',

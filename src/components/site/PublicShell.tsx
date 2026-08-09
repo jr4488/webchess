@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 
-import styles from './PublicSite.module.css'
+import { PublicEffects } from './PublicEffects'
 import { SiteFooter } from './SiteFooter'
 import { SiteHeader } from './SiteHeader'
 
@@ -10,12 +10,11 @@ interface PublicShellProps {
 
 export function PublicShell({ children }: PublicShellProps) {
   return (
-    <div className={styles.page}>
-      <a className={styles.skipLink} href="#main-content">
-        Skip to main content
-      </a>
+    <div className="wc-site">
+      <a className="wc-skip-link" href="#main-content">Skip to main content</a>
       <SiteHeader />
-      <main className={styles.main} id="main-content">
+      <PublicEffects />
+      <main className="wc-main" id="main-content">
         {children}
       </main>
       <SiteFooter />
