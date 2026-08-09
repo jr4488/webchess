@@ -33,16 +33,16 @@ const LINEAGE = [
 export function ResearchHome() {
   return (
     <PublicShell>
-      <header className="wc-research-hero">
+      <section className="wc-research-hero" aria-labelledby="wc-research-title">
         <div className="wc-wrap">
           <div className="wc-kicker">WebChess research</div>
-          <h1>Research that can survive disassembly.</h1>
+          <h1 id="wc-research-title">Research that can survive disassembly.</h1>
           <p>
             WebChess is an implemented architecture and a falsifiable research program. Its value
             depends on controlled comparisons—not how profound the board feels while it is moving.
           </p>
         </div>
-      </header>
+      </section>
 
       <section className="wc-block" aria-labelledby="research-documents-title">
         <div className="wc-wrap">
