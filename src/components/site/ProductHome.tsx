@@ -129,12 +129,12 @@ const PHASES = [
 export function ProductHome() {
   return (
     <PublicShell>
-      <header className="wc-hero" id="top">
+      <section className="wc-hero" id="top" aria-labelledby="wc-home-title">
         <AmbientWeb />
         <div className="wc-hero-veil" aria-hidden="true" />
         <div className="wc-hero-in">
           <div className="wc-kicker">WebChess 2.0 · Deliberative Middleware</div>
-          <h1>
+          <h1 id="wc-home-title">
             Every question arrives wrapped in its first frame.{' '}
             <span className="wc-goldline">WebChess cuts it loose.</span>
           </h1>
@@ -152,7 +152,7 @@ export function ProductHome() {
           </div>
         </div>
         <div className="wc-scroll-cue" aria-hidden="true">Descend</div>
-      </header>
+      </section>
 
       <div className="wc-hexstrip" aria-hidden="true">
         <div className="wc-hexrow">{HEXAGRAMS} {HEXAGRAMS}</div>
