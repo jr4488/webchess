@@ -9,6 +9,7 @@ import { resolveSiteOrigin } from '@/server/site-origin'
 import '../styles.css'
 import '../theme-dark.css'
 import '../canonical-site.css'
+import '../canonical-site-a11y.css'
 
 const publicSans = Public_Sans({
   subsets: ['latin'],
