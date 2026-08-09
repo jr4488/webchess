@@ -6,7 +6,9 @@ export function PublicEffects() {
   useEffect(() => {
     const navigation = document.querySelector<HTMLElement>('[data-wc-nav]')
     const ruleMoment = document.querySelector<HTMLElement>('[data-wc-rule]')
-    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const reducedMotion =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
     const updateNavigation = () => {
       if (!navigation) return
