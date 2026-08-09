@@ -1,236 +1,343 @@
-import {
-  ArrowRight,
-  BookOpenText,
-  Braces,
-  CircleDotDashed,
-  Download,
-  GitBranch,
-  OctagonX,
-  ShieldCheck,
-} from 'lucide-react'
 import Link from 'next/link'
 
-import styles from './PublicSite.module.css'
-import { HeroBoard } from './HeroBoard'
+import { AmbientWeb } from './AmbientWeb'
+import { EpisodePlayer } from './EpisodePlayer'
 import { PublicShell } from './PublicShell'
 
-const METHOD = [
+const HEXAGRAMS = Array.from({ length: 64 }, (_, index) =>
+  String.fromCharCode(0x4dc0 + index),
+).join(' ')
+
+const LIFECYCLE = [
   {
-    number: '01',
-    title: 'Expand the question',
-    body: 'Anansi constructs 64 distinct facets so the first plausible framing loses its monopoly.',
+    glyph: '䷀',
+    authority: 'Model-mediated',
+    authorityClass: 'wc-authority-model',
+    title: 'Anansi',
+    body: 'Generates a plural field of exactly 64 facets, crossing eight practical dimensions with eight movements of change.',
+    prohibition: 'declare any facet true or complete.',
   },
   {
-    number: '02',
-    title: 'Force real conflict',
-    body: 'A complete circular-chess game creates a bounded, replayable path through the field.',
+    glyph: '䷄',
+    authority: 'Deterministic',
+    authorityClass: 'wc-authority-det',
+    title: 'Chess',
+    body: 'A semantically blind engine plays a complete game on the circular board—a bounded, replayable trajectory.',
+    prohibition: 'read facet meaning or assess evidence.',
   },
   {
-    number: '03',
-    title: 'Attack what survives',
-    body: 'Portia applies 13 adversarial tests. A deterministic Gate can permit, retry, or refuse.',
+    glyph: '䷅',
+    authority: 'Model-mediated',
+    authorityClass: 'wc-authority-model',
+    title: 'Portia',
+    body: 'Attacks every surviving candidate with thirteen examinations before any answer exists.',
+    prohibition: 'generate the substantive answer.',
   },
   {
-    number: '04',
-    title: 'Act and remember',
-    body: 'Charlotte qualifies the answer; Wilbur records a reversible action and what happened next.',
+    glyph: '䷐',
+    authority: 'Deterministic',
+    authorityClass: 'wc-authority-det',
+    title: 'Gate & Retry',
+    body: 'Code decides whether the surviving basis is sufficient—with bounded retry and principled refusal.',
+    prohibition: 'invent material or waive requirements.',
+  },
+  {
+    glyph: '䷊',
+    authority: 'Model-mediated',
+    authorityClass: 'wc-authority-model',
+    title: 'Answer',
+    body: 'Synthesizes only the exact permitted prompt: reviewed evidence, usable candidates, and required qualifications.',
+    prohibition: 'cite consumed or unresolved candidates.',
+  },
+  {
+    glyph: '䷗',
+    authority: 'Model-mediated',
+    authorityClass: 'wc-authority-model',
+    title: 'Charlotte',
+    body: 'Qualifies the stored answer—truth boundaries, stakeholders, audience—and returns exactly three reversible actions.',
+    prohibition: 'silently replace the analysis.',
+  },
+  {
+    glyph: '䷒',
+    authority: 'Human-owned',
+    authorityClass: 'wc-authority-human',
+    title: 'Wilbur',
+    body: 'The person plans, runs, abandons, or completes an action—and records what reality did.',
+    prohibition: 'be delegated: the model never declares success.',
+  },
+  {
+    glyph: '䷾',
+    authority: 'Persistence',
+    authorityClass: 'wc-authority-store',
+    title: 'The Web',
+    body: 'Preserves the full genealogy—field, seeds, moves, dispositions, digests, actions, and observations.',
+    prohibition: 'convert provenance into truth.',
   },
 ] as const
 
-const ANANSI = [
-  ['A', 'Analyze'],
-  ['N', 'Name'],
-  ['A', 'Associate'],
-  ['N', 'Navigate'],
-  ['S', 'Synthesize'],
-  ['I', 'Iterate'],
+const STATUS = [
+  {
+    title: 'Implemented',
+    body: '64-facet contract, seeded casting, circular engine, 13 Portia attacks, deterministic Gate, Charlotte, Wilbur, and provenance.',
+    limit: 'Does not establish that any component improves reasoning.',
+  },
+  {
+    title: 'Reproducible',
+    body: 'The same field, seeds, versions, and event log reconstruct the cast and game state.',
+    limit: 'Does not make a reproducible trajectory epistemically privileged.',
+  },
+  {
+    title: 'Inspectable',
+    body: 'Typed artifacts, dispositions, thresholds, transitions, and ancestry are exposed.',
+    limit: 'Does not guarantee truth or prevent manipulation.',
+  },
+  {
+    title: 'Falsifiable',
+    body: 'Preregistered baselines, component ablations, cross-seed analysis, adversarial suites, and real-world follow-up.',
+    limit: 'Does not promise the system will survive evaluation.',
+  },
+] as const
+
+const PHASES = [
+  {
+    label: 'Phase 1',
+    title: 'Contract and implementation audit',
+    body: 'One authoritative version manifest; every lifecycle transition tested; artifacts bound to exact prompt and source digests.',
+  },
+  {
+    label: 'Phase 2',
+    title: 'Minimum scientific evaluation',
+    body: 'A diverse ill-structured problem corpus; direct, matched-compute, and ablation baselines; multiple seeds per problem; preregistered analysis.',
+  },
+  {
+    label: 'Phase 3',
+    title: 'Adversarial safety evaluation',
+    body: 'Dynamic prompt injection, correlated-model conditions, memory poisoning, and replay tampering. Attack failures get published, not laundered.',
+  },
+  {
+    label: 'Phase 4',
+    title: 'Human consequence and longitudinal learning',
+    body: 'Do people execute the actions? Do thresholds change decisions? Does memory improve later cycles without amplifying contamination?',
+  },
+  {
+    label: 'Phase 5',
+    title: 'Simplification',
+    body: 'Remove any component that does not earn its cost. A system that refuses to molt has mistaken its current shell for its essence.',
+  },
 ] as const
 
 export function ProductHome() {
   return (
     <PublicShell>
-      <section className={styles.hero} aria-labelledby="hero-title">
-        <div className={styles.heroCopy}>
-          <p className={styles.eyebrow}>A deliberative computation layer for AI</p>
-          <h1 id="hero-title">Move past the first answer.</h1>
-          <p className={styles.heroLead}>
-            WebChess turns a difficult question into an auditable process of divergence,
-            conflict, adversarial testing, refusal, action, and memory.
+      <header className="wc-hero" id="top">
+        <AmbientWeb />
+        <div className="wc-hero-veil" aria-hidden="true" />
+        <div className="wc-hero-in">
+          <div className="wc-kicker">WebChess 2.0 · Deliberative Middleware</div>
+          <h1>
+            Every question arrives wrapped in its first frame.{' '}
+            <span className="wc-goldline">WebChess cuts it loose.</span>
+          </h1>
+          <p className="wc-hero-lede">
+            An external institution around a foundation model: <strong>sixty-four candidate
+            perspectives</strong>, a reproducible symbolic cast, a complete circular-chess
+            traversal, <strong>adversarial review before any answer exists</strong>, a
+            deterministic Gate that can refuse—and durable provenance for everything that
+            survives.
           </p>
-          <div className={styles.heroActions}>
-            <Link className={styles.primaryAction} href="/play">
-              Play WebChess <ArrowRight aria-hidden="true" size={18} />
-            </Link>
-            <Link className={styles.secondaryAction} href="/research">
-              See the research
-            </Link>
+          <div className="wc-hero-ctas">
+            <Link className="wc-btn" href="/play">Play WebChess</Link>
+            <Link className="wc-btn wc-btn-plain" href="/white-paper">Read the white paper</Link>
+            <a className="wc-btn wc-btn-plain" href="#episode">Watch an episode</a>
           </div>
-          <dl className={styles.heroMetrics} aria-label="WebChess method at a glance">
-            <div>
-              <dt>64</dt>
-              <dd>problem perspectives</dd>
-            </div>
-            <div>
-              <dt>13</dt>
-              <dd>Portia attack classes</dd>
-            </div>
-            <div>
-              <dt>3</dt>
-              <dd>reversible next actions</dd>
-            </div>
-          </dl>
         </div>
-        <HeroBoard />
-      </section>
+        <div className="wc-scroll-cue" aria-hidden="true">Descend</div>
+      </header>
 
-      <section className={styles.boundaryStrip} aria-label="Governing epistemic boundary">
-        <strong>Board events generate salience, not evidence.</strong>
-        <span>Reality—not the game—decides what holds.</span>
-      </section>
+      <div className="wc-hexstrip" aria-hidden="true">
+        <div className="wc-hexrow">{HEXAGRAMS} {HEXAGRAMS}</div>
+      </div>
 
-      <section className={styles.section} id="method" aria-labelledby="method-title">
-        <div className={styles.sectionHeading}>
-          <div>
-            <p className={styles.sectionIndex}>01 · Method</p>
-            <h2 id="method-title">One question. Four visible transformations.</h2>
-          </div>
+      <section className="wc-rule" id="rulemoment" data-wc-rule>
+        <div className="wc-wrap">
+          <div className="wc-kicker">The governing rule</div>
+          <h2>
+            Board events generate <span className="wc-salience">salience,</span>
+            <br />
+            <span className="wc-strike">not evidence.</span>
+          </h2>
           <p>
-            WebChess does not ask one model call to generate, criticize, authorize, persuade,
-            and declare success. Those powers are separated and recorded.
+            A capture earns a candidate <b>inspection—never truth</b>. The hexagram lenses, seeded
+            cast, and chess conflict exist to disturb premature closure. Evidence enters only
+            through observation, sources, domain knowledge, stakeholder testimony, formal tools,
+            and real-world tests.
           </p>
         </div>
-        <ol className={styles.methodGrid}>
-          {METHOD.map((step) => (
-            <li key={step.number}>
-              <span>{step.number}</span>
-              <h3>{step.title}</h3>
-              <p>{step.body}</p>
-            </li>
-          ))}
-        </ol>
       </section>
 
-      <section className={`${styles.section} ${styles.darkSection}`} aria-labelledby="refusal-title">
-        <div className={styles.refusalGrid}>
-          <div>
-            <p className={styles.sectionIndex}>02 · Safety by architecture</p>
-            <h2 id="refusal-title">The system can say no.</h2>
-            <p className={styles.largeBody}>
-              Portia reviews the exact answer package before generation. The Gate requires
-              independent surviving material, mandatory coverage, explicit tension, and no
-              severe unresolved contradiction.
-            </p>
-            <Link className={styles.inlineLinkLight} href="/research#safety">
-              Read the threat model <ArrowRight aria-hidden="true" size={16} />
-            </Link>
-          </div>
-          <div className={styles.gatePanel} aria-label="WebChess admission sequence">
-            <div className={styles.gateRow}>
-              <ShieldCheck aria-hidden="true" />
-              <div><strong>Portia</strong><span>Attack every survivor</span></div>
-              <b>REVIEW</b>
+      <section className="wc-block" id="method">
+        <div className="wc-wrap">
+          <div className="wc-kicker" data-wc-reveal>Why it exists</div>
+          <h2 className="wc-sec" data-wc-reveal>A model can solve the wrong problem beautifully.</h2>
+          <div className="wc-method-grid">
+            <div data-wc-reveal>
+              <p>
+                Many consequential questions are ill structured: the actors are disputed, the
+                objective is unstable, constraints are incomplete, values collide, and the
+                initial wording already smuggles in a preferred answer. In those conditions, a
+                fluent completion is a fast route to a confident answer to the wrong problem.
+              </p>
+              <div className="wc-pull">
+                Once the first frame captures the prompt, every later sentence pays taxes to it.
+              </div>
             </div>
-            <div className={styles.gateConnector} aria-hidden="true" />
-            <div className={styles.gateRow}>
-              <GitBranch aria-hidden="true" />
-              <div><strong>Gate</strong><span>Apply deterministic thresholds</span></div>
-              <b>DECIDE</b>
-            </div>
-            <div className={styles.gateOutcomes}>
-              <span><CircleDotDashed aria-hidden="true" /> Permit</span>
-              <span><Braces aria-hidden="true" /> Retry</span>
-              <span><OctagonX aria-hidden="true" /> Refuse</span>
+            <div data-wc-reveal>
+              <p>
+                <b>WebChess does not change the model&apos;s weights. It changes the episode the
+                model operates in.</b> Generation, perturbation, traversal, attack, admission,
+                communication, action, and memory are separated into components with distinct
+                authority.
+              </p>
+              <p>
+                The result is <b>deliberative middleware</b>: an external computational institution
+                surrounding a parametric model. Whether it earns its cost remains an open,
+                explicitly falsifiable question—and the project publishes failure conditions next
+                to its claims.
+              </p>
             </div>
           </div>
         </div>
       </section>
 
-      <section className={styles.section} aria-labelledby="anansi-title">
-        <div className={styles.sectionHeading}>
-          <div>
-            <p className={styles.sectionIndex}>03 · ANANSI</p>
-            <h2 id="anansi-title">A recursive protocol for thinking before concluding.</h2>
+      <section className="wc-block wc-episode" id="episode">
+        <div className="wc-wrap">
+          <EpisodePlayer />
+        </div>
+      </section>
+
+      <section className="wc-block" id="lifecycle">
+        <div className="wc-wrap">
+          <div className="wc-kicker" data-wc-reveal>The ANANSI lifecycle</div>
+          <h2 className="wc-sec" data-wc-reveal>
+            Eight authorities. None may adjudicate its own proposal.
+          </h2>
+          <p className="wc-sec-lede" data-wc-reveal>
+            ANANSI—Analyze, Name, Associate, Navigate, Synthesize, Iterate—governs the episode.
+            Each stage holds a narrow power and an explicit prohibition.
+          </p>
+          <div className="wc-stages">
+            {LIFECYCLE.map((stage) => (
+              <article className="wc-stage" data-wc-reveal key={stage.title}>
+                <span className="wc-stage-glyph" aria-hidden="true">{stage.glyph}</span>
+                <span className={`wc-authority ${stage.authorityClass}`}>{stage.authority}</span>
+                <h3>{stage.title}</h3>
+                <p>{stage.body}</p>
+                <p className="wc-maynot"><b>May not</b> {stage.prohibition}</p>
+              </article>
+            ))}
           </div>
-          <p>
-            The acronym names the full metaprotocol. The mythic Anansi supplies the image of
-            plural intelligence and strategic indirection; the software turns that image into
-            explicit operations.
-          </p>
         </div>
-        <ol className={styles.anansiRail} aria-label="ANANSI protocol">
-          {ANANSI.map(([letter, word]) => (
-            <li key={`${letter}-${word}`}>
-              <span>{letter}</span>
-              <strong>{word}</strong>
-            </li>
-          ))}
-        </ol>
       </section>
 
-      <section className={styles.section} aria-labelledby="proof-title">
-        <div className={styles.sectionHeading}>
-          <div>
-            <p className={styles.sectionIndex}>04 · Inspection</p>
-            <h2 id="proof-title">A result with a chain of custody.</h2>
+      <section className="wc-block" id="honesty">
+        <div className="wc-wrap">
+          <div className="wc-kicker" data-wc-reveal>Stated plainly</div>
+          <h2 className="wc-sec" data-wc-reveal>The claims and the refusals.</h2>
+          <p className="wc-sec-lede" data-wc-reveal>
+            The architecture is implemented. Its benefits are hypotheses.
+          </p>
+          <div className="wc-ledger" data-wc-reveal>
+            <div className="wc-ledger-is">
+              <h3>WebChess is</h3>
+              <ul>
+                <li>A structured external representation for difficult questions</li>
+                <li>A reproducible perturbation and traversal protocol</li>
+                <li>A separation-of-authority architecture</li>
+                <li>A generator of hypotheses, countercases, and reversible actions</li>
+                <li>An auditable episode with persistent ancestry</li>
+              </ul>
+            </div>
+            <div className="wc-ledger-isnot">
+              <h3>WebChess is not</h3>
+              <ul>
+                <li>A replacement for evidence or expertise</li>
+                <li>Divination, prophecy, or a causal oracle</li>
+                <li>Proof that multiple model calls are independent minds</li>
+                <li>An autonomous high-stakes decision maker</li>
+                <li>A validated safety technology—yet</li>
+              </ul>
+            </div>
           </div>
-          <p>
-            Seeds, board state, moves, attacks, Gate decisions, model prompts, qualifications,
-            actions, and observations remain linked in a replayable genealogy.
-          </p>
-        </div>
-        <div className={styles.proofGrid}>
-          <article>
-            <GitBranch aria-hidden="true" />
-            <h3>Replayable</h3>
-            <p>The server reconstructs the game from canonical state and ordered events.</p>
-          </article>
-          <article>
-            <ShieldCheck aria-hidden="true" />
-            <h3>Prompt-bound</h3>
-            <p>Portia and the Gate authorize one exact answer package, not a later substitute.</p>
-          </article>
-          <article>
-            <CircleDotDashed aria-hidden="true" />
-            <h3>Falsifiable</h3>
-            <p>Every layer can be ablated and compared against simpler baselines.</p>
-          </article>
         </div>
       </section>
 
-      <section className={styles.researchBand} aria-labelledby="research-title">
-        <div>
-          <p className={styles.sectionIndex}>Research program</p>
-          <h2 id="research-title">Publish the machinery. Test the claims.</h2>
-          <p>
-            Read the full architecture, implementation boundary, failure modes, and evaluation
-            program. WebChess is presented as a testable method—not a revealed truth.
+      <section className="wc-block" id="research">
+        <div className="wc-wrap">
+          <div className="wc-kicker" data-wc-reveal>Research program</div>
+          <h2 className="wc-sec" data-wc-reveal>Every layer must earn its complexity.</h2>
+          <p className="wc-sec-lede" data-wc-reveal>
+            A spider-shaped bureaucracy is still a bureaucracy. Each component must survive
+            direct, matched-compute, random, semantic, and human baselines—and null results belong
+            in the record.
           </p>
-        </div>
-        <div className={styles.researchActions}>
-          <Link href="/white-paper">
-            <BookOpenText aria-hidden="true" />
-            <span><strong>White paper</strong><small>Architecture and research agenda</small></span>
-            <ArrowRight aria-hidden="true" />
-          </Link>
-          <a href="https://github.com/jr4488/webchess">
-            <Braces aria-hidden="true" />
-            <span><strong>Source code</strong><small>Browse the Apache-2.0 implementation</small></span>
-            <ArrowRight aria-hidden="true" />
-          </a>
-          <a href="/downloads/webchess-source.zip" download>
-            <Download aria-hidden="true" />
-            <span><strong>Source archive</strong><small>Download the reviewed repository snapshot</small></span>
-            <ArrowRight aria-hidden="true" />
-          </a>
+          <div className="wc-status-grid">
+            {STATUS.map((item) => (
+              <article className="wc-status" data-wc-reveal key={item.title}>
+                <h4>{item.title}</h4>
+                <p>{item.body}</p>
+                <p className="wc-not">{item.limit}</p>
+              </article>
+            ))}
+          </div>
+          <div>
+            {PHASES.map((item) => (
+              <article className="wc-phase" data-wc-reveal key={item.label}>
+                <span className="wc-phase-label">{item.label}</span>
+                <div>
+                  <h4>{item.title}</h4>
+                  <p>{item.body}</p>
+                </div>
+              </article>
+            ))}
+          </div>
         </div>
       </section>
 
-      <section className={styles.closing} aria-labelledby="closing-title">
-        <p className={styles.eyebrow}>Bring a question worth examining</p>
-        <h2 id="closing-title">The first answer is where WebChess begins.</h2>
-        <Link className={styles.primaryAction} href="/play">
-          Start a game <ArrowRight aria-hidden="true" size={18} />
-        </Link>
+      <section className="wc-block" id="paper">
+        <div className="wc-wrap">
+          <div className="wc-paper-card" data-wc-reveal>
+            <div className="wc-paper-left">
+              <div className="wc-kicker">Technical white paper</div>
+              <h3>WebChess 2.0: Deliberative Middleware for AI-Assisted Problem Solving</h3>
+              <p>
+                Architecture, formal Gate predicates, threat model, the thirteen-attack taxonomy,
+                the ablation program, and a five-phase roadmap—with an explicit account of what is
+                implemented and what remains hypothetical.
+              </p>
+              <div className="wc-paper-actions">
+                <Link className="wc-btn" href="/white-paper">Read online</Link>
+                <a className="wc-btn wc-btn-plain" href="/downloads/webchess-white-paper.pdf" download>
+                  Download PDF
+                </a>
+                <a className="wc-btn wc-btn-plain" href="/downloads/webchess-source.zip" download>
+                  Download source
+                </a>
+              </div>
+            </div>
+            <div className="wc-paper-right">
+              <h4>Reference implementation manifest</h4>
+              <ul className="wc-manifest">
+                <li><span className="wc-manifest-key">method</span><span className="wc-manifest-value">WebChess 2.0</span></li>
+                <li><span className="wc-manifest-key">release</span><span className="wc-manifest-value">2.1.0</span></li>
+                <li><span className="wc-manifest-key">evaluated commit</span><span className="wc-manifest-value">9980328…4773bc</span></li>
+                <li><span className="wc-manifest-key">board</span><span className="wc-manifest-value">8 rings × 8 sectors</span></li>
+                <li><span className="wc-manifest-key">engine</span><span className="wc-manifest-value">150,000 nodes · depth 12</span></li>
+                <li><span className="wc-manifest-key">retry budget</span><span className="wc-manifest-value">2 games · 1 field</span></li>
+                <li><span className="wc-manifest-key">license</span><span className="wc-manifest-value">Apache-2.0</span></li>
+              </ul>
+            </div>
+          </div>
+        </div>
       </section>
     </PublicShell>
   )
