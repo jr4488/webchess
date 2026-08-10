@@ -1,0 +1,13 @@
+{
+  "artifact": "WebChess audited research artifact",
+  "method_version": "2.0",
+  "software_version": "2.1.0",
+  "manuscript_version": "2.1",
+  "evaluated_commit": "9980328581ba3e6fed6f2c4fc99b555fec4773bc",
+  "archive_branch": "archive/webchess-2.1.0-evaluated-9980328",
+  "license": "Apache-2.0",
+  "correspondence": "AnansiPortia@gmail.com",
+  "project_site": "https://AnansiPortia.com",
+  "doi": null,
+  "doi_status": "pending external archive deposit"
+}

@@ -1,0 +1,35 @@
+{
+  "@context": "https://doi.org/10.5063/schema/codemeta-2.0",
+  "@type": "SoftwareSourceCode",
+  "name": "WebChess",
+  "version": "2.1.0",
+  "description": "A rule-governed deliberative layer for foundation models and AI-assisted problem solving.",
+  "codeRepository": "https://github.com/jr4488/webchess",
+  "issueTracker": "https://github.com/jr4488/webchess/issues",
+  "url": "https://AnansiPortia.com",
+  "license": "https://spdx.org/licenses/Apache-2.0",
+  "datePublished": "2026-08-03",
+  "dateModified": "2026-08-05",
+  "author": [
+    {
+      "@type": "Person",
+      "givenName": "Jack",
+      "familyName": "Reynolds",
+      "email": "AnansiPortia@gmail.com",
+      "affiliation": "The WebChess Project"
+    }
+  ],
+  "programmingLanguage": ["TypeScript", "JavaScript", "SQL"],
+  "runtimePlatform": ["Node.js", "Next.js", "PostgreSQL"],
+  "softwareRequirements": ["Node.js", "PostgreSQL 17"],
+  "identifier": "9980328581ba3e6fed6f2c4fc99b555fec4773bc",
+  "keywords": [
+    "artificial intelligence",
+    "AI safety",
+    "deliberation",
+    "provenance",
+    "adversarial evaluation",
+    "human-AI interaction"
+  ],
+  "citation": "WebChess: A Rule-Governed Deliberative Layer for Foundation Models (audited manuscript v2.1; DOI pending)."
+}
