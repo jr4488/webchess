@@ -52,10 +52,10 @@ export function ResearchHome() {
           <div className="wc-research-documents" data-wc-reveal>
             <article className="wc-research-document">
               <small>Primary document</small>
-              <h2>WebChess 2.0 white paper</h2>
+              <h2>The First Answer Is Not Enough</h2>
               <p>
-                The ANANSI protocol, circular-chess computation, Portia, Gate, Retry, Charlotte,
-                Wilbur, provenance, failure modes, threat model, and evaluation program.
+                The Arachne Method, circular-chess computation, Portia, Gate, Retry, Answer,
+                Charlotte, Wilbur, provenance, implementation audit, and evaluation program.
               </p>
               <Link href="/white-paper">Read online</Link>
             </article>

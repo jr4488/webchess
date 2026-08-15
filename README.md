@@ -20,7 +20,8 @@ from many angles before acting. It combines:
 WebChess is a thinking aid, not divination, prediction, or evidence. A board
 event makes a facet salient; it does not make that facet true. The full method,
 limitations, and proposed validation program are documented in the
-[WebChess 2.0 technical white paper](docs/WEBCHESS_WHITE_PAPER_V2.md).
+[The First Answer Is Not Enough](docs/WEBCHESS_WHITE_PAPER_V3.md), the current
+research and technical white paper.
 
 ## Project status
 
@@ -447,7 +448,8 @@ Repository documents:
 - [Terms](docs/TERMS.md)
 - [Acceptable use](docs/ACCEPTABLE_USE.md)
 - [Research and evaluation](docs/RESEARCH.md)
-- [WebChess 2.0 technical white paper](docs/WEBCHESS_WHITE_PAPER_V2.md)
+- [The First Answer Is Not Enough — current white paper](docs/WEBCHESS_WHITE_PAPER_V3.md)
+- [Archived WebChess 2.0 white paper](docs/WEBCHESS_WHITE_PAPER_V2.md)
 - [Archived WebChess 1.3 white paper](docs/archive/WEBCHESS_WHITE_PAPER_V1.3.md)
 - [WebChess 2.0 operator guide](docs/WEBCHESS_2_0_OPERATIONS.md)
 - [Contributing](CONTRIBUTING.md)

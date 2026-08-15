@@ -47,7 +47,7 @@ cannot supply that evidence by itself.
 Do not submit confidential questions, credentials, personal data, or regulated
 information.
 
-Read the current [WebChess 2.0 technical white paper](WEBCHESS_WHITE_PAPER_V2.md).
+Read the current white paper, [The First Answer Is Not Enough](WEBCHESS_WHITE_PAPER_V3.md).
 Portia dispositions, Gate passes, and completed software tests are conformance
 evidence—not proof that a recommendation is true or effective. The deployed
 site reserves:

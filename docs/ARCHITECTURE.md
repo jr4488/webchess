@@ -570,5 +570,5 @@ without introducing a separate queue or cache as an authority.
 - A replay start is cloned and accounted atomically.
 - Forced deletion retains no raw Clerk ID in application tables.
 
-See the [WebChess 2.0 technical white paper](WEBCHESS_WHITE_PAPER_V2.md) for the intellectual
+See [The First Answer Is Not Enough](WEBCHESS_WHITE_PAPER_V3.md) for the intellectual
 lineage, evidence matrix, limitations, and evaluation agenda.

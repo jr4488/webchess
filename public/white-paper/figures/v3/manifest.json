@@ -1,0 +1,436 @@
+{
+  "schema_version": 1,
+  "paper": "The First Answer Is Not Enough: An Architecture for AI-Assisted Deliberation Before Decision",
+  "software_examined": "WebChess 2.2.0 release candidate at 7a3749cf7f2c4e4c5ebfeb9b9aa870a11843f3a2 (committed; not tagged; not deployment proof)",
+  "generator": "scripts/generate-white-paper-v3-figures.py",
+  "deterministic": true,
+  "fact_boundary": "No figure reports effectiveness data. Measured figures are limited to current perft and pinned engine-arena regression results.",
+  "figures": [
+    {
+      "id": "figure-01",
+      "display_label": "01",
+      "file": "01-first-frame.jpg",
+      "title": "The first frame should not become a monopoly",
+      "evidence_label": "CONCEPTUAL BOUNDARY",
+      "alt_text": "A forked flow contrasts a one-pass path from ambiguous question to first frame and fluent answer with the Arachne Method path through structured plurality, conflict, examination, and qualified action.",
+      "caption": "The Arachne Method delays premature closure by separating problem construction from selection, examination, qualification, and consequence. This is the architecture's thesis, not a measured effectiveness claim.",
+      "source_refs": [
+        "docs/WEBCHESS_WHITE_PAPER_V3.md §1"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-02",
+      "display_label": "02",
+      "file": "02-authority-crosswalk.jpg",
+      "title": "Eight authorities, seven visible stops, one Answer artifact",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "Two horizontal rails compare the eight formal Arachne authorities with the seven player-facing lifecycle stops, showing Gate and Retry as internal authorities and Answer as a generated artifact.",
+      "caption": "The architecture counts Anansi, Chess, Portia, Gate, Retry, Charlotte, Wilbur, and the Web. The interface instead shows Anansi, Chess, Portia, Answer, Charlotte, Wilbur, and Web; Answer is not a ninth authority.",
+      "source_refs": [
+        "src/lib/lifecycle/contracts.ts",
+        "src/components/LifecycleRail.tsx"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-03",
+      "display_label": "03",
+      "file": "03-facet-matrix.jpg",
+      "title": "Anansi's 8 × 8 field: sixty-four bounded facets",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "An eight-by-eight matrix crosses Purpose, People, Resources, Timing, Risks, Values, Evidence, and Possibilities with Begin, Receive, Clarify, Connect, Challenge, Adapt, Consolidate, and Release.",
+      "caption": "Every facet occupies one practical-dimension by change-movement coordinate. Structural coverage constrains generation but does not prove completeness or correctness.",
+      "source_refs": [
+        "src/lib/problem.ts",
+        "src/lib/division.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-04",
+      "display_label": "04",
+      "file": "04-three-shuffle-cast.jpg",
+      "title": "One seed, three independent deterministic shuffles",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "A saved seed fans into separate facet, lens, and board permutations before producing the initial semantic board.",
+      "caption": "The cast independently permutes facets, I Ching-inspired lenses, and completed pairs onto board locations. It is reproducible recombination, not semantic inference or evidence.",
+      "source_refs": [
+        "src/lib/problem.ts",
+        "src/server/http/services.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-05",
+      "display_label": "A.1",
+      "file": "05-polar-topology.jpg",
+      "title": "The board as P₈ □ C₈: bounded rings, cyclic sectors",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "An eight-ring radial board is paired with the notation P8 Cartesian-product C8, explaining bounded ring positions, cyclic sector positions, and sixty-four cells.",
+      "caption": "WebChess coordinates form eight bounded ring positions crossed with eight wrapping sector positions. The notation describes cell topology; piece rules still define legal movement.",
+      "source_refs": [
+        "src/lib/game.ts",
+        "src/lib/engine/position.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-06",
+      "display_label": "A.2",
+      "file": "06-initial-board-polarities.jpg",
+      "title": "Initial position and the two nonmoral polarities",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "A radial chess board shows Black back pieces and pawns at the center moving outward and White pieces and pawns at the edge moving inward.",
+      "caption": "Black represents inside-out intent from rings zero and one. White represents outside-in evidence from rings seven and six and moves first. The colors are directional, not moral.",
+      "source_refs": [
+        "src/lib/game.ts:createInitialPieces"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-07",
+      "display_label": "A.3",
+      "file": "07-piece-metaphors.jpg",
+      "title": "Six movement roles, six metaphors of attention",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "Six cards map King, Queen, Rook, Bishop, Knight, and Pawn to core purpose, agency, structure, perspective, reframing, and practice, while summarizing their implemented movement.",
+      "caption": "Piece metaphors translate chess roles into modes of attention. They organize inquiry without assigning truth or stakeholder worth.",
+      "source_refs": [
+        "src/lib/reading.ts:PIECE_METAPHORS",
+        "src/lib/engine/movegen.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-08",
+      "display_label": "A.5",
+      "file": "08-attention-and-value-scales.jpg",
+      "title": "Attention is a display score—not an epistemology",
+      "evidence_label": "CONCEPTUAL BOUNDARY",
+      "alt_text": "The implemented capture-attention equation appears above four separated scales: piece value, engine evaluation, capture attention, and evidence or human value.",
+      "caption": "The capture score combines a constant, piece values, and a middle-ring meeting bonus. It must not be promoted into probability, evidence quality, moral importance, or decision benefit.",
+      "source_refs": [
+        "src/lib/game.ts:captureAttentionWeight",
+        "src/lib/engine/evaluate.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-09",
+      "display_label": "A.7",
+      "file": "09-pvs-search-web.jpg",
+      "title": "Engine V2: a principal-variation search web",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "A branching search tree highlights one principal variation and defines PVS, TT, SEE, and quiescence alongside the deterministic node budget.",
+      "caption": "Engine V2 uses iterative principal-variation alpha-beta search, aspiration windows, a transposition table, quiescence, static exchange evaluation, and a seeded root tie-break. It has no semantic access.",
+      "source_refs": [
+        "src/lib/engine/index.ts",
+        "src/lib/engine/search.ts",
+        "src/lib/engine/evaluate.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-10",
+      "display_label": "A.4",
+      "file": "10-terminal-precedence.jpg",
+      "title": "Terminal precedence: the decisive condition wins first",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "A five-step vertical decision order checks King capture, mutual immobility, one hundred quiet plies, two hundred fifty-six completed plies, then continuation or forced pass.",
+      "caption": "A direct King capture is evaluated before draw boundaries. This makes a capture on ply 256 a win rather than a move-limit draw.",
+      "source_refs": [
+        "src/lib/game.ts:getGameOutcome",
+        "src/lib/game-replay.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-11",
+      "display_label": "A.6",
+      "file": "11-authoritative-replay.jpg",
+      "title": "Authoritative replay: derive state, never trust it",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "A small browser command passes through load, canonical rebuild, replay, resolution, and atomic compare-and-swap commit stages.",
+      "caption": "The browser proposes only a piece, destination, and expected revision. The server reconstructs and validates the authoritative game before committing derived events.",
+      "source_refs": [
+        "src/lib/game-replay.ts",
+        "src/server/games/repository.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-12",
+      "display_label": "05",
+      "file": "12-portia-thirteen-attacks.jpg",
+      "title": "Portia hunts the prompt before an Answer exists",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "Thirteen named adversarial attacks orbit a Portia center, with preserved, wounded, consumed, and unresolved dispositions below.",
+      "caption": "Every terminal candidate is tested exactly once against thirteen versioned attack types. Portia reviews the exact forthcoming Answer prompt before generation.",
+      "source_refs": [
+        "src/lib/lifecycle/contracts.ts:PORTIA_ATTACK_TYPES",
+        "src/server/openai/portia.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-13",
+      "display_label": "06",
+      "file": "13-gate-conjunction.jpg",
+      "title": "The Gate is a conjunction, not an oracle",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "Seven requirement cards converge on an AND gate that authorizes Answer only when every hard floor passes.",
+      "caption": "webchess-gate-v4 requires Portia permission, minimum usable and independent candidates, required coverage, explicit tension, contradiction safety, and qualification integrity.",
+      "source_refs": [
+        "src/lib/lifecycle/gate.ts",
+        "src/lib/lifecycle/versions.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-14",
+      "display_label": "07",
+      "file": "14-bounded-retry.jpg",
+      "title": "Retry is a finite tree, not an infinite reroll",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "A failed Gate can spend at most two root-wide same-field replay allowances and one field-regeneration allowance, in policy-selected order, before an explicit insufficient-basis stop.",
+      "caption": "Two root-wide replay children plus one regenerated-field child cap a genealogy at four games. The policy chooses their order; duplicate fingerprints favor regeneration.",
+      "source_refs": [
+        "src/lib/lifecycle/retry.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-15",
+      "display_label": "08",
+      "file": "15-answer-charlotte-wilbur.jpg",
+      "title": "Answer → Charlotte → durable Wilbur",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "Four cards flow from approved prompt to stored Answer, Charlotte qualification with exactly three suggestions, and a durable Wilbur mutation boundary with once-only rate admission, lifetime capacity reservation, atomic settlement, and exact replay.",
+      "caption": "Gate-approved Answer is stored, then Charlotte qualifies it. Every Wilbur create, update, or observation is owner-, idempotency-key-, and digest-bound; admission uses database time, and the artifact, lifecycle event, and ledger result settle atomically. Wilbur executes and independently verifies neither.",
+      "source_refs": [
+        "src/server/openai/answer.ts",
+        "src/server/openai/charlotte.ts",
+        "src/server/lifecycle/repository.ts",
+        "src/server/usage/queries.ts",
+        "db/migrations/0012_unique_wilbur_charlotte_actions.sql",
+        "db/migrations/0013_wilbur_mutation_requests.sql"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-16",
+      "display_label": "09",
+      "file": "16-provenance-web.jpg",
+      "title": "The Web remembers—including failure",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "A circular provenance graph connects question, facets, cast, event log, terminal ecology, Portia, Gate, Answer, Charlotte, Wilbur action, observations, and the durable mutation ledger around a central Web.",
+      "caption": "The implemented Web is within-case provenance with owner scope, versions, digests, append-only lifecycle events, and terminal Wilbur mutation outcomes. Consented cross-case learning is not implemented.",
+      "source_refs": [
+        "src/server/lifecycle/repository.ts",
+        "src/server/games/repository.ts",
+        "db/migrations/0013_wilbur_mutation_requests.sql"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-17",
+      "display_label": "11",
+      "file": "17-runtime-topologies.jpg",
+      "title": "Three audited runtime boundaries",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "Three columns distinguish the tagged v2.1.0 OpenClaw release line, the committed but undeployed hosted-service architecture, and the working local source-checkout topology in the committed WebChess 2.2.0 candidate.",
+      "caption": "The local checkout now supports either a signed no-Clerk session or a complete Clerk development-key pair, validates its loopback PostgreSQL boundary, applies exact-prefix canonical migrations only under launcher authority, and waits for readiness before opening the browser. The candidate is not tagged, and no hosted deployment is claimed.",
+      "source_refs": [
+        "docs/ARCHITECTURE.md",
+        "scripts/local-hosted.mjs",
+        "openclaw-plugin/src/launcher.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-18",
+      "display_label": "13",
+      "file": "18-evidence-ladder.jpg",
+      "title": "Evidence labels prevent architectural time travel",
+      "evidence_label": "CONCEPTUAL BOUNDARY",
+      "alt_text": "A six-level tapered ledger separates the tagged v2.1.0 release, committed WebChess 2.2.0 candidate at 7a3749c, absent deployment proof, unit and PostgreSQL tests, combined coverage, and browser, accessibility, and audit gates.",
+      "caption": "The immutable candidate passed 82 unit files with 1,177 tests, 9 PostgreSQL files with 61 tests, a combined 91-file/1,238-test coverage run at 84.66% statements, 80.76% branches, 88.51% functions, and 85.78% lines, plus 145 Playwright tests, 6 expected Clerk skips, 32 accessibility checks, and zero dependency-audit findings. These overlapping gates are not additive and are not deployment or effectiveness proof.",
+      "source_refs": [
+        "docs/WEBCHESS_WHITE_PAPER_V3.md:How to read implementation claims"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-19",
+      "display_label": "A.8",
+      "file": "19-measured-perft.jpg",
+      "title": "Perft: measured rule-space fingerprints",
+      "evidence_label": "MEASURED AUDIT",
+      "alt_text": "Horizontal bars show exact perft leaf counts for the initial position, a bishop crossing the sector seam, and a rook circling the seam at depths one and two.",
+      "caption": "The audit reproduced canonical perft counts: initial 20 and 400; bishop seam 13 and 65; rook seam 12 and 60. These validate bounded rule behavior, not playing strength.",
+      "source_refs": [
+        "src/lib/engine/perft.test.ts",
+        "src/test/engine-fixtures.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-20",
+      "display_label": "A.9",
+      "file": "20-measured-arena.jpg",
+      "title": "Arena: a bounded strength-regression result",
+      "evidence_label": "MEASURED AUDIT",
+      "alt_text": "A paired-color arena card reports Engine V2 depth three against legacy-greedy-v1 across three seeded openings, with six win tokens and a six-zero-zero record.",
+      "caption": "The current deterministic arena produced W-D-L 6-0-0 over six paired-color legs. This is regression evidence against a pinned baseline, not Elo or evidence of reasoning benefit.",
+      "source_refs": [
+        "src/lib/engine/strength.test.ts",
+        "src/test/engine-arena.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-21",
+      "display_label": "14",
+      "file": "21-proposed-evaluation.jpg",
+      "title": "How the architecture should be tested",
+      "evidence_label": "PROPOSED EVALUATION",
+      "alt_text": "Five experimental arms—direct answer, self-refine, capture trail, full lifecycle, and ablations—flow into matched tasks and blinded evaluation metrics.",
+      "caption": "A credible evaluation compares the full lifecycle with strong baselines and ablations while measuring quality, calibration, downstream learning, cost, latency, harms, and refusal.",
+      "source_refs": [
+        "docs/WEBCHESS_WHITE_PAPER_V3.md §18"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-22",
+      "display_label": "12",
+      "file": "22-metaphor-breakpoints.jpg",
+      "title": "Eight metaphors—and the point where each must break",
+      "evidence_label": "CONCEPTUAL BOUNDARY",
+      "alt_text": "Eight cards around a web pair each Arachne authority with its functional metaphor and a warning against overextending the analogy.",
+      "caption": "Metaphors make authority boundaries memorable. Typed contracts, failure states, provenance, and evaluation—not mythological resonance—make the method accountable.",
+      "source_refs": [
+        "docs/WEBCHESS_WHITE_PAPER_V3.md §§3, 16"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-23",
+      "display_label": "10",
+      "file": "23-formal-model.jpg",
+      "title": "Formal model: a provenance-preserving flow",
+      "evidence_label": "CONCEPTUAL BOUNDARY",
+      "alt_text": "Eleven equation cards trace the field, cast, game, survivors, exact prompt package, Portia, Gate, the distinct Answer artifact, Charlotte, the human-authored Wilbur record, and the within-case Web.",
+      "caption": "The notation matches the paper's formal chain and keeps Prompt Package, Answer, Charlotte qualification, Wilbur's player-authored report, and the provenance Web distinct. The equations imply neither autonomous execution, independent verification, nor a proven world-state transition; Figure 8 separately shows the implemented Wilbur durability controls.",
+      "source_refs": [
+        "docs/WEBCHESS_WHITE_PAPER_V3.md §12.2",
+        "src/server/openai/answer.ts",
+        "src/server/openai/charlotte.ts",
+        "src/server/lifecycle/repository.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-24",
+      "display_label": "E.1",
+      "file": "24-schema-web.jpg",
+      "title": "The durable Web: twenty physical tables",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "Five linked panels enumerate the migration ledger and all nineteen application tables across governance, play and limits, lifecycle, human records and mutation claims, and model research boundaries.",
+      "caption": "Thirteen ordered migrations define nineteen application tables plus the migration ledger, twenty physical tables total. The release contract also verifies eight critical unique or primary-key indexes, two exact guarded trigger/function pairs, eighteen critical constraints, and five defaults.",
+      "source_refs": [
+        "db/migrations/0001_durable_webchess.sql",
+        "db/migrations/0002_webchess_2_lifecycle.sql",
+        "db/migrations/0008_visible_research_broker.sql",
+        "db/migrations/0012_unique_wilbur_charlotte_actions.sql",
+        "db/migrations/0013_wilbur_mutation_requests.sql",
+        "scripts/deployment-database.mjs"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-25",
+      "display_label": "E.2",
+      "file": "25-recovery-transactions.jpg",
+      "title": "Two short transactions around remote inference",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "An authenticated intent passes through a reservation transaction, bounded provider call, settlement transaction, and durable response, with four interruption outcomes below.",
+      "caption": "WebChess commits before inference and settles afterward. Ambiguous provider-started work becomes indeterminate; there is no silent replay. This is application recovery, not backup.",
+      "source_refs": [
+        "src/server/usage/queries.ts",
+        "src/server/http/service-adapter.ts",
+        "src/server/lifecycle/repository.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "id": "figure-26",
+      "display_label": "E.3",
+      "file": "26-deletion-boundary.jpg",
+      "title": "Deletion boundary: verified, ordered, atomic",
+      "evidence_label": "VERIFIED IMPLEMENTATION",
+      "alt_text": "Two independent entries are shown: self-deletion branches to a 409 no-loss stop while provider work is in progress or to content cleanup and a suspended identity marker; the signed user-deleted webhook enters the force path directly.",
+      "caption": "Both paths use the foreign-key-safe game-first order under the shared lock. On the force path, game cascades occur first; under that same lock, the lifetime HMAC barrier is then established before request-ledger and raw-identity deletion, and all changes commit atomically. Mature artifacts, force, retries, and refunds are integration-tested.",
+      "source_refs": [
+        "src/server/usage/service.ts:deleteAccountData",
+        "src/server/usage/queries.ts:deleteAccountGamesSql",
+        "src/server/usage/queries.ts:deleteAccountDataSql",
+        "tests/integration/usage.integration.ts"
+      ],
+      "width": 2400,
+      "height": 1350,
+      "mime_type": "image/jpeg"
+    }
+  ]
+}

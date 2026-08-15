@@ -308,11 +308,12 @@ export function ProductHome() {
           <div className="wc-paper-card" data-wc-reveal>
             <div className="wc-paper-left">
               <div className="wc-kicker">Technical white paper</div>
-              <h3>WebChess 2.0: Deliberative Middleware for AI-Assisted Problem Solving</h3>
+              <h3>The First Answer Is Not Enough</h3>
               <p>
-                Architecture, formal Gate predicates, threat model, the thirteen-attack taxonomy,
-                the ablation program, and a five-phase roadmap—with an explicit account of what is
-                implemented and what remains hypothetical.
+                Deliberation before decision. An engaging, repository-audited account of the Arachne
+                Method: circular chess, Portia's thirteen attacks, the deterministic Gate, bounded
+                Retry, qualified action, provenance, measured evidence, repaired release boundaries,
+                and a falsifiable research program.
               </p>
               <div className="wc-paper-actions">
                 <Link className="wc-btn" href="/white-paper">Read online</Link>
@@ -327,12 +328,14 @@ export function ProductHome() {
             <div className="wc-paper-right">
               <h4>Reference implementation manifest</h4>
               <ul className="wc-manifest">
-                <li><span className="wc-manifest-key">method</span><span className="wc-manifest-value">WebChess 2.0</span></li>
-                <li><span className="wc-manifest-key">release</span><span className="wc-manifest-value">2.1.0</span></li>
-                <li><span className="wc-manifest-key">evaluated commit</span><span className="wc-manifest-value">9980328…4773bc</span></li>
+                <li><span className="wc-manifest-key">architecture</span><span className="wc-manifest-value">Arachne Method</span></li>
+                <li><span className="wc-manifest-key">candidate</span><span className="wc-manifest-value">2.2.0 · committed</span></li>
+                <li><span className="wc-manifest-key">code baseline</span><span className="wc-manifest-value">7a3749c…43f3a2</span></li>
+                <li><span className="wc-manifest-key">released tag</span><span className="wc-manifest-value">v2.1.0 · 9980328</span></li>
+                <li><span className="wc-manifest-key">boundary</span><span className="wc-manifest-value">not tagged or deployed</span></li>
                 <li><span className="wc-manifest-key">board</span><span className="wc-manifest-value">8 rings × 8 sectors</span></li>
-                <li><span className="wc-manifest-key">engine</span><span className="wc-manifest-value">150,000 nodes · depth 12</span></li>
-                <li><span className="wc-manifest-key">retry budget</span><span className="wc-manifest-value">2 games · 1 field</span></li>
+                <li><span className="wc-manifest-key">engine</span><span className="wc-manifest-value">150,000-node default · depth cap 12</span></li>
+                <li><span className="wc-manifest-key">retry budget</span><span className="wc-manifest-value">2 same-field · 1 regenerated-field</span></li>
                 <li><span className="wc-manifest-key">license</span><span className="wc-manifest-value">Apache-2.0</span></li>
               </ul>
             </div>

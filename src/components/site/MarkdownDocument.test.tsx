@@ -30,6 +30,10 @@ describe('MarkdownDocument', () => {
           '',
           '[Operator guide](docs/WEBCHESS_2_0_OPERATIONS.md)',
           '',
+          '[Current white paper](docs/WEBCHESS_WHITE_PAPER_V3.md)',
+          '',
+          '[Research program](docs/RESEARCH.md)',
+          '',
           '[Terms section](docs/TERMS.md#limits)',
           '',
           '[Root link](/privacy)',
@@ -40,6 +44,8 @@ describe('MarkdownDocument', () => {
           '',
           '[Unknown relative link](notes.md)',
           '',
+          '![A radial chessboard becoming a web](../public/white-paper/figures/arachne-cover-v3.jpg)',
+          '',
           '| Name | Value |',
           '| --- | --- |',
           '| WebChess | 64 |',
@@ -47,6 +53,12 @@ describe('MarkdownDocument', () => {
           String.raw`\[`,
           'x = 8 \\times 8',
           String.raw`\]`,
+          '',
+          '$$',
+          'y = x + 1',
+          '$$',
+          '',
+          String.raw`Inline \(d,m\in\{0,\ldots,7\}\) and \(C_{req}\).`,
         ].join('\n')}
       />,
     )
@@ -71,11 +83,20 @@ describe('MarkdownDocument', () => {
     ).toHaveAttribute('href', '/install#requirements')
     expect(
       screen.getByRole('link', { name: 'Architecture section' }),
-    ).toHaveAttribute('href', '/white-paper#29-current-production-architecture')
+    ).toHaveAttribute(
+      'href',
+      '/white-paper#214-three-runtime-surfaces-three-separate-promises',
+    )
     expect(screen.getByRole('link', { name: 'Operator guide' })).toHaveAttribute(
       'href',
       '/operations',
     )
+    expect(
+      screen.getByRole('link', { name: 'Current white paper' }),
+    ).toHaveAttribute('href', '/white-paper')
+    expect(
+      screen.getAllByRole('link', { name: 'Research program' })[0],
+    ).toHaveAttribute('href', '/white-paper#18-falsifiable-evaluation-program')
     expect(
       screen.getByRole('link', { name: 'Terms section' }),
     ).toHaveAttribute('href', '/terms#limits')
@@ -92,6 +113,9 @@ describe('MarkdownDocument', () => {
     expect(
       screen.getByRole('link', { name: 'Unknown relative link' }),
     ).toHaveAttribute('href', 'notes.md')
+    expect(
+      screen.getByRole('img', { name: 'A radial chessboard becoming a web' }),
+    ).toHaveAttribute('src', '/white-paper/figures/arachne-cover-v3.jpg')
 
     const tableRegion = screen.getByRole('region', {
       name: 'Scrollable table',
@@ -99,11 +123,15 @@ describe('MarkdownDocument', () => {
     expect(tableRegion).toHaveAttribute('tabindex', '0')
     expect(within(tableRegion).getByRole('table')).toBeInTheDocument()
 
-    const formulaRegion = screen.getByRole('region', {
+    const formulaRegions = screen.getAllByRole('region', {
       name: 'Scrollable code or formula',
     })
-    expect(formulaRegion).toHaveAttribute('tabindex', '0')
-    expect(formulaRegion).toHaveTextContent('x = 8 \\times 8')
+    expect(formulaRegions).toHaveLength(2)
+    expect(formulaRegions[0]).toHaveAttribute('tabindex', '0')
+    expect(formulaRegions[0]).toHaveTextContent('x = 8 × 8')
+    expect(formulaRegions[1]).toHaveTextContent('y = x + 1')
+    expect(screen.getByText('d,m∈{0,…,7}')).toBeInTheDocument()
+    expect(screen.getByText('C_req')).toBeInTheDocument()
 
     expect(
       screen.getByRole('link', { name: 'Download Markdown' }),

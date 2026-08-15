@@ -4,9 +4,9 @@ import { MarkdownDocument } from '@/components/site/MarkdownDocument'
 import { loadWhitePaper } from '@/content/documents/whitePaper'
 
 export const metadata: Metadata = {
-  title: 'White paper',
+  title: 'The First Answer Is Not Enough',
   description:
-    'The complete WebChess method, evidence standard, circular-chess rules, limitations, and research agenda.',
+    'The Arachne Method: an architecture for AI-assisted deliberation before decision, with a complete WebChess implementation audit and falsifiable research agenda.',
 }
 
 const DOWNLOADS = [
