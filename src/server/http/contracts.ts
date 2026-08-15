@@ -45,14 +45,18 @@ const lifecycleText = (minimum: number, maximum: number) =>
   z.string().transform((value) => value.replace(/\s+/gu, ' ').trim())
     .pipe(z.string().min(minimum).max(maximum))
 
+const exactLifecycleText = (minimum: number, maximum: number) =>
+  z.string().transform((value) => value.trim())
+    .pipe(z.string().min(minimum).max(maximum))
+
 export const createWilburActionBodySchema = z.strictObject({
-  charlotteActionIndex: z.number().int().min(0).max(2).nullable(),
-  actor: lifecycleText(2, 240),
-  action: lifecycleText(8, 2_000),
-  testedAssumption: lifecycleText(8, 1_000),
-  expectedObservation: lifecycleText(8, 1_000),
-  decisionThreshold: lifecycleText(8, 1_000),
-  reviewHorizon: lifecycleText(2, 240),
+  charlotteActionIndex: z.number().int().min(0).max(2),
+  actor: exactLifecycleText(2, 240),
+  action: exactLifecycleText(8, 2_000),
+  testedAssumption: exactLifecycleText(8, 1_000),
+  expectedObservation: exactLifecycleText(8, 1_000),
+  decisionThreshold: exactLifecycleText(8, 1_000),
+  reviewHorizon: exactLifecycleText(2, 240),
 })
 
 export const updateWilburActionBodySchema = z.strictObject({

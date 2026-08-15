@@ -3,6 +3,11 @@ import 'server-only'
 export { isClerkConfigured, isProtectedPagePath } from './config'
 export { LOCAL_E2E_AUTH_HEADER, resolveLocalE2EUser } from './e2e'
 export {
+  LOCAL_HOSTED_SESSION_COOKIE,
+  isLocalHostedSignInAvailable,
+  resolveLocalHostedUser,
+} from './local-session'
+export {
   LOCAL_OPENCLAW_AUTH_HEADER,
   LOCAL_OPENCLAW_AUTH_VALUE,
   resolveLocalOpenClawUser,

@@ -14,6 +14,8 @@ import {
   rateBucketRowSchema,
   usageBucketRowSchema,
   userControlsRowSchema,
+  wilburActionRowSchema,
+  wilburMutationRequestRowSchema,
 } from './rows'
 import type { SqlResult, SqlRow } from './sql'
 
@@ -378,5 +380,63 @@ describe('database row validators', () => {
     expect(() =>
       parseOptionalResultRow(result([row, row]), userControlsRowSchema),
     ).toThrow(/at most one/)
+  })
+
+  it('parses current and legacy Wilbur bindings plus durable mutation rows', () => {
+    const action = {
+      id: REQUEST_ID,
+      clerk_user_id: 'user_test',
+      lifecycle_run_id: GAME_ID,
+      charlotte_action_index: 0,
+      idempotency_key: IDEMPOTENCY_KEY,
+      request_digest: HASH,
+      actor: 'A project owner',
+      action: 'Run the smallest useful test.',
+      tested_assumption: 'The proposed path is feasible.',
+      expected_observation: 'The trial completes within the window.',
+      decision_threshold: 'Continue only if the trial meets the threshold.',
+      review_horizon: 'One week',
+      status: 'planned',
+      revision: '0',
+      record_version: 'wilbur-v1',
+      created_at: NOW,
+      updated_at: NOW,
+      charlotte_binding_version:
+        'webchess-charlotte-action-binding-v1',
+    }
+
+    expect(
+      wilburActionRowSchema.parse(action).charlotte_binding_version,
+    ).toBe('webchess-charlotte-action-binding-v1')
+    expect(
+      wilburActionRowSchema.parse({
+        ...action,
+        charlotte_binding_version: null,
+      }).charlotte_binding_version,
+    ).toBeNull()
+
+    const mutation = wilburMutationRequestRowSchema.parse({
+      clerk_user_id: 'user_test',
+      idempotency_key: IDEMPOTENCY_KEY,
+      operation: 'create_action',
+      request_digest: HASH,
+      target_game_id: GAME_ID,
+      target_action_id: null,
+      rate_kind: 'action',
+      rate_admitted_at: NOW,
+      denial_code: null,
+      retry_at: null,
+      reserved_future_rows: 2,
+      reserved_text_bytes: '314',
+      status: 'pending',
+      result_entity_id: null,
+      result_revision: null,
+      result_status: null,
+      result_updated_at: null,
+      created_at: NOW,
+      updated_at: NOW,
+    })
+
+    expect(mutation.reserved_text_bytes).toBe(314n)
   })
 })

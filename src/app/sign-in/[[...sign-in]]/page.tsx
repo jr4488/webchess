@@ -2,10 +2,12 @@ import { SignIn } from '@clerk/nextjs'
 import Link from 'next/link'
 
 import { isClerkConfigured } from '@/server/auth/config'
+import { isLocalHostedSignInAvailable } from '@/server/auth/local-session'
 import {
   buildSignUpPath,
   resolveAuthReturnUrl,
 } from '@/server/auth/return-url'
+import { requestFromCurrentHeaders } from '@/server/auth/session'
 import { resolveSiteOrigin } from '@/server/site-origin'
 
 import styles from '../auth.module.css'
@@ -29,6 +31,13 @@ export default async function SignInPage({
     resolveSiteOrigin(),
   )
   const configured = isClerkConfigured()
+  let localHosted = false
+  if (!configured) {
+    const localRequest = await requestFromCurrentHeaders()
+    localHosted = localRequest
+      ? isLocalHostedSignInAvailable(localRequest)
+      : false
+  }
 
   return (
     <div className={styles.shell}>
@@ -55,6 +64,29 @@ export default async function SignInPage({
               />
             </div>
           </>
+        ) : localHosted ? (
+          <section
+            className={styles.unavailable}
+            aria-labelledby="sign-in-heading"
+          >
+            <p className={styles.eyebrow}>This machine</p>
+            <h1 id="sign-in-heading">Continue on this computer.</h1>
+            <p>
+              Clerk is not configured here. This loopback WebChess uses a
+              signed local session and stores games in the PostgreSQL database
+              on this machine. It does not use OpenClaw.
+            </p>
+            <form
+              className={styles.localForm}
+              action="/api/auth/local/sign-in"
+              method="post"
+            >
+              <input type="hidden" name="return_url" value={returnUrl} />
+              <button className={styles.localAction} type="submit">
+                Continue on this machine
+              </button>
+            </form>
+          </section>
         ) : (
           <section
             className={styles.unavailable}

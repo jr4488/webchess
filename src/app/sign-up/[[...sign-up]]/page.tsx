@@ -2,10 +2,12 @@ import { SignUp } from '@clerk/nextjs'
 import Link from 'next/link'
 
 import { isClerkConfigured } from '@/server/auth/config'
+import { isLocalHostedSignInAvailable } from '@/server/auth/local-session'
 import {
   buildSignInPath,
   resolveAuthReturnUrl,
 } from '@/server/auth/return-url'
+import { requestFromCurrentHeaders } from '@/server/auth/session'
 import { resolveSiteOrigin } from '@/server/site-origin'
 
 import styles from '../../sign-in/auth.module.css'
@@ -29,6 +31,13 @@ export default async function SignUpPage({
     resolveSiteOrigin(),
   )
   const configured = isClerkConfigured()
+  let localHosted = false
+  if (!configured) {
+    const localRequest = await requestFromCurrentHeaders()
+    localHosted = localRequest
+      ? isLocalHostedSignInAvailable(localRequest)
+      : false
+  }
 
   return (
     <div className={styles.shell}>
@@ -56,6 +65,28 @@ export default async function SignUpPage({
               />
             </div>
           </>
+        ) : localHosted ? (
+          <section
+            className={styles.unavailable}
+            aria-labelledby="sign-up-heading"
+          >
+            <p className={styles.eyebrow}>This machine</p>
+            <h1 id="sign-up-heading">Continue on this computer.</h1>
+            <p>
+              A separate hosted account is not used on this loopback
+              installation. Continue with the signed local session to play.
+            </p>
+            <form
+              className={styles.localForm}
+              action="/api/auth/local/sign-in"
+              method="post"
+            >
+              <input type="hidden" name="return_url" value={returnUrl} />
+              <button className={styles.localAction} type="submit">
+                Continue on this machine
+              </button>
+            </form>
+          </section>
         ) : (
           <section
             className={styles.unavailable}

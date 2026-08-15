@@ -13,6 +13,7 @@ import type {
   LifecycleAggregate,
   LifecycleState,
   PortiaReview,
+  WilburAction,
 } from '../../lib/lifecycle/contracts'
 import { PORTIA_ATTACK_TYPES } from '../../lib/lifecycle/contracts'
 import { CURRENT_LIFECYCLE_VERSIONS } from '../../lib/lifecycle/versions'
@@ -21,7 +22,10 @@ import {
   buildOpenClawAnswerModelPrompt,
   OPENCLAW_LOCAL_MODEL_RUN_SYSTEM_PROMPT,
 } from '../../lib/full-answer-model-prompt'
-import type { DurableGame } from '../../lib/webchess-api'
+import type {
+  AppendWilburObservationCommand,
+  DurableGame,
+} from '../../lib/webchess-api'
 import { makeProblemFacets, makeProblemParts } from '../../test/fixtures'
 import type {
   CaptureRecord,
@@ -466,10 +470,19 @@ function renderStage(
     boardAnswer?: GeneratedAnswer | null
     game?: DurableGame | null
     gameStatus?: 'completed' | 'answering' | 'answer_failed' | 'answered'
+    onCreateAction?: (index: number) => void
+    onUpdateAction?: (action: WilburAction, status: WilburAction['status']) => void
+    onObserve?: (
+      action: WilburAction,
+      observation: AppendWilburObservationCommand,
+    ) => Promise<boolean>
   } = {},
 ) {
   const onRetry = vi.fn()
   const onRetryAnswer = vi.fn()
+  const onCreateAction = options.onCreateAction ?? vi.fn()
+  const onUpdateAction = options.onUpdateAction ?? vi.fn()
+  const onObserve = options.onObserve ?? vi.fn(async () => true)
 
   render(
     <LifecycleStage
@@ -490,13 +503,19 @@ function renderStage(
       onRefresh={vi.fn()}
       onRetry={onRetry}
       onRetryAnswer={onRetryAnswer}
-      onCreateAction={vi.fn()}
-      onUpdateAction={vi.fn()}
-      onObserve={vi.fn(async () => true)}
+      onCreateAction={onCreateAction}
+      onUpdateAction={onUpdateAction}
+      onObserve={onObserve}
     />,
   )
 
-  return { onRetry, onRetryAnswer }
+  return {
+    onCreateAction,
+    onObserve,
+    onRetry,
+    onRetryAnswer,
+    onUpdateAction,
+  }
 }
 
 describe('LifecycleStage terminal Gate experience', () => {
@@ -718,6 +737,86 @@ describe('LifecycleStage terminal Gate experience', () => {
       boardHeading.compareDocumentPosition(charlotteHeading)
       & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy()
+  })
+
+  it('gives each canonical Charlotte action a stable card key and action-specific controls', () => {
+    const lifecycle = aggregate('charlotte_complete', 'answer')
+    const suggestions = Array.from({ length: 3 }, (_, index) => ({
+      title: 'Run a bounded trial',
+      actor: `Owner ${index + 1}`,
+      assumptionBeingTested: `Assumption ${index + 1}`,
+      smallestAction: `Run bounded trial ${index + 1}.`,
+      expectedObservation: `Observe signal ${index + 1}.`,
+      decisionThreshold: `Continue at threshold ${index + 1}.`,
+      reviewHorizon: `${index + 1} week`,
+      reversibility: 'Stop and restore the prior state.',
+      risksOrAffectedParties: 'Stop if the protected outcome is threatened.',
+      decisionRule: 'revise' as const,
+    }))
+    const trackedAction: WilburAction = {
+      id: '83000000-0000-4000-8000-000000000001',
+      lifecycleRunId: lifecycle.id,
+      charlotteActionIndex: 0,
+      charlotteBindingVersion: 'webchess-charlotte-action-binding-v1',
+      actor: suggestions[0]!.actor,
+      action: suggestions[0]!.smallestAction,
+      testedAssumption: suggestions[0]!.assumptionBeingTested,
+      expectedObservation: suggestions[0]!.expectedObservation,
+      decisionThreshold: suggestions[0]!.decisionThreshold,
+      reviewHorizon: suggestions[0]!.reviewHorizon,
+      status: 'planned',
+      revision: 0,
+      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      createdAt: '2026-08-15T16:00:00.000Z',
+      updatedAt: '2026-08-15T16:00:00.000Z',
+    }
+    const legacyAction: WilburAction = {
+      ...trackedAction,
+      id: '83000000-0000-4000-8000-000000000002',
+      charlotteActionIndex: 2,
+      charlotteBindingVersion: null,
+      action: 'Preserved action from before canonical Charlotte binding.',
+    }
+    const completedLifecycle = {
+      ...lifecycle,
+      charlotte: {
+        supportingCandidateIds: [],
+        qualificationsByCandidateId: {},
+        exactlyThreeNextActions: suggestions,
+      },
+      charlotteRenderedAnswer: 'Run one bounded test and decide from the observation.',
+      wilburActions: [trackedAction, legacyAction],
+    } as unknown as LifecycleAggregate
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const onCreateAction = vi.fn()
+    const onUpdateAction = vi.fn()
+
+    renderStage(completedLifecycle, { onCreateAction, onUpdateAction })
+
+    expect(consoleError).not.toHaveBeenCalled()
+    const status = screen.getByRole('combobox', {
+      name: 'Status for Action 1: Run a bounded trial',
+    })
+    const record = screen.getByRole('button', {
+      name: 'Record what happened for Action 1: Run a bounded trial',
+    })
+    const track = screen.getByRole('button', {
+      name: 'Track Action 2: Run a bounded trial with Wilbur',
+    })
+    expect(screen.getByRole('button', {
+      name: 'Track Action 3: Run a bounded trial with Wilbur',
+    })).toBeInTheDocument()
+    expect(screen.getByText('Legacy history · unbound to current Charlotte'))
+      .toBeInTheDocument()
+
+    fireEvent.change(status, { target: { value: 'in_progress' } })
+    fireEvent.click(record)
+    fireEvent.click(track)
+
+    expect(onUpdateAction).toHaveBeenCalledWith(trackedAction, 'in_progress')
+    expect(onCreateAction).toHaveBeenCalledWith(1)
+    expect(screen.getByRole('textbox', { name: 'What did you observe?' }))
+      .toBeInTheDocument()
   })
 
   it('reveals the exact durable user prompt in a collapsed Portia-to-Answer handoff', () => {

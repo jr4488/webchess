@@ -76,7 +76,7 @@ describe('AccountDashboard', () => {
       screen.getByRole('button', { name: /download webchess data/i }),
     ).toBeEnabled()
     expect(screen.getByText(/synchronous, single-file export/i)).toHaveTextContent(
-      /oversized export is refused/i,
+      /server-configured size limit capped at 100 MB.*oversized export is refused/i,
     )
     expect(screen.getByRole('link', { name: /^support$/i })).toHaveAttribute(
       'href',
@@ -87,6 +87,22 @@ describe('AccountDashboard', () => {
     )
     expect(screen.getByRole('heading', { name: /local test identity/i })).toBeInTheDocument()
     expect(screen.queryByLabelText(/clerk user profile/i)).not.toBeInTheDocument()
+  })
+
+  it('renders the signed local-hosted identity branch with loopback sign-out', async () => {
+    render(<AccountDashboard identityMode="local-hosted" />)
+
+    expect(await screen.findByRole('heading', { name: /local machine identity/i }))
+      .toBeInTheDocument()
+    expect(screen.getByText(/signed local principal for this computer/i))
+      .toBeInTheDocument()
+    const signOut = screen.getByRole('button', { name: /^sign out$/i })
+    const form = signOut.closest('form')
+    expect(form).toHaveAttribute('action', '/api/auth/local/sign-out')
+    expect(form).toHaveAttribute('method', 'post')
+    expect(screen.queryByLabelText(/clerk user profile/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /delete account/i }))
+      .not.toBeInTheDocument()
   })
 
   it('downloads an account export through an origin-protected POST', async () => {

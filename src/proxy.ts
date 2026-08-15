@@ -9,6 +9,7 @@ import {
   removeUnsafeInlineScriptPolicy,
 } from './server/auth/config'
 import { resolveLocalE2EUser } from './server/auth/e2e'
+import { resolveLocalHostedUser } from './server/auth/local-session'
 import { buildSignInPath } from './server/auth/return-url'
 
 const configuredClerkProxy = clerkMiddleware(
@@ -83,7 +84,10 @@ export default async function proxy(
   request: NextRequest,
   event: NextFetchEvent,
 ) {
-  if (resolveLocalE2EUser(request)) {
+  if (
+    resolveLocalE2EUser(request) ||
+    resolveLocalHostedUser(request)
+  ) {
     return NextResponse.next()
   }
 

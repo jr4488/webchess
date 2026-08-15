@@ -24,16 +24,22 @@ limitations, and proposed validation program are documented in the
 
 ## Project status
 
-The current product release is **WebChess 2.1** (`2.1.0`). It implements the
-WebChess 2.0 method and lifecycle described by the technical white paper.
+The latest tagged product release is **WebChess 2.1** (`2.1.0`). This source
+tree identifies the next release candidate as `2.2.0`; until that candidate is
+verified and tagged, it is not a published release or evidence of a hosted
+deployment.
 
 This repository is the sole canonical WebChess product. The same rules and
-visual game now have two deliberately separate runtime surfaces:
+visual game now have three deliberately separate runtime surfaces:
 
 - an installable, startup-lazy OpenClaw plugin that launches the complete app
   on the user's own machine, uses that user's configured OpenClaw model and
   provider authentication, and keeps games and lifecycle provenance in a
-  dedicated local PostgreSQL 17 database; and
+  dedicated local PostgreSQL 17 database;
+- a source-checkout runtime that binds the application and a dedicated Docker
+  PostgreSQL 17 database to loopback, uses a server-side OpenAI key, and
+  selects either a signed machine principal or a complete Clerk development
+  identity; and
 - the existing account-backed service architecture for a future independent
   Vercel project named `webchess`.
 
@@ -106,17 +112,20 @@ pass-enabled rules; it is not Stockfish and does not claim an Elo rating.
 
 ### 4. Replay and validate
 
-In both runtimes, the browser sends only a requested piece and destination plus
-the expected game revision. The shared server handler reconstructs the board
-from the durable event log, validates the move, and commits the derived event.
-The local plugin replaces Clerk with a loopback-only installation principal,
-Neon with dedicated local PostgreSQL, and hosted OpenAI calls with OpenClaw;
-the game and lifecycle authority remain the same.
+Across all three runtimes, the browser sends only a requested piece and
+destination plus the expected game revision. The shared server handler
+reconstructs the board from the durable event log, validates the move, and
+commits the derived event. The OpenClaw plugin replaces Clerk with a
+loopback-only installation principal, Neon with dedicated local PostgreSQL, and
+hosted OpenAI calls with OpenClaw. The source-checkout runtime instead uses its
+loopback database, the server-side OpenAI path, and either its signed machine
+principal or Clerk development identity. The game and lifecycle authority are
+unchanged.
 
-Neither runtime trusts supplied pieces, captures, passes, outcomes, attention
-weights, or answers. Both reconstruct the board from the canonical initial
-position, check moves, derive forced passes and captures, apply ending
-precedence, and reject stale or fabricated state.
+No runtime trusts supplied pieces, captures, passes, outcomes, attention
+weights, or answers. Each reconstructs the board from the canonical initial
+position, checks moves, derives forced passes and captures, applies ending
+precedence, and rejects stale or fabricated state.
 
 ### 5. Test what survives, then act
 
@@ -127,6 +136,13 @@ answer-generation prompt package. Portia receives that exact package before any
 answer exists. It performs all thirteen versioned attack types against every
 survivor and classifies each as `preserved`, `wounded`, `consumed`, or
 `unresolved`. Survival is explicitly not treated as truth.
+
+Only the OpenClaw runtime can insert automatic external research before
+Portia. Its deterministic broker makes at most one Codex Search invocation,
+accepts at most five result links and five stored citation candidates, and runs
+inside a 150-second envelope. It does not fetch cited pages, and a candidate
+link is not proof that WebChess read or verified the source. Hosted and local
+source-checkout runtimes do not inject this broker.
 
 Each validated per-signal assessment is persisted as Portia advances, so a
 recovered attempt resumes from saved work instead of starting a decorative or
@@ -152,7 +168,17 @@ technical budget so a provider or contract failure cannot leave the web
 spinning forever. The already generated Answer remains visible if that budget
 is exhausted, clearly marked as not Charlotte-qualified.
 Wilbur lets the authenticated player select one of exactly three bounded,
-reversible actions, mark it in progress, and append a real-world observation.
+reversible Charlotte suggestions, mark it in progress, and append a real-world
+observation. The stored action is bound to that exact suggestion index, and the
+database permits at most one current-bound action for each suggestion in a
+lifecycle run; upgrade-preserved legacy actions remain explicitly unbound. Each
+create, update, or observation is durably claimed by owner and idempotency key,
+so exact retries replay a committed result or denial, changed requests conflict,
+and rate admission occurs once. Claims abandoned for 24 hours expire, future
+durable-row and exact-text capacity is reserved against a lifetime admission
+envelope, and the
+artifact, lifecycle activity, and ledger result commit atomically. Action and
+observation mutations have independent per-user/IP hourly limits.
 The lifecycle, retry ancestry, artifacts, versions, actions, and observations
 remain in an owner-scoped provenance record.
 
@@ -217,9 +243,14 @@ openclaw webchess
 Use `openclaw webchess --no-open` to print the URL without opening a browser,
 or `--port 4312` to choose another loopback port. See
 [Installation](INSTALL.md) for source-link and packed-plugin workflows.
-`verify:openclaw` exercises the packaged plugin and UI path. Run
-`npm run test:integration` with `DATABASE_URL` pointed at a disposable
-PostgreSQL 17 database to verify the shared persistence contract.
+`verify:openclaw` builds the plugin entry and exercises the application and UI
+checks, but it does not install a packed archive or prove a live OpenClaw
+provider/database round trip. A release also rebuilds the committed entry,
+requires `git diff --exit-code -- openclaw-plugin/dist`, inspects the `npm pack`
+contents, installs that exact archive, and manually exercises the configured
+provider, database, and research path. Run `npm run test:integration` with
+`DATABASE_URL` pointed at a disposable PostgreSQL 17 database to verify the
+shared persistence contract.
 
 ## Hosted architecture
 
@@ -253,12 +284,20 @@ New divisions and replays share the daily game-start allowance and hourly
 per-user/IP game-start limits. A replay validates its source, clones the saved
 field, records its idempotency intent, activates the child, and consumes the
 rate/quota counts in one atomic database transaction—there is no debit-before-clone
-window. Account exports have separate per-user/IP hourly limits and a
-3,000,000-byte default response ceiling. The export is generated synchronously
-as one JSON file, with no pagination or background preparation. Oversized
-exports are refused; the owner can follow [Support](SUPPORT.md) to ask for
-non-sensitive help through GitHub Discussions, without a promise of a custom
-data handoff or response time.
+window. Wilbur actions and observations have their own per-user/IP hourly
+limits. Account export format `webchess-account-export/4` has separate
+per-user/IP hourly limits and a 3,000,000-byte default response ceiling. It adds
+the owner's pseudonymous user-rate windows and all ten lifecycle recovery fields
+to the owner-scoped game, request, research, lifecycle, and artifact data. It
+also includes `charlotteBindingVersion` and sanitized Wilbur mutation-ledger
+rows, but omits the ledger's private capacity reservations, owner/IP identifiers,
+and HMAC material. It does not include shared IP/global counters, Clerk or
+vendor data, or a database-restorable backup. The export is generated
+synchronously as one JSON file, with no pagination or background preparation.
+Oversized exports are refused; Wilbur's admission envelope preserves existing
+history and does not guarantee that all other accumulated account data fits. The
+owner can follow [Support](SUPPORT.md) to ask for non-sensitive help through GitHub Discussions,
+without a promise of a custom data handoff or response time.
 
 A same-key model retry recovers an already committed result or the existing
 pending request; WebChess never silently replays the same provider intent. If a
@@ -290,11 +329,38 @@ Self-service deletion removes content but leaves a suspended raw-ID
 reserved work but waits for a provider call already in progress. The signed
 `user.deleted` webhook installs the stable HMAC barrier first, wins even over
 active work, and then removes raw identifiers and content. Late calls cannot
-recreate the account.
+recreate the account. Artifact-bearing games are deleted through the tested
+foreign-key-safe order, including Portia and Charlotte model requests; shared
+IP rate windows and vendor backups remain subject to their separate expiry and
+retention policies.
 
 No correctness, security, quota, or ownership decision may depend on Vercel
 Function memory. See [Architecture](docs/ARCHITECTURE.md) and
 [Security](SECURITY.md).
+
+## Local source-checkout development
+
+To run the hosted-service architecture on this machine without OpenClaw:
+
+```bash
+npm ci
+npm run local:setup
+npm run local:dev
+```
+
+That command starts loopback PostgreSQL 17, binds Next.js to
+`127.0.0.1:3005`, and uses the server-side OpenAI Platform key. With neither
+Clerk key, it offers one signed local machine principal. To use Clerk instead,
+put a complete development `pk_test_` / `sk_test_` pair in `.env.local`; a
+partial pair or live keys fail closed. The launcher identifies this source
+candidate as `2.2.0-local` and generates a dedicated
+`WEBCHESS_LOCAL_SESSION_SECRET`; preserve that secret with the local database or
+the signed principal will no longer address its prior rows. See
+[INSTALL.md](INSTALL.md#local-source-checkout-development-without-openclaw).
+Only this launcher can auto-migrate the dedicated local database, and it refuses
+unrelated pre-existing relations. If it refuses a legacy same-name container
+that lacks the ownership label, follow the data-preserving volume-adoption
+procedure in the installation guide; never remove the named volume.
 
 ## Hosted-service development
 
@@ -329,16 +395,23 @@ Install exactly from the lockfile, then run:
 npm run lint
 npm run typecheck
 npm run plugin:build
+git diff --exit-code -- openclaw-plugin/dist
 npm run test
 npm run test:coverage
-npm run test:integration
+DATABASE_URL='postgresql://...disposable-test-only...' npm run test:integration
 npm audit --omit=dev --audit-level=high
 npm audit --audit-level=high
 npm run build
 npm run test:a11y
 npm run test:e2e
 npm run test:links
+npm pack --dry-run
 ```
+
+The integration URL must name a disposable PostgreSQL 17 database. The plugin
+build must leave committed `openclaw-plugin/dist` unchanged, and the package dry
+run must contain the intended runtime files without local secrets or test
+output.
 
 The Playwright suite is expected to cover every public route, authentication
 redirects, the complete play flow, refresh recovery, downloads, GitHub links,

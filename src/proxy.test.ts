@@ -4,6 +4,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import proxy from './proxy'
 import { LOCAL_E2E_AUTH_HEADER } from './server/auth/e2e'
+import {
+  LOCAL_HOSTED_AUTH_FLAG,
+  LOCAL_SESSION_SECRET_NAME,
+  createLocalHostedSessionCookie,
+} from './server/auth/local-session'
 
 const environmentKeys = [
   'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY',
@@ -11,6 +16,9 @@ const environmentKeys = [
   'NEXT_PUBLIC_SITE_URL',
   'WEBCHESS_E2E_AUTH',
   'WEBCHESS_E2E_USER_ID',
+  'WEBCHESS_HMAC_SECRET',
+  LOCAL_HOSTED_AUTH_FLAG,
+  LOCAL_SESSION_SECRET_NAME,
   'VERCEL',
   'VERCEL_ENV',
 ] as const
@@ -129,5 +137,27 @@ describe('auth proxy', () => {
 
     expect(response.status).toBe(307)
     expect(response.headers.get('location')).toContain('/sign-in?')
+  })
+
+  it('allows a signed loopback machine session through a protected page', async () => {
+    clearAuthEnvironment()
+    process.env[LOCAL_HOSTED_AUTH_FLAG] = 'true'
+    process.env[LOCAL_SESSION_SECRET_NAME] =
+      'local-session-secret-material-that-is-stable-32b'
+    const unsigned = new NextRequest('http://127.0.0.1:3005/play', {
+      headers: { host: '127.0.0.1:3005' },
+    })
+    const cookie = createLocalHostedSessionCookie(unsigned)
+    const response = await runProxy(
+      new NextRequest('http://127.0.0.1:3005/play', {
+        headers: {
+          host: '127.0.0.1:3005',
+          cookie: `${cookie?.name}=${cookie?.value}`,
+        },
+      }),
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('x-middleware-next')).toBe('1')
   })
 })

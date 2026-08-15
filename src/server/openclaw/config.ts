@@ -25,7 +25,9 @@ export function isOpenClawLocalModeEnabled(
 ): boolean {
   if (
     environment.VERCEL !== undefined ||
-    environment.VERCEL_ENV !== undefined
+    environment.VERCEL_ENV !== undefined ||
+    environment.VERCEL_TARGET_ENV !== undefined ||
+    environment.VERCEL_URL !== undefined
   ) {
     return false
   }

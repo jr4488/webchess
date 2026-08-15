@@ -18,6 +18,8 @@ export type {
   ConsumeGameMoveRateResult,
   ConsumeReplayGameStartInput,
   ConsumeReplayGameStartResult,
+  ConsumeWilburMutationRateInput,
+  ConsumeWilburMutationRateResult,
   DeleteAccountDataResult,
   DeleteAccountDataOptions,
   GetModelRequestByIdempotencyKeyInput,

@@ -36,6 +36,10 @@ export interface UsageConfig {
   readonly hourlyIpGameMoveLimit: number
   readonly hourlyAccountExportLimit: number
   readonly hourlyIpAccountExportLimit: number
+  readonly hourlyWilburActionLimit: number
+  readonly hourlyIpWilburActionLimit: number
+  readonly hourlyWilburObservationLimit: number
+  readonly hourlyIpWilburObservationLimit: number
   readonly concurrentModelLimit: 1
   readonly globalModelConcurrentLimit: number
   readonly modelLeaseSeconds: number
@@ -82,6 +86,12 @@ export type UsageDenialCode =
   | 'IP_GAME_MOVE_HOURLY_RATE_LIMITED'
   | 'ACCOUNT_EXPORT_HOURLY_RATE_LIMITED'
   | 'IP_ACCOUNT_EXPORT_HOURLY_RATE_LIMITED'
+  | 'WILBUR_ACTION_HOURLY_RATE_LIMITED'
+  | 'IP_WILBUR_ACTION_HOURLY_RATE_LIMITED'
+  | 'WILBUR_OBSERVATION_HOURLY_RATE_LIMITED'
+  | 'IP_WILBUR_OBSERVATION_HOURLY_RATE_LIMITED'
+  | 'WILBUR_MUTATION_EXPIRED'
+  | 'WILBUR_MUTATION_CONFLICT'
   | 'MODEL_USER_CONCURRENCY_LIMIT'
   | 'MODEL_GLOBAL_CAPACITY'
   | 'GAME_OWNERSHIP_CONFLICT'
@@ -132,6 +142,27 @@ export interface ConsumeAccountExportRateInput {
 export type ConsumeAccountExportRateResult =
   | {
       readonly ok: true
+      readonly remaining: {
+        readonly user: number
+        readonly ip: number
+      }
+      readonly resetsAt: string
+    }
+  | UsageDenied
+
+export interface ConsumeWilburMutationRateInput {
+  readonly userId: string
+  readonly ipAddress: string
+  readonly kind: 'action' | 'observation'
+  readonly operation: 'create_action' | 'update_action' | 'append_observation'
+  readonly idempotencyKey: string
+  readonly requestDigest: string
+}
+
+export type ConsumeWilburMutationRateResult =
+  | {
+      readonly ok: true
+      readonly kind: 'consumed' | 'existing'
       readonly remaining: {
         readonly user: number
         readonly ip: number
@@ -374,6 +405,9 @@ export interface UsageController {
   consumeAccountExportRate(
     input: ConsumeAccountExportRateInput,
   ): Promise<ConsumeAccountExportRateResult>
+  consumeWilburMutationRate(
+    input: ConsumeWilburMutationRateInput,
+  ): Promise<ConsumeWilburMutationRateResult>
   consumeReplayGameStart(
     input: ConsumeReplayGameStartInput,
   ): Promise<ConsumeReplayGameStartResult>

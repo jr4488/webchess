@@ -41,6 +41,7 @@ export {
   usageBucketRowSchema,
   userControlsRowSchema,
   wilburActionRowSchema,
+  wilburMutationRequestRowSchema,
   wilburObservationRowSchema,
 } from './rows'
 export type {
@@ -57,15 +58,32 @@ export type {
   GateDecisionRow,
   CharlotteResultRow,
   WilburActionRow,
+  WilburMutationRequestRow,
   WilburObservationRow,
   RateBucketRow,
   UsageBucketRow,
   UserControlsRow,
 } from './rows'
 
+export {
+  isLoopbackHostname,
+  isVercelRuntime,
+  parseLoopbackPostgresUrl,
+  resolveDatabaseAdapterKind,
+  shouldUseLocalPostgresWireProtocol,
+} from './adapter-kind'
+export type { DatabaseAdapterKind } from './adapter-kind'
+export {
+  assertDedicatedLocalSchema,
+  ensureLocalHostedSchema,
+  loadCanonicalFilesystemMigrations,
+} from './local-postgres'
 export { createNeonSqlAdapter, getDatabase } from './sql'
 export { createPostgresSqlAdapter } from './postgres'
-export type { PostgresSqlAdapter } from './postgres'
+export type {
+  PostgresSqlAdapter,
+  PostgresSqlAdapterOptions,
+} from './postgres'
 export type {
   SqlAdapter,
   SqlResult,

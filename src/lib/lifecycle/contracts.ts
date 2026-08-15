@@ -461,10 +461,17 @@ export const ASSUMPTION_RESULTS = [
 
 export type AssumptionResult = (typeof ASSUMPTION_RESULTS)[number]
 
+export const CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION =
+  'webchess-charlotte-action-binding-v1' as const
+
 export interface WilburAction {
   readonly id: string
   readonly lifecycleRunId: string
   readonly charlotteActionIndex: number | null
+  /** NULL identifies an upgrade-preserved action created before canonical binding. */
+  readonly charlotteBindingVersion:
+    | typeof CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION
+    | null
   readonly actor: string
   readonly action: string
   readonly testedAssumption: string

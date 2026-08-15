@@ -141,7 +141,7 @@ export interface CreateWilburActionInput {
   readonly id: string
   readonly idempotencyKey: string
   readonly requestDigest: string
-  readonly charlotteActionIndex: number | null
+  readonly charlotteActionIndex: number
   readonly actor: string
   readonly action: string
   readonly testedAssumption: string
@@ -151,10 +151,49 @@ export interface CreateWilburActionInput {
   readonly configurationDigest: string
 }
 
+export type WilburMutationOperation =
+  | 'create_action'
+  | 'update_action'
+  | 'append_observation'
+
+export interface ClaimWilburMutationInput {
+  readonly ownerId: string
+  readonly gameId: string
+  readonly actionId: string | null
+  readonly idempotencyKey: string
+  readonly operation: WilburMutationOperation
+  readonly requestDigest: string
+  readonly rateKind: 'action' | 'observation'
+  /** Rows the admitted mutation will add after its request-ledger row exists. */
+  readonly reservedFutureRows: 1 | 2
+  readonly reservedTextBytes: number
+  readonly storageRowLimit: number
+  readonly storageTextBytesLimit: number
+}
+
+export type ClaimWilburMutationResult =
+  | { readonly kind: 'pending' }
+  | { readonly kind: 'committed'; readonly action: WilburAction }
+  | { readonly kind: 'committed'; readonly observation: WilburObservation }
+
+export interface SettleWilburMutationConflictInput {
+  readonly ownerId: string
+  readonly gameId: string
+  readonly actionId: string | null
+  readonly idempotencyKey: string
+  readonly operation: WilburMutationOperation
+  readonly requestDigest: string
+  readonly rateKind: 'action' | 'observation'
+  readonly reservedFutureRows: 1 | 2
+  readonly reservedTextBytes: number
+}
+
 export interface UpdateWilburActionInput {
   readonly ownerId: string
   readonly gameId: string
   readonly actionId: string
+  readonly idempotencyKey: string
+  readonly requestDigest: string
   readonly expectedRevision: number
   readonly status: WilburActionStatus
   readonly configurationDigest: string
@@ -197,6 +236,12 @@ export interface LifecycleRepositoryPort {
     fingerprint: string,
     excludingRunId: string,
   ): Promise<boolean>
+  claimWilburMutation(
+    input: ClaimWilburMutationInput,
+  ): Promise<ClaimWilburMutationResult>
+  settleWilburMutationConflict(
+    input: SettleWilburMutationConflictInput,
+  ): Promise<void>
   createWilburAction(input: CreateWilburActionInput): Promise<WilburAction>
   updateWilburAction(input: UpdateWilburActionInput): Promise<WilburAction>
   appendWilburObservation(

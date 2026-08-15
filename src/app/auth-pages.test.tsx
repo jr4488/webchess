@@ -8,15 +8,25 @@ const clerkMocks = vi.hoisted(() => ({
   signIn: vi.fn(() => null),
   signUp: vi.fn(() => null),
 }))
+const nextMocks = vi.hoisted(() => ({
+  headers: vi.fn(async () => new Headers({ host: '127.0.0.1:3005' })),
+}))
 
 vi.mock('@clerk/nextjs', () => ({
   SignIn: clerkMocks.signIn,
   SignUp: clerkMocks.signUp,
 }))
+vi.mock('next/headers', () => ({
+  headers: nextMocks.headers,
+}))
 
 beforeEach(() => {
   clerkMocks.signIn.mockClear()
   clerkMocks.signUp.mockClear()
+  nextMocks.headers.mockReset()
+  nextMocks.headers.mockResolvedValue(
+    new Headers({ host: '127.0.0.1:3005' }),
+  )
   vi.stubEnv('NEXT_PUBLIC_SITE_URL', 'https://webchess.example')
   vi.stubEnv('NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY', 'pk_test_example')
   vi.stubEnv('CLERK_SECRET_KEY', 'sk_test_example')
@@ -27,6 +37,17 @@ afterEach(() => {
 })
 
 describe('auth page return destinations', () => {
+  const enableLocalHostedAuth = () => {
+    vi.stubEnv('NEXT_PUBLIC_SITE_URL', 'http://localhost:3005')
+    vi.stubEnv('NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY', '')
+    vi.stubEnv('CLERK_SECRET_KEY', '')
+    vi.stubEnv('WEBCHESS_LOCAL_HOSTED_AUTH', 'true')
+    vi.stubEnv(
+      'WEBCHESS_LOCAL_SESSION_SECRET',
+      'local-session-secret-material-that-is-stable-32b',
+    )
+  }
+
   it('uses the app return_url first and carries it to sign-up', async () => {
     render(
       await SignInPage({
@@ -129,5 +150,63 @@ describe('auth page return destinations', () => {
     expect(
       screen.getByText(/methods clerk shows/i),
     ).toHaveTextContent(/manage passkeys from your account/i)
+  })
+
+  it('renders the signed local-session action when Clerk is absent on loopback', async () => {
+    enableLocalHostedAuth()
+
+    const { unmount } = render(
+      await SignInPage({
+        searchParams: Promise.resolve({ return_url: '/account' }),
+      }),
+    )
+
+    expect(nextMocks.headers).toHaveBeenCalledOnce()
+    expect(
+      screen.getByRole('button', { name: 'Continue on this machine' }),
+    ).toBeInTheDocument()
+    expect(screen.getByDisplayValue('/account')).toHaveAttribute(
+      'name',
+      'return_url',
+    )
+    unmount()
+
+    render(
+      await SignUpPage({
+        searchParams: Promise.resolve({}),
+      }),
+    )
+    expect(
+      screen.getByRole('button', { name: 'Continue on this machine' }),
+    ).toBeInTheDocument()
+  })
+
+  it.each([
+    ['missing', new Headers()],
+    ['malformed', new Headers({ host: '[' })],
+  ])('fails closed when the Host header is %s', async (_case, requestHeaders) => {
+    enableLocalHostedAuth()
+    nextMocks.headers.mockResolvedValue(requestHeaders)
+
+    const { unmount } = render(
+      await SignInPage({ searchParams: Promise.resolve({}) }),
+    )
+
+    expect(screen.getByRole('heading', {
+      name: 'Sign-in is not available here yet.',
+    })).toBeInTheDocument()
+    expect(screen.queryByRole('button', {
+      name: 'Continue on this machine',
+    })).not.toBeInTheDocument()
+    unmount()
+
+    render(await SignUpPage({ searchParams: Promise.resolve({}) }))
+
+    expect(screen.getByRole('heading', {
+      name: 'Account creation is not available here yet.',
+    })).toBeInTheDocument()
+    expect(screen.queryByRole('button', {
+      name: 'Continue on this machine',
+    })).not.toBeInTheDocument()
   })
 })

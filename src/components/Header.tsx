@@ -33,8 +33,8 @@ export function Header({
         </span>
         <span className="brand-word">WebChess</span>
         {localMode ? (
-          <span className="brand-version" aria-label="WebChess version 2.1">
-            2.1
+          <span className="brand-version" aria-label="WebChess version 2.2">
+            2.2
           </span>
         ) : null}
       </a>

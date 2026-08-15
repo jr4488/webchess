@@ -73,6 +73,10 @@ describe('resolveLocalE2EUser', () => {
     { VERCEL: '' },
     { VERCEL_ENV: 'preview' },
     { VERCEL_ENV: '' },
+    { VERCEL_TARGET_ENV: 'preview' },
+    { VERCEL_TARGET_ENV: '' },
+    { VERCEL_URL: 'webchess-preview.vercel.app' },
+    { VERCEL_URL: '' },
   ])('is impossible when a Vercel marker is present: %o', (marker) => {
     expect(
       resolveLocalE2EUser(request(), {

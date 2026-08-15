@@ -1089,13 +1089,11 @@
 }
 
 .wc-site [data-wc-reveal] {
-  opacity: 0;
   transform: translateY(1.375rem);
-  transition: opacity 0.8s ease, transform 0.8s ease;
+  transition: transform 0.8s ease;
 }
 
 .wc-site [data-wc-reveal][data-revealed="true"] {
-  opacity: 1;
   transform: none;
 }
 

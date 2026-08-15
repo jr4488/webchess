@@ -29,6 +29,21 @@ Engine arena results are regression evidence, not an Elo estimate. Structured
 output and deterministic facet checks establish bounded conformance, not
 semantic quality.
 
+## Automatic research is not evaluation evidence
+
+Only the OpenClaw runtime can run the automatic pre-Portia research broker.
+Deterministic policy permits at most one local Codex Search invocation, five
+result links, five stored citation candidates, a 150-second WebChess envelope,
+and 12,000 synthesis characters. The broker does not fetch linked pages, and
+the hosted and local source-checkout runtimes do not inject it. A search
+synthesis or candidate URL is untrusted material for Portia to scrutinize—not a
+verified fact, study result, or validation of the WebChess method.
+
+That operational search path is distinct from the evaluation program above.
+Method claims require preregistered or otherwise explicit comparisons, outcome
+measures, adverse findings, and reproducible release identity; automatic search
+cannot supply that evidence by itself.
+
 Do not submit confidential questions, credentials, personal data, or regulated
 information.
 

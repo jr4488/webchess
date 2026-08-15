@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import {
   CURRENT_LIFECYCLE_VERSIONS,
+  CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
   assertLifecycleTransition,
   canReopenInsufficientBasis,
   charlotteResultSchema,
@@ -64,6 +65,8 @@ import type {
   BeginPortiaAttemptInput,
   CreateRetryRunInput,
   CreateWilburActionInput,
+  ClaimWilburMutationInput,
+  ClaimWilburMutationResult,
   EnsureLifecycleInput,
   FailPortiaAttemptInput,
   FailCharlotteAttemptInput,
@@ -71,6 +74,7 @@ import type {
   StoreCharlotteInput,
   StoreGateInput,
   StorePortiaInput,
+  SettleWilburMutationConflictInput,
   TransitionLifecycleInput,
   UpdatePortiaProgressInput,
   UpdateWilburActionInput,
@@ -170,6 +174,7 @@ const SELECT_ACTION_COLUMNS = `
   clerk_user_id,
   lifecycle_run_id,
   charlotte_action_index,
+  charlotte_binding_version,
   idempotency_key,
   request_digest,
   actor,
@@ -239,7 +244,7 @@ function assertUuid(value: string, label: string): string {
       `${label} must be a UUID.`,
     )
   }
-  return value
+  return value.toLowerCase()
 }
 
 function assertDigest(value: string, label: string): string {
@@ -395,6 +400,7 @@ function actionFromRow(row: WilburActionRow): WilburAction {
     id: row.id,
     lifecycleRunId: row.lifecycle_run_id,
     charlotteActionIndex: row.charlotte_action_index,
+    charlotteBindingVersion: row.charlotte_binding_version,
     actor: row.actor,
     action: row.action,
     testedAssumption: row.tested_assumption,
@@ -1938,6 +1944,445 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     })
   }
 
+  async claimWilburMutation(
+    input: ClaimWilburMutationInput,
+  ): Promise<ClaimWilburMutationResult> {
+    const owner = assertOwner(input.ownerId)
+    const gameId = assertUuid(input.gameId, 'Game id')
+    const actionId = input.actionId === null
+      ? null
+      : assertUuid(input.actionId, 'Action id')
+    const idempotencyKey = assertUuid(
+      input.idempotencyKey,
+      'Idempotency key',
+    )
+    const requestDigest = assertDigest(input.requestDigest, 'Request digest')
+    const expectedFutureRows = input.operation === 'update_action' ? 1 : 2
+    const expectedRateKind = input.operation === 'append_observation'
+      ? 'observation'
+      : 'action'
+    if (
+      input.reservedFutureRows !== expectedFutureRows ||
+      !Number.isSafeInteger(input.reservedTextBytes) ||
+      input.reservedTextBytes < 0 ||
+      !Number.isSafeInteger(input.storageRowLimit) ||
+      input.storageRowLimit < 1 ||
+      !Number.isSafeInteger(input.storageTextBytesLimit) ||
+      input.storageTextBytesLimit < 1 ||
+      input.rateKind !== expectedRateKind ||
+      (input.operation === 'create_action') !== (actionId === null) ||
+      (input.operation === 'update_action' && input.reservedTextBytes !== 0) ||
+      (input.operation !== 'update_action' && input.reservedTextBytes === 0)
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-input',
+        'The Wilbur target, rate kind, and storage reservation must match the mutation operation.',
+      )
+    }
+
+    const result = await this.database.query<{
+      operation: string | null
+      request_digest: string | null
+      target_game_id: string | null
+      target_action_id: string | null
+      rate_kind: string | null
+      status: string | null
+      result_entity_id: string | null
+      result_revision: bigint | null
+      result_status: string | null
+      result_updated_at: Date | null
+      reserved_future_rows: number | null
+      reserved_text_bytes: bigint | null
+      claim_code: string
+    }>({
+      text: `
+        WITH lock_gate AS MATERIALIZED (
+          SELECT pg_advisory_xact_lock(
+            hashtextextended('webchess-wilbur-storage-v1:' || $1::text, 0)
+          ) AS held
+        ),
+        expired AS (
+          UPDATE wilbur_mutation_requests AS requests
+          SET status = 'denied',
+              denial_code = 'WILBUR_MUTATION_EXPIRED',
+              retry_at = NULL,
+              reserved_future_rows = 0,
+              reserved_text_bytes = 0,
+              updated_at = now()
+          FROM lock_gate
+          WHERE requests.clerk_user_id = $1::text
+            AND requests.status = 'pending'
+            AND requests.updated_at < now() - interval '24 hours'
+          RETURNING requests.operation, requests.request_digest,
+            requests.target_game_id, requests.target_action_id,
+            requests.rate_kind,
+            requests.status, requests.result_entity_id,
+            requests.result_revision, requests.result_status,
+            requests.result_updated_at, requests.idempotency_key,
+            requests.reserved_future_rows,
+            requests.reserved_text_bytes
+        ),
+        existing AS MATERIALIZED (
+          SELECT expired.operation, expired.request_digest,
+            expired.target_game_id, expired.target_action_id,
+            expired.rate_kind, expired.status,
+            expired.result_entity_id, expired.result_revision,
+            expired.result_status, expired.result_updated_at,
+            expired.reserved_future_rows, expired.reserved_text_bytes
+          FROM expired
+          WHERE expired.idempotency_key = $4::uuid
+          UNION ALL
+          SELECT requests.operation, requests.request_digest,
+            requests.target_game_id, requests.target_action_id,
+            requests.rate_kind, requests.status,
+            requests.result_entity_id, requests.result_revision,
+            requests.result_status, requests.result_updated_at,
+            requests.reserved_future_rows, requests.reserved_text_bytes
+          FROM wilbur_mutation_requests AS requests
+          CROSS JOIN lock_gate
+          WHERE requests.clerk_user_id = $1::text
+            AND requests.idempotency_key = $4::uuid
+            AND NOT EXISTS (
+              SELECT 1 FROM expired
+              WHERE expired.idempotency_key = requests.idempotency_key
+            )
+        ),
+        artifact_storage AS MATERIALIZED (
+          SELECT
+            coalesce(sum(text_bytes), 0)::bigint AS text_bytes
+          FROM (
+            SELECT
+              (
+                octet_length(actions.actor) +
+                octet_length(actions.action) +
+                octet_length(actions.tested_assumption) +
+                octet_length(actions.expected_observation) +
+                octet_length(actions.decision_threshold) +
+                octet_length(actions.review_horizon)
+              )::bigint AS text_bytes
+            FROM wilbur_actions AS actions
+            CROSS JOIN lock_gate
+            WHERE actions.clerk_user_id = $1::text
+            UNION ALL
+            SELECT
+              (
+                octet_length(observations.observation) +
+                octet_length(observations.evidence_classification) +
+                octet_length(observations.expected_effect) +
+                octet_length(observations.unexpected_effect) +
+                octet_length(observations.stakeholder_response) +
+                octet_length(observations.assumption_result) +
+                octet_length(observations.next_decision)
+              )::bigint AS text_bytes
+            FROM wilbur_observations AS observations
+            CROSS JOIN lock_gate
+            WHERE observations.clerk_user_id = $1::text
+          ) AS artifacts
+        ),
+        owned_rows AS MATERIALIZED (
+          SELECT coalesce(sum(row_count), 0)::bigint AS row_count
+          FROM (
+            SELECT count(*)::bigint AS row_count
+            FROM wilbur_actions AS actions
+            CROSS JOIN lock_gate
+            WHERE actions.clerk_user_id = $1::text
+            UNION ALL
+            SELECT count(*)::bigint
+            FROM wilbur_observations AS observations
+            CROSS JOIN lock_gate
+            WHERE observations.clerk_user_id = $1::text
+            UNION ALL
+            SELECT count(*)::bigint
+            FROM wilbur_mutation_requests AS requests
+            CROSS JOIN lock_gate
+            WHERE requests.clerk_user_id = $1::text
+            UNION ALL
+            SELECT count(*)::bigint
+            FROM lifecycle_events AS events
+            CROSS JOIN lock_gate
+            WHERE events.clerk_user_id = $1::text
+              AND events.stage = 'wilbur'
+          ) AS owned
+        ),
+        pending_storage AS MATERIALIZED (
+          SELECT
+            coalesce(sum(requests.reserved_future_rows), 0)::bigint
+              AS future_rows,
+            coalesce(sum(requests.reserved_text_bytes), 0)::bigint
+              AS text_bytes
+          FROM wilbur_mutation_requests AS requests
+          CROSS JOIN lock_gate
+          WHERE requests.clerk_user_id = $1::text
+            AND requests.status = 'pending'
+            AND requests.updated_at >= now() - interval '24 hours'
+        ),
+        capacity AS MATERIALIZED (
+          SELECT
+            owned_rows.row_count + pending_storage.future_rows
+              + CASE
+                  WHEN EXISTS (SELECT 1 FROM existing) THEN 0
+                  ELSE 1 + $8::smallint
+                END AS next_rows,
+            artifact_storage.text_bytes + pending_storage.text_bytes
+              + CASE
+                  WHEN EXISTS (SELECT 1 FROM existing) THEN 0
+                  ELSE $9::bigint
+                END AS next_text_bytes
+          FROM artifact_storage, owned_rows, pending_storage
+        ),
+        inserted AS (
+          INSERT INTO wilbur_mutation_requests (
+            clerk_user_id, idempotency_key, operation, request_digest,
+            target_game_id, target_action_id, rate_kind, status,
+            reserved_future_rows, reserved_text_bytes
+          )
+          SELECT $1::text, $4::uuid, $5::text, $6::char(64),
+            $2::uuid, $3::uuid, $7::text, 'pending',
+            $8::smallint, $9::bigint
+          FROM capacity
+          WHERE NOT EXISTS (SELECT 1 FROM existing)
+            AND capacity.next_rows <= $10::bigint
+            AND capacity.next_text_bytes <= $11::bigint
+          ON CONFLICT (clerk_user_id, idempotency_key) DO NOTHING
+          RETURNING operation, request_digest, target_game_id,
+            target_action_id, rate_kind, status, result_entity_id,
+            result_revision, result_status, result_updated_at,
+            reserved_future_rows, reserved_text_bytes
+        )
+        SELECT
+          coalesce(existing.operation, inserted.operation) AS operation,
+          coalesce(existing.request_digest, inserted.request_digest)
+            AS request_digest,
+          coalesce(existing.target_game_id, inserted.target_game_id)::text
+            AS target_game_id,
+          coalesce(existing.target_action_id, inserted.target_action_id)::text
+            AS target_action_id,
+          coalesce(existing.rate_kind, inserted.rate_kind) AS rate_kind,
+          coalesce(existing.status, inserted.status) AS status,
+          coalesce(existing.result_entity_id, inserted.result_entity_id)::text
+            AS result_entity_id,
+          coalesce(existing.result_revision, inserted.result_revision)
+            AS result_revision,
+          coalesce(existing.result_status, inserted.result_status)
+            AS result_status,
+          coalesce(existing.result_updated_at, inserted.result_updated_at)
+            AS result_updated_at,
+          coalesce(
+            existing.reserved_future_rows,
+            inserted.reserved_future_rows
+          ) AS reserved_future_rows,
+          coalesce(existing.reserved_text_bytes, inserted.reserved_text_bytes)
+            AS reserved_text_bytes,
+          CASE
+            WHEN EXISTS (SELECT 1 FROM existing) THEN 'EXISTING'
+            WHEN EXISTS (SELECT 1 FROM inserted) THEN 'CLAIMED'
+            WHEN capacity.next_rows > $10::bigint THEN 'ROW_LIMIT'
+            ELSE 'TEXT_LIMIT'
+          END AS claim_code
+        FROM capacity
+        LEFT JOIN existing ON true
+        LEFT JOIN inserted ON true
+      `,
+      values: [
+        owner,
+        gameId,
+        actionId,
+        idempotencyKey,
+        input.operation,
+        requestDigest,
+        input.rateKind,
+        input.reservedFutureRows,
+        input.reservedTextBytes,
+        input.storageRowLimit,
+        input.storageTextBytesLimit,
+      ],
+    })
+    const row = result.rows[0]
+    if (!row) {
+      throw new LifecycleRepositoryError(
+        'integrity-error',
+        'Wilbur mutation claim returned no result.',
+      )
+    }
+    if (row.claim_code === 'ROW_LIMIT' || row.claim_code === 'TEXT_LIMIT') {
+      throw new LifecycleRepositoryError(
+        'storage-limit',
+        row.claim_code === 'ROW_LIMIT'
+          ? 'The lifetime Wilbur record limit has been reached.'
+          : 'The lifetime Wilbur text storage limit has been reached.',
+      )
+    }
+    if (
+      row.operation !== input.operation ||
+      row.request_digest !== requestDigest ||
+      row.target_game_id !== gameId ||
+      row.target_action_id !== actionId ||
+      row.rate_kind !== input.rateKind ||
+      (
+        row.status === 'pending' &&
+        (
+          row.reserved_future_rows !== input.reservedFutureRows ||
+          Number(row.reserved_text_bytes) !== input.reservedTextBytes
+        )
+      ) ||
+      (
+        row.status !== 'pending' &&
+        (
+          row.reserved_future_rows !== 0 ||
+          Number(row.reserved_text_bytes) !== 0
+        )
+      )
+    ) {
+      throw new LifecycleRepositoryError(
+        'conflict',
+        'That Wilbur idempotency key was used for different mutation data.',
+      )
+    }
+    if (row.status !== 'committed') return { kind: 'pending' }
+    if (!row.result_entity_id) {
+      throw new LifecycleRepositoryError(
+        'integrity-error',
+        'A committed Wilbur mutation is missing its durable result identifier.',
+      )
+    }
+
+    if (input.operation === 'append_observation') {
+      const replay = await this.database.query({
+        text: `
+          SELECT ${SELECT_OBSERVATION_COLUMNS.replaceAll(
+            '\n  ',
+            '\n  observation.',
+          )}
+          FROM wilbur_observations AS observation
+          JOIN wilbur_actions AS action ON action.id = observation.action_id
+          JOIN lifecycle_runs AS run ON run.id = action.lifecycle_run_id
+          WHERE observation.clerk_user_id = $1::text
+            AND observation.id = $2::uuid
+            AND observation.action_id = $3::uuid
+            AND run.clerk_user_id = $1::text
+            AND run.game_id = $4::uuid
+        `,
+        values: [owner, row.result_entity_id, actionId, gameId],
+      })
+      const observation = parseOptionalResultRow(
+        replay,
+        wilburObservationRowSchema,
+      )
+      if (!observation) {
+        throw new LifecycleRepositoryError(
+          'integrity-error',
+          'The committed Wilbur observation result is missing.',
+        )
+      }
+      return { kind: 'committed', observation: observationFromRow(observation) }
+    }
+
+    const replay = await this.database.query({
+      text: `
+        SELECT ${SELECT_ACTION_COLUMNS.replaceAll('\n  ', '\n  action.')}
+          FROM wilbur_actions AS action
+          JOIN lifecycle_runs AS run ON run.id = action.lifecycle_run_id
+          WHERE action.clerk_user_id = $1::text
+            AND action.id = $2::uuid
+            AND run.clerk_user_id = $1::text
+            AND run.game_id = $3::uuid
+        `,
+      values: [owner, row.result_entity_id, gameId],
+    })
+    const action = parseOptionalResultRow(replay, wilburActionRowSchema)
+    if (!action) {
+      throw new LifecycleRepositoryError(
+        'integrity-error',
+        'The committed Wilbur action result is missing.',
+      )
+    }
+    const mapped = actionFromRow(action)
+    if (
+      row.result_revision === null ||
+      row.result_status === null ||
+      row.result_updated_at === null ||
+      !['planned', 'in_progress', 'completed', 'abandoned', 'inconclusive']
+        .includes(row.result_status) ||
+      (input.operation === 'update_action' && row.result_entity_id !== actionId)
+    ) {
+      throw new LifecycleRepositoryError(
+        'integrity-error',
+        'The committed Wilbur action result is incomplete.',
+      )
+    }
+    return {
+      kind: 'committed',
+      action: {
+        ...mapped,
+        status: row.result_status as WilburAction['status'],
+        revision: revisionNumber(row.result_revision),
+        updatedAt: row.result_updated_at.toISOString(),
+      },
+    }
+  }
+
+  async settleWilburMutationConflict(
+    input: SettleWilburMutationConflictInput,
+  ): Promise<void> {
+    const owner = assertOwner(input.ownerId)
+    const gameId = assertUuid(input.gameId, 'Game id')
+    const actionId = input.actionId === null
+      ? null
+      : assertUuid(input.actionId, 'Action id')
+    const idempotencyKey = assertUuid(input.idempotencyKey, 'Idempotency key')
+    const requestDigest = assertDigest(input.requestDigest, 'Request digest')
+    const expectedFutureRows = input.operation === 'update_action' ? 1 : 2
+    const expectedRateKind = input.operation === 'append_observation'
+      ? 'observation'
+      : 'action'
+    if (
+      input.reservedFutureRows !== expectedFutureRows ||
+      !Number.isSafeInteger(input.reservedTextBytes) ||
+      input.reservedTextBytes < 0 ||
+      input.rateKind !== expectedRateKind ||
+      (input.operation === 'create_action') !== (actionId === null) ||
+      (input.operation === 'update_action' && input.reservedTextBytes !== 0) ||
+      (input.operation !== 'update_action' && input.reservedTextBytes === 0)
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-input',
+        'The Wilbur target, rate kind, and storage reservation must match the mutation operation.',
+      )
+    }
+    await this.database.query({
+      text: `
+        UPDATE wilbur_mutation_requests
+        SET status = 'denied',
+            denial_code = 'WILBUR_MUTATION_CONFLICT',
+            retry_at = NULL,
+            reserved_future_rows = 0,
+            reserved_text_bytes = 0,
+            updated_at = now()
+        WHERE clerk_user_id = $1::text
+          AND idempotency_key = $2::uuid
+          AND operation = $3::text
+          AND request_digest = $4::char(64)
+          AND target_game_id = $5::uuid
+          AND target_action_id IS NOT DISTINCT FROM $6::uuid
+          AND rate_kind = $7::text
+          AND reserved_future_rows = $8::smallint
+          AND reserved_text_bytes = $9::bigint
+          AND status = 'pending'
+      `,
+      values: [
+        owner,
+        idempotencyKey,
+        input.operation,
+        requestDigest,
+        gameId,
+        actionId,
+        input.rateKind,
+        input.reservedFutureRows,
+        input.reservedTextBytes,
+      ],
+    })
+  }
+
   async createWilburAction(input: CreateWilburActionInput): Promise<WilburAction> {
     const owner = assertOwner(input.ownerId)
     const gameId = assertUuid(input.gameId, 'Game id')
@@ -1945,39 +2390,113 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     assertUuid(input.idempotencyKey, 'Idempotency key')
     assertDigest(input.requestDigest, 'Request digest')
     assertDigest(input.configurationDigest, 'Configuration digest')
-    let run = await this.getForGame(owner, gameId)
-    if (!run) throw new LifecycleRepositoryError('not-found', 'Lifecycle run not found.')
-    if (run.state === 'charlotte_complete') {
-      run = await this.transition({
-        ownerId: owner,
-        gameId,
-        expectedRevision: run.revision,
-        to: 'wilbur_planning',
-        stage: 'wilbur',
-        activityType: 'action_planning_started',
-        responsibleAgentIds: ['wilbur', 'player'],
-        configurationDigest: input.configurationDigest,
-      })
-    }
-    if (!['wilbur_planning', 'wilbur_in_progress', 'wilbur_observed'].includes(run.state)) {
-      throw new LifecycleRepositoryError('invalid-state', 'Wilbur requires a completed Charlotte synthesis.')
-    }
     const result = await this.database.query({
       text: `
-        INSERT INTO wilbur_actions (
-          id, clerk_user_id, lifecycle_run_id, charlotte_action_index,
-          idempotency_key, request_digest, actor, action, tested_assumption,
-          expected_observation, decision_threshold, review_horizon,
-          status, record_version
+        WITH mutation AS MATERIALIZED (
+          SELECT requests.clerk_user_id, requests.idempotency_key
+          FROM wilbur_mutation_requests AS requests
+          WHERE requests.clerk_user_id = $1::text
+            AND requests.idempotency_key = $5::uuid
+            AND requests.operation = 'create_action'
+            AND requests.request_digest = $6::char(64)
+            AND requests.target_game_id = $2::uuid
+            AND requests.target_action_id IS NULL
+            AND requests.rate_kind = 'action'
+            AND requests.reserved_future_rows = 2
+            AND requests.reserved_text_bytes = (
+              octet_length($7::text) + octet_length($8::text) +
+              octet_length($9::text) + octet_length($10::text) +
+              octet_length($11::text) + octet_length($12::text)
+            )::bigint
+            AND requests.status = 'pending'
+            AND requests.rate_admitted_at IS NOT NULL
+          FOR UPDATE OF requests
+        ),
+        eligible_run AS MATERIALIZED (
+          SELECT run.id, run.state
+          FROM lifecycle_runs AS run
+          CROSS JOIN mutation
+          WHERE run.clerk_user_id = $1::text
+            AND run.game_id = $2::uuid
+            AND run.state IN (
+              'charlotte_complete', 'wilbur_planning',
+              'wilbur_in_progress', 'wilbur_observed'
+            )
+            AND EXISTS (
+              SELECT 1 FROM charlotte_results
+              WHERE lifecycle_run_id = run.id
+                AND clerk_user_id = run.clerk_user_id
+            )
+          FOR UPDATE OF run
+        ),
+        inserted AS (
+          INSERT INTO wilbur_actions (
+            id, clerk_user_id, lifecycle_run_id, charlotte_action_index,
+            charlotte_binding_version, idempotency_key, request_digest,
+            actor, action, tested_assumption,
+            expected_observation, decision_threshold, review_horizon,
+            status, record_version
+          )
+          SELECT $3::uuid, $1::text, eligible_run.id, $4::smallint,
+            $16::text, $5::uuid,
+            $6::char(64), $7::text, $8::text, $9::text, $10::text,
+            $11::text, $12::text, 'planned', $13::text
+          FROM eligible_run
+          ON CONFLICT DO NOTHING
+          RETURNING ${SELECT_ACTION_COLUMNS}
+        ),
+        advanced AS (
+          UPDATE lifecycle_runs AS run
+          SET state = CASE
+                WHEN eligible_run.state = 'charlotte_complete'
+                  THEN 'wilbur_planning'
+                ELSE eligible_run.state
+              END,
+              revision = run.revision + 1,
+              updated_at = now()
+          FROM eligible_run, inserted
+          WHERE run.id = eligible_run.id
+          RETURNING run.id, eligible_run.state AS state_from,
+            run.state AS state_to
+        ),
+        activity AS (
+          INSERT INTO lifecycle_events (
+            id, clerk_user_id, lifecycle_run_id, sequence, stage,
+            activity_type, state_from, state_to, input_entity_ids,
+            output_entity_ids, responsible_agent_ids,
+            configuration_digest, status, event_version
+          )
+          SELECT gen_random_uuid(), $1::text, advanced.id,
+            coalesce((
+              SELECT max(sequence) + 1
+              FROM lifecycle_events
+              WHERE lifecycle_run_id = advanced.id
+            ), 1),
+            'wilbur', 'action_recorded', advanced.state_from,
+            advanced.state_to, '[]'::jsonb,
+            jsonb_build_array(inserted.id::text),
+            jsonb_build_array('wilbur', 'player'),
+            $14::char(64), 'completed', $15::smallint
+          FROM advanced, inserted
+          RETURNING lifecycle_run_id
+        ),
+        committed AS (
+          UPDATE wilbur_mutation_requests AS requests
+          SET status = 'committed', result_entity_id = inserted.id,
+              result_revision = inserted.revision,
+              result_status = inserted.status,
+              result_updated_at = inserted.updated_at,
+              reserved_future_rows = 0,
+              reserved_text_bytes = 0,
+              updated_at = now()
+          FROM inserted, activity
+          WHERE requests.clerk_user_id = $1::text
+            AND requests.idempotency_key = $5::uuid
+            AND requests.status = 'pending'
+          RETURNING requests.idempotency_key
         )
-        SELECT $3::uuid, $1::text, run.id, $4::smallint, $5::uuid,
-          $6::char(64), $7::text, $8::text, $9::text, $10::text,
-          $11::text, $12::text, 'planned', $13::text
-        FROM lifecycle_runs AS run
-        WHERE run.clerk_user_id = $1::text AND run.game_id = $2::uuid
-          AND run.state IN ('wilbur_planning', 'wilbur_in_progress', 'wilbur_observed')
-        ON CONFLICT (clerk_user_id, idempotency_key) DO NOTHING
-        RETURNING ${SELECT_ACTION_COLUMNS}
+        SELECT ${SELECT_ACTION_COLUMNS.replaceAll('\n  ', '\n  inserted.')}
+        FROM inserted, committed
       `,
       values: [
         owner,
@@ -1993,61 +2512,136 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         input.decisionThreshold,
         input.reviewHorizon,
         CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+        input.configurationDigest,
+        CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
+        CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
       ],
     })
-    let row = parseOptionalResultRow(result, wilburActionRowSchema)
-    if (!row) {
-      const existing = await this.database.query({
-        text: `SELECT ${SELECT_ACTION_COLUMNS} FROM wilbur_actions WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid`,
-        values: [owner, input.idempotencyKey],
-      })
-      row = parseOptionalResultRow(existing, wilburActionRowSchema)
-      if (!row || row.request_digest !== input.requestDigest) {
-        throw new LifecycleRepositoryError('conflict', 'That Wilbur idempotency key was used for different action data.')
-      }
-    }
+    const row = parseOptionalResultRow(result, wilburActionRowSchema)
+    if (!row) throw new LifecycleRepositoryError(
+      'conflict',
+      'The Wilbur action could not be atomically bound to this Charlotte suggestion.',
+    )
     return actionFromRow(row)
   }
 
   async updateWilburAction(input: UpdateWilburActionInput): Promise<WilburAction> {
+    const owner = assertOwner(input.ownerId)
+    const gameId = assertUuid(input.gameId, 'Game id')
+    const actionId = assertUuid(input.actionId, 'Action id')
+    const idempotencyKey = assertUuid(input.idempotencyKey, 'Idempotency key')
+    const requestDigest = assertDigest(input.requestDigest, 'Request digest')
+    assertDigest(input.configurationDigest, 'Configuration digest')
     const result = await this.database.query({
       text: `
-        UPDATE wilbur_actions AS action
-        SET status = $5::text,
-            revision = action.revision + 1,
-            updated_at = now()
-        FROM lifecycle_runs AS run
-        WHERE action.id = $3::uuid AND action.clerk_user_id = $1::text
-          AND action.lifecycle_run_id = run.id AND run.game_id = $2::uuid
-          AND action.revision = $4::bigint
-        RETURNING ${SELECT_ACTION_COLUMNS.replaceAll('\n  ', '\n  action.')}
+        WITH mutation AS MATERIALIZED (
+          SELECT requests.clerk_user_id, requests.idempotency_key
+          FROM wilbur_mutation_requests AS requests
+          WHERE requests.clerk_user_id = $1::text
+            AND requests.idempotency_key = $6::uuid
+            AND requests.operation = 'update_action'
+            AND requests.request_digest = $7::char(64)
+            AND requests.target_game_id = $2::uuid
+            AND requests.target_action_id = $3::uuid
+            AND requests.rate_kind = 'action'
+            AND requests.reserved_future_rows = 1
+            AND requests.reserved_text_bytes = 0
+            AND requests.status = 'pending'
+            AND requests.rate_admitted_at IS NOT NULL
+          FOR UPDATE OF requests
+        ),
+        eligible_run AS MATERIALIZED (
+          SELECT run.id, run.state
+          FROM lifecycle_runs AS run
+          CROSS JOIN mutation
+          WHERE run.clerk_user_id = $1::text
+            AND run.game_id = $2::uuid
+            AND run.state IN (
+              'charlotte_complete', 'wilbur_planning',
+              'wilbur_in_progress', 'wilbur_observed'
+            )
+          FOR UPDATE OF run
+        ),
+        changed AS (
+          UPDATE wilbur_actions AS action
+          SET status = $5::text,
+              revision = action.revision + 1,
+              updated_at = now()
+          FROM eligible_run
+          WHERE action.id = $3::uuid
+            AND action.clerk_user_id = $1::text
+            AND action.lifecycle_run_id = eligible_run.id
+            AND action.revision = $4::bigint
+          RETURNING ${SELECT_ACTION_COLUMNS.replaceAll('\n  ', '\n  action.')}
+        ),
+        advanced AS (
+          UPDATE lifecycle_runs AS run
+          SET state = CASE
+                WHEN $5::text = 'in_progress' THEN 'wilbur_in_progress'
+                WHEN eligible_run.state = 'charlotte_complete'
+                  THEN 'wilbur_planning'
+                ELSE eligible_run.state
+              END,
+              revision = run.revision + 1,
+              updated_at = now()
+          FROM eligible_run, changed
+          WHERE run.id = eligible_run.id
+          RETURNING run.id, eligible_run.state AS state_from,
+            run.state AS state_to
+        ),
+        activity AS (
+          INSERT INTO lifecycle_events (
+            id, clerk_user_id, lifecycle_run_id, sequence, stage,
+            activity_type, state_from, state_to, input_entity_ids,
+            output_entity_ids, responsible_agent_ids,
+            configuration_digest, status, event_version
+          )
+          SELECT gen_random_uuid(), $1::text, advanced.id,
+            coalesce((
+              SELECT max(sequence) + 1
+              FROM lifecycle_events
+              WHERE lifecycle_run_id = advanced.id
+            ), 1),
+            'wilbur', 'action_status_updated', advanced.state_from,
+            advanced.state_to, jsonb_build_array(changed.id::text),
+            jsonb_build_array(changed.id::text),
+            jsonb_build_array('wilbur', changed.actor),
+            $8::char(64), 'completed', $9::smallint
+          FROM advanced, changed
+          RETURNING lifecycle_run_id
+        ),
+        committed AS (
+          UPDATE wilbur_mutation_requests AS requests
+          SET status = 'committed', result_entity_id = changed.id,
+              result_revision = changed.revision,
+              result_status = changed.status,
+              result_updated_at = changed.updated_at,
+              reserved_future_rows = 0,
+              reserved_text_bytes = 0,
+              updated_at = now()
+          FROM changed, activity
+          WHERE requests.clerk_user_id = $1::text
+            AND requests.idempotency_key = $6::uuid
+            AND requests.status = 'pending'
+          RETURNING requests.idempotency_key
+        )
+        SELECT ${SELECT_ACTION_COLUMNS.replaceAll('\n  ', '\n  changed.')}
+        FROM changed, committed
       `,
       values: [
-        assertOwner(input.ownerId),
-        assertUuid(input.gameId, 'Game id'),
-        assertUuid(input.actionId, 'Action id'),
+        owner,
+        gameId,
+        actionId,
         assertRevision(input.expectedRevision),
         input.status,
+        idempotencyKey,
+        requestDigest,
+        input.configurationDigest,
+        CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
       ],
     })
     const row = parseOptionalResultRow(result, wilburActionRowSchema)
     if (!row) throw new LifecycleRepositoryError('conflict', 'The Wilbur action revision changed.')
-    if (input.status === 'in_progress') {
-      const run = await this.getForGame(input.ownerId, input.gameId)
-      if (run?.state === 'wilbur_planning' || run?.state === 'wilbur_observed') {
-        await this.transition({
-          ownerId: input.ownerId,
-          gameId: input.gameId,
-          expectedRevision: run.revision,
-          to: 'wilbur_in_progress',
-          stage: 'wilbur',
-          activityType: 'action_started',
-          inputEntityIds: [row.id],
-          responsibleAgentIds: ['wilbur', row.actor],
-          configurationDigest: input.configurationDigest,
-        })
-      }
-    }
     return actionFromRow(row)
   }
 
@@ -2067,21 +2661,103 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     }
     const result = await this.database.query({
       text: `
-        INSERT INTO wilbur_observations (
-          id, clerk_user_id, action_id, idempotency_key, request_digest,
-          observed_at, observation, evidence_classification, expected_effect,
-          unexpected_effect, stakeholder_response, assumption_result,
-          next_decision, record_version
+        WITH mutation AS MATERIALIZED (
+          SELECT requests.clerk_user_id, requests.idempotency_key
+          FROM wilbur_mutation_requests AS requests
+          WHERE requests.clerk_user_id = $1::text
+            AND requests.idempotency_key = $5::uuid
+            AND requests.operation = 'append_observation'
+            AND requests.request_digest = $6::char(64)
+            AND requests.target_game_id = $2::uuid
+            AND requests.target_action_id = $3::uuid
+            AND requests.rate_kind = 'observation'
+            AND requests.reserved_future_rows = 2
+            AND requests.reserved_text_bytes = (
+              octet_length($8::text) + octet_length($9::text) +
+              octet_length($10::text) + octet_length($11::text) +
+              octet_length($12::text) + octet_length($13::text) +
+              octet_length($14::text)
+            )::bigint
+            AND requests.status = 'pending'
+            AND requests.rate_admitted_at IS NOT NULL
+          FOR UPDATE OF requests
+        ),
+        eligible_run AS MATERIALIZED (
+          SELECT run.id, run.state
+          FROM lifecycle_runs AS run
+          JOIN wilbur_actions AS action ON action.lifecycle_run_id = run.id
+          CROSS JOIN mutation
+          WHERE run.clerk_user_id = $1::text
+            AND run.game_id = $2::uuid
+            AND action.id = $3::uuid
+            AND action.clerk_user_id = $1::text
+            AND run.state IN (
+              'charlotte_complete', 'wilbur_planning',
+              'wilbur_in_progress', 'wilbur_observed'
+            )
+          FOR UPDATE OF run
+        ),
+        inserted AS (
+          INSERT INTO wilbur_observations (
+            id, clerk_user_id, action_id, idempotency_key, request_digest,
+            observed_at, observation, evidence_classification, expected_effect,
+            unexpected_effect, stakeholder_response, assumption_result,
+            next_decision, record_version
+          )
+          SELECT $4::uuid, $1::text, $3::uuid, $5::uuid, $6::char(64),
+            $7::timestamptz, $8::text, $9::text, $10::text, $11::text,
+            $12::text, $13::text, $14::text, $15::text
+          FROM eligible_run
+          ON CONFLICT DO NOTHING
+          RETURNING ${SELECT_OBSERVATION_COLUMNS}
+        ),
+        advanced AS (
+          UPDATE lifecycle_runs AS run
+          SET state = 'wilbur_observed',
+              revision = run.revision + 1,
+              updated_at = now()
+          FROM eligible_run, inserted
+          WHERE run.id = eligible_run.id
+          RETURNING run.id, eligible_run.state AS state_from,
+            run.state AS state_to
+        ),
+        activity AS (
+          INSERT INTO lifecycle_events (
+            id, clerk_user_id, lifecycle_run_id, sequence, stage,
+            activity_type, state_from, state_to, input_entity_ids,
+            output_entity_ids, responsible_agent_ids,
+            configuration_digest, status, event_version
+          )
+          SELECT gen_random_uuid(), $1::text, advanced.id,
+            coalesce((
+              SELECT max(sequence) + 1
+              FROM lifecycle_events
+              WHERE lifecycle_run_id = advanced.id
+            ), 1),
+            'wilbur', 'observation_recorded', advanced.state_from,
+            advanced.state_to, jsonb_build_array($3::text),
+            jsonb_build_array(inserted.id::text),
+            jsonb_build_array('wilbur'),
+            $16::char(64), 'completed', $17::smallint
+          FROM advanced, inserted
+          RETURNING lifecycle_run_id
+        ),
+        committed AS (
+          UPDATE wilbur_mutation_requests AS requests
+          SET status = 'committed', result_entity_id = inserted.id,
+              result_revision = NULL, result_status = NULL,
+              result_updated_at = NULL,
+              reserved_future_rows = 0,
+              reserved_text_bytes = 0,
+              updated_at = now()
+          FROM inserted, activity
+          WHERE requests.clerk_user_id = $1::text
+            AND requests.idempotency_key = $5::uuid
+            AND requests.status = 'pending'
+          RETURNING requests.idempotency_key
         )
-        SELECT $4::uuid, $1::text, action.id, $5::uuid, $6::char(64),
-          $7::timestamptz, $8::text, $9::text, $10::text, $11::text,
-          $12::text, $13::text, $14::text, $15::text
-        FROM wilbur_actions AS action
-        JOIN lifecycle_runs AS run ON run.id = action.lifecycle_run_id
-        WHERE action.id = $3::uuid AND action.clerk_user_id = $1::text
-          AND run.game_id = $2::uuid
-        ON CONFLICT (action_id, idempotency_key) DO NOTHING
-        RETURNING ${SELECT_OBSERVATION_COLUMNS}
+        SELECT ${SELECT_OBSERVATION_COLUMNS.replaceAll('\n  ', '\n  inserted.')}
+        FROM inserted, committed
       `,
       values: [
         owner,
@@ -2099,40 +2775,15 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         input.assumptionResult,
         input.nextDecision,
         CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+        input.configurationDigest,
+        CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
       ],
     })
-    let row = parseOptionalResultRow(result, wilburObservationRowSchema)
-    if (!row) {
-      const existing = await this.database.query({
-        text: `
-          SELECT ${SELECT_OBSERVATION_COLUMNS}
-          FROM wilbur_observations
-          WHERE clerk_user_id = $1::text
-            AND action_id = $2::uuid
-            AND idempotency_key = $3::uuid
-        `,
-        values: [owner, input.actionId, input.idempotencyKey],
-      })
-      row = parseOptionalResultRow(existing, wilburObservationRowSchema)
-      if (!row || row.request_digest !== input.requestDigest) {
-        throw new LifecycleRepositoryError('conflict', 'That Wilbur idempotency key was used for different observation data.')
-      }
-    }
-    const run = await this.getForGame(owner, gameId)
-    if (run && (run.state === 'wilbur_planning' || run.state === 'wilbur_in_progress')) {
-      await this.transition({
-        ownerId: owner,
-        gameId,
-        expectedRevision: run.revision,
-        to: 'wilbur_observed',
-        stage: 'wilbur',
-        activityType: 'observation_recorded',
-        inputEntityIds: [input.actionId],
-        outputEntityIds: [row.id],
-        responsibleAgentIds: ['wilbur'],
-        configurationDigest: input.configurationDigest,
-      })
-    }
+    const row = parseOptionalResultRow(result, wilburObservationRowSchema)
+    if (!row) throw new LifecycleRepositoryError(
+      'conflict',
+      'The Wilbur observation could not be atomically recorded.',
+    )
     return observationFromRow(row)
   }
 }

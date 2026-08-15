@@ -29,7 +29,10 @@ import type {
   WilburAction,
   WilburActionStatus,
 } from '../../lib/lifecycle/contracts'
-import { PORTIA_ATTACK_TYPES } from '../../lib/lifecycle/contracts'
+import {
+  CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
+  PORTIA_ATTACK_TYPES,
+} from '../../lib/lifecycle/contracts'
 import {
   RETRY_LIMITS,
   canReopenInsufficientBasis,
@@ -168,10 +171,12 @@ function activeHeadline(
 
 function ObservationForm({
   action,
+  actionLabel,
   pending,
   onObserve,
 }: {
   action: WilburAction
+  actionLabel: string
   pending: boolean
   onObserve: LifecycleStageProps['onObserve']
 }) {
@@ -205,6 +210,7 @@ function ObservationForm({
       <button
         className="text-button wilbur-observe-button"
         type="button"
+        aria-label={`Record what happened for ${actionLabel}`}
         onClick={() => setOpen(true)}
       >
         <Eye size={14} /> Record what happened
@@ -294,10 +300,19 @@ export function LifecycleStage({
   const actionsByIndex = useMemo(
     () => new Map(
       (lifecycle?.wilburActions ?? []).flatMap((action) =>
+        action.charlotteBindingVersion !==
+          CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION ||
         action.charlotteActionIndex === null
           ? []
           : [[action.charlotteActionIndex, action] as const],
       ),
+    ),
+    [lifecycle?.wilburActions],
+  )
+  const legacyWilburActions = useMemo(
+    () => (lifecycle?.wilburActions ?? []).filter(
+      (action) => action.charlotteBindingVersion !==
+        CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
     ),
     [lifecycle?.wilburActions],
   )
@@ -472,7 +487,7 @@ export function LifecycleStage({
       className="lifecycle-layout stage-enter"
       data-stage-root
       tabIndex={-1}
-      aria-label="WebChess 2.1 lifecycle"
+      aria-label="WebChess 2.2 lifecycle"
     >
       <header className="lifecycle-heading">
         <p className="eyebrow"><span /> Game complete · Move {outcome.completedTurn}</p>
@@ -994,8 +1009,9 @@ export function LifecycleStage({
               <div className="wilbur-actions">
                 {lifecycle.charlotte.exactlyThreeNextActions.map((suggestion, index) => {
                   const action = actionsByIndex.get(index)
+                  const actionLabel = `Action ${index + 1}: ${suggestion.title}`
                   return (
-                    <article key={suggestion.title}>
+                    <article key={`${lifecycle.id}:charlotte-action:${index}`}>
                       <small>Action {index + 1} · {suggestion.reviewHorizon}</small>
                       <h3>{suggestion.title}</h3>
                       <p>{suggestion.smallestAction}</p>
@@ -1004,6 +1020,7 @@ export function LifecycleStage({
                         <button
                           className="secondary-button"
                           type="button"
+                          aria-label={`Track ${actionLabel} with Wilbur`}
                           disabled={actionPendingIndex !== null}
                           onClick={() => onCreateAction(index)}
                         >
@@ -1015,6 +1032,7 @@ export function LifecycleStage({
                             Status
                             <select
                               value={action.status}
+                              aria-label={`Status for ${actionLabel}`}
                               disabled={wilburPending}
                               onChange={(event) => onUpdateAction(
                                 action,
@@ -1030,11 +1048,48 @@ export function LifecycleStage({
                           </label>
                           <ObservationForm
                             action={action}
+                            actionLabel={actionLabel}
                             pending={wilburPending}
                             onObserve={onObserve}
                           />
                         </div>
                       )}
+                    </article>
+                  )
+                })}
+                {legacyWilburActions.map((action, index) => {
+                  const actionLabel = `Preserved legacy action ${index + 1}`
+                  return (
+                    <article key={action.id}>
+                      <small>Legacy history · unbound to current Charlotte</small>
+                      <h3>{actionLabel}</h3>
+                      <p>{action.action}</p>
+                      <div className="wilbur-tracked">
+                        <label className="wilbur-status-control">
+                          Status
+                          <select
+                            value={action.status}
+                            aria-label={`Status for ${actionLabel}`}
+                            disabled={wilburPending}
+                            onChange={(event) => onUpdateAction(
+                              action,
+                              event.target.value as WilburActionStatus,
+                            )}
+                          >
+                            <option value="planned">Planned</option>
+                            <option value="in_progress">In progress</option>
+                            <option value="completed">Completed</option>
+                            <option value="inconclusive">Inconclusive</option>
+                            <option value="abandoned">Abandoned</option>
+                          </select>
+                        </label>
+                        <ObservationForm
+                          action={action}
+                          actionLabel={actionLabel}
+                          pending={wilburPending}
+                          onObserve={onObserve}
+                        />
+                      </div>
                     </article>
                   )
                 })}

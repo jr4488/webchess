@@ -6,6 +6,10 @@ These plain-language terms describe the intended production WebChess service.
 Using a deployed WebChess service means agreeing to these terms and the
 [Acceptable Use Policy](ACCEPTABLE_USE.md).
 
+The repository does not claim that a production hosted service is currently
+live. Local OpenClaw and source-checkout operation have separate identity,
+provider, persistence, and account-control boundaries.
+
 ## What the service is
 
 WebChess is an experimental reflection and problem-framing tool. It generates a
@@ -15,8 +19,10 @@ possible answer. Portia evaluates that exact prompt before generation, while an
 internal deterministic Gate and bounded Retry policy decide whether it may
 proceed. Only an approved prompt generates an Answer. Charlotte then qualifies
 that exact generated answer and proposes reversible next actions. Wilbur
-records what the user reports happened afterward, and Web retains the resulting
-provenance.
+records what the user reports happened afterward. Each action created under the
+current contract is version-bound to one of Charlotte's exact three stored
+suggestions, and Web retains the resulting provenance. Pre-`0012` rows remain
+preserved, null-bound historical records.
 
 WebChess is not divination, prediction, factual verification, professional
 advice, an emergency service, or an autonomous decision maker. A capture,
@@ -67,12 +73,19 @@ evade controls by automating requests, creating duplicate accounts, sharing
 accounts, or manipulating clients or network identities.
 
 New divisions and replays are counted game starts and may share daily and
-hourly limits. Account exports have independent user/IP limits and a maximum
-response size. An oversized synchronous export is refused; WebChess does not
-paginate it or prepare it later. The [support path](../SUPPORT.md) can help
+hourly limits. Wilbur actions and observations have independent user/IP hourly
+limits. Account format `webchess-account-export/4` has independent user/IP
+limits and a maximum
+response size. It is an owner-scoped application export, not a vendor subject-
+access package or database backup. An oversized synchronous export is refused;
+WebChess does not paginate it or prepare it later. Wilbur's lifetime admission
+envelope preserves existing history and does not guarantee whole-account
+exportability because other account content also accumulates. The
+[support path](../SUPPORT.md) can help
 troubleshoot general behavior but does not promise a custom data handoff or
 response time. Retrying an already-recorded idempotent request does not create
-a new operation. Portia may make a new fenced attempt after a failed or
+a new operation; an exact Wilbur retry replays its committed result or durable
+denial, while a changed request conflicts. Portia may make a new fenced attempt after a failed or
 indeterminate provider-started request, but the persisted three-attempt limit
 prevents an unbounded automatic cycle.
 
@@ -86,10 +99,17 @@ stored durably by design, but uninterrupted access, permanent retention, and
 perfect recovery are not guaranteed. Preview deployments are test
 environments, not production service commitments.
 
+Event replay and persisted request/lifecycle state can recover some interrupted
+operations. They are not a disaster-recovery guarantee: backup schedules,
+point-in-time restore, recovery objectives, and vendor restore behavior depend
+on the separately configured deployment or local operator.
+
 Deleting WebChess data may leave a suspended deletion-pending account marker
 until Clerk confirms identity deletion. After that signed confirmation,
 WebChess retains only an HMAC deletion marker needed to prevent quota-reset
-recreation, subject to the privacy notice and applicable law.
+recreation, subject to the privacy notice and applicable law. Shared IP windows
+and vendor backups may remain until their independent expiry or retention
+period ends.
 
 ## Open-source materials
 

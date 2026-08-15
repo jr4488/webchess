@@ -76,6 +76,11 @@ test.describe('WCAG AA', () => {
       { page },
       testInfo,
     ) => {
+      test.slow(
+        route.path === '/white-paper',
+        'The repository-backed paper requires a full-document accessibility scan.',
+      )
+
       const response = await page.goto(route.path, {
         waitUntil: 'domcontentloaded',
       })

@@ -22,7 +22,9 @@ import {
   consumeAccountExportRateSql,
   consumeGameMoveRateSql,
   consumeReplayGameStartSql,
+  consumeWilburMutationRateSql,
   deleteAccountDataSql,
+  deleteAccountGamesSql,
   ensureUsageBucketsSql,
   getModelRequestByIdempotencyKeySql,
   releaseReservationSql,
@@ -57,6 +59,10 @@ const CONFIG: UsageConfig = {
   hourlyIpGameMoveLimit: 1_200,
   hourlyAccountExportLimit: 2,
   hourlyIpAccountExportLimit: 10,
+  hourlyWilburActionLimit: 120,
+  hourlyIpWilburActionLimit: 240,
+  hourlyWilburObservationLimit: 60,
+  hourlyIpWilburObservationLimit: 120,
   concurrentModelLimit: 1,
   globalModelConcurrentLimit: 4,
   modelLeaseSeconds: 180,
@@ -114,6 +120,27 @@ function reserveInput() {
   }
 }
 
+function wilburRateInput(
+  overrides: Partial<{
+    userId: string
+    ipAddress: string
+    kind: 'action' | 'observation'
+    operation: 'create_action' | 'update_action' | 'append_observation'
+    idempotencyKey: string
+    requestDigest: string
+  }> = {},
+) {
+  return {
+    userId: USER_ID,
+    ipAddress: IP_ADDRESS,
+    kind: 'action' as const,
+    operation: 'create_action' as const,
+    idempotencyKey: IDEMPOTENCY_KEY,
+    requestDigest: SHA,
+    ...overrides,
+  }
+}
+
 function controllerWith(db: FakeSqlAdapter) {
   return createUsageController({
     db,
@@ -144,6 +171,10 @@ describe('usage configuration', () => {
       hourlyIpGameMoveLimit: 1_200,
       hourlyAccountExportLimit: 2,
       hourlyIpAccountExportLimit: 10,
+      hourlyWilburActionLimit: 120,
+      hourlyIpWilburActionLimit: 240,
+      hourlyWilburObservationLimit: 60,
+      hourlyIpWilburObservationLimit: 120,
       concurrentModelLimit: 1,
       globalModelConcurrentLimit: 4,
       modelLeaseSeconds: 180,
@@ -153,6 +184,10 @@ describe('usage configuration', () => {
       dailyModelRequestLimit: 100,
       dailyGlobalModelRequestLimit: 200,
       hourlyModelRequestLimit: 20,
+      hourlyWilburActionLimit: 120,
+      hourlyIpWilburActionLimit: 240,
+      hourlyWilburObservationLimit: 60,
+      hourlyIpWilburObservationLimit: 120,
       concurrentModelLimit: 1,
       globalModelConcurrentLimit: 4,
     })
@@ -169,6 +204,39 @@ describe('usage configuration', () => {
         WEBCHESS_CONCURRENT_MODEL_LIMIT: '2',
       }),
     ).toThrow(/at most 1/)
+  })
+
+  it('loads independent Wilbur action and observation limits', () => {
+    expect(
+      loadUsageConfig({
+        WEBCHESS_HMAC_SECRET: HMAC_SECRET,
+        WEBCHESS_DELETION_HMAC_SECRET: 'd'.repeat(48),
+        WEBCHESS_HOURLY_WILBUR_ACTION_LIMIT: '11',
+        WEBCHESS_HOURLY_IP_WILBUR_ACTION_LIMIT: '12',
+        WEBCHESS_HOURLY_WILBUR_OBSERVATION_LIMIT: '13',
+        WEBCHESS_HOURLY_IP_WILBUR_OBSERVATION_LIMIT: '14',
+      }),
+    ).toMatchObject({
+      hourlyWilburActionLimit: 11,
+      hourlyIpWilburActionLimit: 12,
+      hourlyWilburObservationLimit: 13,
+      hourlyIpWilburObservationLimit: 14,
+    })
+  })
+
+  it.each([
+    ['WEBCHESS_HOURLY_WILBUR_ACTION_LIMIT', '100001', 100_000],
+    ['WEBCHESS_HOURLY_IP_WILBUR_ACTION_LIMIT', '1000001', 1_000_000],
+    ['WEBCHESS_HOURLY_WILBUR_OBSERVATION_LIMIT', '100001', 100_000],
+    ['WEBCHESS_HOURLY_IP_WILBUR_OBSERVATION_LIMIT', '1000001', 1_000_000],
+  ] as const)('bounds %s at its durable maximum', (name, value, maximum) => {
+    expect(() =>
+      loadUsageConfig({
+        WEBCHESS_HMAC_SECRET: HMAC_SECRET,
+        WEBCHESS_DELETION_HMAC_SECRET: 'd'.repeat(48),
+        [name]: value,
+      }),
+    ).toThrow(`must be at most ${maximum}`)
   })
 })
 
@@ -471,6 +539,192 @@ describe('reservation lifecycle', () => {
     expect(db.transactions[0]?.statements[1]?.text).toBe(
       cleanupExpiredRateBucketsSql,
     )
+  })
+
+  it('durably admits Wilbur actions with independent hashed user and IP limits', async () => {
+    const db = new FakeSqlAdapter()
+    db.transactionResults = [
+      sqlResult([{ held: null }]),
+      sqlResult([]),
+      sqlResult([
+        {
+          code: 'ALLOW',
+          retry_at: null,
+          user_count: 1,
+          ip_count: 1,
+          resets_at: '2026-07-26T20:00:00.000Z',
+          persisted: 1,
+        },
+      ]),
+    ]
+
+    await expect(
+      controllerWith(db).consumeWilburMutationRate({
+        ...wilburRateInput(),
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      kind: 'consumed',
+      remaining: { user: 119, ip: 239 },
+      resetsAt: '2026-07-26T20:00:00.000Z',
+    })
+
+    const statement = db.transactions[0]?.statements[2]
+    expect(statement?.text).toBe(consumeWilburMutationRateSql)
+    expect(statement?.values).not.toContain(IP_ADDRESS)
+    expect(statement?.values).toContain(hashIpRateKey(HMAC_SECRET, IP_ADDRESS))
+    expect(statement?.values?.slice(5, 10)).toEqual([
+      120,
+      240,
+      'wilbur_action',
+      'WILBUR_ACTION_HOURLY_RATE_LIMITED',
+      'IP_WILBUR_ACTION_HOURLY_RATE_LIMITED',
+    ])
+    expect(statement?.values?.slice(11)).toEqual([
+      'create_action',
+      IDEMPOTENCY_KEY,
+      SHA,
+      'action',
+    ])
+    expect(consumeWilburMutationRateSql.indexOf('user_decision AS')).toBeLessThan(
+      consumeWilburMutationRateSql.indexOf('ip_rate AS'),
+    )
+    expect(consumeWilburMutationRateSql).toContain(
+      "WHERE user_decision.code = 'CONTINUE'",
+    )
+  })
+
+  it('does not debit either rate bucket for an already-admitted exact replay', async () => {
+    const db = new FakeSqlAdapter()
+    db.transactionResults = [
+      sqlResult([{ held: null }]),
+      sqlResult([]),
+      sqlResult([{
+        code: 'EXISTING',
+        retry_at: null,
+        user_count: 1,
+        ip_count: 1,
+        resets_at: '2026-07-26T20:00:00.000Z',
+      }]),
+    ]
+
+    await expect(
+      controllerWith(db).consumeWilburMutationRate(wilburRateInput()),
+    ).resolves.toEqual({
+      ok: true,
+      kind: 'existing',
+      remaining: { user: 119, ip: 239 },
+      resetsAt: '2026-07-26T20:00:00.000Z',
+    })
+    expect(consumeWilburMutationRateSql).toContain(
+      "request_state.rate_admitted_at IS NOT NULL",
+    )
+    expect(consumeWilburMutationRateSql).toContain(
+      "request_state.status = 'committed'",
+    )
+  })
+
+  it.each([
+    ['action', 'WILBUR_ACTION_HOURLY_RATE_LIMITED'],
+    ['action', 'IP_WILBUR_ACTION_HOURLY_RATE_LIMITED'],
+    ['observation', 'WILBUR_OBSERVATION_HOURLY_RATE_LIMITED'],
+    ['observation', 'IP_WILBUR_OBSERVATION_HOURLY_RATE_LIMITED'],
+  ] as const)('returns the distinct %s denial %s', async (kind, code) => {
+    const db = new FakeSqlAdapter()
+    db.transactionResults = [
+      sqlResult([{ held: null }]),
+      sqlResult([]),
+      sqlResult([
+        {
+          code,
+          retry_at: '2026-07-26T20:00:00.000Z',
+          user_count: 121,
+          ip_count: 241,
+          resets_at: '2026-07-26T20:00:00.000Z',
+        },
+      ]),
+    ]
+
+    await expect(
+      controllerWith(db).consumeWilburMutationRate({
+        ...wilburRateInput({
+          kind,
+          operation: kind === 'action'
+            ? 'create_action'
+            : 'append_observation',
+        }),
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      code,
+      httpStatus: 429,
+      retryAfterSeconds: 2846,
+    })
+
+    const expected = kind === 'action'
+      ? [120, 240, 'wilbur_action']
+      : [60, 120, 'wilbur_observation']
+    expect(db.transactions[0]?.statements[2]?.values?.slice(5, 8)).toEqual(
+      expected,
+    )
+  })
+
+  it.each([
+    'WILBUR_MUTATION_CONFLICT',
+    'WILBUR_MUTATION_EXPIRED',
+  ] as const)('replays the terminal Wilbur intent denial %s', async (code) => {
+    const db = new FakeSqlAdapter()
+    db.transactionResults = [
+      sqlResult([{ held: null }]),
+      sqlResult([]),
+      sqlResult([{
+        code,
+        retry_at: null,
+        user_count: 0,
+        ip_count: 0,
+        resets_at: '2026-07-26T20:00:00.000Z',
+      }]),
+    ]
+
+    await expect(controllerWith(db).consumeWilburMutationRate(
+      wilburRateInput(),
+    )).resolves.toEqual({
+      ok: false,
+      code,
+      httpStatus: 409,
+      retryAfterSeconds: null,
+    })
+  })
+
+  it('rejects an invalid Wilbur mutation kind before touching SQL', async () => {
+    const db = new FakeSqlAdapter()
+
+    await expect(
+      controllerWith(db).consumeWilburMutationRate({
+        ...wilburRateInput(),
+        kind: 'invalid' as 'action',
+      }),
+    ).rejects.toThrow(/kind must be action or observation/)
+    expect(db.transactions).toHaveLength(0)
+  })
+
+  it('validates Wilbur ledger identity before touching SQL', async () => {
+    const db = new FakeSqlAdapter()
+    const usage = controllerWith(db)
+
+    await expect(usage.consumeWilburMutationRate(wilburRateInput({
+      operation: 'invalid' as 'create_action',
+    }))).rejects.toThrow(/operation must be/)
+    await expect(usage.consumeWilburMutationRate(wilburRateInput({
+      operation: 'append_observation',
+    }))).rejects.toThrow(/operation and kind/)
+    await expect(usage.consumeWilburMutationRate(wilburRateInput({
+      idempotencyKey: 'not-a-uuid',
+    }))).rejects.toThrow(/idempotencyKey must be a UUID/)
+    await expect(usage.consumeWilburMutationRate(wilburRateInput({
+      requestDigest: 'not-a-digest',
+    }))).rejects.toThrow(/requestDigest must be a lowercase SHA-256/)
+    expect(db.transactions).toHaveLength(0)
   })
 
   it('consumes one durable replay game start and reuses its idempotency ledger', async () => {
@@ -836,6 +1090,7 @@ describe('reservation lifecycle', () => {
     db.transactionResults = [
       sqlResult([{ held: null }]),
       sqlResult([{ expired_requests: 0, cleared_slots: 0 }]),
+      sqlResult([]),
       sqlResult([
         {
           code: 'ACTIVE_MODEL_REQUEST',
@@ -853,8 +1108,16 @@ describe('reservation lifecycle', () => {
       httpStatus: 409,
       retryAfterSeconds: 180,
     })
-    expect(db.transactions[0]?.statements[2]?.text).toBe(deleteAccountDataSql)
-    expect(db.transactions[0]?.statements[2]?.values?.[3]).toBe(false)
+    expect(db.transactions[0]?.statements[2]?.text).toBe(deleteAccountGamesSql)
+    expect(db.transactions[0]?.statements[2]?.values).toEqual([
+      USER_ID,
+      NOW.toISOString(),
+      false,
+    ])
+    expect(deleteAccountGamesSql).toContain("requests.status = 'in_progress'")
+    expect(deleteAccountGamesSql).toContain('NOT $3::boolean')
+    expect(db.transactions[0]?.statements[3]?.text).toBe(deleteAccountDataSql)
+    expect(db.transactions[0]?.statements[3]?.values?.[3]).toBe(false)
     expect(deleteAccountDataSql).toContain("'ACCOUNT_DELETION_PENDING'")
     expect(deleteAccountDataSql).toContain('tombstone_user AS')
     expect(deleteAccountDataSql).toContain(
@@ -872,6 +1135,7 @@ describe('reservation lifecycle', () => {
     db.transactionResults = [
       sqlResult([{ held: null }]),
       sqlResult([{ expired_requests: 0, cleared_slots: 0 }]),
+      sqlResult([]),
       sqlResult([
         {
           code: 'ALLOW',
@@ -886,7 +1150,8 @@ describe('reservation lifecycle', () => {
       ok: true,
       deleted: true,
     })
-    expect(db.transactions[1]?.statements[2]?.values?.[3]).toBe(true)
+    expect(db.transactions[1]?.statements[2]?.values?.[2]).toBe(true)
+    expect(db.transactions[1]?.statements[3]?.values?.[3]).toBe(true)
   })
 
   it('allows self deletion to cancel reserved work and retain a pending control', async () => {
@@ -894,6 +1159,7 @@ describe('reservation lifecycle', () => {
     db.transactionResults = [
       sqlResult([{ held: null }]),
       sqlResult([{ expired_requests: 0, cleared_slots: 0 }]),
+      sqlResult([]),
       sqlResult([
         {
           code: 'ALLOW',
@@ -909,8 +1175,9 @@ describe('reservation lifecycle', () => {
       ok: true,
       deleted: true,
     })
-    expect(db.transactions[0]?.statements[2]?.values?.[3]).toBe(false)
-    expect(db.transactions[0]?.statements[2]?.text).toContain(
+    expect(db.transactions[0]?.statements[2]?.values?.[2]).toBe(false)
+    expect(db.transactions[0]?.statements[3]?.values?.[3]).toBe(false)
+    expect(db.transactions[0]?.statements[3]?.text).toContain(
       "'ACCOUNT_DELETION_PENDING'",
     )
   })

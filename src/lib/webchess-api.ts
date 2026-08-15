@@ -77,7 +77,7 @@ export interface RetryLifecycleResult {
 }
 
 export interface CreateWilburActionCommand {
-  charlotteActionIndex: number | null
+  charlotteActionIndex: number
   actor: string
   action: string
   testedAssumption: string

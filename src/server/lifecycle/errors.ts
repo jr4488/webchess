@@ -3,6 +3,7 @@ export type LifecycleRepositoryErrorCode =
   | 'invalid-input'
   | 'invalid-state'
   | 'conflict'
+  | 'storage-limit'
   | 'integrity-error'
 
 export class LifecycleRepositoryError extends Error {

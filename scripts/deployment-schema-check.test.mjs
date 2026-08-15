@@ -24,6 +24,9 @@ const compatibleRuntimeInspection = {
   column_privileges_exact: true,
   owner_isolated: true,
   indexes_exact: true,
+  triggers_exact: true,
+  constraints_exact: true,
+  defaults_exact: true,
 }
 
 class FakeSchemaClient {

@@ -1,13 +1,13 @@
 import 'server-only'
 
-import { readdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
-
 import {
   createPostgresSqlAdapter,
 } from '@/server/db'
+import {
+  assertDedicatedLocalSchema,
+  loadCanonicalFilesystemMigrations,
+} from '@/server/db/local-postgres'
 import { runMigrations } from '@/server/db/migrations'
-import type { Migration, SqlAdapter } from '@/server/db'
 import { DurableGameRepository } from '@/server/games'
 import {
   createApiServicesWithDependencies,
@@ -29,13 +29,14 @@ import {
   generateOpenClawPortiaV2,
 } from './v2-generation'
 
-const MIGRATION_FILENAME = /^(\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*)\.sql$/u
 let servicesPromise: Promise<WebChessApiServices> | null = null
 
 function databaseUrl(): string {
   if (
     process.env.VERCEL !== undefined ||
     process.env.VERCEL_ENV !== undefined ||
+    process.env.VERCEL_TARGET_ENV !== undefined ||
+    process.env.VERCEL_URL !== undefined ||
     process.env.WEBCHESS_OPENCLAW_ENABLED !== 'true'
   ) {
     throw new Error('The local OpenClaw database is disabled in this environment.')
@@ -63,80 +64,12 @@ function databaseUrl(): string {
   return value
 }
 
-async function loadMigrations(): Promise<readonly Migration[]> {
-  const directory = join(process.cwd(), 'db', 'migrations')
-  const entries = await readdir(directory, { withFileTypes: true })
-  const filenames = entries.map((entry) => {
-    if (!entry.isFile() || !MIGRATION_FILENAME.test(entry.name)) {
-      throw new Error('The local migration directory contains an unexpected entry.')
-    }
-    return entry.name
-  }).sort()
-  if (filenames.length === 0) {
-    throw new Error('The local WebChess runtime has no database migrations.')
-  }
-  return Promise.all(filenames.map(async (filename) => ({
-    id: MIGRATION_FILENAME.exec(filename)?.[1] ?? '',
-    sql: await readFile(join(directory, filename), 'utf8'),
-  })))
-}
-
-async function assertDedicatedLocalSchema(database: SqlAdapter): Promise<void> {
-  const inspection = await database.query({
-    text: `
-      SELECT
-        to_regclass('webchess_schema_migrations')::text AS migration_ledger,
-        EXISTS (
-          SELECT 1
-          FROM pg_catalog.pg_class AS relation
-          INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = relation.relnamespace
-          WHERE namespace.nspname = current_schema()
-            AND relation.relname IN (
-              'deleted_user_tombstones',
-              'user_controls',
-              'games',
-              'game_events',
-              'model_requests',
-              'game_start_requests',
-              'usage_buckets',
-              'rate_buckets',
-              'model_concurrency_slots',
-              'lifecycle_runs',
-              'portia_reviews',
-              'gate_decisions',
-              'charlotte_results',
-              'wilbur_actions',
-              'wilbur_observations',
-              'lifecycle_events',
-              'research_requests',
-              'research_sources'
-            )
-        ) AS has_webchess_objects
-    `,
-  })
-  const row = inspection.rows[0]
-  if (
-    !row ||
-    !(
-      row.migration_ledger === null ||
-      typeof row.migration_ledger === 'string'
-    ) ||
-    typeof row.has_webchess_objects !== 'boolean'
-  ) {
-    throw new Error('The dedicated local database could not be inspected safely.')
-  }
-  if (row.migration_ledger === null && row.has_webchess_objects) {
-    throw new Error(
-      'The dedicated local database has WebChess objects without a migration ledger; automatic adoption is forbidden.',
-    )
-  }
-}
-
 async function createServices(): Promise<WebChessApiServices> {
   const usageConfig = loadUsageConfig()
-  const migrations = await loadMigrations()
-  const database = createPostgresSqlAdapter(databaseUrl())
+  const migrations = await loadCanonicalFilesystemMigrations()
+  const database = createPostgresSqlAdapter(databaseUrl(), {
+    applicationName: 'webchess-openclaw-v2',
+  })
   try {
     await assertDedicatedLocalSchema(database)
     await runMigrations(database, migrations)
@@ -157,6 +90,8 @@ async function createServices(): Promise<WebChessApiServices> {
       requiresModelApiKey: false,
       softwareVersion: `webchess@${WEBCHESS_SOFTWARE_VERSION}-openclaw`,
       usage: createUsageController({ db: database, config: usageConfig }),
+      wilburStorageRowLimit: 500,
+      wilburStorageTextBytesLimit: 250_000,
     })
   } catch (error) {
     await database.close()

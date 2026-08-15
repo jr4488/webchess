@@ -1,10 +1,7 @@
 import { z } from 'zod'
 
 import { sha256Hex } from './hash'
-import {
-  parseResultRows,
-  parseSingleResultRow,
-} from './rows'
+import { parseResultRows } from './rows'
 import type { SqlAdapter, SqlStatement } from './sql'
 
 const MIGRATION_ID_PATTERN = /^\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*$/
@@ -18,10 +15,9 @@ const appliedMigrationRowSchema = z.object({
 export interface Migration {
   readonly id: string
   /**
-   * Migrations must be safe to retry. The runner records and checks an exact
-   * checksum, but Neon HTTP transactions are non-interactive, so a concurrent
-   * runner can only safely replay idempotent DDL after waiting for the advisory
-   * transaction lock.
+   * Migrations must be fully transactional. The runner rejects explicit
+   * transaction control and PostgreSQL commands that cannot run in its atomic
+   * transaction, then records and checks an exact checksum.
    */
   readonly sql: string
 }
@@ -41,6 +37,16 @@ export class MigrationDriftError extends Error {
       `Migration ${migrationId} has checksum ${actualChecksum}, but the database records ${expectedChecksum}.`,
     )
     this.name = 'MigrationDriftError'
+  }
+}
+
+export class MigrationHistoryError extends Error {
+  constructor(
+    message: string,
+    readonly migrationId?: string,
+  ) {
+    super(message)
+    this.name = 'MigrationHistoryError'
   }
 }
 
@@ -194,6 +200,41 @@ export function splitSqlStatements(sql: string): readonly string[] {
   return statements
 }
 
+function withoutLeadingComments(statement: string): string {
+  let remaining = statement.trimStart()
+  while (remaining.startsWith('--') || remaining.startsWith('/*')) {
+    if (remaining.startsWith('--')) {
+      const lineEnd = remaining.indexOf('\n')
+      remaining =
+        lineEnd === -1
+          ? ''
+          : remaining.slice(lineEnd + 1).trimStart()
+      continue
+    }
+
+    let depth = 0
+    let index = 0
+    for (; index < remaining.length - 1; index += 1) {
+      const pair = remaining.slice(index, index + 2)
+      if (pair === '/*') {
+        depth += 1
+        index += 1
+      } else if (pair === '*/') {
+        depth -= 1
+        index += 1
+        if (depth === 0) break
+      }
+    }
+    remaining = remaining.slice(index + 1).trimStart()
+  }
+  return remaining
+}
+
+const FORBIDDEN_TRANSACTION_STATEMENT =
+  /^(?:BEGIN|START\s+TRANSACTION|COMMIT|END(?:\s+(?:WORK|TRANSACTION))?|ROLLBACK|ABORT|SAVEPOINT|RELEASE\s+SAVEPOINT|PREPARE\s+TRANSACTION|SET\s+TRANSACTION)\b/i
+const FORBIDDEN_NONTRANSACTIONAL_DDL =
+  /^(?:(?:CREATE|DROP)\s+(?:(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY|DATABASE\b|TABLESPACE\b)|ALTER\s+SYSTEM\b|REINDEX\b[\s\S]*\bCONCURRENTLY\b|VACUUM\b)/i
+
 function validateMigrations(migrations: readonly Migration[]): void {
   let previousId: string | undefined
   const seen = new Set<string>()
@@ -213,12 +254,74 @@ function validateMigrations(migrations: readonly Migration[]): void {
       throw new TypeError('Migrations must be provided in strictly increasing id order.')
     }
 
-    if (splitSqlStatements(migration.sql).length === 0) {
+    const statements = splitSqlStatements(migration.sql)
+    if (statements.length === 0) {
       throw new TypeError(`Migration ${migration.id} has no SQL statements.`)
+    }
+    for (const statement of statements) {
+      const significantStatement = withoutLeadingComments(statement)
+      if (
+        FORBIDDEN_TRANSACTION_STATEMENT.test(significantStatement) ||
+        FORBIDDEN_NONTRANSACTIONAL_DDL.test(significantStatement)
+      ) {
+        throw new TypeError(
+          `Migration ${migration.id} contains transaction control or nontransactional DDL.`,
+        )
+      }
     }
 
     previousId = migration.id
     seen.add(migration.id)
+  }
+}
+
+function validateMigrationHistory(
+  migrations: readonly Migration[],
+  databaseMigrations: readonly z.infer<typeof appliedMigrationRowSchema>[],
+): void {
+  let previousId: string | undefined
+  for (const databaseMigration of databaseMigrations) {
+    if (
+      previousId !== undefined &&
+      databaseMigration.id <= previousId
+    ) {
+      throw new MigrationHistoryError(
+        'The database migration ledger is not strictly ordered and unique.',
+        databaseMigration.id,
+      )
+    }
+    previousId = databaseMigration.id
+  }
+
+  const sourceById = new Map(
+    migrations.map((migration) => [migration.id, migration]),
+  )
+  for (const databaseMigration of databaseMigrations) {
+    const sourceMigration = sourceById.get(databaseMigration.id)
+    if (!sourceMigration) {
+      throw new MigrationHistoryError(
+        `Database migration ${databaseMigration.id} is not present in the canonical migration source.`,
+        databaseMigration.id,
+      )
+    }
+
+    const sourceChecksum = migrationChecksum(sourceMigration.sql)
+    if (databaseMigration.checksum !== sourceChecksum) {
+      throw new MigrationDriftError(
+        databaseMigration.id,
+        databaseMigration.checksum,
+        sourceChecksum,
+      )
+    }
+  }
+
+  for (let index = 0; index < databaseMigrations.length; index += 1) {
+    if (databaseMigrations[index].id !== migrations[index]?.id) {
+      throw new MigrationHistoryError(
+        'The database migration ledger is not an exact prefix of the canonical migration source.',
+        databaseMigrations[index].id,
+      )
+    }
   }
 }
 
@@ -234,10 +337,42 @@ const createMigrationsTableStatement: SqlStatement = {
   `,
 }
 
+function migrationLedgerGuardStatement(
+  expectedMigrations: readonly z.infer<typeof appliedMigrationRowSchema>[],
+): SqlStatement {
+  return {
+    text: `
+      /* webchess_migration_ledger_guard */
+      WITH current_ledger AS (
+        SELECT COALESCE(
+          jsonb_agg(
+            jsonb_build_array(id, checksum::text)
+            ORDER BY id
+          ),
+          '[]'::jsonb
+        ) AS entries
+        FROM webchess_schema_migrations
+      )
+      SELECT 1 / CASE
+        WHEN entries = $1::jsonb THEN 1
+        ELSE 0
+      END AS ledger_matches
+      FROM current_ledger
+    `,
+    values: [
+      JSON.stringify(
+        expectedMigrations.map(({ id, checksum }) => [id, checksum]),
+      ),
+    ],
+  }
+}
+
 /**
- * @internal Test-only helper for provisioning blank, disposable database
- * schemas. It does not validate or adopt a pre-existing schema that lacks the
- * migration ledger, so production and deployment code must not call it.
+ * Applies canonical migrations to a dedicated local PostgreSQL schema.
+ * Existing ledger rows must be an exact, checksum-matching prefix of the
+ * supplied source before any pending migration is applied. Callers remain
+ * responsible for rejecting pre-existing WebChess schemas that lack a ledger;
+ * hosted deployment uses its separate owner-only migration command.
  */
 export async function runMigrations(
   database: SqlAdapter,
@@ -257,79 +392,48 @@ export async function runMigrations(
     appliedResult,
     appliedMigrationRowSchema,
   )
-  const checksumById = new Map(
-    databaseMigrations.map((migration) => [
-      migration.id,
-      migration.checksum,
-    ]),
-  )
+  validateMigrationHistory(migrations, databaseMigrations)
+  const pendingMigrations = migrations.slice(databaseMigrations.length)
+  const finalLedger = migrations.map((migration) => ({
+    id: migration.id,
+    checksum: migrationChecksum(migration.sql),
+  }))
+  const transactionStatements: SqlStatement[] = [
+    {
+      text: 'SELECT pg_advisory_xact_lock($1::bigint)',
+      values: [MIGRATION_LOCK_KEY],
+    },
+    {
+      text: `
+        LOCK TABLE webchess_schema_migrations
+        IN SHARE ROW EXCLUSIVE MODE
+      `,
+    },
+    migrationLedgerGuardStatement(databaseMigrations),
+  ]
 
-  const applied: string[] = []
-  const alreadyApplied: string[] = []
-
-  for (const migration of migrations) {
-    const checksum = migrationChecksum(migration.sql)
-    const existingChecksum = checksumById.get(migration.id)
-
-    if (existingChecksum !== undefined) {
-      if (existingChecksum !== checksum) {
-        throw new MigrationDriftError(
-          migration.id,
-          existingChecksum,
-          checksum,
-        )
-      }
-
-      alreadyApplied.push(migration.id)
-      continue
-    }
-
-    const migrationStatements: SqlStatement[] = splitSqlStatements(
-      migration.sql,
-    ).map((text) => ({ text }))
-
-    const results = await database.transaction(
-      [
-        {
-          text: 'SELECT pg_advisory_xact_lock($1::bigint)',
-          values: [MIGRATION_LOCK_KEY],
-        },
-        ...migrationStatements,
-        {
-          text: `
-            INSERT INTO webchess_schema_migrations (id, checksum)
-            VALUES ($1, $2)
-            ON CONFLICT (id) DO NOTHING
-          `,
-          values: [migration.id, checksum],
-        },
-        {
-          text: `
-            SELECT id, checksum
-            FROM webchess_schema_migrations
-            WHERE id = $1
-          `,
-          values: [migration.id],
-        },
-      ],
-      { isolationLevel: 'Serializable' },
+  for (const migration of pendingMigrations) {
+    transactionStatements.push(
+      ...splitSqlStatements(migration.sql).map((text) => ({ text })),
+      {
+        text: `
+          INSERT INTO webchess_schema_migrations (id, checksum)
+          VALUES ($1, $2)
+        `,
+        values: [migration.id, migrationChecksum(migration.sql)],
+      },
     )
-
-    const verification = parseSingleResultRow(
-      results[results.length - 1],
-      appliedMigrationRowSchema,
-    )
-    if (verification.checksum !== checksum) {
-      throw new MigrationDriftError(
-        migration.id,
-        verification.checksum,
-        checksum,
-      )
-    }
-
-    checksumById.set(migration.id, checksum)
-    applied.push(migration.id)
+  }
+  if (pendingMigrations.length > 0) {
+    transactionStatements.push(migrationLedgerGuardStatement(finalLedger))
   }
 
-  return { applied, alreadyApplied }
+  await database.transaction(transactionStatements, {
+    isolationLevel: 'ReadCommitted',
+  })
+
+  return {
+    applied: pendingMigrations.map(({ id }) => id),
+    alreadyApplied: databaseMigrations.map(({ id }) => id),
+  }
 }

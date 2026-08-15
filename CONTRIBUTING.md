@@ -20,8 +20,11 @@ effect could be evaluated.
 
 ## Local setup
 
-Follow [INSTALL.md](INSTALL.md). Use development Clerk, Neon, and stub OpenAI
-resources; never point an unreviewed branch at production data or secrets.
+Follow [INSTALL.md](INSTALL.md). For source-checkout play on this machine
+without OpenClaw, use `npm run local:dev` with a server-side OpenAI credential
+and the loopback PostgreSQL database. Omit both Clerk keys for the signed local
+principal, or provide a complete development Clerk pair. Never point an
+unreviewed branch at production data or secrets.
 
 ## Verification
 
@@ -32,9 +35,11 @@ npm ci
 npm run verify:openclaw
 npm run lint
 npm run typecheck
+npm run plugin:build
+git diff --exit-code -- openclaw-plugin/dist
 npm run test
 npm run test:coverage
-npm run test:integration
+DATABASE_URL='postgresql://...disposable-test-only...' npm run test:integration
 npm audit --omit=dev --audit-level=high
 npm audit --audit-level=high
 npm run build
@@ -43,9 +48,12 @@ npm run test:e2e
 npm run test:links
 ```
 
-`verify:openclaw` is the source, plugin, UI, and browser gate for the local
-runtime. The separate integration command exercises the disposable PostgreSQL
-database used to validate both hosted and local durable lifecycle behavior.
+`verify:openclaw` builds the source plugin entry and runs application, UI, and
+browser checks; it does not install a packed archive or prove a live provider
+round trip. `plugin:build` must leave the committed generated entry unchanged.
+The separate integration command exercises a disposable PostgreSQL 17 database
+used only to validate hosted and local durable lifecycle behavior. Never use a
+local game, Preview, or Production database for that command.
 
 Changes to circular movement, replay, ending precedence, model prompts,
 structured schemas, authentication, ownership, quota accounting, rate limits,

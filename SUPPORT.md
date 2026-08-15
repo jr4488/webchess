@@ -38,13 +38,24 @@ or feature requests.
 
 ## Account and privacy actions
 
-The deployed `/account` page is the self-service path for exporting WebChess
-data, deleting WebChess data, and deleting the account. Authentication and
-passkey management are handled through Clerk's account controls.
+In the intended hosted service, `/account` is the self-service path for
+exporting WebChess data, deleting WebChess data, and deleting the Clerk account.
+Authentication and passkey management are handled through Clerk's controls.
+The signed local source runtime exposes export and sign-out but intentionally
+withholds Clerk profile and deletion controls. The OpenClaw runtime has no
+account API; its local database owner controls backup, export, and deletion.
 
-An account export is generated synchronously as one JSON file and is limited to
-3,000,000 bytes. WebChess does not paginate the export or prepare it later in
-the background. An oversized export is refused rather than partially returned.
+Account export format `webchess-account-export/4` is generated synchronously as
+one JSON file and is limited to 3,000,000 bytes by default. It includes the
+owner's application records, lifecycle recovery fields,
+`charlotteBindingVersion`, sanitized Wilbur mutation-ledger rows, and
+pseudonymous user-rate windows. It omits private mutation capacity reservations,
+owner/IP identifiers, HMAC material, shared IP/global counters, Clerk/vendor
+data, and database-restoration metadata. WebChess does not paginate the export
+or prepare it later in the background. An oversized export is refused rather
+than partially returned. Wilbur's admission envelope preserves existing history
+and does not guarantee whole-account exportability because other account content
+also accumulates.
 
 If an export is refused or another self-service account control fails, use
 [GitHub Discussions](https://github.com/jr4488/webchess/discussions) and

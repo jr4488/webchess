@@ -52,6 +52,8 @@ vi.mock('@/server/usage', () => ({
 const ENVIRONMENT_KEYS = [
   'VERCEL',
   'VERCEL_ENV',
+  'VERCEL_TARGET_ENV',
+  'VERCEL_URL',
   'WEBCHESS_OPENCLAW_DATABASE_URL',
   'WEBCHESS_OPENCLAW_ENABLED',
 ] as const
@@ -95,8 +97,10 @@ beforeEach(() => {
   harness.runMigrations.mockResolvedValue(undefined)
   harness.createApiServices.mockReturnValue({ kind: 'api-services' })
   harness.createPostgresSqlAdapter.mockReturnValue(databaseWithRow({
-    has_webchess_objects: false,
-    migration_ledger: null,
+    has_migration_ledger: false,
+    relation_count: 0,
+    schema_name: 'public',
+    unexpected_relation: null,
   }))
 })
 
@@ -112,13 +116,16 @@ describe('OpenClaw durable service bootstrap', () => {
   it('rejects every hosted or disabled environment before opening PostgreSQL', async () => {
     const { getOpenClawApiServices } = await loadServicesModule()
 
-    process.env.VERCEL = '1'
-    await expect(getOpenClawApiServices()).rejects.toThrow(/disabled/u)
-    delete process.env.VERCEL
-
-    process.env.VERCEL_ENV = 'preview'
-    await expect(getOpenClawApiServices()).rejects.toThrow(/disabled/u)
-    delete process.env.VERCEL_ENV
+    for (const [name, value] of [
+      ['VERCEL', '1'],
+      ['VERCEL_ENV', 'preview'],
+      ['VERCEL_TARGET_ENV', 'preview'],
+      ['VERCEL_URL', 'webchess-preview.vercel.app'],
+    ] as const) {
+      process.env[name] = value
+      await expect(getOpenClawApiServices()).rejects.toThrow(/disabled/u)
+      delete process.env[name]
+    }
 
     process.env.WEBCHESS_OPENCLAW_ENABLED = 'false'
     await expect(getOpenClawApiServices()).rejects.toThrow(/disabled/u)
@@ -165,9 +172,24 @@ describe('OpenClaw durable service bootstrap', () => {
   it('rejects malformed or unsafe existing schemas and always closes the adapter', async () => {
     const databases = [
       databaseWithRow(undefined),
-      databaseWithRow({ migration_ledger: 7, has_webchess_objects: false }),
-      databaseWithRow({ migration_ledger: null, has_webchess_objects: 'yes' }),
-      databaseWithRow({ migration_ledger: null, has_webchess_objects: true }),
+      databaseWithRow({
+        has_migration_ledger: false,
+        relation_count: 0,
+        schema_name: 7,
+        unexpected_relation: null,
+      }),
+      databaseWithRow({
+        has_migration_ledger: 'no',
+        relation_count: 0,
+        schema_name: 'public',
+        unexpected_relation: null,
+      }),
+      databaseWithRow({
+        has_migration_ledger: false,
+        relation_count: 1,
+        schema_name: 'public',
+        unexpected_relation: null,
+      }),
     ]
     const pendingDatabases = [...databases]
     harness.createPostgresSqlAdapter.mockImplementation(() => pendingDatabases.shift())
@@ -185,8 +207,10 @@ describe('OpenClaw durable service bootstrap', () => {
 
   it('runs ordered migrations once and reuses the fully composed service graph', async () => {
     const database = databaseWithRow({
-      migration_ledger: 'webchess_schema_migrations',
-      has_webchess_objects: true,
+      has_migration_ledger: true,
+      relation_count: 74,
+      schema_name: 'public',
+      unexpected_relation: null,
     })
     harness.createPostgresSqlAdapter.mockReturnValue(database)
     const services = { kind: 'webchess-services' }
@@ -205,7 +229,7 @@ describe('OpenClaw durable service bootstrap', () => {
       expect.objectContaining({
         modelProvider: 'openclaw',
         requiresModelApiKey: false,
-        softwareVersion: 'webchess@2.1.0-openclaw',
+        softwareVersion: 'webchess@2.2.0-openclaw',
       }),
     )
     expect(harness.createPostgresSqlAdapter).toHaveBeenCalledOnce()
@@ -214,12 +238,16 @@ describe('OpenClaw durable service bootstrap', () => {
 
   it('closes PostgreSQL and allows a clean retry when initialization fails', async () => {
     const failedDatabase = databaseWithRow({
-      migration_ledger: null,
-      has_webchess_objects: false,
+      has_migration_ledger: false,
+      relation_count: 0,
+      schema_name: 'public',
+      unexpected_relation: null,
     })
     const recoveredDatabase = databaseWithRow({
-      migration_ledger: null,
-      has_webchess_objects: false,
+      has_migration_ledger: false,
+      relation_count: 0,
+      schema_name: 'public',
+      unexpected_relation: null,
     })
     harness.createPostgresSqlAdapter
       .mockReturnValueOnce(failedDatabase)

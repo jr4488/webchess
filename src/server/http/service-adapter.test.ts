@@ -29,7 +29,10 @@ import {
   type DurableGameSnapshot,
   type TerminalGameSnapshot,
 } from '../games'
-import type { LifecycleRepositoryPort } from '../lifecycle'
+import {
+  LifecycleRepositoryError,
+  type LifecycleRepositoryPort,
+} from '../lifecycle'
 import {
   buildBoardAnswerPromptPackage,
   DIVISION_PROMPT_VERSION,
@@ -39,14 +42,17 @@ import {
   OPENAI_MODEL,
 } from '../openai'
 import type { PortiaInput, PortiaRequestContext } from '../openai'
-import type {
-  ModelResultPayload,
-  ModelRequestStatus,
-  UsageController,
+import {
+  hashUserRateKey,
+  type ModelResultPayload,
+  type ModelRequestStatus,
+  type UsageController,
 } from '../usage'
 import { ApiError } from './errors'
 import {
   createApiServicesWithDependencies,
+  normalizeAccountExportMaxBytes,
+  normalizeSoftwareVersion,
   type ApiServiceAdapterDependencies,
 } from './service-adapter'
 
@@ -290,6 +296,12 @@ function createUsage(): UsageController {
       remaining: { user: 1, ip: 9 },
       resetsAt: '2026-07-26T21:00:00.000Z',
     })),
+    consumeWilburMutationRate: vi.fn(async () => ({
+      ok: true as const,
+      kind: 'consumed' as const,
+      remaining: { user: 59, ip: 119 },
+      resetsAt: '2026-07-26T21:00:00.000Z',
+    })),
     consumeReplayGameStart: vi.fn(async () => ({
       ok: true as const,
       kind: 'consumed' as const,
@@ -392,6 +404,8 @@ function createDependencies(): ApiServiceAdapterDependencies {
   const usage = createUsage()
   return {
     accountExportMaxBytes: 3_000_000,
+    wilburStorageRowLimit: 500,
+    wilburStorageTextBytesLimit: 250_000,
     database: createDatabase(),
     repository: repository as ApiServiceAdapterDependencies['repository'],
     usage,
@@ -816,52 +830,77 @@ function createLifecycleRepository(
       return current
     }),
     hasPriorTerminalFingerprint: vi.fn(async () => false),
-    createWilburAction: vi.fn(async (input) => ({
-      id: input.id,
-      lifecycleRunId: current.id,
-      charlotteActionIndex: input.charlotteActionIndex,
-      actor: input.actor,
-      action: input.action,
-      testedAssumption: input.testedAssumption,
-      expectedObservation: input.expectedObservation,
-      decisionThreshold: input.decisionThreshold,
-      reviewHorizon: input.reviewHorizon,
-      status: 'planned' as const,
-      revision: 0,
-      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
-      createdAt: NOW.toISOString(),
-      updatedAt: NOW.toISOString(),
-    })),
-    updateWilburAction: vi.fn(async (input) => ({
-      id: input.actionId,
-      lifecycleRunId: current.id,
-      charlotteActionIndex: 0,
-      actor: 'The accountable owner',
-      action: 'Run one bounded test.',
-      testedAssumption: 'The bounded test can produce useful evidence.',
-      expectedObservation: 'A direct signal appears.',
-      decisionThreshold: 'Continue only if the signal appears safely.',
-      reviewHorizon: 'Within fourteen days',
-      status: input.status,
-      revision: input.expectedRevision + 1,
-      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
-      createdAt: NOW.toISOString(),
-      updatedAt: NOW.toISOString(),
-    })),
-    appendWilburObservation: vi.fn(async (input) => ({
-      id: input.id,
-      actionId: input.actionId,
-      observedAt: input.observedAt,
-      observation: input.observation,
-      evidenceClassification: input.evidenceClassification,
-      expectedEffect: input.expectedEffect,
-      unexpectedEffect: input.unexpectedEffect,
-      stakeholderResponse: input.stakeholderResponse,
-      assumptionResult: input.assumptionResult,
-      nextDecision: input.nextDecision,
-      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
-      createdAt: NOW.toISOString(),
-    })),
+    claimWilburMutation: vi.fn(async () => ({ kind: 'pending' as const })),
+    settleWilburMutationConflict: vi.fn(async () => undefined),
+    createWilburAction: vi.fn(async (input) => {
+      const action = {
+        id: input.id,
+        lifecycleRunId: current.id,
+        charlotteActionIndex: input.charlotteActionIndex,
+        charlotteBindingVersion:
+          'webchess-charlotte-action-binding-v1' as const,
+        actor: input.actor,
+        action: input.action,
+        testedAssumption: input.testedAssumption,
+        expectedObservation: input.expectedObservation,
+        decisionThreshold: input.decisionThreshold,
+        reviewHorizon: input.reviewHorizon,
+        status: 'planned' as const,
+        revision: 0,
+        version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+        createdAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+      }
+      current = {
+        ...current,
+        state: 'wilbur_planning',
+        wilburActions: [...current.wilburActions, action],
+      }
+      return action
+    }),
+    updateWilburAction: vi.fn(async (input) => {
+      const existing = current.wilburActions.find(
+        (action) => action.id === input.actionId,
+      )
+      if (!existing) throw new Error('Wilbur action fixture not found.')
+      const action = {
+        ...existing,
+        status: input.status,
+        revision: input.expectedRevision + 1,
+        updatedAt: NOW.toISOString(),
+      }
+      current = {
+        ...current,
+        state: input.status === 'in_progress'
+          ? 'wilbur_in_progress'
+          : current.state,
+        wilburActions: current.wilburActions.map((candidate) =>
+          candidate.id === action.id ? action : candidate),
+      }
+      return action
+    }),
+    appendWilburObservation: vi.fn(async (input) => {
+      const observation = {
+        id: input.id,
+        actionId: input.actionId,
+        observedAt: input.observedAt,
+        observation: input.observation,
+        evidenceClassification: input.evidenceClassification,
+        expectedEffect: input.expectedEffect,
+        unexpectedEffect: input.unexpectedEffect,
+        stakeholderResponse: input.stakeholderResponse,
+        assumptionResult: input.assumptionResult,
+        nextDecision: input.nextDecision,
+        version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+        createdAt: NOW.toISOString(),
+      }
+      current = {
+        ...current,
+        state: 'wilbur_observed',
+        wilburObservations: [...current.wilburObservations, observation],
+      }
+      return observation
+    }),
   }
   return repository
 }
@@ -984,6 +1023,23 @@ describe('durable HTTP service adapter', () => {
 
   beforeEach(() => {
     dependencies = createDependencies()
+  })
+
+  it('bounds the configured synchronous account export size at 100 MB', () => {
+    expect(normalizeAccountExportMaxBytes(undefined)).toBe(3_000_000)
+    expect(normalizeAccountExportMaxBytes('100000000')).toBe(100_000_000)
+
+    for (const invalid of ['0', '100000001', '1.5', 'not-a-number']) {
+      expect(() => normalizeAccountExportMaxBytes(invalid)).toThrow(
+        'must be between 1 and 100000000 bytes',
+      )
+    }
+  })
+
+  it('uses the canonical candidate identity for fallback provenance', () => {
+    expect(normalizeSoftwareVersion(undefined)).toBe('webchess@2.2.0')
+    expect(normalizeSoftwareVersion('   ')).toBe('webchess@2.2.0')
+    expect(normalizeSoftwareVersion('deployment-sha')).toBe('deployment-sha')
   })
 
   it('orders division reservation, provider work, durable settlement, and game finalization', async () => {
@@ -2019,6 +2075,52 @@ describe('durable HTTP service adapter', () => {
         sourceGameId: GAME_ID,
         activatedAt: NOW,
       }]),
+      sqlResult([{
+        id: '55555555-5555-4555-8555-555555555555',
+        answerPromptDigest: 'c'.repeat(64),
+        portiaCurrentCandidateId: LIFECYCLE_SURVIVORS[0]!.candidateId,
+        portiaActiveModelRequestId: '77777777-7777-4777-8777-777777777777',
+        portiaFailedAttemptCount: 1,
+        portiaFailureLimit: 3,
+        portiaCompletedCandidateIds: [LIFECYCLE_SURVIVORS[0]!.candidateId],
+        portiaAssessmentDrafts: [{ candidateId: LIFECYCLE_SURVIVORS[0]!.candidateId }],
+        charlotteActiveModelRequestId: '88888888-8888-4888-8888-888888888888',
+        charlotteFailedAttemptCount: 2,
+        charlotteFailureLimit: 3,
+      }]),
+      sqlResult(),
+      sqlResult(),
+      sqlResult(),
+      sqlResult(),
+      sqlResult(),
+      sqlResult(),
+      sqlResult(),
+      sqlResult([{
+        idempotencyKey: IDEMPOTENCY_KEY,
+        operation: 'create_action',
+        requestDigest: 'd'.repeat(64),
+        targetGameId: GAME_ID,
+        targetActionId: null,
+        rateKind: 'action',
+        rateAdmittedAt: NOW,
+        denialCode: null,
+        retryAt: null,
+        status: 'committed',
+        resultEntityId: '99999999-9999-4999-8999-999999999999',
+        resultRevision: '0',
+        resultStatus: 'planned',
+        resultUpdatedAt: NOW,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }]),
+      sqlResult(),
+      sqlResult([{
+        action: 'wilbur_action',
+        windowStart: NOW,
+        windowSeconds: 3_600,
+        count: 2,
+        expiresAt: new Date('2026-07-26T22:00:00.000Z'),
+      }]),
     ])
 
     const exported = await createApiServicesWithDependencies(
@@ -2031,7 +2133,7 @@ describe('durable HTTP service adapter', () => {
     })
 
     expect(exported).toMatchObject({
-      format: 'webchess-account-export/3',
+      format: 'webchess-account-export/4',
       controls: { suspended: false },
       games: [{ id: GAME_ID, revision: '3' }],
       events: [{ gameId: GAME_ID, ply: 1 }],
@@ -2042,6 +2144,35 @@ describe('durable HTTP service adapter', () => {
         kind: 'replay',
         sourceGameId: GAME_ID,
         activatedAt: NOW.toISOString(),
+      }],
+      lifecycleRuns: [{
+        answerPromptDigest: 'c'.repeat(64),
+        portiaCurrentCandidateId: LIFECYCLE_SURVIVORS[0]!.candidateId,
+        portiaActiveModelRequestId: '77777777-7777-4777-8777-777777777777',
+        portiaFailedAttemptCount: 1,
+        portiaFailureLimit: 3,
+        portiaCompletedCandidateIds: [LIFECYCLE_SURVIVORS[0]!.candidateId],
+        portiaAssessmentDrafts: [{ candidateId: LIFECYCLE_SURVIVORS[0]!.candidateId }],
+        charlotteActiveModelRequestId: '88888888-8888-4888-8888-888888888888',
+        charlotteFailedAttemptCount: 2,
+        charlotteFailureLimit: 3,
+      }],
+      wilburMutationRequests: [{
+        idempotencyKey: IDEMPOTENCY_KEY,
+        operation: 'create_action',
+        requestDigest: 'd'.repeat(64),
+        targetGameId: GAME_ID,
+        rateKind: 'action',
+        status: 'committed',
+        resultRevision: '0',
+        resultStatus: 'planned',
+      }],
+      userRateBuckets: [{
+        action: 'wilbur_action',
+        windowStart: NOW.toISOString(),
+        windowSeconds: 3_600,
+        count: 2,
+        expiresAt: '2026-07-26T22:00:00.000Z',
       }],
     })
     expect(dependencies.usage.consumeAccountExportRate).toHaveBeenCalledWith({
@@ -2058,15 +2189,47 @@ describe('durable HTTP service adapter', () => {
     const statements = vi.mocked(
       dependencies.database.transaction,
     ).mock.calls[0]?.[0]
-    expect(statements).toHaveLength(16)
+    expect(statements).toHaveLength(18)
     expect(statements?.[0]?.text).toContain('pg_column_size')
+    expect(statements?.[0]?.text).toContain(
+      'FROM wilbur_mutation_requests AS mutations',
+    )
+    expect(statements?.[0]?.values).toEqual([
+      OWNER_ID,
+      dependencies.accountExportMaxBytes,
+      hashUserRateKey(dependencies.hmacSecret, OWNER_ID),
+    ])
     expect(statements?.[6]?.text).toContain(
       'activated_at AS "activatedAt"',
     )
     expect(statements?.[7]?.text).toContain('FROM lifecycle_runs')
     expect(statements?.[8]?.text).toContain('FROM research_requests')
     expect(statements?.[9]?.text).toContain('FROM research_sources')
-    expect(statements?.[15]?.text).toContain('FROM lifecycle_events')
+    expect(statements?.[15]?.text).toContain('FROM wilbur_mutation_requests')
+    expect(statements?.[15]?.text).not.toMatch(
+      /reserved_future_rows|reserved_text_bytes/u,
+    )
+    expect(statements?.[16]?.text).toContain('FROM lifecycle_events')
+    for (const alias of [
+      'answerPromptDigest',
+      'portiaCurrentCandidateId',
+      'portiaActiveModelRequestId',
+      'portiaFailedAttemptCount',
+      'portiaFailureLimit',
+      'portiaCompletedCandidateIds',
+      'portiaAssessmentDrafts',
+      'charlotteActiveModelRequestId',
+      'charlotteFailedAttemptCount',
+      'charlotteFailureLimit',
+    ]) {
+      expect(statements?.[7]?.text).toContain(`AS "${alias}"`)
+    }
+    expect(statements?.[17]?.text).toContain('FROM rate_buckets')
+    expect(statements?.[17]?.text).toContain("key_type = 'user'")
+    expect(statements?.[17]?.text.match(/\bcount\b/gu)).toHaveLength(1)
+    expect(statements?.[17]?.values).toEqual([
+      hashUserRateKey(dependencies.hmacSecret, OWNER_ID),
+    ])
     expect(
       statements
         ?.slice(1)
@@ -2075,7 +2238,21 @@ describe('durable HTTP service adapter', () => {
         ),
     ).toBe(true)
     expect(statements?.map((statement) => statement.text).join('\n'))
-      .not.toMatch(/rate_buckets|lease_token|clerk_user_id AS/i)
+      .not.toMatch(/lease_token|clerk_user_id AS/i)
+    const exportedRateBuckets = (exported as {
+      readonly userRateBuckets: readonly Record<string, unknown>[]
+    }).userRateBuckets
+    expect(exportedRateBuckets[0]).not.toHaveProperty('keyHash')
+    expect(exportedRateBuckets[0]).not.toHaveProperty('keyType')
+    const exportedMutationRequests = (exported as {
+      readonly wilburMutationRequests: readonly Record<string, unknown>[]
+    }).wilburMutationRequests
+    expect(exportedMutationRequests[0]).not.toHaveProperty(
+      'reservedFutureRows',
+    )
+    expect(exportedMutationRequests[0]).not.toHaveProperty(
+      'reservedTextBytes',
+    )
   })
 
   it('does not read export rows when the durable export rate limit denies', async () => {
@@ -2135,6 +2312,7 @@ describe('durable HTTP service adapter', () => {
     expect(statements?.[0]?.values).toEqual([
       OWNER_ID,
       dependencies.accountExportMaxBytes,
+      hashUserRateKey(dependencies.hmacSecret, OWNER_ID),
     ])
     expect(
       statements
@@ -3357,13 +3535,292 @@ describe('durable HTTP service adapter', () => {
       }))
   })
 
-  it('delegates owner-scoped Wilbur actions, statuses, observations, and provenance', async () => {
+  it.each([
+    'actor',
+    'action',
+    'testedAssumption',
+    'expectedObservation',
+    'decisionThreshold',
+    'reviewHorizon',
+  ] as const)(
+    'refuses a Wilbur action whose %s does not exactly match Charlotte',
+    async (field) => {
+      const portia = lifecycleReview()
+      const charlotte = lifecycleCharlotte(portia)
+      const suggestion = charlotte.exactlyThreeNextActions[0]!
+      const canonicalCommand = {
+        actor: suggestion.actor,
+        action: suggestion.smallestAction,
+        testedAssumption: suggestion.assumptionBeingTested,
+        expectedObservation: suggestion.expectedObservation,
+        decisionThreshold: suggestion.decisionThreshold,
+        reviewHorizon: suggestion.reviewHorizon,
+      }
+      dependencies = lifecycleDependencies(lifecycleAggregate({
+        state: 'charlotte_complete',
+        portia,
+        gate: evaluateGate(portia),
+        charlotte,
+      }))
+
+      await expect(
+        createApiServicesWithDependencies(dependencies).createWilburAction({
+          ...operationInput(),
+          ...canonicalCommand,
+          [field]: `${canonicalCommand[field]} Expanded by the client.`,
+          gameId: GAME_ID,
+          charlotteActionIndex: 0,
+        }),
+      ).rejects.toMatchObject({
+        code: 'CONFLICT',
+        status: 409,
+      })
+
+      expect(dependencies.usage.consumeWilburMutationRate).not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.getForGame).toHaveBeenCalledOnce()
+      expect(dependencies.lifecycleRepository?.createWilburAction)
+        .not.toHaveBeenCalled()
+    },
+  )
+
+  it('rejects an already current-bound Charlotte action before rate admission', async () => {
     const portia = lifecycleReview()
+    const charlotte = lifecycleCharlotte(portia)
+    const suggestion = charlotte.exactlyThreeNextActions[0]!
+    const existingAction = {
+      id: REQUEST_ID,
+      lifecycleRunId: GAME_ID,
+      charlotteActionIndex: 0,
+      charlotteBindingVersion:
+        'webchess-charlotte-action-binding-v1' as const,
+      actor: suggestion.actor,
+      action: suggestion.smallestAction,
+      testedAssumption: suggestion.assumptionBeingTested,
+      expectedObservation: suggestion.expectedObservation,
+      decisionThreshold: suggestion.decisionThreshold,
+      reviewHorizon: suggestion.reviewHorizon,
+      status: 'planned' as const,
+      revision: 0,
+      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+    }
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'wilbur_planning',
+      portia,
+      gate: evaluateGate(portia),
+      charlotte,
+      wilburActions: [existingAction],
+    }))
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .createWilburAction({
+        ...operationInput(),
+        gameId: GAME_ID,
+        charlotteActionIndex: 0,
+        actor: suggestion.actor,
+        action: suggestion.smallestAction,
+        testedAssumption: suggestion.assumptionBeingTested,
+        expectedObservation: suggestion.expectedObservation,
+        decisionThreshold: suggestion.decisionThreshold,
+        reviewHorizon: suggestion.reviewHorizon,
+      })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+    expect(dependencies.usage.consumeWilburMutationRate).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.settleWilburMutationConflict)
+      .toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.createWilburAction)
+      .not.toHaveBeenCalled()
+  })
+
+  it('terminally settles an admitted create conflict and releases its reservation', async () => {
+    const portia = lifecycleReview()
+    const charlotte = lifecycleCharlotte(portia)
+    const suggestion = charlotte.exactlyThreeNextActions[0]!
     dependencies = lifecycleDependencies(lifecycleAggregate({
       state: 'charlotte_complete',
       portia,
       gate: evaluateGate(portia),
-      charlotte: lifecycleCharlotte(portia),
+      charlotte,
+    }))
+    vi.mocked(dependencies.lifecycleRepository!.createWilburAction)
+      .mockRejectedValueOnce(new LifecycleRepositoryError(
+        'conflict',
+        'A concurrent current binding won.',
+      ))
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .createWilburAction({
+        ...operationInput(),
+        gameId: GAME_ID,
+        charlotteActionIndex: 0,
+        actor: suggestion.actor,
+        action: suggestion.smallestAction,
+        testedAssumption: suggestion.assumptionBeingTested,
+        expectedObservation: suggestion.expectedObservation,
+        decisionThreshold: suggestion.decisionThreshold,
+        reviewHorizon: suggestion.reviewHorizon,
+      })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+    expect(dependencies.usage.consumeWilburMutationRate).toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.settleWilburMutationConflict)
+      .toHaveBeenCalledOnce()
+  })
+
+  it('settles a stale status intent without consuming shared rate capacity', async () => {
+    const portia = lifecycleReview()
+    const charlotte = lifecycleCharlotte(portia)
+    const suggestion = charlotte.exactlyThreeNextActions[0]!
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'wilbur_planning',
+      portia,
+      gate: evaluateGate(portia),
+      charlotte,
+      wilburActions: [{
+        id: REQUEST_ID,
+        lifecycleRunId: GAME_ID,
+        charlotteActionIndex: 0,
+        charlotteBindingVersion: 'webchess-charlotte-action-binding-v1',
+        actor: suggestion.actor,
+        action: suggestion.smallestAction,
+        testedAssumption: suggestion.assumptionBeingTested,
+        expectedObservation: suggestion.expectedObservation,
+        decisionThreshold: suggestion.decisionThreshold,
+        reviewHorizon: suggestion.reviewHorizon,
+        status: 'in_progress',
+        revision: 1,
+        version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+        createdAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+      }],
+    }))
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .updateWilburAction({
+        ...operationInput(),
+        gameId: GAME_ID,
+        actionId: REQUEST_ID,
+        expectedRevision: 0,
+        status: 'completed',
+      })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+    expect(dependencies.usage.consumeWilburMutationRate).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.settleWilburMutationConflict)
+      .toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.updateWilburAction)
+      .not.toHaveBeenCalled()
+  })
+
+  it('denies every valid Wilbur mutation before an artifact write', async () => {
+    const portia = lifecycleReview()
+    const charlotte = lifecycleCharlotte(portia)
+    const suggestion = charlotte.exactlyThreeNextActions[0]!
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'wilbur_planning',
+      portia,
+      gate: evaluateGate(portia),
+      charlotte,
+      wilburActions: [{
+        id: REQUEST_ID,
+        lifecycleRunId: GAME_ID,
+        charlotteActionIndex: 2,
+        charlotteBindingVersion: 'webchess-charlotte-action-binding-v1',
+        actor: suggestion.actor,
+        action: suggestion.smallestAction,
+        testedAssumption: suggestion.assumptionBeingTested,
+        expectedObservation: suggestion.expectedObservation,
+        decisionThreshold: suggestion.decisionThreshold,
+        reviewHorizon: suggestion.reviewHorizon,
+        status: 'planned',
+        revision: 0,
+        version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+        createdAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+      }],
+    }))
+    vi.mocked(dependencies.usage.consumeWilburMutationRate)
+      .mockResolvedValueOnce({
+        ok: false,
+        code: 'WILBUR_ACTION_HOURLY_RATE_LIMITED',
+        httpStatus: 429,
+        retryAfterSeconds: 30,
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        code: 'IP_WILBUR_ACTION_HOURLY_RATE_LIMITED',
+        httpStatus: 429,
+        retryAfterSeconds: 31,
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        code: 'WILBUR_OBSERVATION_HOURLY_RATE_LIMITED',
+        httpStatus: 429,
+        retryAfterSeconds: 32,
+      })
+    const services = createApiServicesWithDependencies(dependencies)
+    const context = { ...operationInput(), gameId: GAME_ID }
+
+    await expect(services.createWilburAction({
+      ...context,
+      charlotteActionIndex: 0,
+      actor: suggestion.actor,
+      action: suggestion.smallestAction,
+      testedAssumption: suggestion.assumptionBeingTested,
+      expectedObservation: suggestion.expectedObservation,
+      decisionThreshold: suggestion.decisionThreshold,
+      reviewHorizon: suggestion.reviewHorizon,
+    })).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      status: 429,
+      retryAfterSeconds: 30,
+    })
+    await expect(services.updateWilburAction({
+      ...context,
+      actionId: REQUEST_ID,
+      expectedRevision: 0,
+      status: 'in_progress',
+    })).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      status: 429,
+      retryAfterSeconds: 31,
+    })
+    await expect(services.appendWilburObservation({
+      ...context,
+      actionId: REQUEST_ID,
+      observedAt: NOW.toISOString(),
+      observation: 'A direct signal appeared.',
+      evidenceClassification: 'Direct observation.',
+      expectedEffect: 'The declared signal appeared.',
+      unexpectedEffect: 'No unexpected effect.',
+      stakeholderResponse: 'The stop path remained available.',
+      assumptionResult: 'supported',
+      nextDecision: 'Continue inside the bounded scope.',
+    })).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      status: 429,
+      retryAfterSeconds: 32,
+    })
+
+    expect(dependencies.lifecycleRepository?.getForGame).toHaveBeenCalledTimes(3)
+    expect(dependencies.lifecycleRepository?.claimWilburMutation)
+      .toHaveBeenCalledTimes(3)
+    expect(dependencies.lifecycleRepository?.createWilburAction)
+      .not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.updateWilburAction)
+      .not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.appendWilburObservation)
+      .not.toHaveBeenCalled()
+  })
+
+  it('delegates owner-scoped Wilbur actions, statuses, observations, and provenance', async () => {
+    const portia = lifecycleReview()
+    const charlotte = lifecycleCharlotte(portia)
+    const suggestion = charlotte.exactlyThreeNextActions[0]!
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'charlotte_complete',
+      portia,
+      gate: evaluateGate(portia),
+      charlotte,
       activities: [{
         id: 'activity-1',
         sequence: 1,
@@ -3389,12 +3846,12 @@ describe('durable HTTP service adapter', () => {
     const created = await services.createWilburAction({
       ...context,
       charlotteActionIndex: 0,
-      actor: 'The accountable owner',
-      action: 'Run one bounded test.',
-      testedAssumption: 'The test can produce useful evidence.',
-      expectedObservation: 'A direct signal appears.',
-      decisionThreshold: 'Continue only if the signal appears safely.',
-      reviewHorizon: 'Within fourteen days',
+      actor: suggestion.actor,
+      action: suggestion.smallestAction,
+      testedAssumption: suggestion.assumptionBeingTested,
+      expectedObservation: suggestion.expectedObservation,
+      decisionThreshold: suggestion.decisionThreshold,
+      reviewHorizon: suggestion.reviewHorizon,
     })
     const updated = await services.updateWilburAction({
       ...context,
@@ -3402,18 +3859,21 @@ describe('durable HTTP service adapter', () => {
       expectedRevision: created.revision,
       status: 'in_progress',
     })
-    const observed = await services.appendWilburObservation({
+    const observationCommand = {
       ...context,
       actionId: created.id,
       observedAt: NOW.toISOString(),
-      observation: 'The bounded test produced one direct signal.',
+      observation: 'The bounded test produced one direct café signal.',
       evidenceClassification: 'Direct observation by the accountable owner.',
       expectedEffect: 'A direct signal appears.',
       unexpectedEffect: 'No unexpected effect was recorded.',
       stakeholderResponse: 'Affected participants retained the stop path.',
-      assumptionResult: 'supported',
+      assumptionResult: 'supported' as const,
       nextDecision: 'Continue only inside the original bounded scope.',
-    })
+    }
+    const observed = await services.appendWilburObservation(
+      observationCommand,
+    )
     const provenance = await services.getProvenance({
       ownerId: OWNER_ID,
       gameId: GAME_ID,
@@ -3428,6 +3888,13 @@ describe('durable HTTP service adapter', () => {
     expect(dependencies.lifecycleRepository?.createWilburAction)
       .toHaveBeenCalledWith(expect.objectContaining({
         ownerId: OWNER_ID,
+        charlotteActionIndex: 0,
+        actor: suggestion.actor,
+        action: suggestion.smallestAction,
+        testedAssumption: suggestion.assumptionBeingTested,
+        expectedObservation: suggestion.expectedObservation,
+        decisionThreshold: suggestion.decisionThreshold,
+        reviewHorizon: suggestion.reviewHorizon,
         requestDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
       }))
     expect(dependencies.lifecycleRepository?.appendWilburObservation)
@@ -3435,5 +3902,108 @@ describe('durable HTTP service adapter', () => {
         assumptionResult: 'supported',
         requestDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
       }))
+    const expectedObservationBytes = [
+      observationCommand.observation,
+      observationCommand.evidenceClassification,
+      observationCommand.expectedEffect,
+      observationCommand.unexpectedEffect,
+      observationCommand.stakeholderResponse,
+      observationCommand.assumptionResult,
+      observationCommand.nextDecision,
+    ].reduce(
+      (total, value) => total + new TextEncoder().encode(value).byteLength,
+      0,
+    )
+    const observationClaims = vi.mocked(
+      dependencies.lifecycleRepository!.claimWilburMutation,
+    ).mock.calls
+      .map(([claim]) => claim)
+      .filter((claim) => claim.operation === 'append_observation')
+    expect(observationClaims).toHaveLength(2)
+    expect(observationClaims).toEqual([
+      expect.objectContaining({ reservedTextBytes: expectedObservationBytes }),
+      expect.objectContaining({ reservedTextBytes: expectedObservationBytes }),
+    ])
+    expect(dependencies.usage.consumeWilburMutationRate).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        userId: OWNER_ID,
+        ipAddress: '203.0.113.17',
+        kind: 'action',
+        operation: 'create_action',
+        idempotencyKey: IDEMPOTENCY_KEY,
+        requestDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      }),
+    )
+    expect(dependencies.usage.consumeWilburMutationRate).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        userId: OWNER_ID,
+        ipAddress: '203.0.113.17',
+        kind: 'action',
+        operation: 'update_action',
+        idempotencyKey: IDEMPOTENCY_KEY,
+        requestDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      }),
+    )
+    expect(dependencies.usage.consumeWilburMutationRate).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        userId: OWNER_ID,
+        ipAddress: '203.0.113.17',
+        kind: 'observation',
+        operation: 'append_observation',
+        idempotencyKey: IDEMPOTENCY_KEY,
+        requestDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      }),
+    )
+  })
+
+  it('replays the saved PATCH result after an ambiguous lost response', async () => {
+    const portia = lifecycleReview()
+    const charlotte = lifecycleCharlotte(portia)
+    const suggestion = charlotte.exactlyThreeNextActions[0]!
+    const action = {
+      id: REQUEST_ID,
+      lifecycleRunId: GAME_ID,
+      charlotteActionIndex: 0,
+      charlotteBindingVersion:
+        'webchess-charlotte-action-binding-v1' as const,
+      actor: suggestion.actor,
+      action: suggestion.smallestAction,
+      testedAssumption: suggestion.assumptionBeingTested,
+      expectedObservation: suggestion.expectedObservation,
+      decisionThreshold: suggestion.decisionThreshold,
+      reviewHorizon: suggestion.reviewHorizon,
+      status: 'planned' as const,
+      revision: 0,
+      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+    }
+    dependencies = lifecycleDependencies(lifecycleAggregate({
+      state: 'wilbur_planning',
+      portia,
+      gate: evaluateGate(portia),
+      charlotte,
+      wilburActions: [action],
+    }))
+    const services = createApiServicesWithDependencies(dependencies)
+    const command = {
+      ...operationInput(),
+      gameId: GAME_ID,
+      actionId: REQUEST_ID,
+      expectedRevision: 0,
+      status: 'in_progress' as const,
+    }
+
+    const committed = await services.updateWilburAction(command)
+    vi.mocked(dependencies.lifecycleRepository!.claimWilburMutation)
+      .mockResolvedValueOnce({ kind: 'committed', action: committed })
+    await expect(services.updateWilburAction(command)).resolves.toEqual(committed)
+
+    expect(dependencies.usage.consumeWilburMutationRate).toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.updateWilburAction)
+      .toHaveBeenCalledOnce()
   })
 })

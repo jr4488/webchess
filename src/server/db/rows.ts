@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import {
   ASSUMPTION_RESULTS,
+  CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
   LIFECYCLE_STATES,
   WILBUR_ACTION_STATUSES,
 } from '../../lib/lifecycle/contracts'
@@ -520,6 +521,9 @@ export const wilburActionRowSchema = z.object({
   record_version: z.string().min(1).max(80),
   created_at: timestampSchema,
   updated_at: timestampSchema,
+  charlotte_binding_version: z
+    .literal(CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION)
+    .nullable(),
 })
 
 export const wilburObservationRowSchema = z.object({
@@ -538,6 +542,32 @@ export const wilburObservationRowSchema = z.object({
   next_decision: z.string().min(3).max(2_000),
   record_version: z.string().min(1).max(80),
   created_at: timestampSchema,
+})
+
+export const wilburMutationRequestRowSchema = z.object({
+  clerk_user_id: z.string().min(3).max(255),
+  idempotency_key: uuidSchema,
+  operation: z.enum([
+    'create_action',
+    'update_action',
+    'append_observation',
+  ]),
+  request_digest: sha256Schema,
+  target_game_id: uuidSchema,
+  target_action_id: uuidSchema.nullable(),
+  rate_kind: z.enum(['action', 'observation']),
+  rate_admitted_at: timestampSchema.nullable(),
+  denial_code: z.string().min(1).max(120).nullable(),
+  retry_at: timestampSchema.nullable(),
+  reserved_future_rows: z.number().int().min(0).max(2),
+  reserved_text_bytes: nonnegativeBigintSchema,
+  status: z.enum(['pending', 'committed', 'denied']),
+  result_entity_id: uuidSchema.nullable(),
+  result_revision: nonnegativeBigintSchema.nullable(),
+  result_status: z.string().min(1).max(80).nullable(),
+  result_updated_at: timestampSchema.nullable(),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
 })
 
 export const lifecycleEventRowSchema = z.object({
@@ -578,6 +608,9 @@ export type GateDecisionRow = z.infer<typeof gateDecisionRowSchema>
 export type CharlotteResultRow = z.infer<typeof charlotteResultRowSchema>
 export type WilburActionRow = z.infer<typeof wilburActionRowSchema>
 export type WilburObservationRow = z.infer<typeof wilburObservationRowSchema>
+export type WilburMutationRequestRow = z.infer<
+  typeof wilburMutationRequestRowSchema
+>
 export type LifecycleEventRow = z.infer<typeof lifecycleEventRowSchema>
 
 export function parseResultRows<Output>(

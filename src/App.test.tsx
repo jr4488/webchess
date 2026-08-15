@@ -10,14 +10,21 @@ import type { EngineOptions } from './lib/engine'
 import { composeProblemParts } from './lib/division'
 import { WebChessApiError } from './lib/webchess-api'
 import { PORTIA_ATTACK_TYPES } from './lib/lifecycle/contracts'
-import type { LifecycleAggregate } from './lib/lifecycle/contracts'
+import type {
+  LifecycleAggregate,
+  WilburAction,
+  WilburObservation,
+} from './lib/lifecycle/contracts'
 import { CURRENT_LIFECYCLE_VERSIONS } from './lib/lifecycle/versions'
 import type { ResearchRecord } from './lib/research'
 import type {
   DurableGame,
   DurableGameStatus,
+  AppendWilburObservationCommand,
+  CreateWilburActionCommand,
   MoveGameCommand,
   RevisionCommand,
+  UpdateWilburActionCommand,
 } from './lib/webchess-api'
 import { makeDivisionAnalysis } from './test/fixtures'
 import type { CellCoord, GeneratedAnswer, Piece, Side } from './types'
@@ -60,6 +67,8 @@ const engineHarness = vi.hoisted(() => ({
 
 const apiHarness = vi.hoisted(() => ({
   abandonGame: vi.fn(),
+  appendWilburObservation: vi.fn(),
+  createWilburAction: vi.fn(),
   createIdempotencyKey: vi.fn(() => '018f47b2-4b0c-7b9e-8f24-123456789000'),
   divideProblem: vi.fn(),
   getCurrentGame: vi.fn(),
@@ -72,6 +81,7 @@ const apiHarness = vi.hoisted(() => ({
   runPortia: vi.fn(),
   startGame: vi.fn(),
   submitMove: vi.fn(),
+  updateWilburAction: vi.fn(),
 }))
 
 /**
@@ -109,6 +119,8 @@ vi.mock('./lib/webchess-api', async (importOriginal) => {
   return {
     ...actual,
     abandonGame: apiHarness.abandonGame,
+    appendWilburObservation: apiHarness.appendWilburObservation,
+    createWilburAction: apiHarness.createWilburAction,
     createIdempotencyKey: apiHarness.createIdempotencyKey,
     divideProblem: apiHarness.divideProblem,
     getCurrentGame: apiHarness.getCurrentGame,
@@ -121,17 +133,40 @@ vi.mock('./lib/webchess-api', async (importOriginal) => {
     runPortia: apiHarness.runPortia,
     startGame: apiHarness.startGame,
     submitMove: apiHarness.submitMove,
+    updateWilburAction: apiHarness.updateWilburAction,
   }
 })
 
 const GAME_ID = '123e4567-e89b-42d3-a456-426614174000'
 const REPLAY_GAME_ID = '123e4567-e89b-42d3-a456-426614174001'
+const WILBUR_ACTION_ID = '83000000-0000-4000-8000-000000000001'
+const WILBUR_OBSERVATION_ID = '84000000-0000-4000-8000-000000000001'
 const PROBLEM = 'How should this position move toward a useful next step?'
 const ANSWER: GeneratedAnswer = {
   answer: 'Protect the purpose, then test the smallest reversible next step.',
   model: 'gpt-5.6-sol',
   prompt: 'Canonical answer prompt made from the server-verified replay.',
 }
+
+const AMBIGUOUS_WILBUR_FAILURES = [
+  [
+    'a transport failure',
+    (message: string) => new WebChessApiError(message, { kind: 'transport' }),
+  ],
+  [
+    'an HTTP 503 response',
+    (message: string) => new WebChessApiError(message, {
+      kind: 'http-error',
+      status: 503,
+    }),
+  ],
+  [
+    'a malformed 2xx response',
+    (message: string) => new WebChessApiError(message, {
+      kind: 'invalid-response',
+    }),
+  ],
+] as const
 
 let serverGame: DurableGame | null
 
@@ -467,6 +502,46 @@ function makeLifecycle(
   } as unknown as LifecycleAggregate
 }
 
+function makeWilburAction(
+  lifecycle: LifecycleAggregate,
+  index = 0,
+  overrides: Partial<WilburAction> = {},
+): WilburAction {
+  const suggestion = lifecycle.charlotte?.exactlyThreeNextActions[index]
+  if (!suggestion) throw new Error('The Wilbur fixture requires a Charlotte action.')
+  return {
+    id: WILBUR_ACTION_ID,
+    lifecycleRunId: lifecycle.id,
+    charlotteActionIndex: index,
+    charlotteBindingVersion: 'webchess-charlotte-action-binding-v1',
+    actor: suggestion.actor,
+    action: suggestion.smallestAction,
+    testedAssumption: suggestion.assumptionBeingTested,
+    expectedObservation: suggestion.expectedObservation,
+    decisionThreshold: suggestion.decisionThreshold,
+    reviewHorizon: suggestion.reviewHorizon,
+    status: 'planned',
+    revision: 0,
+    version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+    createdAt: '2026-08-15T16:00:00.000Z',
+    updatedAt: '2026-08-15T16:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function makeWilburObservation(
+  actionId: string,
+  command: AppendWilburObservationCommand,
+): WilburObservation {
+  return {
+    id: WILBUR_OBSERVATION_ID,
+    actionId,
+    ...command,
+    version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+    createdAt: '2026-08-15T16:05:00.000Z',
+  }
+}
+
 function requireServerGame(): DurableGame {
   if (!serverGame) throw new Error('The mock server has no current game.')
   return serverGame
@@ -622,6 +697,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('durable WebChess client flow', () => {
@@ -1392,7 +1468,7 @@ describe('durable WebChess client flow', () => {
       { expectedRevision: completed.revision },
       expect.objectContaining({ idempotencyKey: expect.any(String) }),
     )
-    expect(screen.getByRole('region', { name: /WebChess 2\.1 lifecycle/i }))
+    expect(screen.getByRole('region', { name: /WebChess 2\.2 lifecycle/i }))
       .toBeInTheDocument()
   })
 
@@ -1608,6 +1684,601 @@ describe('durable WebChess client flow', () => {
       idempotencyKey: string
     }
     expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+  })
+
+  it.each(AMBIGUOUS_WILBUR_FAILURES)(
+    'retries a Wilbur action after %s with the same key and exact command',
+    async (_failureLabel, makeFailure) => {
+    serverGame = makeAnsweredGame()
+    let lifecycle = makeLifecycle('charlotte_complete', {
+      portia: true,
+      gate: true,
+      charlotte: true,
+    })
+    apiHarness.getGameLifecycle.mockImplementation(async () => lifecycle)
+    apiHarness.createIdempotencyKey.mockReturnValueOnce(
+      '91000000-0000-4000-8000-000000000001',
+    )
+    apiHarness.createWilburAction
+      .mockRejectedValueOnce(makeFailure(
+        'The Wilbur action result could not be confirmed.',
+      ))
+      .mockImplementationOnce(async (
+        _gameId: string,
+        command: CreateWilburActionCommand,
+      ) => {
+        const action = makeWilburAction(lifecycle, command.charlotteActionIndex)
+        lifecycle = { ...lifecycle, wilburActions: [action] }
+        return action
+      })
+
+    await renderRestoredApp()
+
+    const track = screen.getByRole('button', {
+      name: 'Track Action 1: Action 1 with Wilbur',
+    })
+    fireEvent.click(track)
+    expect(await screen.findByText(/action result could not be confirmed/i))
+      .toBeInTheDocument()
+
+    fireEvent.click(track)
+    expect(await screen.findByRole('combobox', {
+      name: 'Status for Action 1: Action 1',
+    })).toHaveValue('planned')
+
+    expect(apiHarness.createWilburAction).toHaveBeenCalledTimes(2)
+    const firstCommand = apiHarness.createWilburAction.mock.calls[0]?.[1]
+    const retryCommand = apiHarness.createWilburAction.mock.calls[1]?.[1]
+    const firstOptions = apiHarness.createWilburAction.mock.calls[0]?.[2] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.createWilburAction.mock.calls[1]?.[2] as {
+      idempotencyKey: string
+    }
+    expect(retryCommand).toBe(firstCommand)
+    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(3)
+    },
+  )
+
+  it.each(AMBIGUOUS_WILBUR_FAILURES)(
+    'retries a Wilbur status update after %s with the same key and exact command',
+    async (_failureLabel, makeFailure) => {
+    serverGame = makeAnsweredGame()
+    const baseLifecycle = makeLifecycle('charlotte_complete', {
+      portia: true,
+      gate: true,
+      charlotte: true,
+    })
+    const action = makeWilburAction(baseLifecycle)
+    let lifecycle = { ...baseLifecycle, wilburActions: [action] }
+    apiHarness.getGameLifecycle.mockImplementation(async () => lifecycle)
+    apiHarness.createIdempotencyKey.mockReturnValueOnce(
+      '92000000-0000-4000-8000-000000000001',
+    )
+    apiHarness.updateWilburAction
+      .mockRejectedValueOnce(makeFailure(
+        'The Wilbur status result could not be confirmed.',
+      ))
+      .mockImplementationOnce(async (
+        _gameId: string,
+        _actionId: string,
+        command: UpdateWilburActionCommand,
+      ) => {
+        const updated = makeWilburAction(lifecycle, 0, {
+          status: command.status,
+          revision: command.expectedRevision + 1,
+          updatedAt: '2026-08-15T16:03:00.000Z',
+        })
+        lifecycle = { ...lifecycle, wilburActions: [updated] }
+        return updated
+      })
+
+    await renderRestoredApp()
+
+    const status = screen.getByRole('combobox', {
+      name: 'Status for Action 1: Action 1',
+    })
+    fireEvent.change(status, { target: { value: 'in_progress' } })
+    expect(await screen.findByText(/status result could not be confirmed/i))
+      .toBeInTheDocument()
+
+    fireEvent.change(status, { target: { value: 'in_progress' } })
+    await waitFor(() => expect(status).toHaveValue('in_progress'))
+
+    expect(apiHarness.updateWilburAction).toHaveBeenCalledTimes(2)
+    const firstCommand = apiHarness.updateWilburAction.mock.calls[0]?.[2]
+    const retryCommand = apiHarness.updateWilburAction.mock.calls[1]?.[2]
+    const firstOptions = apiHarness.updateWilburAction.mock.calls[0]?.[3] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.updateWilburAction.mock.calls[1]?.[3] as {
+      idempotencyKey: string
+    }
+    expect(retryCommand).toBe(firstCommand)
+    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(3)
+    },
+  )
+
+  it.each(AMBIGUOUS_WILBUR_FAILURES)(
+    'retries a Wilbur observation after %s with the same key and original observedAt',
+    async (_failureLabel, makeFailure) => {
+    serverGame = makeAnsweredGame()
+    const baseLifecycle = makeLifecycle('charlotte_complete', {
+      portia: true,
+      gate: true,
+      charlotte: true,
+    })
+    const action = makeWilburAction(baseLifecycle)
+    let lifecycle = { ...baseLifecycle, wilburActions: [action] }
+    apiHarness.getGameLifecycle.mockImplementation(async () => lifecycle)
+    apiHarness.createIdempotencyKey.mockReturnValueOnce(
+      '93000000-0000-4000-8000-000000000001',
+    )
+    vi.spyOn(Date.prototype, 'toISOString')
+      .mockReturnValueOnce('2026-08-15T16:05:00.000Z')
+      .mockReturnValueOnce('2026-08-15T16:06:00.000Z')
+    apiHarness.appendWilburObservation
+      .mockRejectedValueOnce(makeFailure(
+        'The Wilbur observation result could not be confirmed.',
+      ))
+      .mockImplementationOnce(async (
+        _gameId: string,
+        actionId: string,
+        command: AppendWilburObservationCommand,
+      ) => {
+        const saved = makeWilburObservation(actionId, command)
+        lifecycle = { ...lifecycle, wilburObservations: [saved] }
+        return saved
+      })
+
+    await renderRestoredApp()
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Record what happened for Action 1: Action 1',
+    }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'What did you observe?' }), {
+      target: { value: 'The bounded signal appeared safely.' },
+    })
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should happen next?' }), {
+      target: { value: 'Continue only inside the original limit.' },
+    })
+    const submitObservation = screen.getByRole('button', { name: 'Add to the web' })
+    fireEvent.click(submitObservation)
+    expect(await screen.findByText(/observation result could not be confirmed/i))
+      .toBeInTheDocument()
+
+    fireEvent.click(submitObservation)
+    expect(await screen.findByRole('button', {
+      name: 'Record what happened for Action 1: Action 1',
+    })).toBeInTheDocument()
+
+    expect(apiHarness.appendWilburObservation).toHaveBeenCalledTimes(2)
+    const firstCommand = apiHarness.appendWilburObservation.mock.calls[0]?.[2] as
+      AppendWilburObservationCommand
+    const retryCommand = apiHarness.appendWilburObservation.mock.calls[1]?.[2]
+    const firstOptions = apiHarness.appendWilburObservation.mock.calls[0]?.[3] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.appendWilburObservation.mock.calls[1]?.[3] as {
+      idempotencyKey: string
+    }
+    expect(firstCommand.observedAt).toBe('2026-08-15T16:05:00.000Z')
+    expect(retryCommand).toBe(firstCommand)
+    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(3)
+    },
+  )
+
+  it('recovers a committed Wilbur action after an HTTP 503 without replaying creation', async () => {
+    serverGame = makeAnsweredGame()
+    let lifecycle = makeLifecycle('charlotte_complete', {
+      portia: true,
+      gate: true,
+      charlotte: true,
+    })
+    apiHarness.getGameLifecycle.mockImplementation(async () => lifecycle)
+    apiHarness.createIdempotencyKey
+      .mockReturnValueOnce('97000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('97000000-0000-4000-8000-000000000002')
+    apiHarness.createWilburAction.mockImplementationOnce(async (
+      _gameId: string,
+      command: CreateWilburActionCommand,
+    ) => {
+      const action = makeWilburAction(lifecycle, command.charlotteActionIndex)
+      lifecycle = { ...lifecycle, wilburActions: [action] }
+      throw new WebChessApiError(
+        'The server committed the action before its response was lost.',
+        { kind: 'http-error', status: 503 },
+      )
+    })
+    apiHarness.updateWilburAction.mockImplementationOnce(async (
+      _gameId: string,
+      _actionId: string,
+      command: UpdateWilburActionCommand,
+    ) => {
+      const updated = makeWilburAction(lifecycle, 0, {
+        status: command.status,
+        revision: command.expectedRevision + 1,
+        updatedAt: '2026-08-15T16:08:00.000Z',
+      })
+      lifecycle = { ...lifecycle, wilburActions: [updated] }
+      return updated
+    })
+
+    await renderRestoredApp()
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Track Action 1: Action 1 with Wilbur',
+    }))
+    const status = await screen.findByRole('combobox', {
+      name: 'Status for Action 1: Action 1',
+    })
+    expect(status).toHaveValue('planned')
+    expect(apiHarness.createWilburAction).toHaveBeenCalledOnce()
+    expect(screen.queryByText(/response was lost/i)).not.toBeInTheDocument()
+
+    fireEvent.change(status, { target: { value: 'in_progress' } })
+    await waitFor(() => expect(status).toHaveValue('in_progress'))
+
+    expect(apiHarness.createWilburAction).toHaveBeenCalledOnce()
+    expect(apiHarness.updateWilburAction).toHaveBeenCalledOnce()
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(3)
+  })
+
+  it('recovers a committed Wilbur status after a malformed 2xx without replaying it', async () => {
+    serverGame = makeAnsweredGame()
+    const baseLifecycle = makeLifecycle('charlotte_complete', {
+      portia: true,
+      gate: true,
+      charlotte: true,
+    })
+    const action = makeWilburAction(baseLifecycle)
+    let lifecycle = { ...baseLifecycle, wilburActions: [action] }
+    apiHarness.getGameLifecycle.mockImplementation(async () => lifecycle)
+    apiHarness.createIdempotencyKey
+      .mockReturnValueOnce('98000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('98000000-0000-4000-8000-000000000002')
+    apiHarness.updateWilburAction
+      .mockImplementationOnce(async (
+        _gameId: string,
+        _actionId: string,
+        command: UpdateWilburActionCommand,
+      ) => {
+        const updated = makeWilburAction(lifecycle, 0, {
+          status: command.status,
+          revision: command.expectedRevision + 1,
+          updatedAt: '2026-08-15T16:09:00.000Z',
+        })
+        lifecycle = { ...lifecycle, wilburActions: [updated] }
+        throw new WebChessApiError(
+          'The server committed the status but returned malformed JSON.',
+          { kind: 'invalid-response' },
+        )
+      })
+      .mockImplementationOnce(async (
+        _gameId: string,
+        _actionId: string,
+        command: UpdateWilburActionCommand,
+      ) => {
+        const updated = makeWilburAction(lifecycle, 0, {
+          status: command.status,
+          revision: command.expectedRevision + 1,
+          updatedAt: '2026-08-15T16:10:00.000Z',
+        })
+        lifecycle = { ...lifecycle, wilburActions: [updated] }
+        return updated
+      })
+
+    await renderRestoredApp()
+
+    const status = screen.getByRole('combobox', {
+      name: 'Status for Action 1: Action 1',
+    })
+    fireEvent.change(status, { target: { value: 'in_progress' } })
+    await waitFor(() => expect(status).toHaveValue('in_progress'))
+    expect(apiHarness.updateWilburAction).toHaveBeenCalledOnce()
+    expect(screen.queryByText(/malformed JSON/i)).not.toBeInTheDocument()
+
+    fireEvent.change(status, { target: { value: 'completed' } })
+    await waitFor(() => expect(status).toHaveValue('completed'))
+
+    const firstCommand = apiHarness.updateWilburAction.mock.calls[0]?.[2] as
+      UpdateWilburActionCommand
+    const nextCommand = apiHarness.updateWilburAction.mock.calls[1]?.[2] as
+      UpdateWilburActionCommand
+    const firstOptions = apiHarness.updateWilburAction.mock.calls[0]?.[3] as {
+      idempotencyKey: string
+    }
+    const nextOptions = apiHarness.updateWilburAction.mock.calls[1]?.[3] as {
+      idempotencyKey: string
+    }
+    expect(firstCommand).toEqual({ expectedRevision: 0, status: 'in_progress' })
+    expect(nextCommand).toEqual({ expectedRevision: 1, status: 'completed' })
+    expect(nextOptions.idempotencyKey).not.toBe(firstOptions.idempotencyKey)
+    expect(apiHarness.updateWilburAction).toHaveBeenCalledTimes(2)
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(3)
+  })
+
+  it('recovers a committed Wilbur observation after an HTTP 503 without duplicating it', async () => {
+    serverGame = makeAnsweredGame()
+    const baseLifecycle = makeLifecycle('charlotte_complete', {
+      portia: true,
+      gate: true,
+      charlotte: true,
+    })
+    const action = makeWilburAction(baseLifecycle)
+    let lifecycle = { ...baseLifecycle, wilburActions: [action] }
+    apiHarness.getGameLifecycle.mockImplementation(async () => lifecycle)
+    apiHarness.createIdempotencyKey
+      .mockReturnValueOnce('99000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('99000000-0000-4000-8000-000000000002')
+    vi.spyOn(Date.prototype, 'toISOString')
+      .mockReturnValueOnce('2026-08-15T16:11:00.000Z')
+      .mockReturnValueOnce('2026-08-15T16:12:00.000Z')
+    apiHarness.appendWilburObservation
+      .mockImplementationOnce(async (
+        _gameId: string,
+        actionId: string,
+        command: AppendWilburObservationCommand,
+      ) => {
+        const saved = makeWilburObservation(actionId, command)
+        lifecycle = { ...lifecycle, wilburObservations: [saved] }
+        throw new WebChessApiError(
+          'The server committed the observation before its response was lost.',
+          { kind: 'http-error', status: 503 },
+        )
+      })
+      .mockImplementationOnce(async (
+        _gameId: string,
+        actionId: string,
+        command: AppendWilburObservationCommand,
+      ) => {
+        const saved = {
+          ...makeWilburObservation(actionId, command),
+          id: '84000000-0000-4000-8000-000000000002',
+        }
+        lifecycle = {
+          ...lifecycle,
+          wilburObservations: [...lifecycle.wilburObservations, saved],
+        }
+        return saved
+      })
+
+    await renderRestoredApp()
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Record what happened for Action 1: Action 1',
+    }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'What did you observe?' }), {
+      target: { value: 'The first bounded signal appeared safely.' },
+    })
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should happen next?' }), {
+      target: { value: 'Keep the first action inside its original limit.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to the web' }))
+    expect(await screen.findByRole('button', {
+      name: 'Record what happened for Action 1: Action 1',
+    })).toBeInTheDocument()
+    expect(apiHarness.appendWilburObservation).toHaveBeenCalledOnce()
+    expect(screen.queryByText(/response was lost/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Record what happened for Action 1: Action 1',
+    }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'What did you observe?' }), {
+      target: { value: 'A distinct follow-up signal appeared.' },
+    })
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should happen next?' }), {
+      target: { value: 'Use the follow-up signal for the next decision.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to the web' }))
+    expect(await screen.findByRole('button', {
+      name: 'Record what happened for Action 1: Action 1',
+    })).toBeInTheDocument()
+
+    const firstCommand = apiHarness.appendWilburObservation.mock.calls[0]?.[2] as
+      AppendWilburObservationCommand
+    const nextCommand = apiHarness.appendWilburObservation.mock.calls[1]?.[2] as
+      AppendWilburObservationCommand
+    const firstOptions = apiHarness.appendWilburObservation.mock.calls[0]?.[3] as {
+      idempotencyKey: string
+    }
+    const nextOptions = apiHarness.appendWilburObservation.mock.calls[1]?.[3] as {
+      idempotencyKey: string
+    }
+    expect(nextCommand.observation).not.toBe(firstCommand.observation)
+    expect(nextCommand.observedAt).not.toBe(firstCommand.observedAt)
+    expect(nextOptions.idempotencyKey).not.toBe(firstOptions.idempotencyKey)
+    expect(lifecycle.wilburObservations).toHaveLength(2)
+    expect(lifecycle.wilburObservations.filter(
+      (observation) => observation.observation === firstCommand.observation,
+    )).toHaveLength(1)
+    expect(apiHarness.appendWilburObservation).toHaveBeenCalledTimes(2)
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(3)
+  })
+
+  it('starts a new Wilbur action intent after a definitive 4xx response', async () => {
+    serverGame = makeAnsweredGame()
+    let lifecycle = makeLifecycle('charlotte_complete', {
+      portia: true,
+      gate: true,
+      charlotte: true,
+    })
+    apiHarness.getGameLifecycle.mockImplementation(async () => lifecycle)
+    apiHarness.createIdempotencyKey
+      .mockReturnValueOnce('94000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('94000000-0000-4000-8000-000000000002')
+    apiHarness.createWilburAction
+      .mockRejectedValueOnce(new WebChessApiError(
+        'That Wilbur action was rejected.',
+        { kind: 'http-error', status: 422 },
+      ))
+      .mockImplementationOnce(async (
+        _gameId: string,
+        command: CreateWilburActionCommand,
+      ) => {
+        const action = makeWilburAction(lifecycle, command.charlotteActionIndex)
+        lifecycle = { ...lifecycle, wilburActions: [action] }
+        return action
+      })
+
+    await renderRestoredApp()
+
+    const track = screen.getByRole('button', {
+      name: 'Track Action 1: Action 1 with Wilbur',
+    })
+    fireEvent.click(track)
+    expect(await screen.findByText(/Wilbur action was rejected/i))
+      .toBeInTheDocument()
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledOnce()
+
+    fireEvent.click(track)
+    expect(await screen.findByRole('combobox', {
+      name: 'Status for Action 1: Action 1',
+    })).toHaveValue('planned')
+
+    const firstCommand = apiHarness.createWilburAction.mock.calls[0]?.[1]
+    const retryCommand = apiHarness.createWilburAction.mock.calls[1]?.[1]
+    const firstOptions = apiHarness.createWilburAction.mock.calls[0]?.[2] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.createWilburAction.mock.calls[1]?.[2] as {
+      idempotencyKey: string
+    }
+    expect(retryCommand).not.toBe(firstCommand)
+    expect(retryCommand).toEqual(firstCommand)
+    expect(retryOptions.idempotencyKey).not.toBe(firstOptions.idempotencyKey)
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(2)
+  })
+
+  it('starts a new Wilbur status intent after a definitive 4xx response', async () => {
+    serverGame = makeAnsweredGame()
+    const baseLifecycle = makeLifecycle('charlotte_complete', {
+      portia: true,
+      gate: true,
+      charlotte: true,
+    })
+    const action = makeWilburAction(baseLifecycle)
+    let lifecycle = { ...baseLifecycle, wilburActions: [action] }
+    apiHarness.getGameLifecycle.mockImplementation(async () => lifecycle)
+    apiHarness.createIdempotencyKey
+      .mockReturnValueOnce('95000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('95000000-0000-4000-8000-000000000002')
+    apiHarness.updateWilburAction
+      .mockRejectedValueOnce(new WebChessApiError(
+        'That Wilbur status update was rejected.',
+        { kind: 'http-error', status: 422 },
+      ))
+      .mockImplementationOnce(async (
+        _gameId: string,
+        _actionId: string,
+        command: UpdateWilburActionCommand,
+      ) => {
+        const updated = makeWilburAction(lifecycle, 0, {
+          status: command.status,
+          revision: command.expectedRevision + 1,
+          updatedAt: '2026-08-15T16:03:00.000Z',
+        })
+        lifecycle = { ...lifecycle, wilburActions: [updated] }
+        return updated
+      })
+
+    await renderRestoredApp()
+
+    const status = screen.getByRole('combobox', {
+      name: 'Status for Action 1: Action 1',
+    })
+    fireEvent.change(status, { target: { value: 'in_progress' } })
+    expect(await screen.findByText(/Wilbur status update was rejected/i))
+      .toBeInTheDocument()
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledOnce()
+
+    fireEvent.change(status, { target: { value: 'in_progress' } })
+    await waitFor(() => expect(status).toHaveValue('in_progress'))
+
+    const firstCommand = apiHarness.updateWilburAction.mock.calls[0]?.[2]
+    const retryCommand = apiHarness.updateWilburAction.mock.calls[1]?.[2]
+    const firstOptions = apiHarness.updateWilburAction.mock.calls[0]?.[3] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.updateWilburAction.mock.calls[1]?.[3] as {
+      idempotencyKey: string
+    }
+    expect(retryCommand).not.toBe(firstCommand)
+    expect(retryCommand).toEqual(firstCommand)
+    expect(retryOptions.idempotencyKey).not.toBe(firstOptions.idempotencyKey)
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(2)
+  })
+
+  it('starts a new Wilbur observation intent after a definitive 4xx response', async () => {
+    serverGame = makeAnsweredGame()
+    const baseLifecycle = makeLifecycle('charlotte_complete', {
+      portia: true,
+      gate: true,
+      charlotte: true,
+    })
+    const action = makeWilburAction(baseLifecycle)
+    let lifecycle = { ...baseLifecycle, wilburActions: [action] }
+    apiHarness.getGameLifecycle.mockImplementation(async () => lifecycle)
+    apiHarness.createIdempotencyKey
+      .mockReturnValueOnce('96000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('96000000-0000-4000-8000-000000000002')
+    vi.spyOn(Date.prototype, 'toISOString')
+      .mockReturnValueOnce('2026-08-15T16:05:00.000Z')
+      .mockReturnValueOnce('2026-08-15T16:06:00.000Z')
+    apiHarness.appendWilburObservation
+      .mockRejectedValueOnce(new WebChessApiError(
+        'That Wilbur observation was rejected.',
+        { kind: 'http-error', status: 422 },
+      ))
+      .mockImplementationOnce(async (
+        _gameId: string,
+        actionId: string,
+        command: AppendWilburObservationCommand,
+      ) => {
+        const saved = makeWilburObservation(actionId, command)
+        lifecycle = { ...lifecycle, wilburObservations: [saved] }
+        return saved
+      })
+
+    await renderRestoredApp()
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Record what happened for Action 1: Action 1',
+    }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'What did you observe?' }), {
+      target: { value: 'The bounded signal appeared safely.' },
+    })
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should happen next?' }), {
+      target: { value: 'Continue only inside the original limit.' },
+    })
+    const submitObservation = screen.getByRole('button', { name: 'Add to the web' })
+    fireEvent.click(submitObservation)
+    expect(await screen.findByText(/Wilbur observation was rejected/i))
+      .toBeInTheDocument()
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledOnce()
+
+    fireEvent.click(submitObservation)
+    expect(await screen.findByRole('button', {
+      name: 'Record what happened for Action 1: Action 1',
+    })).toBeInTheDocument()
+
+    const firstCommand = apiHarness.appendWilburObservation.mock.calls[0]?.[2] as
+      AppendWilburObservationCommand
+    const retryCommand = apiHarness.appendWilburObservation.mock.calls[1]?.[2] as
+      AppendWilburObservationCommand
+    const firstOptions = apiHarness.appendWilburObservation.mock.calls[0]?.[3] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.appendWilburObservation.mock.calls[1]?.[3] as {
+      idempotencyKey: string
+    }
+    expect(retryCommand).not.toBe(firstCommand)
+    expect(retryCommand.observedAt).not.toBe(firstCommand.observedAt)
+    expect(retryOptions.idempotencyKey).not.toBe(firstOptions.idempotencyKey)
+    expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(2)
   })
 
   it('guards replay against rapid duplicate clicks and other reading actions', async () => {

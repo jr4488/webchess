@@ -6,6 +6,10 @@ import { redirect } from 'next/navigation'
 
 import { isClerkConfigured } from './config'
 import { resolveLocalE2EUser } from './e2e'
+import {
+  isLocalHostedSignInAvailable,
+  resolveLocalHostedUser,
+} from './local-session'
 import { resolveLocalOpenClawUser } from './openclaw'
 import {
   authenticationUnavailableJson,
@@ -14,7 +18,7 @@ import {
 import { buildSignInPath, sanitizeReturnUrl } from './return-url'
 import type { AuthenticatedUser, RequestAuth } from './types'
 
-const requestFromCurrentHeaders = async (): Promise<Request | null> => {
+export const requestFromCurrentHeaders = async (): Promise<Request | null> => {
   const requestHeaders = await headers()
   const host = requestHeaders.get('host')
   if (!host) {
@@ -37,13 +41,21 @@ export async function getRequestAuth(
 ): Promise<RequestAuth> {
   const resolvedRequest = request ?? (await requestFromCurrentHeaders())
   const localUser = resolvedRequest
-    ? resolveLocalOpenClawUser(resolvedRequest) ?? resolveLocalE2EUser(resolvedRequest)
+    ? resolveLocalOpenClawUser(resolvedRequest) ??
+      resolveLocalE2EUser(resolvedRequest) ??
+      resolveLocalHostedUser(resolvedRequest)
     : null
 
   if (localUser) {
     return {
       status: 'authenticated',
       user: localUser,
+    }
+  }
+
+  if (resolvedRequest && isLocalHostedSignInAvailable(resolvedRequest)) {
+    return {
+      status: 'signed-out',
     }
   }
 

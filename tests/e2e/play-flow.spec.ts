@@ -829,7 +829,7 @@ test.describe('complete durable play flow', () => {
     await expect(
       page.getByText(/Inspect the saved activity thread/i),
     ).toBeVisible()
-    await expectAccessibleDynamicStage(page, 'WebChess 2.1 lifecycle')
+    await expectAccessibleDynamicStage(page, 'WebChess 2.2 lifecycle')
 
     const railDimensions = await page.locator('.lifecycle-rail').evaluate((element) => ({
       clientWidth: element.clientWidth,

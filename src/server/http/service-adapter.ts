@@ -12,6 +12,8 @@ import { composeProblemParts } from '../../lib/division'
 import { GameRuleError } from '../../lib/game-replay'
 import {
   CURRENT_LIFECYCLE_VERSIONS,
+  CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
+  WEBCHESS_SOFTWARE_VERSION,
   canReopenInsufficientBasis,
   charlotteResultSchema,
   decideRetry,
@@ -31,6 +33,13 @@ import {
   hmacSha256Hex,
   sha256Hex,
 } from '../db'
+import {
+  isLocalHostedPostgresMigrationAuthorized,
+  shouldUseLocalPostgresWireProtocol,
+} from '../db/adapter-kind'
+import {
+  ensureLocalHostedSchema,
+} from '../db/local-postgres'
 import type {
   CanonicalJson,
   SqlAdapter,
@@ -93,6 +102,7 @@ import type {
 } from '../lifecycle'
 import {
   createUsageController,
+  hashUserRateKey,
   loadUsageConfig,
 } from '../usage'
 import { OpenClawProviderError } from '../openclaw/errors'
@@ -109,9 +119,12 @@ import type {
 import { ApiError, isApiError, serviceUnavailable } from './errors'
 import type { WebChessApiServices } from './ports'
 
-const FALLBACK_SOFTWARE_VERSION = 'webchess@0.1.0'
-const ACCOUNT_EXPORT_FORMAT = 'webchess-account-export/3'
+const FALLBACK_SOFTWARE_VERSION = `webchess@${WEBCHESS_SOFTWARE_VERSION}`
+const ACCOUNT_EXPORT_FORMAT = 'webchess-account-export/4'
 const DEFAULT_ACCOUNT_EXPORT_MAX_BYTES = 3_000_000
+const MAX_ACCOUNT_EXPORT_BYTES = 100_000_000
+const DEFAULT_WILBUR_STORAGE_ROW_LIMIT = 500
+const DEFAULT_WILBUR_STORAGE_TEXT_BYTES_LIMIT = 250_000
 const ACCOUNT_EXPORT_GUARD_SETTING = 'webchess.account_export_allowed'
 
 const DivisionResultPayloadSchema = z.strictObject({
@@ -233,6 +246,8 @@ export interface ApiServiceAdapterDependencies {
   readonly researchBroker?: ResearchBrokerPort
   readonly softwareVersion: string
   readonly usage: UsageController
+  readonly wilburStorageRowLimit: number
+  readonly wilburStorageTextBytesLimit: number
 }
 
 interface ProviderFailure {
@@ -247,11 +262,26 @@ function canonicalHash(value: unknown): string {
   return hashCanonicalJson(value as CanonicalJson)
 }
 
+function utf8Bytes(values: readonly string[]): number {
+  const total = values.reduce(
+    (bytes, value) => bytes + Buffer.byteLength(value, 'utf8'),
+    0,
+  )
+  if (!Number.isSafeInteger(total)) {
+    throw new ApiError(
+      'BAD_REQUEST',
+      400,
+      'The Wilbur mutation text is too large to measure safely.',
+    )
+  }
+  return total
+}
+
 function modelResultPayload<T extends ModelResultPayload>(value: T): T {
   return value
 }
 
-function normalizeSoftwareVersion(value: string | undefined): string {
+export function normalizeSoftwareVersion(value: string | undefined): string {
   const version = value?.trim() || FALLBACK_SOFTWARE_VERSION
   if (version.length > 120) {
     throw serviceUnavailable('The WebChess software version is invalid.')
@@ -259,28 +289,62 @@ function normalizeSoftwareVersion(value: string | undefined): string {
   return version
 }
 
-function normalizeAccountExportMaxBytes(value: string | undefined): number {
+export function normalizeAccountExportMaxBytes(value: string | undefined): number {
   if (value === undefined || value.trim() === '') {
     return DEFAULT_ACCOUNT_EXPORT_MAX_BYTES
   }
 
   const parsed = Number(value)
-  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < 1 ||
+    parsed > MAX_ACCOUNT_EXPORT_BYTES
+  ) {
     throw serviceUnavailable(
-      'The WebChess account export size limit is invalid.',
+      `The WebChess account export size limit must be between 1 and ${MAX_ACCOUNT_EXPORT_BYTES} bytes.`,
     )
   }
   return parsed
 }
 
-function productionDependencies(): ApiServiceAdapterDependencies {
-  const database = getDatabase()
+function normalizeWilburStorageLimit(
+  value: string | undefined,
+  label: string,
+  fallback: number,
+  maximum: number,
+): number {
+  if (value === undefined || value.trim() === '') return Math.min(fallback, maximum)
+  if (!/^[1-9]\d*$/u.test(value)) {
+    throw serviceUnavailable(`${label} must be a positive integer.`)
+  }
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed > maximum) {
+    throw serviceUnavailable(`${label} must be at most ${maximum}.`)
+  }
+  return parsed
+}
+
+function productionDependencies(
+  database: SqlAdapter = getDatabase(),
+): ApiServiceAdapterDependencies {
   const usageConfig = loadUsageConfig()
+  const accountExportMaxBytes = normalizeAccountExportMaxBytes(
+    process.env.WEBCHESS_ACCOUNT_EXPORT_MAX_BYTES,
+  )
+  // Reserve most of the synchronous export envelope for games, model records,
+  // provenance, and JSON escaping. These limits bound only Wilbur's share; a
+  // sufficiently large non-Wilbur account can still exceed synchronous export.
+  const maximumWilburRows = Math.max(
+    1,
+    Math.floor(accountExportMaxBytes / (5 * 1_024)),
+  )
+  const maximumWilburTextBytes = Math.max(
+    1,
+    Math.floor(accountExportMaxBytes / 12),
+  )
 
   return {
-    accountExportMaxBytes: normalizeAccountExportMaxBytes(
-      process.env.WEBCHESS_ACCOUNT_EXPORT_MAX_BYTES,
-    ),
+    accountExportMaxBytes,
     answerGenerator: generateAnswer,
     charlotteGenerator: generateCharlotteSynthesis,
     database,
@@ -301,6 +365,18 @@ function productionDependencies(): ApiServiceAdapterDependencies {
       db: database,
       config: usageConfig,
     }),
+    wilburStorageRowLimit: normalizeWilburStorageLimit(
+      process.env.WEBCHESS_WILBUR_STORAGE_ROW_LIMIT,
+      'WEBCHESS_WILBUR_STORAGE_ROW_LIMIT',
+      DEFAULT_WILBUR_STORAGE_ROW_LIMIT,
+      maximumWilburRows,
+    ),
+    wilburStorageTextBytesLimit: normalizeWilburStorageLimit(
+      process.env.WEBCHESS_WILBUR_STORAGE_TEXT_BYTES_LIMIT,
+      'WEBCHESS_WILBUR_STORAGE_TEXT_BYTES_LIMIT',
+      DEFAULT_WILBUR_STORAGE_TEXT_BYTES_LIMIT,
+      maximumWilburTextBytes,
+    ),
   }
 }
 
@@ -369,6 +445,8 @@ function usageError(denial: UsageDenied): ApiError {
   if (
     denial.code === 'GAME_OWNERSHIP_CONFLICT' ||
     denial.code === 'IDEMPOTENCY_CONFLICT' ||
+    denial.code === 'WILBUR_MUTATION_EXPIRED' ||
+    denial.code === 'WILBUR_MUTATION_CONFLICT' ||
     denial.code === 'GAME_REVISION_CONFLICT' ||
     denial.code === 'GAME_INVALID_REPLAY_STATE'
   ) {
@@ -419,7 +497,7 @@ function repositoryError(error: unknown): ApiError | null {
         return new ApiError(
           'LIFECYCLE_NOT_FOUND',
           404,
-          'This game does not have a WebChess 2.1 lifecycle record.',
+          'This game does not have a WebChess 2.2 lifecycle record.',
         )
       case 'invalid-input':
         return new ApiError(
@@ -433,6 +511,12 @@ function repositoryError(error: unknown): ApiError | null {
           'CONFLICT',
           409,
           'The lifecycle changed or cannot perform that operation.',
+        )
+      case 'storage-limit':
+        return new ApiError(
+          'PAYLOAD_TOO_LARGE',
+          413,
+          `${error.message} No Wilbur records were deleted. You may export the account now; only deleting/resetting the account currently frees this lifetime envelope.`,
         )
       case 'integrity-error':
         return new ApiError(
@@ -1117,9 +1201,42 @@ function requireLifecycleRepository(
   dependencies: ApiServiceAdapterDependencies,
 ): LifecycleRepositoryPort {
   if (!dependencies.lifecycleRepository) {
-    throw serviceUnavailable('The WebChess 2.1 lifecycle store is not configured.')
+    throw serviceUnavailable('The WebChess 2.2 lifecycle store is not configured.')
   }
   return dependencies.lifecycleRepository
+}
+
+function canonicalCharlotteActionForWilbur(
+  lifecycle: LifecycleAggregate,
+  input: Parameters<WebChessApiServices['createWilburAction']>[0],
+) {
+  const suggestion = lifecycle.charlotte?.exactlyThreeNextActions[
+    input.charlotteActionIndex
+  ]
+  if (!suggestion) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'Wilbur requires one of the exact actions from the saved Charlotte result.',
+    )
+  }
+
+  if (
+    input.actor !== suggestion.actor ||
+    input.action !== suggestion.smallestAction ||
+    input.testedAssumption !== suggestion.assumptionBeingTested ||
+    input.expectedObservation !== suggestion.expectedObservation ||
+    input.decisionThreshold !== suggestion.decisionThreshold ||
+    input.reviewHorizon !== suggestion.reviewHorizon
+  ) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'The Wilbur action must exactly match its saved Charlotte suggestion.',
+    )
+  }
+
+  return suggestion
 }
 
 async function ensureLifecycleForNewGame(
@@ -1148,7 +1265,7 @@ async function synchronizeLifecycleWithGame(
     throw new ApiError(
       'LIFECYCLE_NOT_FOUND',
       404,
-      'This legacy game remains readable but has no fabricated WebChess 2.1 lifecycle.',
+      'This legacy game remains readable but has no fabricated WebChess 2.2 lifecycle.',
     )
   }
   const digest = lifecycleConfigurationDigest(snapshot)
@@ -1613,6 +1730,7 @@ function accountExportEstimatedBytes(
 function accountExportStatements(
   ownerId: string,
   maxBytes: number,
+  ownerRateKey: string,
 ): readonly SqlStatement[] {
   const exportGuard = `
     WITH export_gate AS MATERIALIZED (
@@ -1680,6 +1798,18 @@ function accountExportStatements(
           FROM usage_buckets AS buckets
           WHERE buckets.subject_type = 'user'
             AND buckets.subject_key = $1::text
+
+          UNION ALL
+
+          SELECT
+            greatest(
+              pg_column_size(rate_windows)::bigint,
+              octet_length(to_jsonb(rate_windows)::text)::bigint,
+              octet_length(jsonb_pretty(to_jsonb(rate_windows)))::bigint
+            ) + 128
+          FROM rate_buckets AS rate_windows
+          WHERE rate_windows.key_type = 'user'
+            AND rate_windows.key_hash = $3::char(64)
 
           UNION ALL
 
@@ -1755,6 +1885,16 @@ function accountExportStatements(
           UNION ALL
 
           SELECT greatest(
+            pg_column_size(mutations)::bigint,
+            octet_length(to_jsonb(mutations)::text)::bigint,
+            octet_length(jsonb_pretty(to_jsonb(mutations)))::bigint
+          ) + 128
+          FROM wilbur_mutation_requests AS mutations
+          WHERE mutations.clerk_user_id = $1::text
+
+          UNION ALL
+
+          SELECT greatest(
             pg_column_size(research)::bigint,
             octet_length(to_jsonb(research)::text)::bigint,
             octet_length(jsonb_pretty(to_jsonb(research)))::bigint
@@ -1798,7 +1938,7 @@ function accountExportStatements(
           ) AS "exportAllowed"
         FROM estimate
       `,
-      values: [ownerId, maxBytes],
+      values: [ownerId, maxBytes, ownerRateKey],
     },
     {
       text: `
@@ -1978,7 +2118,17 @@ function accountExportStatements(
           division_seed AS "divisionSeed", cast_seed AS "castSeed",
           trajectory_seed AS "trajectorySeed", retry_reason AS "retryReason",
           terminal_fingerprint AS "terminalFingerprint",
+          answer_prompt_digest AS "answerPromptDigest",
           survivor_set AS survivors,
+          portia_current_candidate_id AS "portiaCurrentCandidateId",
+          portia_active_model_request_id::text AS "portiaActiveModelRequestId",
+          portia_failed_attempt_count AS "portiaFailedAttemptCount",
+          portia_failure_limit AS "portiaFailureLimit",
+          portia_completed_candidate_ids AS "portiaCompletedCandidateIds",
+          portia_assessment_drafts AS "portiaAssessmentDrafts",
+          charlotte_active_model_request_id::text AS "charlotteActiveModelRequestId",
+          charlotte_failed_attempt_count AS "charlotteFailedAttemptCount",
+          charlotte_failure_limit AS "charlotteFailureLimit",
           software_version AS "softwareVersion",
           lifecycle_version AS "lifecycleVersion",
           rules_version AS "rulesVersion", engine_version AS "engineVersion",
@@ -2086,6 +2236,7 @@ function accountExportStatements(
         ${exportGuard}
         SELECT id::text, lifecycle_run_id::text AS "lifecycleRunId",
           charlotte_action_index AS "charlotteActionIndex",
+          charlotte_binding_version AS "charlotteBindingVersion",
           idempotency_key::text AS "idempotencyKey",
           request_digest AS "requestDigest", actor, action,
           tested_assumption AS "testedAssumption",
@@ -2122,6 +2273,32 @@ function accountExportStatements(
     {
       text: `
         ${exportGuard}
+        SELECT
+          idempotency_key::text AS "idempotencyKey",
+          operation,
+          request_digest AS "requestDigest",
+          target_game_id::text AS "targetGameId",
+          target_action_id::text AS "targetActionId",
+          rate_kind AS "rateKind",
+          rate_admitted_at AS "rateAdmittedAt",
+          denial_code AS "denialCode",
+          retry_at AS "retryAt",
+          status,
+          result_entity_id::text AS "resultEntityId",
+          result_revision::text AS "resultRevision",
+          result_status AS "resultStatus",
+          result_updated_at AS "resultUpdatedAt",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM wilbur_mutation_requests CROSS JOIN export_gate
+        WHERE export_gate.allowed AND clerk_user_id = $1::text
+        ORDER BY created_at, idempotency_key
+      `,
+      values: [ownerId],
+    },
+    {
+      text: `
+        ${exportGuard}
         SELECT id::text, lifecycle_run_id::text AS "lifecycleRunId",
           sequence::text, stage, activity_type AS "activityType",
           state_from AS "stateFrom", state_to AS "stateTo",
@@ -2135,6 +2312,24 @@ function accountExportStatements(
         ORDER BY lifecycle_run_id, sequence
       `,
       values: [ownerId],
+    },
+    {
+      text: `
+        ${exportGuard}
+        SELECT
+          action,
+          window_start AS "windowStart",
+          window_seconds AS "windowSeconds",
+          count,
+          expires_at AS "expiresAt"
+        FROM rate_buckets
+        CROSS JOIN export_gate
+        WHERE export_gate.allowed
+          AND key_type = 'user'
+          AND key_hash = $1::char(64)
+        ORDER BY window_start, action
+      `,
+      values: [ownerRateKey],
     },
   ]
 }
@@ -4142,69 +4337,268 @@ export function createApiServicesWithDependencies(
     },
 
     createWilburAction(input) {
-      return apiOperation(() =>
-        requireLifecycleRepository(dependencies).createWilburAction({
+      return apiOperation(async () => {
+        const repository = requireLifecycleRepository(dependencies)
+        const lifecycle = await repository.getForGame(
+          input.ownerId,
+          input.gameId,
+        )
+        if (!lifecycle) {
+          throw new ApiError(
+            'LIFECYCLE_NOT_FOUND',
+            404,
+            'Lifecycle provenance not found.',
+          )
+        }
+        const suggestion = canonicalCharlotteActionForWilbur(lifecycle, input)
+        const requestDigest = canonicalHash({
+          operation: 'wilbur-action/v2',
+          gameId: input.gameId,
+          charlotteActionIndex: input.charlotteActionIndex,
+          actor: suggestion.actor,
+          action: suggestion.smallestAction,
+          testedAssumption: suggestion.assumptionBeingTested,
+          expectedObservation: suggestion.expectedObservation,
+          decisionThreshold: suggestion.decisionThreshold,
+          reviewHorizon: suggestion.reviewHorizon,
+        })
+        const claimInput = {
+          ownerId: input.ownerId,
+          gameId: input.gameId,
+          actionId: null,
+          idempotencyKey: input.idempotencyKey,
+          operation: 'create_action' as const,
+          requestDigest,
+          rateKind: 'action' as const,
+          reservedFutureRows: 2 as const,
+          reservedTextBytes: utf8Bytes([
+            suggestion.actor,
+            suggestion.smallestAction,
+            suggestion.assumptionBeingTested,
+            suggestion.expectedObservation,
+            suggestion.decisionThreshold,
+            suggestion.reviewHorizon,
+          ]),
+          storageRowLimit: dependencies.wilburStorageRowLimit,
+          storageTextBytesLimit: dependencies.wilburStorageTextBytesLimit,
+        }
+        let claim = await repository.claimWilburMutation(claimInput)
+        if (claim.kind === 'committed' && 'action' in claim) {
+          return claim.action
+        }
+        if (lifecycle.wilburActions.some((action) =>
+          action.charlotteBindingVersion ===
+            CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION &&
+          action.charlotteActionIndex === input.charlotteActionIndex)) {
+          await repository.settleWilburMutationConflict(claimInput)
+          throw new ApiError(
+            'CONFLICT',
+            409,
+            'That Charlotte suggestion already has a current Wilbur action.',
+          )
+        }
+
+        const allowed = await dependencies.usage.consumeWilburMutationRate({
+          userId: input.ownerId,
+          ipAddress: input.ipAddress,
+          kind: 'action',
+          operation: 'create_action',
+          idempotencyKey: input.idempotencyKey,
+          requestDigest,
+        })
+        if (!allowed.ok) throw usageError(allowed)
+
+        claim = await repository.claimWilburMutation(claimInput)
+        if (claim.kind === 'committed' && 'action' in claim) {
+          return claim.action
+        }
+
+        try {
+          return await repository.createWilburAction({
           ownerId: input.ownerId,
           gameId: input.gameId,
           id: input.requestId,
           idempotencyKey: input.idempotencyKey,
-          requestDigest: canonicalHash({
-            operation: 'wilbur-action/v1',
-            gameId: input.gameId,
-            charlotteActionIndex: input.charlotteActionIndex,
-            actor: input.actor,
-            action: input.action,
-            testedAssumption: input.testedAssumption,
-            expectedObservation: input.expectedObservation,
-            decisionThreshold: input.decisionThreshold,
-            reviewHorizon: input.reviewHorizon,
-          }),
+          requestDigest,
           charlotteActionIndex: input.charlotteActionIndex,
-          actor: input.actor,
-          action: input.action,
-          testedAssumption: input.testedAssumption,
-          expectedObservation: input.expectedObservation,
-          decisionThreshold: input.decisionThreshold,
-          reviewHorizon: input.reviewHorizon,
+          actor: suggestion.actor,
+          action: suggestion.smallestAction,
+          testedAssumption: suggestion.assumptionBeingTested,
+          expectedObservation: suggestion.expectedObservation,
+          decisionThreshold: suggestion.decisionThreshold,
+          reviewHorizon: suggestion.reviewHorizon,
           configurationDigest: canonicalHash(CURRENT_LIFECYCLE_VERSIONS),
-        }),
-      )
+          })
+        } catch (error) {
+          if (!isLifecycleRepositoryError(error) || error.code !== 'conflict') {
+            throw error
+          }
+          const recovered = await repository.claimWilburMutation(claimInput)
+          if (recovered.kind === 'committed' && 'action' in recovered) {
+            return recovered.action
+          }
+          await repository.settleWilburMutationConflict(claimInput)
+          const raced = await repository.claimWilburMutation(claimInput)
+          if (raced.kind === 'committed' && 'action' in raced) {
+            return raced.action
+          }
+          throw error
+        }
+      })
     },
 
     updateWilburAction(input) {
-      return apiOperation(() =>
-        requireLifecycleRepository(dependencies).updateWilburAction({
-          ownerId: input.ownerId,
+      return apiOperation(async () => {
+        const repository = requireLifecycleRepository(dependencies)
+        const lifecycle = await repository.getForGame(input.ownerId, input.gameId)
+        const currentAction = lifecycle?.wilburActions.find(
+          (action) => action.id === input.actionId,
+        )
+        if (!currentAction) {
+          throw new ApiError('LIFECYCLE_NOT_FOUND', 404, 'Wilbur action not found.')
+        }
+        const requestDigest = canonicalHash({
+          operation: 'wilbur-action-status/v1',
           gameId: input.gameId,
           actionId: input.actionId,
           expectedRevision: input.expectedRevision,
           status: input.status,
-          configurationDigest: canonicalHash(CURRENT_LIFECYCLE_VERSIONS),
-        }),
-      )
+        })
+        const claimInput = {
+          ownerId: input.ownerId,
+          gameId: input.gameId,
+          actionId: input.actionId,
+          idempotencyKey: input.idempotencyKey,
+          operation: 'update_action' as const,
+          requestDigest,
+          rateKind: 'action' as const,
+          reservedFutureRows: 1 as const,
+          reservedTextBytes: 0,
+          storageRowLimit: dependencies.wilburStorageRowLimit,
+          storageTextBytesLimit: dependencies.wilburStorageTextBytesLimit,
+        }
+        let claim = await repository.claimWilburMutation(claimInput)
+        if (claim.kind === 'committed' && 'action' in claim) {
+          return claim.action
+        }
+        if (currentAction.revision !== input.expectedRevision) {
+          await repository.settleWilburMutationConflict(claimInput)
+          throw new ApiError(
+            'CONFLICT',
+            409,
+            'The Wilbur action revision changed before this update.',
+          )
+        }
+        const allowed = await dependencies.usage.consumeWilburMutationRate({
+          userId: input.ownerId,
+          ipAddress: input.ipAddress,
+          kind: 'action',
+          operation: 'update_action',
+          idempotencyKey: input.idempotencyKey,
+          requestDigest,
+        })
+        if (!allowed.ok) throw usageError(allowed)
+
+        claim = await repository.claimWilburMutation(claimInput)
+        if (claim.kind === 'committed' && 'action' in claim) {
+          return claim.action
+        }
+        try {
+          return await repository.updateWilburAction({
+            ownerId: input.ownerId,
+            gameId: input.gameId,
+            actionId: input.actionId,
+            idempotencyKey: input.idempotencyKey,
+            requestDigest,
+            expectedRevision: input.expectedRevision,
+            status: input.status,
+            configurationDigest: canonicalHash(CURRENT_LIFECYCLE_VERSIONS),
+          })
+        } catch (error) {
+          if (!isLifecycleRepositoryError(error) || error.code !== 'conflict') {
+            throw error
+          }
+          const recovered = await repository.claimWilburMutation(claimInput)
+          if (recovered.kind === 'committed' && 'action' in recovered) {
+            return recovered.action
+          }
+          await repository.settleWilburMutationConflict(claimInput)
+          const raced = await repository.claimWilburMutation(claimInput)
+          if (raced.kind === 'committed' && 'action' in raced) {
+            return raced.action
+          }
+          throw error
+        }
+      })
     },
 
     appendWilburObservation(input) {
-      return apiOperation(() =>
-        requireLifecycleRepository(dependencies).appendWilburObservation({
+      return apiOperation(async () => {
+        const repository = requireLifecycleRepository(dependencies)
+        const lifecycle = await repository.getForGame(input.ownerId, input.gameId)
+        if (!lifecycle?.wilburActions.some((action) => action.id === input.actionId)) {
+          throw new ApiError('LIFECYCLE_NOT_FOUND', 404, 'Wilbur action not found.')
+        }
+        const requestDigest = canonicalHash({
+          operation: 'wilbur-observation/v2',
+          gameId: input.gameId,
+          actionId: input.actionId,
+          observedAt: input.observedAt,
+          observation: input.observation,
+          evidenceClassification: input.evidenceClassification,
+          expectedEffect: input.expectedEffect,
+          unexpectedEffect: input.unexpectedEffect,
+          stakeholderResponse: input.stakeholderResponse,
+          assumptionResult: input.assumptionResult,
+          nextDecision: input.nextDecision,
+        })
+        const claimInput = {
+          ownerId: input.ownerId,
+          gameId: input.gameId,
+          actionId: input.actionId,
+          idempotencyKey: input.idempotencyKey,
+          operation: 'append_observation' as const,
+          requestDigest,
+          rateKind: 'observation' as const,
+          reservedFutureRows: 2 as const,
+          reservedTextBytes: utf8Bytes([
+            input.observation,
+            input.evidenceClassification,
+            input.expectedEffect,
+            input.unexpectedEffect,
+            input.stakeholderResponse,
+            input.assumptionResult,
+            input.nextDecision,
+          ]),
+          storageRowLimit: dependencies.wilburStorageRowLimit,
+          storageTextBytesLimit: dependencies.wilburStorageTextBytesLimit,
+        }
+        let claim = await repository.claimWilburMutation(claimInput)
+        if (claim.kind === 'committed' && 'observation' in claim) {
+          return claim.observation
+        }
+        const allowed = await dependencies.usage.consumeWilburMutationRate({
+          userId: input.ownerId,
+          ipAddress: input.ipAddress,
+          kind: 'observation',
+          operation: 'append_observation',
+          idempotencyKey: input.idempotencyKey,
+          requestDigest,
+        })
+        if (!allowed.ok) throw usageError(allowed)
+
+        claim = await repository.claimWilburMutation(claimInput)
+        if (claim.kind === 'committed' && 'observation' in claim) {
+          return claim.observation
+        }
+        try {
+          return await repository.appendWilburObservation({
           ownerId: input.ownerId,
           gameId: input.gameId,
           actionId: input.actionId,
           id: input.requestId,
           idempotencyKey: input.idempotencyKey,
-          requestDigest: canonicalHash({
-            operation: 'wilbur-observation/v1',
-            gameId: input.gameId,
-            actionId: input.actionId,
-            observedAt: input.observedAt,
-            observation: input.observation,
-            evidenceClassification: input.evidenceClassification,
-            expectedEffect: input.expectedEffect,
-            unexpectedEffect: input.unexpectedEffect,
-            stakeholderResponse: input.stakeholderResponse,
-            assumptionResult: input.assumptionResult,
-            nextDecision: input.nextDecision,
-          }),
+          requestDigest,
           observedAt: input.observedAt,
           observation: input.observation,
           evidenceClassification: input.evidenceClassification,
@@ -4214,8 +4608,23 @@ export function createApiServicesWithDependencies(
           assumptionResult: input.assumptionResult,
           nextDecision: input.nextDecision,
           configurationDigest: canonicalHash(CURRENT_LIFECYCLE_VERSIONS),
-        }),
-      )
+          })
+        } catch (error) {
+          if (!isLifecycleRepositoryError(error) || error.code !== 'conflict') {
+            throw error
+          }
+          const recovered = await repository.claimWilburMutation(claimInput)
+          if (recovered.kind === 'committed' && 'observation' in recovered) {
+            return recovered.observation
+          }
+          await repository.settleWilburMutationConflict(claimInput)
+          const raced = await repository.claimWilburMutation(claimInput)
+          if (raced.kind === 'committed' && 'observation' in raced) {
+            return raced.observation
+          }
+          throw error
+        }
+      })
     },
 
     replay(input) {
@@ -4271,6 +4680,7 @@ export function createApiServicesWithDependencies(
           accountExportStatements(
             input.ownerId,
             dependencies.accountExportMaxBytes,
+            hashUserRateKey(dependencies.hmacSecret, input.ownerId),
           ),
           {
             isolationLevel: 'RepeatableRead',
@@ -4303,7 +4713,9 @@ export function createApiServicesWithDependencies(
           charlotteResults: rowsAt(results, 12),
           wilburActions: rowsAt(results, 13),
           wilburObservations: rowsAt(results, 14),
-          lifecycleActivities: rowsAt(results, 15),
+          wilburMutationRequests: rowsAt(results, 15),
+          lifecycleActivities: rowsAt(results, 16),
+          userRateBuckets: rowsAt(results, 17),
         }
         if (
           new TextEncoder().encode(`${JSON.stringify(exported, null, 2)}\n`)
@@ -4356,8 +4768,24 @@ export function createApiServicesWithDependencies(
 
 /**
  * Lazily composes request-safe services. Importing this module and running
- * `next build` never reads a database or requires runtime secrets.
+ * `next build` never reads a database or requires runtime secrets. Only the
+ * explicit loopback launcher may migrate its dedicated database on first use;
+ * Neon still requires the guarded owner command.
  */
 export async function createApiServices(): Promise<WebChessApiServices> {
-  return createApiServicesWithDependencies(productionDependencies())
+  const database = getDatabase()
+  if (shouldUseLocalPostgresWireProtocol(process.env.DATABASE_URL)) {
+    if (
+      !isLocalHostedPostgresMigrationAuthorized(
+        process.env.DATABASE_URL,
+        process.env,
+      )
+    ) {
+      throw serviceUnavailable(
+        'Loopback PostgreSQL startup is disabled. Start WebChess through npm run local:dev so the launcher can authorize its dedicated database.',
+      )
+    }
+    await ensureLocalHostedSchema(database)
+  }
+  return createApiServicesWithDependencies(productionDependencies(database))
 }

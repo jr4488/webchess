@@ -20,11 +20,18 @@ import { normalizeProblemInput, problemPartAt } from './lib/problem'
 import { PIECE_METAPHORS, synthesizeReading } from './lib/reading'
 import { beginModelActivity } from './lib/model-activity'
 import { isWebChessApiError } from './lib/webchess-api'
-import type { AppendWilburObservationCommand, DurableGame } from './lib/webchess-api'
+import type {
+  AppendWilburObservationCommand,
+  CreateWilburActionCommand,
+  DurableGame,
+  UpdateWilburActionCommand,
+} from './lib/webchess-api'
 import type {
   LifecycleAggregate,
   WilburAction,
+  WilburObservation,
 } from './lib/lifecycle/contracts'
+import { CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION } from './lib/lifecycle/contracts'
 import {
   HOSTED_WEBCHESS_RUNTIME,
   OPENCLAW_WEBCHESS_RUNTIME,
@@ -80,6 +87,49 @@ interface RevisionMutationIntent {
   gameId: string
   expectedRevision: number
   key: string
+}
+
+interface WilburActionIntent {
+  gameId: string
+  charlotteActionIndex: number
+  command: CreateWilburActionCommand
+  key: string
+}
+
+interface WilburStatusIntent {
+  gameId: string
+  actionId: string
+  command: UpdateWilburActionCommand
+  key: string
+}
+
+interface WilburObservationIntent {
+  gameId: string
+  actionId: string
+  command: AppendWilburObservationCommand
+  key: string
+}
+
+function observationMatchesIntent(
+  observation: WilburObservation,
+  command: AppendWilburObservationCommand,
+): boolean {
+  return observation.observedAt === command.observedAt &&
+    observation.observation === command.observation &&
+    observation.evidenceClassification === command.evidenceClassification &&
+    observation.expectedEffect === command.expectedEffect &&
+    observation.unexpectedEffect === command.unexpectedEffect &&
+    observation.stakeholderResponse === command.stakeholderResponse &&
+    observation.assumptionResult === command.assumptionResult &&
+    observation.nextDecision === command.nextDecision
+}
+
+function isAmbiguousWilburMutationFailure(error: unknown): boolean {
+  return isWebChessApiError(error) && (
+    error.kind === 'transport' ||
+    error.kind === 'invalid-response' ||
+    (error.status !== null && error.status >= 500)
+  )
 }
 
 function outcomeNotice(outcome: GameOutcome): string {
@@ -163,6 +213,9 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   const portiaIntentRef = useRef<{ gameId: string; key: string } | null>(null)
   const charlotteIntentRef = useRef<{ gameId: string; key: string } | null>(null)
   const lifecycleRetryIntentRef = useRef<{ gameId: string; key: string } | null>(null)
+  const wilburActionIntentRef = useRef<WilburActionIntent | null>(null)
+  const wilburStatusIntentRef = useRef<WilburStatusIntent | null>(null)
+  const wilburObservationIntentRef = useRef<WilburObservationIntent | null>(null)
   const lifecycleBackoffMsRef = useRef(0)
   const activeGameMutationRef = useRef<ActiveGameMutation | null>(null)
   const gameFinishing = outcome !== null && stage === 'playing'
@@ -221,6 +274,9 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     portiaIntentRef.current = null
     charlotteIntentRef.current = null
     lifecycleRetryIntentRef.current = null
+    wilburActionIntentRef.current = null
+    wilburStatusIntentRef.current = null
+    wilburObservationIntentRef.current = null
     lifecycleBackoffMsRef.current = 0
     movePendingRef.current = false
     invalidateEngineRequest(true)
@@ -788,9 +844,9 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     return () => window.clearTimeout(timer)
   }, [autoPlaying, movePending, outcome, playOneTurn, stage])
 
-  const refreshLifecycle = useCallback(async () => {
+  const refreshLifecycle = useCallback(async (): Promise<LifecycleAggregate | null> => {
     const current = game
-    if (!current || !outcome) return
+    if (!current || !outcome) return null
     lifecycleRequestRef.current?.abort()
     const controller = new AbortController()
     lifecycleRequestRef.current = controller
@@ -800,9 +856,40 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
       const restored = await runtime.api.getGameLifecycle(current.id, {
         signal: controller.signal,
       })
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted) return null
       setLifecycle(restored)
       setLifecycleMode('v2')
+      const actionIntent = wilburActionIntentRef.current
+      if (
+        actionIntent?.gameId === current.id &&
+        restored.wilburActions.some(
+          (action) => action.charlotteBindingVersion ===
+              CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION &&
+            action.charlotteActionIndex === actionIntent.charlotteActionIndex,
+        )
+      ) {
+        wilburActionIntentRef.current = null
+      }
+      const statusIntent = wilburStatusIntentRef.current
+      if (
+        statusIntent?.gameId === current.id &&
+        restored.wilburActions.some(
+          (action) => action.id === statusIntent.actionId &&
+            action.status === statusIntent.command.status,
+        )
+      ) {
+        wilburStatusIntentRef.current = null
+      }
+      const observationIntent = wilburObservationIntentRef.current
+      if (
+        observationIntent?.gameId === current.id &&
+        restored.wilburObservations.some(
+          (observation) => observation.actionId === observationIntent.actionId &&
+            observationMatchesIntent(observation, observationIntent.command),
+        )
+      ) {
+        wilburObservationIntentRef.current = null
+      }
       if (restored.charlotteRenderedAnswer) {
         setAnswer(restored.charlotteRenderedAnswer)
         setAnswerStatus('success')
@@ -817,24 +904,26 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
         setAnswerStatus('idle')
         setAnswerActivity(null)
       }
+      return restored
     } catch (error) {
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted) return null
       if (isWebChessApiError(error) && error.kind === 'not-found') {
         setLifecycleMode('legacy')
-        return
+        return null
       }
       if (
         isWebChessApiError(error) &&
         error.kind === 'authentication-required'
       ) {
         if (runtime.signInPath) window.location.assign(runtime.signInPath)
-        return
+        return null
       }
       setLifecycleError(
         error instanceof Error
           ? error.message
           : 'WebChess could not restore the lifecycle record.',
       )
+      return null
     } finally {
       if (lifecycleRequestRef.current === controller) {
         lifecycleRequestRef.current = null
@@ -1562,22 +1651,43 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     const suggestion = lifecycle?.charlotte?.exactlyThreeNextActions[index]
     if (!current || !suggestion || actionPendingIndex !== null) return
 
+    const existingIntent = wilburActionIntentRef.current
+    const intent = existingIntent?.gameId === current.id &&
+      existingIntent.charlotteActionIndex === index
+      ? existingIntent
+      : {
+          gameId: current.id,
+          charlotteActionIndex: index,
+          command: {
+            charlotteActionIndex: index,
+            actor: suggestion.actor,
+            action: suggestion.smallestAction,
+            testedAssumption: suggestion.assumptionBeingTested,
+            expectedObservation: suggestion.expectedObservation,
+            decisionThreshold: suggestion.decisionThreshold,
+            reviewHorizon: suggestion.reviewHorizon,
+          },
+          key: runtime.api.createIdempotencyKey(),
+        }
+    wilburActionIntentRef.current = intent
+
     setActionPendingIndex(index)
     setLifecycleError('')
     try {
-      await runtime.api.createWilburAction(current.id, {
-        charlotteActionIndex: index,
-        actor: suggestion.actor,
-        action: suggestion.smallestAction,
-        testedAssumption: suggestion.assumptionBeingTested,
-        expectedObservation: suggestion.expectedObservation,
-        decisionThreshold: suggestion.decisionThreshold,
-        reviewHorizon: suggestion.reviewHorizon,
-      }, {
-        idempotencyKey: runtime.api.createIdempotencyKey(),
+      await runtime.api.createWilburAction(current.id, intent.command, {
+        idempotencyKey: intent.key,
       })
+      if (wilburActionIntentRef.current === intent) {
+        wilburActionIntentRef.current = null
+      }
       await refreshLifecycle()
     } catch (error) {
+      if (isAmbiguousWilburMutationFailure(error)) {
+        await refreshLifecycle()
+        if (wilburActionIntentRef.current !== intent) return
+      } else if (wilburActionIntentRef.current === intent) {
+        wilburActionIntentRef.current = null
+      }
       setLifecycleError(
         error instanceof Error
           ? error.message
@@ -1595,17 +1705,39 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     const current = game
     if (!current || wilburPending) return
 
+    const existingIntent = wilburStatusIntentRef.current
+    const intent = existingIntent?.gameId === current.id &&
+      existingIntent.actionId === action.id &&
+      existingIntent.command.status === status
+      ? existingIntent
+      : {
+          gameId: current.id,
+          actionId: action.id,
+          command: {
+            expectedRevision: action.revision,
+            status,
+          },
+          key: runtime.api.createIdempotencyKey(),
+        }
+    wilburStatusIntentRef.current = intent
+
     setWilburPending(true)
     setLifecycleError('')
     try {
-      await runtime.api.updateWilburAction(current.id, action.id, {
-        expectedRevision: action.revision,
-        status,
-      }, {
-        idempotencyKey: runtime.api.createIdempotencyKey(),
+      await runtime.api.updateWilburAction(current.id, action.id, intent.command, {
+        idempotencyKey: intent.key,
       })
+      if (wilburStatusIntentRef.current === intent) {
+        wilburStatusIntentRef.current = null
+      }
       await refreshLifecycle()
     } catch (error) {
+      if (isAmbiguousWilburMutationFailure(error)) {
+        await refreshLifecycle()
+        if (wilburStatusIntentRef.current !== intent) return
+      } else if (wilburStatusIntentRef.current === intent) {
+        wilburStatusIntentRef.current = null
+      }
       if (isWebChessApiError(error) && error.kind === 'conflict') {
         await refreshLifecycle()
         return
@@ -1627,15 +1759,36 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     const current = game
     if (!current || wilburPending) return false
 
+    const existingIntent = wilburObservationIntentRef.current
+    const intent = existingIntent?.gameId === current.id &&
+      existingIntent.actionId === action.id
+      ? existingIntent
+      : {
+          gameId: current.id,
+          actionId: action.id,
+          command: observation,
+          key: runtime.api.createIdempotencyKey(),
+        }
+    wilburObservationIntentRef.current = intent
+
     setWilburPending(true)
     setLifecycleError('')
     try {
-      await runtime.api.appendWilburObservation(current.id, action.id, observation, {
-        idempotencyKey: runtime.api.createIdempotencyKey(),
+      await runtime.api.appendWilburObservation(current.id, action.id, intent.command, {
+        idempotencyKey: intent.key,
       })
+      if (wilburObservationIntentRef.current === intent) {
+        wilburObservationIntentRef.current = null
+      }
       await refreshLifecycle()
       return true
     } catch (error) {
+      if (isAmbiguousWilburMutationFailure(error)) {
+        await refreshLifecycle()
+        if (wilburObservationIntentRef.current !== intent) return true
+      } else if (wilburObservationIntentRef.current === intent) {
+        wilburObservationIntentRef.current = null
+      }
       setLifecycleError(
         error instanceof Error
           ? error.message

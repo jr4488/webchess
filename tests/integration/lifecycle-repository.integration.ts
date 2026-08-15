@@ -26,12 +26,127 @@ import type { PostgresTestDatabase } from './postgres-test-database'
 const OWNER = 'user_lifecycle_repository_integration'
 const RETRY_OWNER = 'user_lifecycle_retry_lineage_integration'
 const CHARLOTTE_OWNER = 'user_lifecycle_charlotte_fence_integration'
-const GAME_ID = '62000000-0000-4000-8000-000000000001'
+const GAME_ID = '62000000-0000-4000-8000-0000000000a1'
 const PROBLEM = 'How should this lifecycle preserve evidence while moving toward action?'
+
+function utf8Bytes(values: readonly string[]): number {
+  return values.reduce(
+    (total, value) => total + Buffer.byteLength(value, 'utf8'),
+    0,
+  )
+}
 
 let database: PostgresTestDatabase
 let repository: DurableLifecycleRepository
 let game: DurableGameSnapshot
+
+async function claimAndAdmitWilburMutation(input: {
+  idempotencyKey: string
+  operation: 'create_action' | 'update_action' | 'append_observation'
+  requestDigest: string
+  actionId: string | null
+  rateKind: 'action' | 'observation'
+  reservedFutureRows: 1 | 2
+  reservedTextBytes: number
+  storageRowLimit?: number
+  storageTextBytesLimit?: number
+}) {
+  const claim = await repository.claimWilburMutation({
+    ownerId: OWNER,
+    gameId: GAME_ID,
+    storageRowLimit: 500,
+    storageTextBytesLimit: 250_000,
+    ...input,
+  })
+  expect(claim).toEqual({ kind: 'pending' })
+  await database.adapter.query({
+    text: `
+      UPDATE wilbur_mutation_requests
+      SET rate_admitted_at = now(), updated_at = now()
+      WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+    `,
+    values: [OWNER, input.idempotencyKey],
+  })
+}
+
+async function readWilburStorageEnvelope(ownerId: string) {
+  const result = await database.adapter.query<{
+    action_rows: number
+    observation_rows: number
+    event_rows: number
+    ledger_rows: number
+    pending_future_rows: number
+  }>({
+    text: `
+      SELECT
+        (
+          SELECT count(*)::integer FROM wilbur_actions
+          WHERE clerk_user_id = $1::text
+        ) AS action_rows,
+        (
+          SELECT count(*)::integer FROM wilbur_observations
+          WHERE clerk_user_id = $1::text
+        ) AS observation_rows,
+        (
+          SELECT count(*)::integer FROM lifecycle_events
+          WHERE clerk_user_id = $1::text AND stage = 'wilbur'
+        ) AS event_rows,
+        (
+          SELECT count(*)::integer FROM wilbur_mutation_requests
+          WHERE clerk_user_id = $1::text
+        ) AS ledger_rows,
+        (
+          SELECT coalesce(sum(reserved_future_rows), 0)::integer
+          FROM wilbur_mutation_requests
+          WHERE clerk_user_id = $1::text
+            AND status = 'pending'
+            AND updated_at >= now() - interval '24 hours'
+        ) AS pending_future_rows
+    `,
+    values: [ownerId],
+  })
+  const row = result.rows[0]!
+  const durableRows =
+    row.action_rows + row.observation_rows + row.event_rows + row.ledger_rows
+  return {
+    ...row,
+    durableRows,
+    totalRows: durableRows + row.pending_future_rows,
+  }
+}
+
+async function installWilburActivityFailure(): Promise<void> {
+  await database.adapter.query({
+    text: `
+      CREATE OR REPLACE FUNCTION reject_wilbur_activity_for_test()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $function$
+      BEGIN
+        RAISE EXCEPTION 'injected lifecycle activity failure';
+      END
+      $function$
+    `,
+  })
+  await database.adapter.query({
+    text: `
+      CREATE TRIGGER reject_wilbur_activity_for_test
+      BEFORE INSERT ON lifecycle_events
+      FOR EACH ROW
+      WHEN (NEW.stage = 'wilbur')
+      EXECUTE FUNCTION reject_wilbur_activity_for_test()
+    `,
+  })
+}
+
+async function removeWilburActivityFailure(): Promise<void> {
+  await database.adapter.query({
+    text: 'DROP TRIGGER reject_wilbur_activity_for_test ON lifecycle_events',
+  })
+  await database.adapter.query({
+    text: 'DROP FUNCTION reject_wilbur_activity_for_test()',
+  })
+}
 
 function survivor(index: number): SurvivorCandidate {
   const part = game.division?.parts[index]
@@ -663,6 +778,145 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       charlotte,
     })
 
+    const faultSuggestion = charlotte.exactlyThreeNextActions[1]
+    const faultActionBytes = utf8Bytes([
+      faultSuggestion.actor,
+      faultSuggestion.smallestAction,
+      faultSuggestion.assumptionBeingTested,
+      faultSuggestion.expectedObservation,
+      faultSuggestion.decisionThreshold,
+      faultSuggestion.reviewHorizon,
+    ])
+    await database.adapter.query({
+      text: `
+        INSERT INTO wilbur_mutation_requests (
+          clerk_user_id, idempotency_key, operation, request_digest,
+          target_game_id, target_action_id, rate_kind,
+          reserved_future_rows, reserved_text_bytes, created_at, updated_at
+        )
+        VALUES (
+          $1::text, $2::uuid, 'create_action', $3::char(64),
+          $4::uuid, NULL, 'action', 2, $5::bigint,
+          now() - interval '25 hours', now() - interval '25 hours'
+        )
+      `,
+      values: [
+        OWNER,
+        '62000000-0000-4000-8000-000000000012',
+        '9'.repeat(64),
+        GAME_ID,
+        faultActionBytes,
+      ],
+    })
+    await database.adapter.query({
+      text: `
+        UPDATE wilbur_mutation_requests
+        SET rate_admitted_at = now() - interval '25 hours'
+        WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+      `,
+      values: [OWNER, '62000000-0000-4000-8000-000000000012'],
+    })
+    await installWilburActivityFailure()
+    try {
+      await expect(repository.createWilburAction({
+        ownerId: OWNER,
+        gameId: GAME_ID,
+        id: '62000000-0000-4000-8000-000000000013',
+        idempotencyKey: '62000000-0000-4000-8000-000000000012',
+        requestDigest: '9'.repeat(64),
+        charlotteActionIndex: 1,
+        actor: faultSuggestion.actor,
+        action: faultSuggestion.smallestAction,
+        testedAssumption: faultSuggestion.assumptionBeingTested,
+        expectedObservation: faultSuggestion.expectedObservation,
+        decisionThreshold: faultSuggestion.decisionThreshold,
+        reviewHorizon: faultSuggestion.reviewHorizon,
+        configurationDigest: 'd'.repeat(64),
+      })).rejects.toThrow(/injected lifecycle activity failure/u)
+    } finally {
+      await removeWilburActivityFailure()
+    }
+    expect(await repository.getForGame(OWNER, GAME_ID)).toMatchObject({
+      state: 'charlotte_complete',
+      wilburActions: [],
+    })
+    const firstSuggestion = charlotte.exactlyThreeNextActions[0]
+    const firstActionBytes = utf8Bytes([
+      firstSuggestion.actor,
+      firstSuggestion.smallestAction,
+      firstSuggestion.assumptionBeingTested,
+      firstSuggestion.expectedObservation,
+      firstSuggestion.decisionThreshold,
+      firstSuggestion.reviewHorizon,
+    ])
+    await claimAndAdmitWilburMutation({
+      idempotencyKey: '62000000-0000-4000-8000-000000000006',
+      operation: 'create_action',
+      requestDigest: '5'.repeat(64),
+      actionId: null,
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: firstActionBytes,
+    })
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: GAME_ID.toUpperCase(),
+      actionId: null,
+      idempotencyKey: '62000000-0000-4000-8000-000000000006',
+      operation: 'create_action',
+      requestDigest: '5'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: firstActionBytes,
+      storageRowLimit: 1,
+      storageTextBytesLimit: 1,
+    })).resolves.toEqual({ kind: 'pending' })
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: '62000000-0000-4000-8000-0000000000ff',
+      actionId: null,
+      idempotencyKey: '62000000-0000-4000-8000-000000000006',
+      operation: 'create_action',
+      requestDigest: '5'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: firstActionBytes,
+      storageRowLimit: 500,
+      storageTextBytesLimit: 250_000,
+    })).rejects.toMatchObject({ code: 'conflict' })
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      actionId: null,
+      idempotencyKey: '62000000-0000-4000-8000-000000000006',
+      operation: 'create_action',
+      requestDigest: '5'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: firstActionBytes + 1,
+      storageRowLimit: 500,
+      storageTextBytesLimit: 250_000,
+    })).rejects.toMatchObject({ code: 'conflict' })
+    const expiredClaim = await database.adapter.query<{
+      status: string
+      denial_code: string | null
+      reserved_future_rows: number
+      reserved_text_bytes: string
+    }>({
+      text: `
+        SELECT status, denial_code, reserved_future_rows,
+          reserved_text_bytes::text
+        FROM wilbur_mutation_requests
+        WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+      `,
+      values: [OWNER, '62000000-0000-4000-8000-000000000012'],
+    })
+    expect(expiredClaim.rows[0]).toMatchObject({
+      status: 'denied',
+      denial_code: 'WILBUR_MUTATION_EXPIRED',
+      reserved_future_rows: 0,
+      reserved_text_bytes: '0',
+    })
     const action = await repository.createWilburAction({
       ownerId: OWNER,
       gameId: GAME_ID,
@@ -678,16 +932,164 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       reviewHorizon: charlotte.exactlyThreeNextActions[0].reviewHorizon,
       configurationDigest: 'd'.repeat(64),
     })
+    expect(action.charlotteBindingVersion).toBe(
+      'webchess-charlotte-action-binding-v1',
+    )
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      actionId: null,
+      idempotencyKey: '62000000-0000-4000-8000-000000000006',
+      operation: 'create_action',
+      requestDigest: '5'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: firstActionBytes,
+      storageRowLimit: 500,
+      storageTextBytesLimit: 250_000,
+    })).resolves.toEqual({ kind: 'committed', action })
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      actionId: null,
+      idempotencyKey: '62000000-0000-4000-8000-000000000018',
+      operation: 'create_action',
+      requestDigest: 'd'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: 1,
+      storageRowLimit: 1,
+      storageTextBytesLimit: 250_000,
+    })).rejects.toMatchObject({ code: 'storage-limit' })
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      actionId: null,
+      idempotencyKey: '62000000-0000-4000-8000-000000000019',
+      operation: 'create_action',
+      requestDigest: 'e'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: 2,
+      storageRowLimit: 500,
+      storageTextBytesLimit: 1,
+    })).rejects.toMatchObject({ code: 'storage-limit' })
+    await claimAndAdmitWilburMutation({
+      idempotencyKey: '62000000-0000-4000-8000-000000000010',
+      operation: 'create_action',
+      requestDigest: '7'.repeat(64),
+      actionId: null,
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: firstActionBytes,
+    })
+    await expect(repository.createWilburAction({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      id: '62000000-0000-4000-8000-000000000009',
+      idempotencyKey: '62000000-0000-4000-8000-000000000010',
+      requestDigest: '7'.repeat(64),
+      charlotteActionIndex: 0,
+      actor: charlotte.exactlyThreeNextActions[0].actor,
+      action: charlotte.exactlyThreeNextActions[0].smallestAction,
+      testedAssumption: charlotte.exactlyThreeNextActions[0].assumptionBeingTested,
+      expectedObservation: charlotte.exactlyThreeNextActions[0].expectedObservation,
+      decisionThreshold: charlotte.exactlyThreeNextActions[0].decisionThreshold,
+      reviewHorizon: charlotte.exactlyThreeNextActions[0].reviewHorizon,
+      configurationDigest: 'd'.repeat(64),
+    })).rejects.toMatchObject({ code: 'conflict' })
+    await repository.settleWilburMutationConflict({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      actionId: null,
+      idempotencyKey: '62000000-0000-4000-8000-000000000010',
+      operation: 'create_action',
+      requestDigest: '7'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: firstActionBytes,
+    })
+    const settledConflict = await database.adapter.query<{
+      status: string
+      denial_code: string | null
+      reserved_future_rows: number
+      reserved_text_bytes: bigint
+    }>({
+      text: `
+        SELECT status, denial_code, reserved_future_rows,
+          reserved_text_bytes
+        FROM wilbur_mutation_requests
+        WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+      `,
+      values: [OWNER, '62000000-0000-4000-8000-000000000010'],
+    })
+    expect(settledConflict.rows[0]).toMatchObject({
+      status: 'denied',
+      denial_code: 'WILBUR_MUTATION_CONFLICT',
+      reserved_future_rows: 0,
+      reserved_text_bytes: '0',
+    })
+    await claimAndAdmitWilburMutation({
+      idempotencyKey: '62000000-0000-4000-8000-000000000014',
+      operation: 'update_action',
+      requestDigest: 'a'.repeat(64),
+      actionId: action.id,
+      rateKind: 'action',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+    })
+    await installWilburActivityFailure()
+    try {
+      await expect(repository.updateWilburAction({
+        ownerId: OWNER,
+        gameId: GAME_ID,
+        actionId: action.id,
+        idempotencyKey: '62000000-0000-4000-8000-000000000014',
+        requestDigest: 'a'.repeat(64),
+        expectedRevision: action.revision,
+        status: 'in_progress',
+        configurationDigest: 'd'.repeat(64),
+      })).rejects.toThrow(/injected lifecycle activity failure/u)
+    } finally {
+      await removeWilburActivityFailure()
+    }
+    expect(await repository.getForGame(OWNER, GAME_ID)).toMatchObject({
+      state: 'wilbur_planning',
+      wilburActions: [{ id: action.id, status: 'planned', revision: 0 }],
+    })
+    await claimAndAdmitWilburMutation({
+      idempotencyKey: '62000000-0000-4000-8000-000000000011',
+      operation: 'update_action',
+      requestDigest: '8'.repeat(64),
+      actionId: action.id,
+      rateKind: 'action',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+    })
     const started = await repository.updateWilburAction({
       ownerId: OWNER,
       gameId: GAME_ID,
       actionId: action.id,
+      idempotencyKey: '62000000-0000-4000-8000-000000000011',
+      requestDigest: '8'.repeat(64),
       expectedRevision: action.revision,
       status: 'in_progress',
       configurationDigest: 'd'.repeat(64),
     })
     expect(started).toMatchObject({ status: 'in_progress', revision: 1 })
-
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      actionId: action.id,
+      idempotencyKey: '62000000-0000-4000-8000-000000000011',
+      operation: 'update_action',
+      requestDigest: '8'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+      storageRowLimit: 1,
+      storageTextBytesLimit: 1,
+    })).resolves.toEqual({ kind: 'committed', action: started })
     const observationInput = {
       ownerId: OWNER,
       gameId: GAME_ID,
@@ -705,16 +1107,565 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       nextDecision: 'Continue only within the original bound and review again.',
       configurationDigest: 'd'.repeat(64),
     }
+    const faultObservation = {
+      ...observationInput,
+      id: '62000000-0000-4000-8000-000000000016',
+      idempotencyKey: '62000000-0000-4000-8000-000000000015',
+      requestDigest: 'b'.repeat(64),
+    }
+    const observationBytes = utf8Bytes([
+      observationInput.observation,
+      observationInput.evidenceClassification,
+      observationInput.expectedEffect,
+      observationInput.unexpectedEffect,
+      observationInput.stakeholderResponse,
+      observationInput.assumptionResult,
+      observationInput.nextDecision,
+    ])
+    await claimAndAdmitWilburMutation({
+      idempotencyKey: faultObservation.idempotencyKey,
+      operation: 'append_observation',
+      requestDigest: faultObservation.requestDigest,
+      actionId: action.id,
+      rateKind: 'observation',
+      reservedFutureRows: 2,
+      reservedTextBytes: observationBytes,
+    })
+    await installWilburActivityFailure()
+    try {
+      await expect(repository.appendWilburObservation(faultObservation))
+        .rejects.toThrow(/injected lifecycle activity failure/u)
+    } finally {
+      await removeWilburActivityFailure()
+    }
+    expect(await repository.getForGame(OWNER, GAME_ID)).toMatchObject({
+      state: 'wilbur_in_progress',
+      wilburObservations: [],
+    })
+    await claimAndAdmitWilburMutation({
+      idempotencyKey: observationInput.idempotencyKey,
+      operation: 'append_observation',
+      requestDigest: observationInput.requestDigest,
+      actionId: action.id,
+      rateKind: 'observation',
+      reservedFutureRows: 2,
+      reservedTextBytes: observationBytes,
+    })
     const observation = await repository.appendWilburObservation(observationInput)
     expect(observation.assumptionResult).toBe('supported')
-    await expect(repository.appendWilburObservation(observationInput)).resolves.toEqual(observation)
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      actionId: action.id,
+      idempotencyKey: observationInput.idempotencyKey,
+      operation: 'append_observation',
+      requestDigest: observationInput.requestDigest,
+      rateKind: 'observation',
+      reservedFutureRows: 2,
+      reservedTextBytes: observationBytes,
+      storageRowLimit: 500,
+      storageTextBytesLimit: 250_000,
+    })).resolves.toEqual({ kind: 'committed', observation })
+
+    await claimAndAdmitWilburMutation({
+      idempotencyKey: '62000000-0000-4000-8000-000000000017',
+      operation: 'update_action',
+      requestDigest: 'c'.repeat(64),
+      actionId: action.id,
+      rateKind: 'action',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+    })
+    const completedAction = await repository.updateWilburAction({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      actionId: action.id,
+      idempotencyKey: '62000000-0000-4000-8000-000000000017',
+      requestDigest: 'c'.repeat(64),
+      expectedRevision: started.revision,
+      status: 'completed',
+      configurationDigest: 'd'.repeat(64),
+    })
+    expect(completedAction).toMatchObject({ status: 'completed', revision: 2 })
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      actionId: action.id,
+      idempotencyKey: '62000000-0000-4000-8000-000000000011',
+      operation: 'update_action',
+      requestDigest: '8'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+      storageRowLimit: 1,
+      storageTextBytesLimit: 1,
+    })).resolves.toEqual({ kind: 'committed', action: started })
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: GAME_ID.toUpperCase(),
+      actionId: null,
+      idempotencyKey: '62000000-0000-4000-8000-000000000006',
+      operation: 'create_action',
+      requestDigest: '5'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: firstActionBytes,
+      storageRowLimit: 1,
+      storageTextBytesLimit: 1,
+    })).resolves.toEqual({ kind: 'committed', action })
 
     const complete = await repository.getForGame(OWNER, GAME_ID)
     expect(complete).toMatchObject({
       state: 'wilbur_observed',
-      wilburActions: [{ id: action.id, status: 'in_progress' }],
+      wilburActions: [{ id: action.id, status: 'completed', revision: 2 }],
       wilburObservations: [{ id: observation.id }],
     })
+
+    const legacyObservationText = [
+      'A direct café signal appeared.',
+      'Direct field note.',
+      'The expected effect appeared.',
+      'No unexpected effect appeared.',
+      'The stakeholder response stayed bounded.',
+      'unresolved',
+      'Review the evidence again.',
+    ] as const
+    await database.adapter.query({
+      text: `
+        INSERT INTO wilbur_observations (
+          id, clerk_user_id, action_id, idempotency_key, request_digest,
+          observed_at, observation, evidence_classification,
+          expected_effect, unexpected_effect, stakeholder_response,
+          assumption_result, next_decision, record_version
+        )
+        VALUES (
+          $1::uuid, $2::text, $3::uuid, $4::uuid, $5::char(64), now(),
+          $6::text, $7::text, $8::text, $9::text, $10::text,
+          $11::text, $12::text, $13::text
+        )
+      `,
+      values: [
+        '62000000-0000-4000-8000-000000000020',
+        OWNER,
+        action.id,
+        '62000000-0000-4000-8000-000000000021',
+        'f'.repeat(64),
+        ...legacyObservationText,
+        CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      ],
+    })
+    const occupiedText = await database.adapter.query<{
+      artifact_text_bytes: string
+      pending_text_bytes: string
+    }>({
+      text: `
+        SELECT
+          (
+            (
+              SELECT coalesce(sum(
+                octet_length(actor) + octet_length(action) +
+                octet_length(tested_assumption) +
+                octet_length(expected_observation) +
+                octet_length(decision_threshold) +
+                octet_length(review_horizon)
+              ), 0)
+              FROM wilbur_actions
+              WHERE clerk_user_id = $1::text
+            ) +
+            (
+              SELECT coalesce(sum(
+                octet_length(observation) +
+                octet_length(evidence_classification) +
+                octet_length(expected_effect) +
+                octet_length(unexpected_effect) +
+                octet_length(stakeholder_response) +
+                octet_length(assumption_result) +
+                octet_length(next_decision)
+              ), 0)
+              FROM wilbur_observations
+              WHERE clerk_user_id = $1::text
+            )
+          )::text AS artifact_text_bytes,
+          (
+            SELECT coalesce(sum(reserved_text_bytes), 0)
+            FROM wilbur_mutation_requests
+            WHERE clerk_user_id = $1::text
+              AND status = 'pending'
+              AND updated_at >= now() - interval '24 hours'
+          )::text AS pending_text_bytes
+      `,
+      values: [OWNER],
+    })
+    const exactLegacyTextBytes = utf8Bytes(legacyObservationText)
+    expect(Number(occupiedText.rows[0]!.artifact_text_bytes)).toBe(
+      firstActionBytes + observationBytes + exactLegacyTextBytes,
+    )
+    expect(Number(occupiedText.rows[0]!.pending_text_bytes)).toBe(
+      observationBytes,
+    )
+    const exactOccupiedTextBytes =
+      Number(occupiedText.rows[0]!.artifact_text_bytes) +
+      Number(occupiedText.rows[0]!.pending_text_bytes)
+    await expect(repository.claimWilburMutation({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      actionId: action.id,
+      idempotencyKey: '62000000-0000-4000-8000-000000000022',
+      operation: 'append_observation',
+      requestDigest: '0'.repeat(64),
+      rateKind: 'observation',
+      reservedFutureRows: 2,
+      reservedTextBytes: 1,
+      storageRowLimit: 500,
+      storageTextBytesLimit: exactOccupiedTextBytes,
+    })).rejects.toMatchObject({ code: 'storage-limit' })
+  })
+
+  it('keeps the Wilbur row envelope exact under concurrent updates and stale-key floods', async () => {
+    const owner = 'user_wilbur_storage_envelope_integration'
+    const gameId = '62ab0000-0000-4000-8000-0000000000a1'
+    const runId = '62ab0000-0000-4000-8000-0000000000a2'
+    const actionId = '62ab0000-0000-4000-8000-0000000000a3'
+
+    await database.adapter.query({
+      text: `INSERT INTO user_controls (clerk_user_id) VALUES ($1::text)`,
+      values: [owner],
+    })
+    await database.adapter.query({
+      text: `
+        INSERT INTO games (
+          id, clerk_user_id, is_current, revision, status, problem,
+          problem_sha256, division_seed, division_facets, problem_parts,
+          division_model, division_prompt_version, division_prompt_sha256,
+          division_digest, event_version, rules_version, engine_version,
+          cast_version, software_version, created_at, updated_at
+        )
+        SELECT
+          $1::uuid, $2::text, true, 1, status, problem, problem_sha256,
+          division_seed, division_facets, problem_parts, division_model,
+          division_prompt_version, division_prompt_sha256, division_digest,
+          event_version, rules_version, engine_version, cast_version,
+          software_version, now(), now()
+        FROM games
+        WHERE id = $3::uuid
+      `,
+      values: [gameId, owner, GAME_ID],
+    })
+    await database.adapter.query({
+      text: `
+        INSERT INTO lifecycle_runs (
+          id, clerk_user_id, game_id, root_run_id, state,
+          division_seed, cast_seed, trajectory_seed,
+          software_version, lifecycle_version, rules_version, engine_version,
+          cast_version, event_version, portia_prompt_version,
+          portia_contract_version, gate_algorithm_version, retry_policy_version,
+          charlotte_prompt_version, charlotte_contract_version,
+          wilbur_record_version
+        )
+        VALUES (
+          $1::uuid, $2::text, $3::uuid, $1::uuid, 'wilbur_planning',
+          'storage-division', 'storage-cast', 'storage-trajectory',
+          $4::text, $5::text, $6::text, $7::text, $8::text, $9::smallint,
+          $10::text, $11::text, $12::text, $13::text, $14::text,
+          $15::text, $16::text
+        )
+      `,
+      values: [
+        runId,
+        owner,
+        gameId,
+        CURRENT_LIFECYCLE_VERSIONS.software,
+        CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+        CURRENT_GAME_VERSIONS.rules,
+        CURRENT_GAME_VERSIONS.engine,
+        CURRENT_GAME_VERSIONS.cast,
+        CURRENT_GAME_VERSIONS.event,
+        CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+        CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+        CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+        CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+        CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+        CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+        CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      ],
+    })
+    await database.adapter.query({
+      text: `
+        INSERT INTO wilbur_actions (
+          id, clerk_user_id, lifecycle_run_id, charlotte_action_index,
+          idempotency_key, request_digest, actor, action,
+          tested_assumption, expected_observation, decision_threshold,
+          review_horizon, status, revision, record_version
+        )
+        VALUES (
+          $1::uuid, $2::text, $3::uuid, 0, $4::uuid, repeat('1', 64),
+          'Storage owner', 'Perform the bounded storage-envelope action.',
+          'The row envelope remains exact under concurrent requests.',
+          'Only one request reserves the last available event row.',
+          'Durable rows and pending future rows never exceed the cap.',
+          'Within one integration test', 'planned', 0, $5::text
+        )
+      `,
+      values: [
+        actionId,
+        owner,
+        runId,
+        '62ab0000-0000-4000-8000-0000000000a4',
+        CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      ],
+    })
+
+    expect(await readWilburStorageEnvelope(owner)).toMatchObject({
+      action_rows: 1,
+      observation_rows: 0,
+      event_rows: 0,
+      ledger_rows: 0,
+      pending_future_rows: 0,
+      durableRows: 1,
+      totalRows: 1,
+    })
+
+    const concurrentClaims = [
+      {
+        idempotencyKey: '62ab0000-0000-4000-8000-0000000000b1',
+        requestDigest: '2'.repeat(64),
+      },
+      {
+        idempotencyKey: '62ab0000-0000-4000-8000-0000000000b2',
+        requestDigest: '3'.repeat(64),
+      },
+    ] as const
+    const results = await Promise.allSettled(concurrentClaims.map((claim) =>
+      repository.claimWilburMutation({
+        ownerId: owner,
+        gameId,
+        actionId,
+        operation: 'update_action',
+        rateKind: 'action',
+        reservedFutureRows: 1,
+        reservedTextBytes: 0,
+        storageRowLimit: 3,
+        storageTextBytesLimit: 250_000,
+        ...claim,
+      })))
+    const acceptedIndex = results.findIndex((result) => result.status === 'fulfilled')
+    const rejected = results.find((result) => result.status === 'rejected')
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1)
+    expect(results[acceptedIndex]).toMatchObject({
+      status: 'fulfilled',
+      value: { kind: 'pending' },
+    })
+    expect(rejected).toMatchObject({
+      status: 'rejected',
+      reason: { code: 'storage-limit' },
+    })
+    const accepted = concurrentClaims[acceptedIndex]!
+    expect(await readWilburStorageEnvelope(owner)).toMatchObject({
+      action_rows: 1,
+      event_rows: 0,
+      ledger_rows: 1,
+      pending_future_rows: 1,
+      durableRows: 2,
+      totalRows: 3,
+    })
+
+    await expect(repository.claimWilburMutation({
+      ownerId: owner,
+      gameId: gameId.toUpperCase(),
+      actionId: actionId.toUpperCase(),
+      idempotencyKey: accepted.idempotencyKey.toUpperCase(),
+      operation: 'update_action',
+      requestDigest: accepted.requestDigest,
+      rateKind: 'action',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+      storageRowLimit: 1,
+      storageTextBytesLimit: 1,
+    })).resolves.toEqual({ kind: 'pending' })
+    await expect(repository.claimWilburMutation({
+      ownerId: owner,
+      gameId,
+      actionId: '62ab0000-0000-4000-8000-0000000000ff',
+      idempotencyKey: accepted.idempotencyKey,
+      operation: 'update_action',
+      requestDigest: accepted.requestDigest,
+      rateKind: 'action',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+      storageRowLimit: 3,
+      storageTextBytesLimit: 250_000,
+    })).rejects.toMatchObject({ code: 'conflict' })
+    await expect(repository.claimWilburMutation({
+      ownerId: owner,
+      gameId,
+      actionId,
+      idempotencyKey: accepted.idempotencyKey,
+      operation: 'update_action',
+      requestDigest: accepted.requestDigest,
+      rateKind: 'observation',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+      storageRowLimit: 3,
+      storageTextBytesLimit: 250_000,
+    })).rejects.toMatchObject({ code: 'invalid-input' })
+    await expect(repository.claimWilburMutation({
+      ownerId: owner,
+      gameId,
+      actionId,
+      idempotencyKey: accepted.idempotencyKey,
+      operation: 'update_action',
+      requestDigest: accepted.requestDigest,
+      rateKind: 'action',
+      reservedFutureRows: 2,
+      reservedTextBytes: 0,
+      storageRowLimit: 3,
+      storageTextBytesLimit: 250_000,
+    })).rejects.toMatchObject({ code: 'invalid-input' })
+
+    await database.adapter.query({
+      text: `
+        UPDATE wilbur_mutation_requests
+        SET rate_admitted_at = now(), updated_at = now()
+        WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+      `,
+      values: [owner, accepted.idempotencyKey],
+    })
+    const updated = await repository.updateWilburAction({
+      ownerId: owner,
+      gameId: gameId.toUpperCase(),
+      actionId: actionId.toUpperCase(),
+      idempotencyKey: accepted.idempotencyKey.toUpperCase(),
+      requestDigest: accepted.requestDigest,
+      expectedRevision: 0,
+      status: 'in_progress',
+      configurationDigest: 'a'.repeat(64),
+    })
+    expect(updated).toMatchObject({ status: 'in_progress', revision: 1 })
+    expect(await readWilburStorageEnvelope(owner)).toMatchObject({
+      action_rows: 1,
+      event_rows: 1,
+      ledger_rows: 1,
+      pending_future_rows: 0,
+      durableRows: 3,
+      totalRows: 3,
+    })
+    await expect(repository.claimWilburMutation({
+      ownerId: owner,
+      gameId,
+      actionId,
+      idempotencyKey: accepted.idempotencyKey,
+      operation: 'update_action',
+      requestDigest: accepted.requestDigest,
+      rateKind: 'action',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+      storageRowLimit: 1,
+      storageTextBytesLimit: 1,
+    })).resolves.toEqual({ kind: 'committed', action: updated })
+    await expect(repository.claimWilburMutation({
+      ownerId: owner,
+      gameId,
+      actionId,
+      idempotencyKey: '62ab0000-0000-4000-8000-0000000000c1',
+      operation: 'update_action',
+      requestDigest: '4'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+      storageRowLimit: 3,
+      storageTextBytesLimit: 250_000,
+    })).rejects.toMatchObject({ code: 'storage-limit' })
+
+    const staleClaims = [
+      ['62ab0000-0000-4000-8000-0000000000d1', '5'.repeat(64)],
+      ['62ab0000-0000-4000-8000-0000000000d2', '6'.repeat(64)],
+    ] as const
+    for (const [idempotencyKey, requestDigest] of staleClaims) {
+      await expect(repository.claimWilburMutation({
+        ownerId: owner,
+        gameId,
+        actionId,
+        idempotencyKey,
+        operation: 'update_action',
+        requestDigest,
+        rateKind: 'action',
+        reservedFutureRows: 1,
+        reservedTextBytes: 0,
+        storageRowLimit: 6,
+        storageTextBytesLimit: 250_000,
+      })).resolves.toEqual({ kind: 'pending' })
+      expect((await readWilburStorageEnvelope(owner)).totalRows).toBeLessThanOrEqual(6)
+      await database.adapter.query({
+        text: `
+          UPDATE wilbur_mutation_requests
+          SET rate_admitted_at = now(), updated_at = now()
+          WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+        `,
+        values: [owner, idempotencyKey],
+      })
+      await expect(repository.updateWilburAction({
+        ownerId: owner,
+        gameId,
+        actionId,
+        idempotencyKey,
+        requestDigest,
+        expectedRevision: 0,
+        status: 'completed',
+        configurationDigest: 'b'.repeat(64),
+      })).rejects.toMatchObject({ code: 'conflict' })
+      await repository.settleWilburMutationConflict({
+        ownerId: owner,
+        gameId,
+        actionId,
+        idempotencyKey,
+        operation: 'update_action',
+        requestDigest,
+        rateKind: 'action',
+        reservedFutureRows: 1,
+        reservedTextBytes: 0,
+      })
+      expect((await readWilburStorageEnvelope(owner)).totalRows).toBeLessThanOrEqual(6)
+    }
+    await expect(repository.claimWilburMutation({
+      ownerId: owner,
+      gameId,
+      actionId,
+      idempotencyKey: '62ab0000-0000-4000-8000-0000000000d3',
+      operation: 'update_action',
+      requestDigest: '7'.repeat(64),
+      rateKind: 'action',
+      reservedFutureRows: 1,
+      reservedTextBytes: 0,
+      storageRowLimit: 6,
+      storageTextBytesLimit: 250_000,
+    })).rejects.toMatchObject({ code: 'storage-limit' })
+    expect(await readWilburStorageEnvelope(owner)).toMatchObject({
+      action_rows: 1,
+      observation_rows: 0,
+      event_rows: 1,
+      ledger_rows: 3,
+      pending_future_rows: 0,
+      durableRows: 5,
+      totalRows: 5,
+    })
+    const ledgerStatuses = await database.adapter.query<{
+      status: string
+      row_count: number
+    }>({
+      text: `
+        SELECT status, count(*)::integer AS row_count
+        FROM wilbur_mutation_requests
+        WHERE clerk_user_id = $1::text
+        GROUP BY status
+        ORDER BY status
+      `,
+      values: [owner],
+    })
+    expect(ledgerStatuses.rows).toEqual([
+      { status: 'committed', row_count: 1 },
+      { status: 'denied', row_count: 2 },
+    ])
   })
 
   it('preserves bounded Retry counters across a complete root lineage', async () => {

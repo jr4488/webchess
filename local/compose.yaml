@@ -1,0 +1,33 @@
+# Equivalent loopback PostgreSQL 17 container used by `npm run local:setup`.
+# The launcher uses `docker run` with these settings so it works without the
+# Docker Compose v2 plugin. Bind is loopback-only; do not publish this port
+# on a LAN interface.
+name: webchess-local
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    container_name: webchess-local-postgres
+    labels:
+      com.anansiportia.webchess.local-postgres: managed-v1
+      com.anansiportia.webchess.local-postgres-volume-binding: managed-v1
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: webchess
+      POSTGRES_USER: webchess
+      POSTGRES_PASSWORD: ${WEBCHESS_LOCAL_POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:55433:5432"
+    volumes:
+      - webchess_local_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username=webchess --dbname=webchess"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  webchess_local_pgdata:
+    name: webchess_local_pgdata
+    labels:
+      com.anansiportia.webchess.local-postgres-volume: managed-v1

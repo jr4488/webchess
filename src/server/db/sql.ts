@@ -2,6 +2,9 @@ import 'server-only'
 
 import { neon } from '@neondatabase/serverless'
 
+import { shouldUseLocalPostgresWireProtocol } from './adapter-kind'
+import { createPostgresSqlAdapter } from './postgres'
+
 export type SqlRow = Record<string, unknown>
 
 export interface SqlStatement {
@@ -129,10 +132,14 @@ export function getDatabase(): SqlAdapter {
   const connectionString = process.env.DATABASE_URL
   if (!connectionString) {
     throw new Error(
-      'DATABASE_URL is not configured. Provision Neon for this environment before using durable WebChess routes.',
+      'DATABASE_URL is not configured. Provision PostgreSQL for this environment before using durable WebChess routes.',
     )
   }
 
-  cachedDatabase = createNeonSqlAdapter(connectionString)
+  cachedDatabase = shouldUseLocalPostgresWireProtocol(connectionString)
+    ? createPostgresSqlAdapter(connectionString, {
+        applicationName: 'webchess-local-v2',
+      })
+    : createNeonSqlAdapter(connectionString)
   return cachedDatabase
 }

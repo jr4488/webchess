@@ -12,7 +12,12 @@ function archiveUrl(): string | null {
     return `${REPOSITORY_ARCHIVE_ROOT}/${commit}.zip`
   }
 
-  if (process.env.VERCEL !== undefined || process.env.VERCEL_ENV !== undefined) {
+  if (
+    process.env.VERCEL !== undefined ||
+    process.env.VERCEL_ENV !== undefined ||
+    process.env.VERCEL_TARGET_ENV !== undefined ||
+    process.env.VERCEL_URL !== undefined
+  ) {
     return null
   }
 

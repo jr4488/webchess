@@ -147,7 +147,7 @@ beforeEach(() => {
   )
 })
 
-describe('OpenClaw WebChess 2.1 model generation', () => {
+describe('OpenClaw WebChess 2.2 model generation', () => {
   it('generates both initial and repair divisions through the structured contract', async () => {
     harness.runOpenClawModel.mockResolvedValue(modelResult({ facets: validFacets() }))
 

@@ -1,10 +1,8 @@
 import { createHash } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
 
-const MIGRATION_FILENAME_PATTERN =
-  /^(\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*)\.sql$/
-const MIGRATION_ID_PATTERN =
-  /^\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*$/
+const MIGRATION_FILENAME_PATTERN = /^(\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*)\.sql$/
+const MIGRATION_ID_PATTERN = /^\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*$/
 const MIGRATION_CHECKSUM_PATTERN = /^[0-9a-f]{64}$/
 const MIGRATION_LOCK_KEY = '8120371142281'
 const DEFAULT_MIGRATION_DIRECTORY = new URL(
@@ -54,6 +52,7 @@ const INSPECT_MIGRATION_LEDGER_SQL = `
           'charlotte_results',
           'wilbur_actions',
           'wilbur_observations',
+          'wilbur_mutation_requests',
           'lifecycle_events',
           'research_requests',
           'research_sources'
@@ -71,12 +70,7 @@ const RUNTIME_TABLE_PRIVILEGES = [
   'TRIGGER',
 ]
 
-const RUNTIME_COLUMN_PRIVILEGES = [
-  'SELECT',
-  'INSERT',
-  'UPDATE',
-  'REFERENCES',
-]
+const RUNTIME_COLUMN_PRIVILEGES = ['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']
 
 const RUNTIME_TABLE_PRIVILEGE_CONTRACT = {
   webchess_schema_migrations: ['SELECT'],
@@ -93,11 +87,30 @@ const RUNTIME_TABLE_PRIVILEGE_CONTRACT = {
   portia_reviews: ['SELECT', 'INSERT'],
   gate_decisions: ['SELECT', 'INSERT'],
   charlotte_results: ['SELECT', 'INSERT'],
-  wilbur_actions: ['SELECT', 'INSERT', 'UPDATE'],
+  wilbur_actions: ['SELECT', 'INSERT'],
   wilbur_observations: ['SELECT', 'INSERT'],
+  wilbur_mutation_requests: ['SELECT', 'INSERT'],
   lifecycle_events: ['SELECT', 'INSERT'],
   research_requests: ['SELECT', 'INSERT', 'UPDATE'],
   research_sources: ['SELECT', 'INSERT'],
+}
+
+const RUNTIME_COLUMN_UPDATE_CONTRACT = {
+  gate_decisions: new Set(['answer_user_prompt', 'answer_user_prompt_sha256']),
+  wilbur_actions: new Set(['status', 'revision', 'updated_at']),
+  wilbur_mutation_requests: new Set([
+    'rate_admitted_at',
+    'denial_code',
+    'retry_at',
+    'reserved_future_rows',
+    'reserved_text_bytes',
+    'status',
+    'result_entity_id',
+    'result_revision',
+    'result_status',
+    'result_updated_at',
+    'updated_at',
+  ]),
 }
 
 const RUNTIME_COLUMN_CONTRACT = {
@@ -335,6 +348,7 @@ const RUNTIME_COLUMN_CONTRACT = {
     ['record_version', 'text', true],
     ['created_at', 'timestamp with time zone', true],
     ['updated_at', 'timestamp with time zone', true],
+    ['charlotte_binding_version', 'text', false],
   ],
   wilbur_observations: [
     ['id', 'uuid', true],
@@ -352,6 +366,27 @@ const RUNTIME_COLUMN_CONTRACT = {
     ['next_decision', 'text', true],
     ['record_version', 'text', true],
     ['created_at', 'timestamp with time zone', true],
+  ],
+  wilbur_mutation_requests: [
+    ['clerk_user_id', 'text', true],
+    ['idempotency_key', 'uuid', true],
+    ['operation', 'text', true],
+    ['request_digest', 'character(64)', true],
+    ['target_game_id', 'uuid', true],
+    ['target_action_id', 'uuid', false],
+    ['rate_kind', 'text', true],
+    ['rate_admitted_at', 'timestamp with time zone', false],
+    ['denial_code', 'text', false],
+    ['retry_at', 'timestamp with time zone', false],
+    ['reserved_future_rows', 'smallint', true],
+    ['reserved_text_bytes', 'bigint', true],
+    ['status', 'text', true],
+    ['result_entity_id', 'uuid', false],
+    ['result_revision', 'bigint', false],
+    ['result_status', 'text', false],
+    ['result_updated_at', 'timestamp with time zone', false],
+    ['created_at', 'timestamp with time zone', true],
+    ['updated_at', 'timestamp with time zone', true],
   ],
   lifecycle_events: [
     ['id', 'uuid', true],
@@ -427,12 +462,10 @@ const RUNTIME_INDEX_CONTRACT = [
     predicate: 'is_current',
   },
   {
-    index_name:
-      'model_requests_one_succeeded_operation_per_game',
+    index_name: 'model_requests_one_succeeded_operation_per_game',
     table_name: 'model_requests',
     key_columns: 'game_id,operation',
-    predicate:
-      "((game_id IS NOT NULL) AND (status = 'succeeded'::text))",
+    predicate: "((game_id IS NOT NULL) AND (status = 'succeeded'::text))",
   },
   {
     index_name: 'lifecycle_runs_game_id_key',
@@ -441,15 +474,26 @@ const RUNTIME_INDEX_CONTRACT = [
     predicate: null,
   },
   {
-    index_name:
-      'research_requests_game_id_stage_policy_version_key',
+    index_name: 'wilbur_actions_one_per_charlotte_suggestion',
+    table_name: 'wilbur_actions',
+    key_columns: 'lifecycle_run_id,charlotte_action_index',
+    predicate:
+      "(charlotte_binding_version = 'webchess-charlotte-action-binding-v1'::text)",
+  },
+  {
+    index_name: 'wilbur_mutation_requests_pkey',
+    table_name: 'wilbur_mutation_requests',
+    key_columns: 'clerk_user_id,idempotency_key',
+    predicate: null,
+  },
+  {
+    index_name: 'research_requests_game_id_stage_policy_version_key',
     table_name: 'research_requests',
     key_columns: 'game_id,stage,policy_version',
     predicate: null,
   },
   {
-    index_name:
-      'research_sources_research_request_id_ordinal_key',
+    index_name: 'research_sources_research_request_id_ordinal_key',
     table_name: 'research_sources',
     key_columns: 'research_request_id,ordinal',
     predicate: null,
@@ -459,6 +503,413 @@ const RUNTIME_INDEX_CONTRACT = [
     table_name: 'research_sources',
     key_columns: 'research_request_id,url',
     predicate: null,
+  },
+]
+
+const normalizeFunctionSource = (source) => source.trim().replace(/\s+/gu, ' ')
+
+const WILBUR_CHARLOTTE_BINDING_FUNCTION_SOURCE = normalizeFunctionSource(`
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.charlotte_action_index IS NULL THEN
+          RAISE EXCEPTION
+            'Current Wilbur actions require a Charlotte action index.'
+            USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.charlotte_binding_version IS NULL THEN
+          NEW.charlotte_binding_version :=
+            'webchess-charlotte-action-binding-v1';
+        ELSIF NEW.charlotte_binding_version <>
+          'webchess-charlotte-action-binding-v1' THEN
+          RAISE EXCEPTION
+            'Unsupported Wilbur Charlotte binding version.'
+            USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.status <> 'planned' OR NEW.revision <> 0 THEN
+          RAISE EXCEPTION
+            'A current Wilbur action must begin planned at revision zero.'
+            USING ERRCODE = '23514';
+        END IF;
+
+        RETURN NEW;
+      END IF;
+
+      IF
+        NEW.id IS DISTINCT FROM OLD.id
+        OR NEW.clerk_user_id IS DISTINCT FROM OLD.clerk_user_id
+        OR NEW.lifecycle_run_id IS DISTINCT FROM OLD.lifecycle_run_id
+        OR NEW.charlotte_action_index IS DISTINCT FROM
+          OLD.charlotte_action_index
+        OR NEW.charlotte_binding_version IS DISTINCT FROM
+          OLD.charlotte_binding_version
+        OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
+        OR NEW.request_digest IS DISTINCT FROM OLD.request_digest
+        OR NEW.actor IS DISTINCT FROM OLD.actor
+        OR NEW.action IS DISTINCT FROM OLD.action
+        OR NEW.tested_assumption IS DISTINCT FROM OLD.tested_assumption
+        OR NEW.expected_observation IS DISTINCT FROM
+          OLD.expected_observation
+        OR NEW.decision_threshold IS DISTINCT FROM
+          OLD.decision_threshold
+        OR NEW.review_horizon IS DISTINCT FROM OLD.review_horizon
+        OR NEW.record_version IS DISTINCT FROM OLD.record_version
+        OR NEW.created_at IS DISTINCT FROM OLD.created_at
+      THEN
+        RAISE EXCEPTION
+          'A Wilbur action can only change status, revision, and updated_at.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      IF NEW.revision <> OLD.revision + 1 THEN
+        RAISE EXCEPTION
+          'A Wilbur action status update must advance revision by one.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      IF NEW.updated_at < OLD.updated_at THEN
+        RAISE EXCEPTION
+          'A Wilbur action update timestamp cannot move backward.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      RETURN NEW;
+    END
+  `)
+
+const WILBUR_MUTATION_REQUEST_FUNCTION_SOURCE = normalizeFunctionSource(`
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.status <> 'pending' OR NEW.rate_admitted_at IS NOT NULL THEN
+          RAISE EXCEPTION
+            'A Wilbur mutation request must begin pending and unadmitted.'
+            USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+      END IF;
+
+      IF
+        NEW.clerk_user_id IS DISTINCT FROM OLD.clerk_user_id
+        OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
+        OR NEW.operation IS DISTINCT FROM OLD.operation
+        OR NEW.request_digest IS DISTINCT FROM OLD.request_digest
+        OR NEW.target_game_id IS DISTINCT FROM OLD.target_game_id
+        OR NEW.target_action_id IS DISTINCT FROM OLD.target_action_id
+        OR NEW.rate_kind IS DISTINCT FROM OLD.rate_kind
+        OR NEW.created_at IS DISTINCT FROM OLD.created_at
+      THEN
+        RAISE EXCEPTION
+          'A Wilbur mutation request cannot change its durable identity.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      IF OLD.status <> 'pending' THEN
+        RAISE EXCEPTION
+          'A terminal Wilbur mutation request is immutable.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      IF
+        NEW.status = 'pending'
+        AND (
+          NEW.reserved_future_rows IS DISTINCT FROM
+            OLD.reserved_future_rows
+          OR NEW.reserved_text_bytes IS DISTINCT FROM
+            OLD.reserved_text_bytes
+        )
+      THEN
+        RAISE EXCEPTION
+          'A pending Wilbur mutation reservation is immutable.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      IF NEW.updated_at < OLD.updated_at THEN
+        RAISE EXCEPTION
+          'A Wilbur mutation update timestamp cannot move backward.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      IF
+        OLD.rate_admitted_at IS NOT NULL
+        AND NEW.rate_admitted_at IS DISTINCT FROM OLD.rate_admitted_at
+      THEN
+        RAISE EXCEPTION
+          'A Wilbur mutation admission timestamp is immutable.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      IF
+        OLD.rate_admitted_at IS NULL
+        AND NEW.rate_admitted_at IS NOT NULL
+        AND NEW.status <> 'pending'
+      THEN
+        RAISE EXCEPTION
+          'Wilbur admission must be recorded before terminal settlement.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      IF NEW.status = 'committed' AND OLD.rate_admitted_at IS NULL THEN
+        RAISE EXCEPTION
+          'A Wilbur mutation must be admitted before it can commit.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      RETURN NEW;
+    END
+  `)
+
+const RUNTIME_TRIGGER_CONTRACT = [
+  {
+    table_name: 'wilbur_actions',
+    trigger_name: 'wilbur_actions_charlotte_binding_guard',
+    function_name: 'webchess_guard_wilbur_charlotte_binding',
+    function_source: WILBUR_CHARLOTTE_BINDING_FUNCTION_SOURCE,
+    function_config: 'search_path=pg_catalog, pg_temp',
+    security_definer: false,
+    leakproof: false,
+    function_owner_isolated: true,
+    volatility: 'v',
+    parallel_mode: 'u',
+    enabled_mode: 'O',
+    trigger_type: 23,
+    has_when_clause: false,
+    update_columns: '',
+    argument_count: 0,
+    argument_bytes: 0,
+    constraint_trigger: false,
+    trigger_deferrable: false,
+    initially_deferred: false,
+    parent_trigger: false,
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    trigger_name: 'wilbur_mutation_requests_state_guard',
+    function_name: 'webchess_guard_wilbur_mutation_request',
+    function_source: WILBUR_MUTATION_REQUEST_FUNCTION_SOURCE,
+    function_config: 'search_path=pg_catalog, pg_temp',
+    security_definer: false,
+    leakproof: false,
+    function_owner_isolated: true,
+    volatility: 'v',
+    parallel_mode: 'u',
+    enabled_mode: 'O',
+    trigger_type: 23,
+    has_when_clause: false,
+    update_columns: '',
+    argument_count: 0,
+    argument_bytes: 0,
+    constraint_trigger: false,
+    trigger_deferrable: false,
+    initially_deferred: false,
+    parent_trigger: false,
+  },
+]
+
+const RUNTIME_CONSTRAINT_CONTRACT = [
+  {
+    table_name: 'wilbur_actions',
+    constraint_name: 'wilbur_actions_charlotte_binding_version_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (charlotte_binding_version IS NULL OR charlotte_binding_version = 'webchess-charlotte-action-binding-v1'::text)",
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_clerk_user_id_fkey',
+    constraint_type: 'f',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      'FOREIGN KEY (clerk_user_id) REFERENCES user_controls(clerk_user_id) ON DELETE CASCADE',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_denial_code_length',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      'CHECK (char_length(denial_code) >= 1 AND char_length(denial_code) <= 120)',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_operation_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (operation = ANY (ARRAY['create_action'::text, 'update_action'::text, 'append_observation'::text]))",
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_pkey',
+    constraint_type: 'p',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition: 'PRIMARY KEY (clerk_user_id, idempotency_key)',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_rate_kind_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (rate_kind = ANY (ARRAY['action'::text, 'observation'::text]))",
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_rate_shape',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK ((operation = ANY (ARRAY['create_action'::text, 'update_action'::text])) AND rate_kind = 'action'::text OR operation = 'append_observation'::text AND rate_kind = 'observation'::text)",
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_request_digest_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition: "CHECK (request_digest ~ '^[0-9a-f]{64}$'::text)",
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_reservation_shape',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (status = 'denied'::text AND reserved_future_rows = 0 AND reserved_text_bytes = 0 OR status = 'committed'::text AND reserved_future_rows = 0 AND reserved_text_bytes = 0 OR status = 'pending'::text AND operation = 'update_action'::text AND reserved_future_rows = 1 AND reserved_text_bytes = 0 OR status = 'pending'::text AND (operation = ANY (ARRAY['create_action'::text, 'append_observation'::text])) AND reserved_future_rows = 2 AND reserved_text_bytes > 0)",
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_reserved_bytes_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition: 'CHECK (reserved_text_bytes >= 0)',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_reserved_rows_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      'CHECK (reserved_future_rows >= 0 AND reserved_future_rows <= 2)',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_result_revision_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition: 'CHECK (result_revision >= 0)',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_result_status_length',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (result_status IS NULL OR (result_status = ANY (ARRAY['planned'::text, 'in_progress'::text, 'completed'::text, 'abandoned'::text, 'inconclusive'::text])))",
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_state_shape',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (status = 'pending'::text AND denial_code IS NULL AND retry_at IS NULL AND result_entity_id IS NULL AND result_revision IS NULL AND result_status IS NULL AND result_updated_at IS NULL OR status = 'denied'::text AND denial_code IS NOT NULL AND result_entity_id IS NULL AND result_revision IS NULL AND result_status IS NULL AND result_updated_at IS NULL OR status = 'committed'::text AND rate_admitted_at IS NOT NULL AND denial_code IS NULL AND retry_at IS NULL AND result_entity_id IS NOT NULL AND ((operation = ANY (ARRAY['create_action'::text, 'update_action'::text])) AND result_revision IS NOT NULL AND result_status IS NOT NULL AND result_updated_at IS NOT NULL OR operation = 'append_observation'::text AND result_revision IS NULL AND result_status IS NULL AND result_updated_at IS NULL))",
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_status_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (status = ANY (ARRAY['pending'::text, 'committed'::text, 'denied'::text]))",
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_target_action_id_fkey',
+    constraint_type: 'f',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      'FOREIGN KEY (target_action_id) REFERENCES wilbur_actions(id) ON DELETE CASCADE',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_target_game_id_fkey',
+    constraint_type: 'f',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      'FOREIGN KEY (target_game_id) REFERENCES games(id) ON DELETE CASCADE',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    constraint_name: 'wilbur_mutation_requests_target_shape',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (operation = 'create_action'::text AND target_action_id IS NULL OR (operation = ANY (ARRAY['update_action'::text, 'append_observation'::text])) AND target_action_id IS NOT NULL)",
+  },
+]
+
+const RUNTIME_DEFAULT_CONTRACT = [
+  {
+    table_name: 'wilbur_mutation_requests',
+    column_name: 'reserved_future_rows',
+    definition: '0',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    column_name: 'reserved_text_bytes',
+    definition: '0',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    column_name: 'status',
+    definition: "'pending'::text",
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    column_name: 'created_at',
+    definition: 'now()',
+  },
+  {
+    table_name: 'wilbur_mutation_requests',
+    column_name: 'updated_at',
+    definition: 'now()',
   },
 ]
 
@@ -494,14 +945,9 @@ const runtimeColumnPrivilegeContractRows = Object.entries(
       privilege,
       allowed:
         RUNTIME_TABLE_PRIVILEGE_CONTRACT[tableName].includes(privilege) ||
-        (
-          tableName === 'gate_decisions' &&
-          privilege === 'UPDATE' &&
-          (
-            columnName === 'answer_user_prompt' ||
-            columnName === 'answer_user_prompt_sha256'
-          )
-        ),
+        (privilege === 'UPDATE' &&
+          (RUNTIME_COLUMN_UPDATE_CONTRACT[tableName]?.has(columnName) ??
+            false)),
     })),
   ),
 )
@@ -663,6 +1109,164 @@ const RUNTIME_COMPATIBILITY_SQL = `
       ON active_schema.schema_name = namespace.nspname
     INNER JOIN expected_indexes AS expected
       ON expected.index_name = index_relation.relname
+  ),
+  expected_triggers AS (
+    SELECT *
+    FROM jsonb_to_recordset($5::jsonb) AS expected (
+      table_name text,
+      trigger_name text,
+      function_name text,
+      function_source text,
+      function_config text,
+      security_definer boolean,
+      leakproof boolean,
+      function_owner_isolated boolean,
+      volatility text,
+      parallel_mode text,
+      enabled_mode text,
+      trigger_type integer,
+      has_when_clause boolean,
+      update_columns text,
+      argument_count integer,
+      argument_bytes integer,
+      constraint_trigger boolean,
+      trigger_deferrable boolean,
+      initially_deferred boolean,
+      parent_trigger boolean
+    )
+  ),
+  actual_triggers AS (
+    SELECT
+      table_relation.relname AS table_name,
+      trigger_catalog.tgname AS trigger_name,
+      procedure_namespace.nspname AS function_schema,
+      procedure_catalog.proname AS function_name,
+      trigger_catalog.tgenabled::text AS enabled_mode,
+      trigger_catalog.tgtype::integer AS trigger_type,
+      trigger_catalog.tgqual IS NOT NULL AS has_when_clause,
+      trigger_catalog.tgattr::text AS update_columns,
+      trigger_catalog.tgnargs::integer AS argument_count,
+      pg_catalog.octet_length(trigger_catalog.tgargs) AS argument_bytes,
+      trigger_catalog.tgconstraint <> 0::oid AS constraint_trigger,
+      trigger_catalog.tgdeferrable AS trigger_deferrable,
+      trigger_catalog.tginitdeferred AS initially_deferred,
+      trigger_catalog.tgparentid <> 0::oid AS parent_trigger,
+      procedure_catalog.prorettype = 'pg_catalog.trigger'::regtype
+        AS returns_trigger,
+      language_catalog.lanname AS language_name,
+      coalesce(
+        pg_catalog.array_to_string(procedure_catalog.proconfig, E'\n'),
+        ''
+      ) AS function_config,
+      procedure_catalog.prosecdef AS security_definer,
+      procedure_catalog.proleakproof AS leakproof,
+      NOT pg_catalog.pg_has_role(
+        current_user,
+        procedure_catalog.proowner,
+        'MEMBER'
+      ) AS function_owner_isolated,
+      procedure_catalog.provolatile::text AS volatility,
+      procedure_catalog.proparallel::text AS parallel_mode,
+      pg_catalog.btrim(
+        pg_catalog.regexp_replace(
+          procedure_catalog.prosrc,
+          '[[:space:]]+',
+          ' ',
+          'g'
+        )
+      ) AS function_source
+    FROM pg_catalog.pg_trigger AS trigger_catalog
+    INNER JOIN pg_catalog.pg_class AS table_relation
+      ON table_relation.oid = trigger_catalog.tgrelid
+    INNER JOIN pg_catalog.pg_namespace AS table_namespace
+      ON table_namespace.oid = table_relation.relnamespace
+    INNER JOIN active_schema
+      ON active_schema.schema_name = table_namespace.nspname
+    INNER JOIN pg_catalog.pg_proc AS procedure_catalog
+      ON procedure_catalog.oid = trigger_catalog.tgfoid
+    INNER JOIN pg_catalog.pg_namespace AS procedure_namespace
+      ON procedure_namespace.oid = procedure_catalog.pronamespace
+    INNER JOIN pg_catalog.pg_language AS language_catalog
+      ON language_catalog.oid = procedure_catalog.prolang
+    WHERE NOT trigger_catalog.tgisinternal
+  ),
+  expected_constraints AS (
+    SELECT *
+    FROM jsonb_to_recordset($6::jsonb) AS expected (
+      table_name text,
+      constraint_name text,
+      constraint_type text,
+      validated boolean,
+      "deferrable" boolean,
+      initially_deferred boolean,
+      definition text
+    )
+  ),
+  actual_constraints AS (
+    SELECT
+      table_relation.relname AS table_name,
+      constraint_catalog.conname AS constraint_name,
+      constraint_catalog.contype::text AS constraint_type,
+      constraint_catalog.convalidated AS validated,
+      constraint_catalog.condeferrable AS "deferrable",
+      constraint_catalog.condeferred AS initially_deferred,
+      CASE
+        WHEN constraint_catalog.contype = 'f' THEN (
+          SELECT
+            count(*) = 4
+            AND pg_catalog.bool_and(
+              enforcement_trigger.tgisinternal
+              AND enforcement_trigger.tgenabled = 'O'
+            )
+          FROM pg_catalog.pg_trigger AS enforcement_trigger
+          WHERE enforcement_trigger.tgconstraint =
+            constraint_catalog.oid
+        )
+        ELSE true
+      END AS enforcement_ready,
+      pg_catalog.pg_get_constraintdef(
+        constraint_catalog.oid,
+        true
+      ) AS definition
+    FROM pg_catalog.pg_constraint AS constraint_catalog
+    INNER JOIN pg_catalog.pg_class AS table_relation
+      ON table_relation.oid = constraint_catalog.conrelid
+    INNER JOIN pg_catalog.pg_namespace AS table_namespace
+      ON table_namespace.oid = table_relation.relnamespace
+    INNER JOIN active_schema
+      ON active_schema.schema_name = table_namespace.nspname
+    WHERE table_relation.relname = 'wilbur_mutation_requests'
+      OR constraint_catalog.conname =
+        'wilbur_actions_charlotte_binding_version_valid'
+  ),
+  expected_defaults AS (
+    SELECT *
+    FROM jsonb_to_recordset($7::jsonb) AS expected (
+      table_name text,
+      column_name text,
+      definition text
+    )
+  ),
+  actual_defaults AS (
+    SELECT
+      table_relation.relname AS table_name,
+      attribute.attname AS column_name,
+      pg_catalog.pg_get_expr(
+        default_catalog.adbin,
+        default_catalog.adrelid,
+        true
+      ) AS definition
+    FROM pg_catalog.pg_attrdef AS default_catalog
+    INNER JOIN pg_catalog.pg_class AS table_relation
+      ON table_relation.oid = default_catalog.adrelid
+    INNER JOIN pg_catalog.pg_namespace AS table_namespace
+      ON table_namespace.oid = table_relation.relnamespace
+    INNER JOIN active_schema
+      ON active_schema.schema_name = table_namespace.nspname
+    INNER JOIN pg_catalog.pg_attribute AS attribute
+      ON attribute.attrelid = table_relation.oid
+      AND attribute.attnum = default_catalog.adnum
+    WHERE table_relation.relname = 'wilbur_mutation_requests'
   )
   SELECT
     active_schema.schema_name IS NOT NULL AS schema_resolved,
@@ -783,7 +1387,95 @@ const RUNTIME_COMPATIBILITY_SQL = `
         OR NOT actual.is_unique
         OR NOT actual.is_valid
         OR NOT actual.is_ready
-    ) AS indexes_exact
+    ) AS indexes_exact,
+    NOT EXISTS (
+      SELECT 1
+      FROM expected_triggers AS expected
+      LEFT JOIN actual_triggers AS actual
+        USING (table_name, trigger_name)
+      CROSS JOIN active_schema
+      WHERE actual.trigger_name IS NULL
+        OR actual.function_schema IS DISTINCT FROM
+          active_schema.schema_name
+        OR actual.function_name IS DISTINCT FROM expected.function_name
+        OR actual.enabled_mode IS DISTINCT FROM expected.enabled_mode
+        OR actual.trigger_type IS DISTINCT FROM expected.trigger_type
+        OR actual.has_when_clause IS DISTINCT FROM
+          expected.has_when_clause
+        OR actual.update_columns IS DISTINCT FROM expected.update_columns
+        OR actual.argument_count IS DISTINCT FROM expected.argument_count
+        OR actual.argument_bytes IS DISTINCT FROM expected.argument_bytes
+        OR actual.constraint_trigger IS DISTINCT FROM
+          expected.constraint_trigger
+        OR actual.trigger_deferrable IS DISTINCT FROM
+          expected.trigger_deferrable
+        OR actual.initially_deferred IS DISTINCT FROM
+          expected.initially_deferred
+        OR actual.parent_trigger IS DISTINCT FROM expected.parent_trigger
+        OR NOT actual.returns_trigger
+        OR actual.language_name IS DISTINCT FROM 'plpgsql'
+        OR actual.function_config IS DISTINCT FROM
+          expected.function_config
+        OR actual.security_definer IS DISTINCT FROM
+          expected.security_definer
+        OR actual.leakproof IS DISTINCT FROM expected.leakproof
+        OR actual.function_owner_isolated IS DISTINCT FROM
+          expected.function_owner_isolated
+        OR actual.volatility IS DISTINCT FROM expected.volatility
+        OR actual.parallel_mode IS DISTINCT FROM expected.parallel_mode
+        OR actual.function_source IS DISTINCT FROM
+          expected.function_source
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM actual_triggers AS actual
+      LEFT JOIN expected_triggers AS expected
+        USING (table_name, trigger_name)
+      WHERE expected.trigger_name IS NULL
+    ) AS triggers_exact,
+    NOT EXISTS (
+      (
+        SELECT table_name, constraint_name, constraint_type,
+          validated, "deferrable", initially_deferred, definition
+        FROM expected_constraints
+        EXCEPT
+        SELECT table_name, constraint_name, constraint_type,
+          validated, "deferrable", initially_deferred, definition
+        FROM actual_constraints
+      )
+      UNION ALL
+      (
+        SELECT table_name, constraint_name, constraint_type,
+          validated, "deferrable", initially_deferred, definition
+        FROM actual_constraints
+        EXCEPT
+        SELECT table_name, constraint_name, constraint_type,
+          validated, "deferrable", initially_deferred, definition
+        FROM expected_constraints
+      )
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM actual_constraints
+      WHERE NOT enforcement_ready
+    ) AS constraints_exact,
+    NOT EXISTS (
+      (
+        SELECT table_name, column_name, definition
+        FROM expected_defaults
+        EXCEPT
+        SELECT table_name, column_name, definition
+        FROM actual_defaults
+      )
+      UNION ALL
+      (
+        SELECT table_name, column_name, definition
+        FROM actual_defaults
+        EXCEPT
+        SELECT table_name, column_name, definition
+        FROM expected_defaults
+      )
+    ) AS defaults_exact
   FROM active_schema
 `
 
@@ -798,6 +1490,9 @@ const RUNTIME_COMPATIBILITY_FIELDS = [
   'column_privileges_exact',
   'owner_isolated',
   'indexes_exact',
+  'triggers_exact',
+  'constraints_exact',
+  'defaults_exact',
 ]
 
 const RUNTIME_COMPATIBILITY_FAILURES = [
@@ -837,6 +1532,21 @@ const RUNTIME_COMPATIBILITY_FAILURES = [
     'The runtime database critical index contract does not match this release.',
   ],
   [
+    'triggers_exact',
+    false,
+    'The runtime database trigger contract does not match this release.',
+  ],
+  [
+    'constraints_exact',
+    false,
+    'The runtime database critical constraint contract does not match this release.',
+  ],
+  [
+    'defaults_exact',
+    false,
+    'The runtime database critical default contract does not match this release.',
+  ],
+  [
     'owner_isolated',
     false,
     'The runtime role must not own or be able to assume ownership of application tables.',
@@ -873,9 +1583,7 @@ function compareAscii(left, right) {
 }
 
 function dollarQuoteAt(sql, offset) {
-  return sql
-    .slice(offset)
-    .match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0]
+  return sql.slice(offset).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0]
 }
 
 function splitTrustedSqlStatements(sql) {
@@ -1006,10 +1714,7 @@ function withoutLeadingComments(statement) {
   while (remaining.startsWith('--') || remaining.startsWith('/*')) {
     if (remaining.startsWith('--')) {
       const lineEnd = remaining.indexOf('\n')
-      remaining =
-        lineEnd === -1
-          ? ''
-          : remaining.slice(lineEnd + 1).trimStart()
+      remaining = lineEnd === -1 ? '' : remaining.slice(lineEnd + 1).trimStart()
       continue
     }
 
@@ -1034,7 +1739,7 @@ function withoutLeadingComments(statement) {
 const FORBIDDEN_TRANSACTION_STATEMENT =
   /^(?:BEGIN|START\s+TRANSACTION|COMMIT|END(?:\s+(?:WORK|TRANSACTION))?|ROLLBACK|ABORT|SAVEPOINT|RELEASE\s+SAVEPOINT|PREPARE\s+TRANSACTION|SET\s+TRANSACTION)\b/i
 const FORBIDDEN_NONTRANSACTIONAL_DDL =
-  /^(?:(?:CREATE|DROP)\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY|REINDEX\b[\s\S]*\bCONCURRENTLY\b|VACUUM\b)/i
+  /^(?:(?:CREATE|DROP)\s+(?:(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY|DATABASE\b|TABLESPACE\b)|ALTER\s+SYSTEM\b|REINDEX\b[\s\S]*\bCONCURRENTLY\b|VACUUM\b)/i
 
 export function validateCanonicalMigrations(migrations) {
   if (!Array.isArray(migrations) || migrations.length === 0) {
@@ -1149,10 +1854,7 @@ function parseMigrationLedger(rows) {
       )
     }
 
-    if (
-      previousId !== undefined &&
-      compareAscii(previousId, row.id) >= 0
-    ) {
+    if (previousId !== undefined && compareAscii(previousId, row.id) >= 0) {
       throw new DeploymentMigrationError(
         'The database migration ledger is not uniquely ordered.',
       )
@@ -1219,11 +1921,7 @@ export async function readCanonicalMigrationLedger(client) {
     const result = await client.query(READ_MIGRATIONS_SQL)
     return parseMigrationLedger(result.rows)
   } catch (error) {
-    if (
-      error &&
-      typeof error === 'object' &&
-      error.code === '42P01'
-    ) {
+    if (error && typeof error === 'object' && error.code === '42P01') {
       throw new DeploymentMigrationError(
         'The database migration ledger is missing.',
       )
@@ -1233,15 +1931,15 @@ export async function readCanonicalMigrationLedger(client) {
 }
 
 export async function assertRuntimeDatabaseCompatibility(client) {
-  const inspection = await client.query(
-    RUNTIME_COMPATIBILITY_SQL,
-    [
-      JSON.stringify(runtimeColumnContractRows),
-      JSON.stringify(runtimePrivilegeContractRows),
-      JSON.stringify(RUNTIME_INDEX_CONTRACT),
-      JSON.stringify(runtimeColumnPrivilegeContractRows),
-    ],
-  )
+  const inspection = await client.query(RUNTIME_COMPATIBILITY_SQL, [
+    JSON.stringify(runtimeColumnContractRows),
+    JSON.stringify(runtimePrivilegeContractRows),
+    JSON.stringify(RUNTIME_INDEX_CONTRACT),
+    JSON.stringify(runtimeColumnPrivilegeContractRows),
+    JSON.stringify(RUNTIME_TRIGGER_CONTRACT),
+    JSON.stringify(RUNTIME_CONSTRAINT_CONTRACT),
+    JSON.stringify(RUNTIME_DEFAULT_CONTRACT),
+  ])
   const row = inspection.rows?.[0]
 
   if (
@@ -1255,8 +1953,7 @@ export async function assertRuntimeDatabaseCompatibility(client) {
     )
   }
 
-  for (const [field, failedValue, message] of
-    RUNTIME_COMPATIBILITY_FAILURES) {
+  for (const [field, failedValue, message] of RUNTIME_COMPATIBILITY_FAILURES) {
     if (row[field] === failedValue) {
       throw new DeploymentMigrationError(message)
     }
@@ -1270,20 +1967,15 @@ export async function applyCanonicalMigrations(client, migrations) {
   try {
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
     transactionStarted = true
-    await client.query(
-      'SELECT pg_advisory_xact_lock($1::bigint)',
-      [MIGRATION_LOCK_KEY],
-    )
-    const inspection = await client.query(
-      INSPECT_MIGRATION_LEDGER_SQL,
-    )
+    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [
+      MIGRATION_LOCK_KEY,
+    ])
+    const inspection = await client.query(INSPECT_MIGRATION_LEDGER_SQL)
     const inspectionRow = inspection.rows?.[0]
     if (
       !inspectionRow ||
-      (
-        inspectionRow.migration_ledger !== null &&
-        typeof inspectionRow.migration_ledger !== 'string'
-      ) ||
+      (inspectionRow.migration_ledger !== null &&
+        typeof inspectionRow.migration_ledger !== 'string') ||
       typeof inspectionRow.has_webchess_objects !== 'boolean'
     ) {
       throw new DeploymentMigrationError(
@@ -1333,16 +2025,11 @@ export async function applyCanonicalMigrations(client, migrations) {
   }
 }
 
-export async function checkCanonicalMigrationsReadOnly(
-  client,
-  migrations,
-) {
+export async function checkCanonicalMigrationsReadOnly(client, migrations) {
   let transactionStarted = false
 
   try {
-    await client.query(
-      'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY',
-    )
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
     transactionStarted = true
     await assertRuntimeDatabaseCompatibility(client)
     const databaseRows = await readCanonicalMigrationLedger(client)

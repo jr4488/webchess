@@ -1,8 +1,14 @@
 # Installing and deploying WebChess
 
-This guide covers the installable local OpenClaw plugin, hosted-service
-development, and the approved Vercel architecture. It does not authorize
-production promotion, billing changes, secret disclosure, or DNS changes.
+This guide covers the installable local OpenClaw plugin, the loopback
+source-checkout runtime, hosted-service development, and the approved Vercel
+architecture. It does not claim that the hosted service is deployed, and it
+does not authorize production promotion, billing changes, secret disclosure,
+or DNS changes.
+
+The latest tagged package is `2.1.0`. This source tree and the archive examples
+below use the unreleased `2.2.0` candidate identity until verification and a new
+tag make it a published release.
 
 ## Install the local OpenClaw plugin
 
@@ -37,8 +43,10 @@ browser, and remains attached so Ctrl-C cleanly stops the local server.
 The database must be dedicated to this local WebChess installation; the
 launcher rejects non-PostgreSQL and non-loopback URLs. It applies the bundled
 canonical migrations before reporting readiness. `npm run verify:openclaw`
-checks the packaged plugin and UI path; `npm run test:integration` uses a
-disposable PostgreSQL 17 database to verify persistence.
+builds the plugin entry and exercises the application and UI checks; it does
+not itself install a packed archive or prove a real OpenClaw provider/database
+round trip. `npm run test:integration` requires `DATABASE_URL` to name a
+disposable PostgreSQL 17 database.
 
 Automatic research uses OpenClaw's configured Codex Search provider. The
 recommended 120-second OpenClaw search window sits inside WebChess's
@@ -62,13 +70,17 @@ npm ci
 npm run plugin:build
 npm run verify:openclaw
 npm pack
-openclaw plugins install npm-pack:./webchess-2.1.0.tgz
+openclaw plugins install npm-pack:./webchess-2.2.0.tgz
 ```
 
 OpenClaw installs production dependencies with lifecycle scripts disabled.
 The package therefore contains both the compiled plugin entry and the source
 needed by the bundled local Next.js application. Rebuild the archive after any
-source change. At launch, the plugin stages that bundled source in an
+source change. Before packing a release candidate, run `npm run plugin:build`,
+require `git diff --exit-code -- openclaw-plugin/dist`, and inspect
+`npm pack --dry-run`. Then install and smoke-test the exact produced archive;
+the source-checkout verification command is not a substitute for that managed-
+install test. At launch, the plugin stages that bundled source in an
 operating-system temporary working directory, links the managed installation's
 dependencies, and removes the directory when the foreground command exits.
 The temporary directory contains application code only; game history remains
@@ -101,6 +113,103 @@ and profiles on the same loopback installation see the same owner-scoped game,
 while another machine does not. Concurrent tabs use durable revision checks.
 The server recomputes the cast from its seed and replays the event log before
 accepting a saved position or running later lifecycle stages.
+
+## Local source-checkout development without OpenClaw
+
+This runs the hosted-service application architecture on one machine with the
+operator's server-side OpenAI key and a dedicated loopback PostgreSQL 17
+database. It does not install, launch, or call OpenClaw. Authentication is
+explicit:
+
+- with neither Clerk key, WebChess offers one signed installation-owned local
+  principal for this machine;
+- with a matching `pk_test_...` / `sk_test_...` pair, it uses Clerk development
+  identity; and
+- a partial pair or live Clerk credentials fail closed.
+
+Prerequisites:
+
+- Docker, with permission to run containers on loopback
+- Node.js 22.22.3 or later in the supported 22.x line, and npm 11.x
+- `OPENAI_API_KEY` in `.env` or `.env.local` (never a `NEXT_PUBLIC_*` variable)
+- optional Clerk development keys as a complete pair. If you use them, include
+  `http://localhost:3005` as an allowed origin.
+
+```bash
+npm ci
+npm run local:setup
+```
+
+The setup command:
+
+- writes `local/.env` with a generated PostgreSQL password;
+- writes `.env.development.local` with a loopback `DATABASE_URL` on
+  `127.0.0.1:55433`, separate `WEBCHESS_HMAC_SECRET`,
+  `WEBCHESS_DELETION_HMAC_SECRET`, and `WEBCHESS_LOCAL_SESSION_SECRET` values,
+  local development quotas (including 1,200/2,400 hourly
+  user/IP Wilbur actions and 600/1,200 observations), the `2.2.0-local`
+  candidate identity, and `WEBCHESS_OPENCLAW_ENABLED` unset;
+- starts PostgreSQL 17 in a Docker container bound only to IPv4 loopback; and
+- leaves `.env.local` untouched, preserves only supported secrets already in
+  the generated file, and removes unrelated settings from that generated file.
+
+To opt into Clerk, add both development keys to `.env.local`:
+
+```dotenv
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
+CLERK_SECRET_KEY=sk_test_...
+```
+
+Then start the app:
+
+```bash
+npm run local:dev
+```
+
+The command binds Next.js to `127.0.0.1:3005`, opens
+`http://localhost:3005/play` only after the application is ready, and uses the
+selected authentication mode for `/sign-in` and `/sign-up`. The launcher
+refuses an existing same-name PostgreSQL container unless its pinned image,
+loopback port, persistent volume, restart policy, and local credentials match.
+It never deletes or rewrites a mismatched container. Only the local launcher
+sets the activation flag that permits the first authenticated request to apply
+canonical migrations; ordinary development, hosted, and Vercel starts never
+take that path. Local initialization accepts a genuinely empty database or an
+exact-prefix WebChess ledger, and refuses a nonempty schema containing an
+unrelated relation rather than adopting it. Stop the app with Ctrl-C. Stop the
+database with `npm run local:down`; that keeps the named volume so games survive
+a restart.
+
+Containers created before the immutable WebChess ownership label was added are
+intentionally refused even when they use the expected name. To adopt the data
+without deleting it, first inspect and back up the named
+`webchess_local_pgdata` volume, then run:
+
+```bash
+docker stop webchess-local-postgres
+docker rm webchess-local-postgres
+npm run local:setup -- --adopt-volume
+```
+
+This removes and recreates only the container and explicitly reuses the named
+volume. Never run `docker volume rm` as part of this procedure.
+
+This path never reads `WEBCHESS_OPENCLAW_DATABASE_URL` and never invokes
+`openclaw infer`. Model calls use the same server-side OpenAI Platform key and
+`gpt-5.6-sol` model as the hosted service. Automatic OpenClaw research is not
+available here.
+
+Do not point the generated `.env.development.local` `DATABASE_URL` at Neon or
+production data. The signed local principal is a machine boundary, not human
+identity proof: browser profiles on the same computer share the same owner.
+Adding Clerk later creates a separate Clerk owner and does not merge or reassign
+local games. Preserve `.env.development.local` with the database backup because
+losing `WEBCHESS_LOCAL_SESSION_SECRET` makes the existing local owner's rows
+inaccessible. Signed-local mode provides the bounded synchronous export and
+sign-out but intentionally
+does not expose Clerk profile, passkey, or hosted account-deletion controls.
+In Clerk mode, the `user.deleted` webhook remains the durable hosted deletion
+barrier; configure it before treating identity deletion as complete.
 
 ## Hosted-service development and deployment
 
@@ -190,7 +299,10 @@ deletion removes game and accounting content but keeps a suspended
 identity deletion. The signed webhook performs forced cleanup: it stores only a
 stable HMAC deletion marker in `deleted_user_tombstones` while deleting the raw
 Clerk user ID and account content. This prevents a deleted identity from being
-re-created with fresh quotas. Do not consider deletion complete until that
+re-created with fresh quotas. The foreign-key-safe cleanup order is tested with
+games that contain Portia and Charlotte artifact rows. Shared IP rate windows
+and vendor backups are not synchronously erased; they expire under their own
+retention policies. Do not consider deletion complete until that
 signed webhook succeeds.
 
 ## 3. Configure Neon
@@ -237,9 +349,24 @@ The guarded command reads only `MIGRATION_DATABASE_URL`; it never falls back to
 the least-privileged `DATABASE_URL`. It takes a PostgreSQL advisory lock,
 applies canonical files in filename order in one transaction, and records the
 normalized SHA-256 of each file in `webchess_schema_migrations`. It refuses
-checksum drift, database migration IDs absent from the release, embedded
-transaction-control statements, and DDL that cannot run inside the outer
-transaction.
+checksum drift, a ledger that is not an exact prefix of the release, database
+migration IDs absent from the release, embedded transaction-control statements,
+and DDL that cannot run inside the outer transaction.
+
+Migration `0012_unique_wilbur_charlotte_actions` is upgrade-safe without a
+duplicate-data audit. It preserves every pre-`0012` action with a null
+`charlotte_binding_version`, including duplicate suggestion indexes. Its trigger
+stamps each new action with the current binding version before the partial
+unique constraint is checked, requires a Charlotte suggestion index, requires
+the action to start `planned` at revision zero, and makes its identity,
+canonical content, and binding immutable. A status update must advance revision
+by exactly one and cannot move `updated_at` backward. Migration
+`0013_wilbur_mutation_requests` adds the durable Wilbur mutation ledger; neither
+migration deletes or chooses among legacy rows. The `0013` state guard requires
+every claim to begin pending and unadmitted, freezes its owner/key/request/target
+identity and pending reservation, prevents `updated_at` from moving backward,
+requires admission to be recorded while still pending before commit, freezes the
+admission timestamp once set, and makes terminal claims immutable.
 
 Never place `MIGRATION_DATABASE_URL` in `.env.local`, a Vercel environment, CI
 logs, shell history, or repository settings.
@@ -257,10 +384,17 @@ runtime-role allowlist:
 - `SELECT`, `INSERT`, `UPDATE`, and `DELETE` on `user_controls`, `games`,
   `model_requests`, `game_start_requests`, `usage_buckets`, and
   `rate_buckets`;
-- `SELECT`, `INSERT`, and `UPDATE` on `lifecycle_runs` and `wilbur_actions`;
-  and
+- `SELECT`, `INSERT`, and `UPDATE` on `lifecycle_runs`;
+- `SELECT` and `INSERT` on `wilbur_actions`, plus column-scoped `UPDATE` only
+  on `status`, `revision`, and `updated_at`;
+- `SELECT` and `INSERT` on `wilbur_mutation_requests`, plus column-scoped
+  `UPDATE` only on `rate_admitted_at`, `denial_code`, `retry_at`,
+  `reserved_future_rows`, `reserved_text_bytes`, `status`, `result_entity_id`,
+  `result_revision`, `result_status`, `result_updated_at`, and `updated_at`;
 - `SELECT` and `INSERT` on `portia_reviews`, `gate_decisions`,
-  `charlotte_results`, `wilbur_observations`, and `lifecycle_events`.
+  `charlotte_results`, `wilbur_observations`, `lifecycle_events`, and
+  `research_sources`; and
+- `SELECT`, `INSERT`, and `UPDATE` on `research_requests`.
 
 Grant no sequence privileges. Remove any role membership that would let the
 runtime login assume an owner, and remove excess access inherited from another
@@ -284,15 +418,28 @@ That command opens a repeatable-read, read-only transaction and fails unless:
 
 - the migration ledger contains exactly the release's ordered IDs and
   checksums;
-- the application schema contains exactly the seventeen expected tables, with the
-  expected column names, types, and nullability;
-- `games_one_current_per_user` and
-  `model_requests_one_succeeded_operation_per_game` are valid, ready, unique
-  partial indexes with the expected predicates; and
+- the application schema contains exactly 19 application tables plus
+  `webchess_schema_migrations`—20 total—with the expected column names, types,
+  and nullability;
+- all eight contract indexes are valid, ready, and unique with their expected
+  columns and predicates: `games_one_current_per_user`,
+  `model_requests_one_succeeded_operation_per_game`,
+  `lifecycle_runs_game_id_key`,
+  `wilbur_actions_one_per_charlotte_suggestion`,
+  `wilbur_mutation_requests_pkey`,
+  `research_requests_game_id_stage_policy_version_key`,
+  `research_sources_research_request_id_ordinal_key`, and
+  `research_sources_research_request_id_url_key`; exactly two origin-enabled
+  `BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur trigger/function pairs—with no
+  `WHEN`, `UPDATE OF`, or trigger arguments—18 critical Wilbur constraints, and
+  all five `0013` defaults also match the release; unexpected noninternal
+  triggers, altered constraint validation/deferrability/parent shape, or
+  disabled foreign-key enforcement triggers fail; and
 - the connected runtime role has schema `USAGE` but not `CREATE`, has exactly
   the effective per-table privileges above, plus column-scoped `UPDATE` only
   on `gate_decisions.answer_user_prompt` and
-  `gate_decisions.answer_user_prompt_sha256`, owns none of the expected tables,
+  `gate_decisions.answer_user_prompt_sha256` and the three Wilbur action columns
+  and eleven mutation-ledger columns above, owns none of the expected tables,
   and cannot assume an owner role.
 
 The privilege check includes access obtained through membership or `PUBLIC`.
@@ -318,6 +465,14 @@ The migration creates:
 - `wilbur_actions`
 - `wilbur_observations`
 - `lifecycle_events`
+- `research_requests`
+- `research_sources`
+- `wilbur_mutation_requests`
+
+The canonical ledger contains 13 ordered migrations, from
+`0001_durable_webchess` through
+`0013_wilbur_mutation_requests`. The 19 application tables above plus the ledger
+table make 20 total schema tables.
 
 The owner command is idempotent for already-recorded, matching files. Once
 `0001_durable_webchess.sql` has been applied to the first durable database, its
@@ -388,11 +543,40 @@ WEBCHESS_HOURLY_GAME_MOVE_LIMIT=600
 WEBCHESS_HOURLY_IP_GAME_MOVE_LIMIT=1200
 WEBCHESS_HOURLY_ACCOUNT_EXPORT_LIMIT=2
 WEBCHESS_HOURLY_IP_ACCOUNT_EXPORT_LIMIT=10
+WEBCHESS_HOURLY_WILBUR_ACTION_LIMIT=120
+WEBCHESS_HOURLY_IP_WILBUR_ACTION_LIMIT=240
+WEBCHESS_HOURLY_WILBUR_OBSERVATION_LIMIT=60
+WEBCHESS_HOURLY_IP_WILBUR_OBSERVATION_LIMIT=120
 WEBCHESS_ACCOUNT_EXPORT_MAX_BYTES=3000000
+WEBCHESS_WILBUR_STORAGE_ROW_LIMIT=500
+WEBCHESS_WILBUR_STORAGE_TEXT_BYTES_LIMIT=250000
 WEBCHESS_CONCURRENT_MODEL_LIMIT=1
 WEBCHESS_GLOBAL_MODEL_CONCURRENT_LIMIT=4
 WEBCHESS_MODEL_LEASE_SECONDS=180
 ```
+
+The default Wilbur admission envelope is 500 total durable Wilbur rows and
+250,000 exact UTF-8 bytes across stored action/observation text. Rows include
+actions, observations, Wilbur lifecycle events, mutation-ledger rows, and
+pending reservations for future rows. A fresh claim adds its ledger row and
+reserves two future rows for create/observation (the artifact and event) or one
+for an update (the event). Commit atomically substitutes the real rows for that
+reservation; terminal ledger rows remain counted and release their future/text
+reservations. Let `B` be
+`WEBCHESS_ACCOUNT_EXPORT_MAX_BYTES`: the effective row maximum cannot exceed
+`max(1, floor(B / 5120))`, and the effective text maximum cannot exceed
+`max(1, floor(B / 12))`. Unset defaults are clamped to those caps; explicit
+Wilbur limits above them fail configuration validation.
+
+These are admission limits, not destructive retention limits. Existing rows,
+including a pre-`0013` account already over an envelope, remain preserved and
+readable; exact existing pending claims can finish by substituting their reserved
+capacity, and committed results remain replayable even if configuration is later
+lowered below usage. WebChess never deletes or rewrites history to regain
+capacity. A fresh status update still needs capacity for its ledger row and
+event. The envelope bounds Wilbur's contribution to a synchronous export but
+does not guarantee that an account with large games, model records, research,
+or provenance will fit in one export.
 
 Limits and expiring leases are enforced transactionally in Neon. The defaults
 permit 200 model operations per UTC day and four concurrent model requests
@@ -400,14 +584,45 @@ across the deployment, while each user remains limited to one concurrent
 request. A new division and a replay both consume the same daily game-start
 allowance and hourly per-user/IP game-start limits. Replay idempotency,
 source-state validation, field cloning, current-game activation, rate counts,
-and the daily debit commit in one atomic database transaction; WebChess never debits first
-and attempts to clone afterward. Move limits protect durable move routes.
-Account exports have separate hourly user/IP limits and default to a
-3,000,000-byte maximum serialized response. They are synchronous single-file
+and the daily debit commit in one atomic database transaction; WebChess never
+debits first and attempts to clone afterward. Move limits protect durable move
+routes. Wilbur actions and observations have independent hourly user/IP limits;
+each action created under the current contract is version-bound to the exact
+Charlotte suggestion index, and the database permits no second current-bound
+action for the same suggestion in one lifecycle run. Pre-`0012` rows remain
+preserved, explicitly null-bound history, even when their legacy suggestion
+indexes duplicate one another.
+
+Every Wilbur create, update, and observation mutation is claimed durably by
+owner plus idempotency key. An exact retry replays its stored committed result
+or denial; changing the operation or request digest conflicts. Rate admission
+is charged once, pending claims abandoned for 24 hours expire durably, and
+future durable-row and exact-text capacity is reserved against the lifetime
+envelope.
+The artifact mutation, lifecycle revision/activity, and mutation-ledger result
+commit atomically.
+
+Account export format `webchess-account-export/4` has separate hourly user/IP
+limits and defaults to a 3,000,000-byte maximum serialized response; configured
+values must remain between 1 and 100,000,000 bytes. It includes owner-scoped
+game, request, research, lifecycle, Portia, Gate, Charlotte, Wilbur, and
+lifecycle-event records, including `charlotteBindingVersion` and sanitized
+Wilbur mutation-ledger rows. Its ten recovery fields are the answer-prompt digest;
+Portia's current candidate, active request, failure count, failure limit,
+completed-candidate IDs, and assessment drafts; and Charlotte's active request,
+failure count, and failure limit. It also includes the owner's user-rate windows
+without their HMAC key. Mutation-ledger exports omit private capacity-
+reservation fields, the raw owner identifier, IP identifiers, and HMAC
+material. The export also excludes shared IP/global
+counters, Clerk and vendor records, concurrency leases, deletion tombstones,
+and database-restoration metadata. Exports are synchronous single-file
 downloads with no pagination or background preparation. An oversized export is
 refused, and the account owner is directed to `/support` for the GitHub
-Discussions path; that path does not promise a custom data handoff or response
-time.
+Discussions path; that bounded operator fallback does not promise a custom data
+handoff or response time. The Wilbur envelope bounds only one contributor to
+export size; it does not guarantee that every whole account fits this bounded
+single response because games, model records, research, and provenance also
+accumulate.
 
 Model retries preserve one provider-call intent. Retrying the same idempotency
 key recovers a committed result or reports the existing reserved/in-progress
@@ -419,6 +634,14 @@ automatically, and a new user intent with a new idempotency key is required.
 Provider responses rejected by WebChess retain only a sanitized provider
 response ID, safe failure status, and normalized token usage when present—not
 raw provider output, refusal text, or reasoning.
+
+These transactions, event replay, idempotency records, leases, and persisted
+model artifacts provide request and lifecycle recovery. They are not disaster
+recovery. The repository provides no database backup schedule, point-in-time
+recovery proof, restore command, account-import endpoint, recovery-point or
+recovery-time objective, or completed restore drill. Configure and test vendor
+backups separately; for local mode, preserve the PostgreSQL volume together
+with its generated database and HMAC/session secrets.
 
 Use WebChess's durable quotas as the primary cost controls. OpenAI
 [spend alerts](https://developers.openai.com/api/docs/guides/spend-limits)
@@ -486,16 +709,25 @@ loaded from Neon.
 ```bash
 npm run lint
 npm run typecheck
+npm run plugin:build
+git diff --exit-code -- openclaw-plugin/dist
 npm run test
 npm run test:coverage
-npm run test:integration
+DATABASE_URL='postgresql://...disposable-test-only...' npm run test:integration
 npm audit --omit=dev --audit-level=high
 npm audit --audit-level=high
 npm run build
 npm run test:a11y
 npm run test:e2e
 npm run test:links
+npm pack --dry-run
 ```
+
+The integration database must be a disposable PostgreSQL 17 database created
+for the test run, never a local game database, Preview database, or Production
+database. `plugin:build` must leave the committed `openclaw-plugin/dist` byte-
+for-byte current, and the package dry run must contain the compiled entry and
+all documented runtime files without local secrets or test output.
 
 Do not create a preview until all gates pass. Automated tests and CI must use
 deterministic OpenAI stubs and must never spend live model tokens. After those

@@ -14,7 +14,7 @@ const USER_PROFILE_APPEARANCE = {
   },
 } as const
 
-type IdentityMode = 'clerk' | 'local-e2e' | 'local-openclaw'
+type IdentityMode = 'clerk' | 'local-e2e' | 'local-openclaw' | 'local-hosted'
 
 interface AccountDashboardProps {
   identityMode: IdentityMode
@@ -321,11 +321,11 @@ function DataExport() {
         active session.
       </p>
       <p className={styles.exportNotice}>
-        This synchronous, single-file export is limited to 3,000,000 bytes. It
-        is not paginated or prepared in the background, so an oversized export
-        is refused. If that happens, see <Link href="/support">Support</Link> for
-        the GitHub Discussions path. Support does not promise a custom data
-        handoff or response time.
+        This synchronous, single-file export is subject to a server-configured
+        size limit capped at 100 MB. It is not paginated or prepared in the
+        background, so an oversized export is refused. If that happens, see{' '}
+        <Link href="/support">Support</Link> for the GitHub Discussions path.
+        Support does not promise a custom data handoff or response time.
       </p>
       <button
         className={styles.secondaryAction}
@@ -344,21 +344,38 @@ function DataExport() {
   )
 }
 
-function LocalIdentityNotice({ openClaw }: Readonly<{ openClaw: boolean }>) {
+function LocalIdentityNotice({
+  identityMode,
+}: Readonly<{ identityMode: IdentityMode }>) {
+  const openClaw = identityMode === 'local-openclaw'
+  const localHosted = identityMode === 'local-hosted'
   return (
     <section className={styles.card} aria-labelledby="fixture-title">
       <div className={styles.cardHeading}>
         <div>
           <p className={styles.sectionNumber}>03</p>
           <h2 id="fixture-title">
-            {openClaw ? 'Local OpenClaw identity' : 'Local test identity'}
+            {openClaw
+              ? 'Local OpenClaw identity'
+              : localHosted
+                ? 'Local machine identity'
+                : 'Local test identity'}
           </h2>
         </div>
+        {localHosted ? (
+          <form action="/api/auth/local/sign-out" method="post">
+            <button className={styles.textAction} type="submit">
+              Sign out
+            </button>
+          </form>
+        ) : null}
       </div>
       <p className={styles.bodyCopy}>
         {openClaw
           ? 'This installation keeps its WebChess data in the dedicated local OpenClaw database. Hosted profile, passkey, sign-out, and account-deletion controls are not used in this mode.'
-          : 'This session uses WebChess\'s test-only local identity. Clerk profile, passkey, sign-out, and account-deletion controls are available only when Clerk is configured.'}
+          : localHosted
+            ? 'This loopback session is a signed local principal for this computer. Clerk profile, passkey, and hosted account-deletion controls are unused until Clerk keys are configured.'
+            : 'This session uses WebChess\'s test-only local identity. Clerk profile, passkey, sign-out, and account-deletion controls are available only when Clerk is configured.'}
       </p>
     </section>
   )
@@ -562,7 +579,7 @@ export function AccountDashboard({ identityMode }: AccountDashboardProps) {
           <DeleteAccount />
         </>
       ) : (
-        <LocalIdentityNotice openClaw={identityMode === 'local-openclaw'} />
+        <LocalIdentityNotice identityMode={identityMode} />
       )}
     </div>
   )

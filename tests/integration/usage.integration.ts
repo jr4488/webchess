@@ -29,7 +29,19 @@ const FOURTH_IDEMPOTENCY_KEY = '12000000-0000-4000-8000-000000000004'
 const FIFTH_IDEMPOTENCY_KEY = '12000000-0000-4000-8000-000000000005'
 const SIXTH_IDEMPOTENCY_KEY = '12000000-0000-4000-8000-000000000006'
 const LEASE_TOKEN = '13000000-0000-4000-8000-000000000001'
+const MATURE_GAME_ID = '14000000-0000-4000-8000-000000000001'
+const MATURE_RUN_ID = '14000000-0000-4000-8000-000000000002'
+const MATURE_PORTIA_REQUEST_ID = '14000000-0000-4000-8000-000000000003'
+const MATURE_CHARLOTTE_REQUEST_ID = '14000000-0000-4000-8000-000000000004'
+const MATURE_PORTIA_REVIEW_ID = '14000000-0000-4000-8000-000000000005'
+const MATURE_GATE_ID = '14000000-0000-4000-8000-000000000006'
+const MATURE_CHARLOTTE_RESULT_ID = '14000000-0000-4000-8000-000000000007'
+const MATURE_ACTIVE_REQUEST_ID = '14000000-0000-4000-8000-000000000008'
+const MATURE_ACTIVE_LEASE_TOKEN = '14000000-0000-4000-8000-000000000009'
+const WILBUR_RATE_ACTION_ID = '14000000-0000-4000-8000-00000000000a'
 const SHA256 = 'a'.repeat(64)
+
+let wilburRateKeySequence = 0
 
 const DEFAULT_CONFIG: UsageConfig = {
   hmacSecret: 'integration-secret-material-32-bytes-minimum',
@@ -46,6 +58,10 @@ const DEFAULT_CONFIG: UsageConfig = {
   hourlyIpGameMoveLimit: 1_200,
   hourlyAccountExportLimit: 2,
   hourlyIpAccountExportLimit: 10,
+  hourlyWilburActionLimit: 120,
+  hourlyIpWilburActionLimit: 240,
+  hourlyWilburObservationLimit: 60,
+  hourlyIpWilburObservationLimit: 120,
   concurrentModelLimit: 1,
   globalModelConcurrentLimit: 4,
   modelLeaseSeconds: 180,
@@ -56,6 +72,7 @@ let database: PostgresTestDatabase
 beforeEach(async () => {
   database = await createPostgresTestDatabase('usage')
   await database.migrate()
+  wilburRateKeySequence = 0
 })
 
 afterEach(async () => {
@@ -195,6 +212,255 @@ async function createTerminalReplaySource(
       'b'.repeat(64),
       'c'.repeat(64),
       NOW.toISOString(),
+    ],
+  })
+}
+
+async function createMatureLifecycleArtifacts(): Promise<void> {
+  await createTerminalReplaySource(
+    OWNER,
+    MATURE_GAME_ID,
+    'How should mature lifecycle data survive until account deletion commits?',
+  )
+  await database.adapter.query({
+    text: `
+      INSERT INTO model_requests (
+        id, clerk_user_id, game_id, operation, idempotency_key,
+        request_sha256, status, provider, model, prompt_version,
+        software_version, result_payload, completed_at, created_at, updated_at
+      )
+      VALUES
+        (
+          $1::uuid, $3::text, $4::uuid, 'portia', $1::uuid,
+          $5::text, 'succeeded', 'openai', 'gpt-5.6-sol',
+          'webchess-portia-v3', 'integration-test', '{}'::jsonb,
+          $6::timestamptz, $6::timestamptz, $6::timestamptz
+        ),
+        (
+          $2::uuid, $3::text, $4::uuid, 'charlotte', $2::uuid,
+          $5::text, 'succeeded', 'openai', 'gpt-5.6-sol',
+          'webchess-charlotte-v4', 'integration-test', '{}'::jsonb,
+          $6::timestamptz, $6::timestamptz, $6::timestamptz
+        )
+    `,
+    values: [
+      MATURE_PORTIA_REQUEST_ID,
+      MATURE_CHARLOTTE_REQUEST_ID,
+      OWNER,
+      MATURE_GAME_ID,
+      SHA256,
+      NOW.toISOString(),
+    ],
+  })
+  await database.adapter.query({
+    text: `
+      INSERT INTO lifecycle_runs (
+        id, clerk_user_id, game_id, root_run_id, state,
+        division_seed, cast_seed, trajectory_seed,
+        software_version, lifecycle_version, rules_version, engine_version,
+        cast_version, event_version, portia_prompt_version,
+        portia_contract_version, gate_algorithm_version, retry_policy_version,
+        charlotte_prompt_version, charlotte_contract_version,
+        wilbur_record_version
+      )
+      VALUES (
+        $1::uuid, $2::text, $3::uuid, $1::uuid, 'charlotte_complete',
+        'mature-division', 'mature-cast', 'mature-trajectory',
+        'integration-test', 'webchess-lifecycle-v2.3', 'rules-v1', 'engine-v1',
+        'cast-v1', 1, 'webchess-portia-v3',
+        'webchess-portia-review-v2', 'webchess-gate-v3', 'retry-v1',
+        'webchess-charlotte-v4', 'charlotte-contract-v1', 'wilbur-record-v1'
+      )
+    `,
+    values: [MATURE_RUN_ID, OWNER, MATURE_GAME_ID],
+  })
+  await database.adapter.query({
+    text: `
+      INSERT INTO portia_reviews (
+        id, clerk_user_id, lifecycle_run_id, model_request_id,
+        input_digest, output_digest, prompt_version, contract_version, review
+      )
+      VALUES (
+        $1::uuid, $2::text, $3::uuid, $4::uuid,
+        $5::text, $6::text, 'webchess-portia-v3',
+        'webchess-portia-review-v2', '{}'::jsonb
+      )
+    `,
+    values: [
+      MATURE_PORTIA_REVIEW_ID,
+      OWNER,
+      MATURE_RUN_ID,
+      MATURE_PORTIA_REQUEST_ID,
+      'd'.repeat(64),
+      'e'.repeat(64),
+    ],
+  })
+  await database.adapter.query({
+    text: `
+      INSERT INTO gate_decisions (
+        id, clerk_user_id, lifecycle_run_id, algorithm_version,
+        input_digest, passed, result
+      )
+      VALUES (
+        $1::uuid, $2::text, $3::uuid, 'webchess-gate-v3',
+        $4::text, true, '{}'::jsonb
+      )
+    `,
+    values: [MATURE_GATE_ID, OWNER, MATURE_RUN_ID, 'd'.repeat(64)],
+  })
+  await database.adapter.query({
+    text: `
+      INSERT INTO charlotte_results (
+        id, clerk_user_id, lifecycle_run_id, model_request_id,
+        input_digest, output_digest, prompt_version, contract_version,
+        result, rendered_answer
+      )
+      VALUES (
+        $1::uuid, $2::text, $3::uuid, $4::uuid,
+        $5::text, $6::text, 'webchess-charlotte-v4',
+        'charlotte-contract-v1', '{}'::jsonb, $7::text
+      )
+    `,
+    values: [
+      MATURE_CHARLOTTE_RESULT_ID,
+      OWNER,
+      MATURE_RUN_ID,
+      MATURE_CHARLOTTE_REQUEST_ID,
+      'd'.repeat(64),
+      'e'.repeat(64),
+      'A mature Charlotte qualification remains immutable until the account owner requests complete deletion. '.repeat(2),
+    ],
+  })
+}
+
+async function createWilburRateTargets(): Promise<void> {
+  await createMatureLifecycleArtifacts()
+  await database.adapter.query({
+    text: `
+      INSERT INTO wilbur_actions (
+        id, clerk_user_id, lifecycle_run_id, charlotte_action_index,
+        idempotency_key, request_digest, actor, action,
+        tested_assumption, expected_observation, decision_threshold,
+        review_horizon, status, revision, record_version, created_at, updated_at
+      )
+      VALUES (
+        $1::uuid, $2::text, $3::uuid, 0,
+        $1::uuid, $4::char(64), 'Integration owner',
+        'Run one bounded integration observation.',
+        'The shared rate bucket remains isolated.',
+        'One durable observation is recorded.',
+        'Stop if the expected signal is absent.',
+        'One integration window', 'planned', 0,
+        'wilbur-record-v1', $5::timestamptz, $5::timestamptz
+      )
+    `,
+    values: [
+      WILBUR_RATE_ACTION_ID,
+      OWNER,
+      MATURE_RUN_ID,
+      SHA256,
+      NOW.toISOString(),
+    ],
+  })
+}
+
+async function claimWilburRateMutation(input: {
+  readonly userId?: string
+  readonly ipAddress: string
+  readonly kind: 'action' | 'observation'
+  readonly operation?: 'create_action' | 'append_observation'
+  readonly idempotencyKey?: string
+  readonly requestDigest?: string
+  readonly ledgerTimestamp?: Date
+}) {
+  const userId = input.userId ?? OWNER
+  const operation = input.operation ?? (
+    input.kind === 'action' ? 'create_action' : 'append_observation'
+  )
+  const idempotencyKey = input.idempotencyKey ??
+    `16000000-0000-4000-8000-${String(++wilburRateKeySequence).padStart(12, '0')}`
+  const requestDigest = input.requestDigest ?? SHA256
+  await database.adapter.query({
+    text: `
+      INSERT INTO user_controls (clerk_user_id, last_seen_at, updated_at)
+      VALUES ($1::text, $2::timestamptz, $2::timestamptz)
+      ON CONFLICT (clerk_user_id) DO NOTHING
+    `,
+    values: [userId, NOW.toISOString()],
+  })
+  await database.adapter.query({
+    text: `
+      INSERT INTO wilbur_mutation_requests (
+        clerk_user_id, idempotency_key, operation, request_digest,
+        target_game_id, target_action_id, rate_kind,
+        reserved_future_rows, reserved_text_bytes, created_at, updated_at
+      )
+      VALUES (
+        $1::text, $2::uuid, $3::text, $4::char(64),
+        $5::uuid, $6::uuid, $7::text,
+        2, 128, $8::timestamptz, $8::timestamptz
+      )
+    `,
+    values: [
+      userId,
+      idempotencyKey,
+      operation,
+      requestDigest,
+      MATURE_GAME_ID,
+      operation === 'append_observation' ? WILBUR_RATE_ACTION_ID : null,
+      input.kind,
+      (input.ledgerTimestamp ?? NOW).toISOString(),
+    ],
+  })
+  return {
+    userId,
+    ipAddress: input.ipAddress,
+    kind: input.kind,
+    operation,
+    idempotencyKey,
+    requestDigest,
+  }
+}
+
+async function attachActiveMatureRequest(): Promise<void> {
+  const expiresAt = new Date(NOW.valueOf() + 180_000)
+  await database.adapter.query({
+    text: `
+      INSERT INTO model_requests (
+        id, clerk_user_id, game_id, operation, idempotency_key,
+        request_sha256, status, provider, model, prompt_version,
+        software_version, provider_started_at, created_at, updated_at
+      )
+      VALUES (
+        $1::uuid, $2::text, $3::uuid, 'answer', $1::uuid,
+        $4::text, 'in_progress', 'openai', 'gpt-5.6-sol',
+        'answer-v1', 'integration-test', $5::timestamptz,
+        $5::timestamptz, $5::timestamptz
+      )
+    `,
+    values: [
+      MATURE_ACTIVE_REQUEST_ID,
+      OWNER,
+      MATURE_GAME_ID,
+      'f'.repeat(64),
+      NOW.toISOString(),
+    ],
+  })
+  await database.adapter.query({
+    text: `
+      UPDATE model_concurrency_slots
+      SET
+        request_id = $1::uuid,
+        clerk_user_id = $2::text,
+        lease_token = $3::uuid,
+        lease_expires_at = $4::timestamptz
+      WHERE slot = 1
+    `,
+    values: [
+      MATURE_ACTIVE_REQUEST_ID,
+      OWNER,
+      MATURE_ACTIVE_LEASE_TOKEN,
+      expiresAt.toISOString(),
     ],
   })
 }
@@ -1048,6 +1314,408 @@ describe('durable usage accounting against PostgreSQL', () => {
     ])
   })
 
+  it('keeps Wilbur action and observation user/IP windows independent', async () => {
+    await createWilburRateTargets()
+    const ipAddress = '198.51.100.45'
+    const usage = controller({
+      ...DEFAULT_CONFIG,
+      hourlyWilburActionLimit: 2,
+      hourlyIpWilburActionLimit: 3,
+      hourlyWilburObservationLimit: 1,
+      hourlyIpWilburObservationLimit: 2,
+    })
+
+    await expect(usage.consumeWilburMutationRate(
+      await claimWilburRateMutation({
+      ipAddress,
+      kind: 'action',
+      }),
+    )).resolves.toMatchObject({
+      ok: true,
+      kind: 'consumed',
+      remaining: { user: 1, ip: 2 },
+    })
+    await expect(usage.consumeWilburMutationRate(
+      await claimWilburRateMutation({
+      ipAddress,
+      kind: 'action',
+      }),
+    )).resolves.toMatchObject({
+      ok: true,
+      remaining: { user: 0, ip: 1 },
+    })
+    await expect(usage.consumeWilburMutationRate(
+      await claimWilburRateMutation({
+      ipAddress,
+      kind: 'action',
+      }),
+    )).resolves.toMatchObject({
+      ok: false,
+      code: 'WILBUR_ACTION_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+    await expect(usage.consumeWilburMutationRate(
+      await claimWilburRateMutation({
+        userId: OTHER_OWNER,
+        ipAddress,
+        kind: 'action',
+      }),
+    )).resolves.toMatchObject({
+      ok: true,
+      remaining: { user: 1, ip: 0 },
+    })
+    await expect(usage.consumeWilburMutationRate(
+      await claimWilburRateMutation({
+      userId: OTHER_OWNER,
+      ipAddress,
+      kind: 'action',
+      }),
+    )).resolves.toMatchObject({
+      ok: false,
+      code: 'IP_WILBUR_ACTION_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+
+    await expect(usage.consumeWilburMutationRate(
+      await claimWilburRateMutation({
+      ipAddress,
+      kind: 'observation',
+      }),
+    )).resolves.toMatchObject({
+      ok: true,
+      remaining: { user: 0, ip: 1 },
+    })
+    await expect(usage.consumeWilburMutationRate(
+      await claimWilburRateMutation({
+      ipAddress,
+      kind: 'observation',
+      }),
+    )).resolves.toMatchObject({
+      ok: false,
+      code: 'WILBUR_OBSERVATION_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+    await expect(usage.consumeWilburMutationRate(
+      await claimWilburRateMutation({
+        userId: OTHER_OWNER,
+        ipAddress,
+        kind: 'observation',
+      }),
+    )).resolves.toMatchObject({
+      ok: true,
+      remaining: { user: 0, ip: 0 },
+    })
+    await expect(usage.consumeWilburMutationRate(
+      await claimWilburRateMutation({
+      userId: 'user_usage_integration_third',
+      ipAddress,
+      kind: 'observation',
+      }),
+    )).resolves.toMatchObject({
+      ok: false,
+      code: 'IP_WILBUR_OBSERVATION_HOURLY_RATE_LIMITED',
+      httpStatus: 429,
+    })
+
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT action, key_type, count
+        FROM rate_buckets
+        WHERE action IN ('wilbur_action', 'wilbur_observation')
+        ORDER BY action, key_type, count
+      `,
+    })
+    expect(persisted.rows).toEqual([
+      { action: 'wilbur_action', key_type: 'ip', count: 4 },
+      { action: 'wilbur_action', key_type: 'user', count: 2 },
+      { action: 'wilbur_action', key_type: 'user', count: 3 },
+      { action: 'wilbur_observation', key_type: 'ip', count: 3 },
+      { action: 'wilbur_observation', key_type: 'user', count: 1 },
+      { action: 'wilbur_observation', key_type: 'user', count: 1 },
+      { action: 'wilbur_observation', key_type: 'user', count: 2 },
+    ])
+  })
+
+  it('replays one Wilbur admission without debiting either bucket twice', async () => {
+    await createWilburRateTargets()
+    const usage = controller()
+    const input = await claimWilburRateMutation({
+      ipAddress: '198.51.100.48',
+      kind: 'action',
+    })
+
+    await expect(usage.consumeWilburMutationRate(input)).resolves.toMatchObject({
+      ok: true,
+      kind: 'consumed',
+    })
+    await expect(usage.consumeWilburMutationRate(input)).resolves.toMatchObject({
+      ok: true,
+      kind: 'existing',
+    })
+
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT key_type, count
+        FROM rate_buckets
+        WHERE action = 'wilbur_action'
+        ORDER BY key_type
+      `,
+    })
+    expect(persisted.rows).toEqual([
+      { key_type: 'ip', count: 1 },
+      { key_type: 'user', count: 1 },
+    ])
+    const ledger = await database.adapter.query({
+      text: `
+        SELECT status, rate_admitted_at IS NOT NULL AS admitted
+        FROM wilbur_mutation_requests
+        WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+      `,
+      values: [OWNER, input.idempotencyKey],
+    })
+    expect(ledger.rows).toEqual([{ status: 'pending', admitted: true }])
+  })
+
+  it('uses the database clock for Wilbur admission across app clock skew', async () => {
+    await createWilburRateTargets()
+    const clock = await database.adapter.query<{ database_now: Date }>({
+      text: `SELECT clock_timestamp() AS database_now`,
+    })
+    const databaseNow = clock.rows[0]!.database_now
+
+    for (const [idempotencyKey, skewMs, ipAddress] of [
+      ['16000000-0000-4000-8000-000000000090', -30_000, '198.51.100.90'],
+      ['16000000-0000-4000-8000-000000000091', 30_000, '198.51.100.91'],
+    ] as const) {
+      const usage = controller(
+        DEFAULT_CONFIG,
+        () => new Date(databaseNow.valueOf() + skewMs),
+      )
+      const input = await claimWilburRateMutation({
+        ipAddress,
+        kind: 'action',
+        idempotencyKey,
+        ledgerTimestamp: databaseNow,
+      })
+
+      await expect(
+        usage.consumeWilburMutationRate(input),
+      ).resolves.toMatchObject({ ok: true, kind: 'consumed' })
+      await expect(database.adapter.query({
+        text: `
+          UPDATE wilbur_mutation_requests
+          SET status = 'committed',
+            result_entity_id = $3::uuid, result_revision = 0,
+            result_status = 'planned', result_updated_at = now(),
+            reserved_future_rows = 0, reserved_text_bytes = 0,
+            updated_at = now()
+          WHERE clerk_user_id = $1::text
+            AND idempotency_key = $2::uuid
+        `,
+        values: [OWNER, idempotencyKey, WILBUR_RATE_ACTION_ID],
+      })).resolves.toMatchObject({ rowCount: 1 })
+
+      const persisted = await database.adapter.query({
+        text: `
+          SELECT
+            status,
+            rate_admitted_at IS NOT NULL AS admitted,
+            rate_admitted_at <= updated_at AS monotone,
+            updated_at <= clock_timestamp() AS not_future
+          FROM wilbur_mutation_requests
+          WHERE clerk_user_id = $1::text
+            AND idempotency_key = $2::uuid
+        `,
+        values: [OWNER, idempotencyKey],
+      })
+      expect(persisted.rows).toEqual([{
+        status: 'committed',
+        admitted: true,
+        monotone: true,
+        not_future: true,
+      }])
+    }
+  })
+
+  it('rejects a changed Wilbur intent without debiting a rate bucket', async () => {
+    await createWilburRateTargets()
+    const usage = controller()
+    const input = await claimWilburRateMutation({
+      ipAddress: '198.51.100.49',
+      kind: 'action',
+    })
+
+    await expect(usage.consumeWilburMutationRate({
+      ...input,
+      requestDigest: 'b'.repeat(64),
+    })).resolves.toMatchObject({
+      ok: false,
+      code: 'IDEMPOTENCY_CONFLICT',
+      httpStatus: 409,
+    })
+    const persisted = await database.adapter.query({
+      text: `SELECT count(*)::integer AS count FROM rate_buckets`,
+    })
+    expect(persisted.rows).toEqual([{ count: 0 }])
+  })
+
+  it('replays a durable Wilbur denial without incrementing either bucket again', async () => {
+    await createWilburRateTargets()
+    const usage = controller({
+      ...DEFAULT_CONFIG,
+      hourlyWilburActionLimit: 0,
+      hourlyIpWilburActionLimit: 10,
+    })
+    const input = await claimWilburRateMutation({
+      ipAddress: '198.51.100.50',
+      kind: 'action',
+    })
+
+    await expect(usage.consumeWilburMutationRate(input)).resolves.toMatchObject({
+      ok: false,
+      code: 'WILBUR_ACTION_HOURLY_RATE_LIMITED',
+    })
+    await expect(usage.consumeWilburMutationRate(input)).resolves.toMatchObject({
+      ok: false,
+      code: 'WILBUR_ACTION_HOURLY_RATE_LIMITED',
+    })
+
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT key_type, count
+        FROM rate_buckets
+        WHERE action = 'wilbur_action'
+        ORDER BY key_type
+      `,
+    })
+    expect(persisted.rows).toEqual([{ key_type: 'user', count: 1 }])
+    const ledger = await database.adapter.query({
+      text: `
+        SELECT
+          status,
+          denial_code,
+          reserved_future_rows,
+          reserved_text_bytes
+        FROM wilbur_mutation_requests
+        WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+      `,
+      values: [OWNER, input.idempotencyKey],
+    })
+    expect(ledger.rows).toEqual([{
+      status: 'denied',
+      denial_code: 'WILBUR_ACTION_HOURLY_RATE_LIMITED',
+      reserved_future_rows: 0,
+      reserved_text_bytes: '0',
+    }])
+  })
+
+  it('serializes concurrent Wilbur admission without oversubscribing the user limit', async () => {
+    await createWilburRateTargets()
+    const usage = controller({
+      ...DEFAULT_CONFIG,
+      hourlyWilburActionLimit: 5,
+      hourlyIpWilburActionLimit: 100,
+    })
+    const inputs = await Promise.all(
+      Array.from({ length: 10 }, () => claimWilburRateMutation({
+        ipAddress: '198.51.100.46',
+        kind: 'action',
+      })),
+    )
+
+    const results = await Promise.all(
+      inputs.map((input) => usage.consumeWilburMutationRate(input)),
+    )
+    expect(results.filter((result) => result.ok)).toHaveLength(5)
+    expect(results.filter((result) =>
+      !result.ok && result.code === 'WILBUR_ACTION_HOURLY_RATE_LIMITED',
+    )).toHaveLength(5)
+
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT key_type, count
+        FROM rate_buckets
+        WHERE action = 'wilbur_action'
+        ORDER BY key_type
+      `,
+    })
+    expect(persisted.rows).toEqual([
+      { key_type: 'ip', count: 5 },
+      { key_type: 'user', count: 10 },
+    ])
+  })
+
+  it('denies Wilbur writes for suspended, blocked, and durably deleted users', async () => {
+    await createWilburRateTargets()
+    const usage = controller()
+    const suspendedInput = await claimWilburRateMutation({
+      ipAddress: '198.51.100.47',
+      kind: 'action',
+    })
+    await database.adapter.query({
+      text: `
+        UPDATE user_controls
+        SET suspended = true, updated_at = $2::timestamptz
+        WHERE clerk_user_id = $1::text
+      `,
+      values: [OWNER, NOW.toISOString()],
+    })
+
+    await expect(usage.consumeWilburMutationRate(
+      suspendedInput,
+    )).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_SUSPENDED',
+      httpStatus: 403,
+    })
+
+    await database.adapter.query({
+      text: `
+        UPDATE user_controls
+        SET suspended = false
+        WHERE clerk_user_id = $1::text
+      `,
+      values: [OWNER],
+    })
+    const blockedInput = await claimWilburRateMutation({
+      ipAddress: '198.51.100.47',
+      kind: 'observation',
+    })
+    const blockedUntil = new Date(NOW.valueOf() + 60_000)
+    await database.adapter.query({
+      text: `
+        UPDATE user_controls
+        SET suspended = false, blocked_until = $2::timestamptz
+        WHERE clerk_user_id = $1::text
+      `,
+      values: [OWNER, blockedUntil.toISOString()],
+    })
+    await expect(usage.consumeWilburMutationRate(
+      blockedInput,
+    )).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_TEMPORARILY_BLOCKED',
+      httpStatus: 403,
+      retryAfterSeconds: 60,
+    })
+
+    await expect(
+      usage.deleteAccountData(OWNER, { force: true }),
+    ).resolves.toEqual({ ok: true, deleted: true })
+    await expect(usage.consumeWilburMutationRate({
+      userId: OWNER,
+      ipAddress: '198.51.100.47',
+      kind: 'action',
+      operation: 'create_action',
+      idempotencyKey: '16000000-0000-4000-8000-999999999999',
+      requestDigest: SHA256,
+    })).resolves.toMatchObject({
+      ok: false,
+      code: 'ACCOUNT_DELETED',
+      httpStatus: 403,
+    })
+  })
+
   it('applies game-start rate limits to new divisions but not answers', async () => {
     await createDivisionShell(
       OWNER,
@@ -1393,6 +2061,116 @@ describe('durable usage accounting against PostgreSQL', () => {
       `,
     })
     expect(ledgers.rows).toEqual([{ clerk_user_id: OWNER, count: 1 }])
+  })
+
+  it('self-deletes mature Portia and Charlotte provenance before request ledgers', async () => {
+    await createMatureLifecycleArtifacts()
+    const usage = controller()
+
+    await expect(usage.deleteAccountData(OWNER)).resolves.toEqual({
+      ok: true,
+      deleted: true,
+    })
+
+    const deleted = await database.adapter.query({
+      text: `
+        SELECT
+          (SELECT count(*)::integer FROM games) AS games,
+          (SELECT count(*)::integer FROM model_requests) AS requests,
+          (SELECT count(*)::integer FROM lifecycle_runs) AS runs,
+          (SELECT count(*)::integer FROM portia_reviews) AS portia,
+          (SELECT count(*)::integer FROM gate_decisions) AS gates,
+          (SELECT count(*)::integer FROM charlotte_results) AS charlotte,
+          (SELECT count(*)::integer FROM deleted_user_tombstones) AS barriers,
+          (
+            SELECT suspended FROM user_controls
+            WHERE clerk_user_id = $1::text
+          ) AS suspended,
+          (
+            SELECT reason_code FROM user_controls
+            WHERE clerk_user_id = $1::text
+          ) AS reason_code
+      `,
+      values: [OWNER],
+    })
+    expect(deleted.rows).toEqual([{
+      games: 0,
+      requests: 0,
+      runs: 0,
+      portia: 0,
+      gates: 0,
+      charlotte: 0,
+      barriers: 0,
+      suspended: true,
+      reason_code: 'ACCOUNT_DELETION_PENDING',
+    }])
+  })
+
+  it('preserves mature provenance during active self-deletion and lets force win', async () => {
+    await createMatureLifecycleArtifacts()
+    await attachActiveMatureRequest()
+    const usage = controller()
+
+    await expect(usage.deleteAccountData(OWNER)).resolves.toEqual({
+      ok: false,
+      code: 'ACTIVE_MODEL_REQUEST',
+      httpStatus: 409,
+      retryAfterSeconds: 180,
+    })
+    const preserved = await database.adapter.query({
+      text: `
+        SELECT
+          (SELECT count(*)::integer FROM games) AS games,
+          (SELECT count(*)::integer FROM model_requests) AS requests,
+          (SELECT count(*)::integer FROM lifecycle_runs) AS runs,
+          (SELECT count(*)::integer FROM portia_reviews) AS portia,
+          (SELECT count(*)::integer FROM gate_decisions) AS gates,
+          (SELECT count(*)::integer FROM charlotte_results) AS charlotte,
+          (
+            SELECT count(*)::integer FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+      `,
+    })
+    expect(preserved.rows).toEqual([{
+      games: 1,
+      requests: 3,
+      runs: 1,
+      portia: 1,
+      gates: 1,
+      charlotte: 1,
+      occupied_slots: 1,
+    }])
+
+    await expect(
+      usage.deleteAccountData(OWNER, { force: true }),
+    ).resolves.toEqual({ ok: true, deleted: true })
+    const forced = await database.adapter.query({
+      text: `
+        SELECT
+          (SELECT count(*)::integer FROM user_controls) AS users,
+          (SELECT count(*)::integer FROM games) AS games,
+          (SELECT count(*)::integer FROM model_requests) AS requests,
+          (SELECT count(*)::integer FROM lifecycle_runs) AS runs,
+          (SELECT count(*)::integer FROM portia_reviews) AS portia,
+          (SELECT count(*)::integer FROM charlotte_results) AS charlotte,
+          (SELECT count(*)::integer FROM deleted_user_tombstones) AS barriers,
+          (
+            SELECT count(*)::integer FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+      `,
+    })
+    expect(forced.rows).toEqual([{
+      users: 0,
+      games: 0,
+      requests: 0,
+      runs: 0,
+      portia: 0,
+      charlotte: 0,
+      barriers: 1,
+      occupied_slots: 0,
+    }])
   })
 
   it('cancels reserved work for self-deletion and keeps a durable force-deletion barrier', async () => {

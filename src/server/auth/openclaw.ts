@@ -25,6 +25,8 @@ export function resolveLocalOpenClawUser(
   if (
     environment.VERCEL !== undefined ||
     environment.VERCEL_ENV !== undefined ||
+    environment.VERCEL_TARGET_ENV !== undefined ||
+    environment.VERCEL_URL !== undefined ||
     environment.WEBCHESS_OPENCLAW_ENABLED !== 'true' ||
     request.headers.get(LOCAL_OPENCLAW_AUTH_HEADER) !== LOCAL_OPENCLAW_AUTH_VALUE
   ) {

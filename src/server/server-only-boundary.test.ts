@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 const protectedModules = [
   'auth/config.ts',
   'auth/e2e.ts',
+  'auth/local-session.ts',
   'auth/index.ts',
   'auth/session.ts',
   'db/index.ts',

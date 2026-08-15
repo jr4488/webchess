@@ -71,7 +71,7 @@ export interface MoveCommand extends RevisionCommand {
 export interface CreateWilburActionCommand extends ApiOperationContext {
   ownerId: string
   gameId: string
-  charlotteActionIndex: number | null
+  charlotteActionIndex: number
   actor: string
   action: string
   testedAssumption: string
@@ -178,7 +178,7 @@ export interface WebChessApiServices {
 
 export interface AuthenticatedApiUser {
   userId: string
-  source: 'clerk' | 'local-e2e' | 'local-openclaw'
+  source: 'clerk' | 'local-e2e' | 'local-openclaw' | 'local-hosted'
 }
 
 export interface HttpDependencies {

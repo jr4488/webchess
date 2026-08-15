@@ -2,6 +2,11 @@ import { auth } from '@clerk/nextjs/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { LOCAL_E2E_AUTH_HEADER } from './e2e'
+import {
+  LOCAL_HOSTED_AUTH_FLAG,
+  LOCAL_SESSION_SECRET_NAME,
+  createLocalHostedSessionCookie,
+} from './local-session'
 import { getRequestAuth, requireApiUser } from './session'
 
 vi.mock('@clerk/nextjs/server', () => ({
@@ -15,6 +20,9 @@ const clerkKeys = [
   'CLERK_SECRET_KEY',
   'WEBCHESS_E2E_AUTH',
   'WEBCHESS_E2E_USER_ID',
+  'WEBCHESS_HMAC_SECRET',
+  LOCAL_HOSTED_AUTH_FLAG,
+  LOCAL_SESSION_SECRET_NAME,
   'VERCEL',
   'VERCEL_ENV',
 ] as const
@@ -39,6 +47,9 @@ describe('request auth facade', () => {
   it('is build-safe and explicit when Clerk is not configured', async () => {
     delete process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
     delete process.env.CLERK_SECRET_KEY
+    delete process.env.WEBCHESS_HMAC_SECRET
+    delete process.env[LOCAL_HOSTED_AUTH_FLAG]
+    delete process.env[LOCAL_SESSION_SECRET_NAME]
 
     const request = new Request('http://localhost:3000/api/games')
     await expect(getRequestAuth(request)).resolves.toEqual({
@@ -70,6 +81,33 @@ describe('request auth facade', () => {
     await expect(requireApiUser(request)).resolves.toEqual({
       userId: 'e2e_route_user',
       source: 'local-e2e',
+    })
+  })
+
+  it('returns the signed loopback machine session through the same facade', async () => {
+    delete process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+    delete process.env.CLERK_SECRET_KEY
+    process.env[LOCAL_HOSTED_AUTH_FLAG] = 'true'
+    process.env[LOCAL_SESSION_SECRET_NAME] =
+      'local-session-secret-material-that-is-stable-32b'
+    const requestUrl = 'http://127.0.0.1:3005/api/games'
+    const unsigned = new Request(requestUrl, {
+      headers: { host: '127.0.0.1:3005' },
+    })
+    await expect(getRequestAuth(unsigned)).resolves.toEqual({
+      status: 'signed-out',
+    })
+
+    const cookie = createLocalHostedSessionCookie(unsigned)
+    const signed = new Request(requestUrl, {
+      headers: {
+        host: '127.0.0.1:3005',
+        cookie: `${cookie?.name}=${cookie?.value}`,
+      },
+    })
+    await expect(requireApiUser(signed)).resolves.toEqual({
+      userId: expect.stringMatching(/^local_[a-f0-9]{32}$/u),
+      source: 'local-hosted',
     })
   })
 

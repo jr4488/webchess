@@ -72,7 +72,7 @@ describe('QuestionStage', () => {
       />,
     )
 
-    expect(screen.getByText(/seven-stage visible WebChess 2.1 lifecycle stay in a dedicated PostgreSQL database/i)).toBeInTheDocument()
+    expect(screen.getByText(/seven-stage visible WebChess 2.2 lifecycle stay in a dedicated PostgreSQL database/i)).toBeInTheDocument()
     expect(screen.getByText(/sends model turns through your local OpenClaw/i)).toBeInTheDocument()
     expect(screen.getByText(/configured provider and provider authentication/i)).toBeInTheDocument()
     expect(screen.getByText(/Portia validates the board-derived answer prompt/i)).toBeInTheDocument()

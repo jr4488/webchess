@@ -4,6 +4,7 @@ import {
   handleAbandonRequest,
   handleAnswerRequest,
   handleClerkWebhookRequest,
+  handleCreateWilburActionRequest,
   handleCurrentGameRequest,
   handleDeleteAccountRequest,
   handleDivisionIntentRequest,
@@ -13,6 +14,7 @@ import {
   handleReplayRequest,
   handleStartGameRequest,
 } from './handlers'
+import { createWilburActionBodySchema } from './contracts'
 import { ApiError } from './errors'
 import type {
   DurableGameDto,
@@ -286,6 +288,46 @@ describe('authenticated API handlers', () => {
 
     expect(response.status).toBe(400)
     expect(services.answer).not.toHaveBeenCalled()
+  })
+
+  it.each([null, -1, 3, 1.5])(
+    'rejects invalid Charlotte suggestion index %s for a new Wilbur action',
+    async (charlotteActionIndex) => {
+      const response = await handleCreateWilburActionRequest(
+        request(`/api/games/${GAME_ID}/wilbur/actions`, {
+          body: {
+            charlotteActionIndex,
+            actor: 'The accountable owner',
+            action: 'Run one bounded observation.',
+            testedAssumption: 'The bounded action can generate useful evidence.',
+            expectedObservation: 'A direct signal appears inside the review horizon.',
+            decisionThreshold: 'Continue only when the declared signal appears.',
+            reviewHorizon: 'Within fourteen days',
+          },
+        }),
+        GAME_ID,
+        dependencies,
+      )
+
+      expect(response.status).toBe(400)
+      expect(services.createWilburAction).not.toHaveBeenCalled()
+    },
+  )
+
+  it('preserves internal Charlotte whitespace for exact Wilbur binding', () => {
+    const parsed = createWilburActionBodySchema.parse({
+      charlotteActionIndex: 0,
+      actor: 'The accountable owner',
+      action: 'Run  one bounded\nobservation without expanding scope.',
+      testedAssumption: 'The bounded action can generate useful evidence.',
+      expectedObservation: 'A direct signal appears inside the review horizon.',
+      decisionThreshold: 'Continue only when the declared signal appears.',
+      reviewHorizon: 'Within fourteen days',
+    })
+
+    expect(parsed.action).toBe(
+      'Run  one bounded\nobservation without expanding scope.',
+    )
   })
 
   it('forwards a durable terminal-game abandon through the authenticated API', async () => {

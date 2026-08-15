@@ -78,6 +78,27 @@
   text-underline-offset: 0.25em;
 }
 
+.localForm {
+  margin-top: 1.75rem;
+}
+
+.localAction {
+  appearance: none;
+  padding: 0.85rem 1.35rem;
+  border: 1px solid #7b2816;
+  background: #7b2816;
+  color: #fffdf8;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.localAction:focus-visible {
+  outline: 3px solid #1d5f82;
+  outline-offset: 4px;
+}
+
 .homeLink:focus-visible,
 .unavailable a:focus-visible {
   outline: 3px solid #1d5f82;

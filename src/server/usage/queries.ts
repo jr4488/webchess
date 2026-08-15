@@ -5,6 +5,7 @@ import type {
   ConsumeAccountExportRateInput,
   ConsumeGameMoveRateInput,
   ConsumeReplayGameStartInput,
+  ConsumeWilburMutationRateInput,
   GetModelRequestByIdempotencyKeyInput,
   GetModelRequestResultInput,
   GetLatestModelRequestForGameInput,
@@ -1803,6 +1804,311 @@ export function buildConsumeAccountExportRateStatement(
   }
 }
 
+/**
+ * Wilbur mutation admission is idempotent against the durable mutation
+ * request ledger. The user bucket is deliberately decided before the shared
+ * IP bucket: once a user's own allowance is exhausted, their rejected retries
+ * cannot consume capacity shared by other users on the same address.
+ */
+export const consumeWilburMutationRateSql = `
+WITH
+lock_gate AS MATERIALIZED (
+  SELECT ${RESERVATION_LOCK} AS held
+),
+deletion_barrier AS MATERIALIZED (
+  SELECT tombstones.user_key_hash
+  FROM deleted_user_tombstones AS tombstones
+  CROSS JOIN lock_gate
+  WHERE tombstones.user_key_hash = $11::text
+),
+inserted_control AS MATERIALIZED (
+  INSERT INTO user_controls (clerk_user_id, last_seen_at)
+  SELECT $1::text, $4::timestamptz
+  FROM lock_gate
+  WHERE NOT EXISTS (SELECT 1 FROM deletion_barrier)
+  ON CONFLICT (clerk_user_id) DO UPDATE
+  SET last_seen_at = excluded.last_seen_at
+  RETURNING suspended, blocked_until
+),
+control AS MATERIALIZED (
+  SELECT
+    inserted_control.suspended,
+    inserted_control.blocked_until,
+    false AS deleted
+  FROM inserted_control
+  UNION ALL
+  SELECT
+    true,
+    NULL::timestamptz,
+    true
+  FROM deletion_barrier
+),
+request_state AS MATERIALIZED (
+  SELECT
+    requests.idempotency_key,
+    requests.operation,
+    requests.request_digest,
+    requests.rate_kind,
+    requests.status,
+    requests.rate_admitted_at,
+    requests.denial_code,
+    requests.retry_at
+  FROM wilbur_mutation_requests AS requests
+  CROSS JOIN lock_gate
+  WHERE
+    requests.clerk_user_id = $1::text
+    AND requests.idempotency_key = $13::uuid
+  FOR UPDATE OF requests
+),
+identity_decision AS MATERIALIZED (
+  SELECT
+    CASE
+      WHEN control.deleted THEN 'ACCOUNT_DELETED'
+      WHEN control.suspended THEN 'ACCOUNT_SUSPENDED'
+      WHEN
+        control.blocked_until IS NOT NULL
+        AND control.blocked_until > $4::timestamptz
+        THEN 'ACCOUNT_TEMPORARILY_BLOCKED'
+      WHEN request_state.idempotency_key IS NULL THEN 'IDEMPOTENCY_CONFLICT'
+      WHEN
+        request_state.operation <> $12::text
+        OR request_state.request_digest <> $14::char(64)
+        OR request_state.rate_kind <> $15::text
+        THEN 'IDEMPOTENCY_CONFLICT'
+      WHEN request_state.status = 'denied' THEN request_state.denial_code
+      WHEN
+        request_state.status = 'committed'
+        OR request_state.rate_admitted_at IS NOT NULL
+        THEN 'EXISTING'
+      ELSE 'CONTINUE'
+    END AS code,
+    CASE
+      WHEN
+        control.blocked_until IS NOT NULL
+        AND control.blocked_until > $4::timestamptz
+        THEN control.blocked_until
+      WHEN request_state.status = 'denied' THEN request_state.retry_at
+      ELSE NULL
+    END AS retry_at
+  FROM control
+  LEFT JOIN request_state ON true
+),
+user_rate AS MATERIALIZED (
+  INSERT INTO rate_buckets (
+    key_type,
+    key_hash,
+    action,
+    window_start,
+    window_seconds,
+    count,
+    expires_at
+  )
+  SELECT
+    'user',
+    $2::text,
+    $8::text,
+    $5::timestamptz,
+    3600,
+    1,
+    $5::timestamptz + interval '2 hours'
+  FROM identity_decision
+  WHERE identity_decision.code = 'CONTINUE'
+  ON CONFLICT (
+    key_type,
+    key_hash,
+    action,
+    window_start,
+    window_seconds
+  ) DO UPDATE
+  SET
+    count = rate_buckets.count + 1,
+    expires_at = excluded.expires_at
+  RETURNING count
+),
+user_decision AS MATERIALIZED (
+  SELECT
+    CASE
+      WHEN identity_decision.code <> 'CONTINUE'
+        THEN identity_decision.code
+      WHEN (SELECT count FROM user_rate) > $6::integer
+        THEN $9::text
+      ELSE 'CONTINUE'
+    END AS code,
+    CASE
+      WHEN identity_decision.code <> 'CONTINUE'
+        THEN identity_decision.retry_at
+      WHEN (SELECT count FROM user_rate) > $6::integer
+        THEN $5::timestamptz + interval '1 hour'
+      ELSE NULL
+    END AS retry_at
+  FROM identity_decision
+),
+ip_rate AS MATERIALIZED (
+  INSERT INTO rate_buckets (
+    key_type,
+    key_hash,
+    action,
+    window_start,
+    window_seconds,
+    count,
+    expires_at
+  )
+  SELECT
+    'ip',
+    $3::text,
+    $8::text,
+    $5::timestamptz,
+    3600,
+    1,
+    $5::timestamptz + interval '2 hours'
+  FROM user_decision
+  WHERE user_decision.code = 'CONTINUE'
+  ON CONFLICT (
+    key_type,
+    key_hash,
+    action,
+    window_start,
+    window_seconds
+  ) DO UPDATE
+  SET
+    count = rate_buckets.count + 1,
+    expires_at = excluded.expires_at
+  RETURNING count
+),
+decision AS MATERIALIZED (
+  SELECT
+    CASE
+      WHEN user_decision.code <> 'CONTINUE' THEN user_decision.code
+      WHEN (SELECT count FROM ip_rate) > $7::integer THEN $10::text
+      ELSE 'ALLOW'
+    END AS code,
+    CASE
+      WHEN user_decision.code <> 'CONTINUE' THEN user_decision.retry_at
+      WHEN (SELECT count FROM ip_rate) > $7::integer
+        THEN $5::timestamptz + interval '1 hour'
+      ELSE NULL
+    END AS retry_at
+  FROM user_decision
+),
+persist_decision AS (
+  UPDATE wilbur_mutation_requests AS requests
+  SET
+    rate_admitted_at = CASE
+      WHEN decision.code = 'ALLOW' THEN now()
+      ELSE requests.rate_admitted_at
+    END,
+    status = CASE
+      WHEN decision.code NOT IN ('ALLOW', 'EXISTING', 'IDEMPOTENCY_CONFLICT')
+        THEN 'denied'
+      ELSE requests.status
+    END,
+    denial_code = CASE
+      WHEN decision.code NOT IN ('ALLOW', 'EXISTING', 'IDEMPOTENCY_CONFLICT')
+        THEN decision.code
+      ELSE requests.denial_code
+    END,
+    retry_at = CASE
+      WHEN decision.code NOT IN ('ALLOW', 'EXISTING', 'IDEMPOTENCY_CONFLICT')
+        THEN decision.retry_at
+      ELSE requests.retry_at
+    END,
+    reserved_future_rows = CASE
+      WHEN decision.code NOT IN ('ALLOW', 'EXISTING', 'IDEMPOTENCY_CONFLICT')
+        THEN 0
+      ELSE requests.reserved_future_rows
+    END,
+    reserved_text_bytes = CASE
+      WHEN decision.code NOT IN ('ALLOW', 'EXISTING', 'IDEMPOTENCY_CONFLICT')
+        THEN 0
+      ELSE requests.reserved_text_bytes
+    END,
+    updated_at = now()
+  FROM decision
+  WHERE
+    requests.clerk_user_id = $1::text
+    AND requests.idempotency_key = $13::uuid
+    AND requests.operation = $12::text
+    AND requests.request_digest = $14::char(64)
+    AND requests.rate_kind = $15::text
+    AND requests.status = 'pending'
+    AND requests.rate_admitted_at IS NULL
+    AND decision.code <> 'IDEMPOTENCY_CONFLICT'
+  RETURNING requests.idempotency_key
+),
+current_counts AS MATERIALIZED (
+  SELECT buckets.key_type, buckets.count
+  FROM rate_buckets AS buckets
+  WHERE
+    buckets.action = $8::text
+    AND buckets.window_start = $5::timestamptz
+    AND buckets.window_seconds = 3600
+    AND (
+      (buckets.key_type = 'user' AND buckets.key_hash = $2::text)
+      OR (buckets.key_type = 'ip' AND buckets.key_hash = $3::text)
+    )
+)
+SELECT
+  decision.code,
+  decision.retry_at,
+  coalesce(
+    (SELECT count FROM user_rate),
+    (SELECT count FROM current_counts WHERE key_type = 'user'),
+    0
+  ) AS user_count,
+  coalesce(
+    (SELECT count FROM ip_rate),
+    (SELECT count FROM current_counts WHERE key_type = 'ip'),
+    0
+  ) AS ip_count,
+  $5::timestamptz + interval '1 hour' AS resets_at,
+  (SELECT count(*) FROM persist_decision) AS persisted
+FROM decision
+`
+
+export function buildConsumeWilburMutationRateStatement(
+  input: ConsumeWilburMutationRateInput,
+  config: UsageConfig,
+  context: {
+    readonly now: Date
+    readonly userRateKey: string
+    readonly ipRateKey: string
+    readonly deletedUserKey: string
+  },
+): SqlStatement {
+  const hourStart = new Date(context.now)
+  hourStart.setUTCMinutes(0, 0, 0)
+  const action = input.kind === 'action'
+
+  return {
+    text: consumeWilburMutationRateSql,
+    values: [
+      input.userId,
+      context.userRateKey,
+      context.ipRateKey,
+      context.now.toISOString(),
+      hourStart.toISOString(),
+      action
+        ? config.hourlyWilburActionLimit
+        : config.hourlyWilburObservationLimit,
+      action
+        ? config.hourlyIpWilburActionLimit
+        : config.hourlyIpWilburObservationLimit,
+      action ? 'wilbur_action' : 'wilbur_observation',
+      action
+        ? 'WILBUR_ACTION_HOURLY_RATE_LIMITED'
+        : 'WILBUR_OBSERVATION_HOURLY_RATE_LIMITED',
+      action
+        ? 'IP_WILBUR_ACTION_HOURLY_RATE_LIMITED'
+        : 'IP_WILBUR_OBSERVATION_HOURLY_RATE_LIMITED',
+      context.deletedUserKey,
+      input.operation,
+      input.idempotencyKey,
+      input.requestDigest,
+      input.kind,
+    ],
+  }
+}
+
 export const beginProviderCallSql = `
 WITH
 lock_gate AS MATERIALIZED (
@@ -2642,6 +2948,49 @@ SELECT
   ) AS deleted
 FROM decision
 `
+
+export const deleteAccountGamesSql = `
+WITH
+lock_gate AS MATERIALIZED (
+  SELECT ${RESERVATION_LOCK} AS held
+),
+active_model_request AS MATERIALIZED (
+  SELECT slots.lease_expires_at
+  FROM model_concurrency_slots AS slots
+  JOIN model_requests AS requests ON requests.id = slots.request_id
+  CROSS JOIN lock_gate
+  WHERE
+    slots.clerk_user_id = $1::text
+    AND requests.status = 'in_progress'
+    AND slots.lease_expires_at > $2::timestamptz
+),
+decision AS MATERIALIZED (
+  SELECT CASE
+    WHEN
+      NOT $3::boolean
+      AND EXISTS (SELECT 1 FROM active_model_request)
+      THEN 'ACTIVE_MODEL_REQUEST'
+    ELSE 'ALLOW'
+  END AS code
+)
+DELETE FROM games
+USING decision
+WHERE
+  decision.code = 'ALLOW'
+  AND games.clerk_user_id = $1::text
+RETURNING games.id
+`
+
+export function buildDeleteAccountGamesStatement(
+  userId: string,
+  now: Date,
+  force: boolean,
+): SqlStatement {
+  return {
+    text: deleteAccountGamesSql,
+    values: [userId, now.toISOString(), force],
+  }
+}
 
 export function buildDeleteAccountDataStatement(
   userId: string,

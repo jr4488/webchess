@@ -1,4 +1,5 @@
 import { forbiddenOriginJson } from './responses'
+import { localHostedRequestOrigin } from './local-session'
 import { resolveLocalOpenClawUser } from './openclaw'
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
@@ -48,16 +49,21 @@ export function verifySameOriginMutation(request: Request): Response | null {
     return forbiddenOriginJson()
   }
 
-  let requestOrigin: string
-  let suppliedOrigin: string
+  let requestUrl: URL
+  let suppliedOrigin: URL
   try {
-    requestOrigin = new URL(request.url).origin
-    suppliedOrigin = new URL(originHeader).origin
+    requestUrl = new URL(request.url)
+    suppliedOrigin = new URL(originHeader)
   } catch {
     return forbiddenOriginJson()
   }
 
-  if (requestOrigin !== suppliedOrigin || originHeader !== suppliedOrigin) {
+  if (originHeader !== suppliedOrigin.origin) {
+    return forbiddenOriginJson()
+  }
+
+  const requestOrigin = localHostedRequestOrigin(request) ?? requestUrl.origin
+  if (requestOrigin !== suppliedOrigin.origin) {
     return forbiddenOriginJson()
   }
 

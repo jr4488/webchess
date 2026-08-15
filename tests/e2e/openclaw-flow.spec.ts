@@ -135,9 +135,9 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
   await expect(
     page.getByRole('heading', { name: /Bring a problem/i }),
   ).toBeVisible()
-  await expect(page.getByLabel(/WebChess version 2.1/i)).toBeVisible()
+  await expect(page.getByLabel(/WebChess version 2.2/i)).toBeVisible()
   await expect(
-    page.getByText(/seven-stage visible WebChess 2.1 lifecycle stay in a dedicated PostgreSQL database/i),
+    page.getByText(/seven-stage visible WebChess 2.2 lifecycle stay in a dedicated PostgreSQL database/i),
   ).toBeVisible()
   await expect(
     page.getByText(/Portia validates the board-derived answer prompt/i),

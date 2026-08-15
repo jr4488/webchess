@@ -10,14 +10,17 @@ Why is this the smallest useful change?
 
 - [ ] `npm run lint`
 - [ ] `npm run typecheck`
+- [ ] `npm run plugin:build`
+- [ ] `git diff --exit-code -- openclaw-plugin/dist`
 - [ ] `npm run test:coverage`
-- [ ] `npm run test:integration`
+- [ ] `DATABASE_URL=<disposable PostgreSQL 17 URL> npm run test:integration`
 - [ ] `npm run build`
 - [ ] `npm run test:a11y`
 - [ ] `npm run test:e2e`
 - [ ] `npm run test:links`
 - [ ] `npm audit --omit=dev --audit-level=high`
 - [ ] `npm audit --audit-level=high`
+- [ ] `npm pack --dry-run` contains the intended runtime files and no local secrets or test output
 - [ ] Tests added or updated
 - [ ] Interface changes checked at desktop and mobile widths
 - [ ] Keyboard and reduced-motion behavior checked
@@ -28,6 +31,7 @@ Why is this the smallest useful change?
 - [ ] Generated salience is not described as evidence
 - [ ] Authentication, persistence, retention, logging, quota, and model-cost implications are documented
 - [ ] Database migrations are additive and include rollback/recovery notes
+- [ ] Existing-ledger compatibility and any migration-specific trigger, privilege, or legacy-row behavior are verified
 - [ ] No production deployment, domain, billing, visibility, or secret change is bundled without separate approval
 - [ ] User-facing behavior and README/docs are updated
 

@@ -16,7 +16,9 @@ import {
   buildConsumeAccountExportRateStatement,
   buildConsumeGameMoveRateStatement,
   buildConsumeReplayGameStartStatement,
+  buildConsumeWilburMutationRateStatement,
   buildDeleteAccountDataStatement,
+  buildDeleteAccountGamesStatement,
   buildEnsureUsageBucketsStatement,
   buildGetModelRequestByIdempotencyKeyStatement,
   buildGetModelRequestResultStatement,
@@ -39,6 +41,8 @@ import type {
   ConsumeGameMoveRateResult,
   ConsumeReplayGameStartInput,
   ConsumeReplayGameStartResult,
+  ConsumeWilburMutationRateInput,
+  ConsumeWilburMutationRateResult,
   DeleteAccountDataResult,
   DeleteAccountDataOptions,
   GetModelRequestByIdempotencyKeyInput,
@@ -86,6 +90,10 @@ interface MoveRateRow extends SqlRow {
   readonly user_count: number | string
   readonly ip_count: number | string
   readonly resets_at: Date | string
+}
+
+interface WilburRateRow extends MoveRateRow {
+  readonly persisted: number | string
 }
 
 interface ReplayGameStartRow extends SqlRow {
@@ -144,6 +152,12 @@ const DENIAL_STATUS: Readonly<
   IP_GAME_MOVE_HOURLY_RATE_LIMITED: 429,
   ACCOUNT_EXPORT_HOURLY_RATE_LIMITED: 429,
   IP_ACCOUNT_EXPORT_HOURLY_RATE_LIMITED: 429,
+  WILBUR_ACTION_HOURLY_RATE_LIMITED: 429,
+  IP_WILBUR_ACTION_HOURLY_RATE_LIMITED: 429,
+  WILBUR_OBSERVATION_HOURLY_RATE_LIMITED: 429,
+  IP_WILBUR_OBSERVATION_HOURLY_RATE_LIMITED: 429,
+  WILBUR_MUTATION_EXPIRED: 409,
+  WILBUR_MUTATION_CONFLICT: 409,
   MODEL_USER_CONCURRENCY_LIMIT: 429,
   MODEL_GLOBAL_CAPACITY: 503,
   GAME_OWNERSHIP_CONFLICT: 409,
@@ -648,6 +662,86 @@ export function createUsageController(
       }
     },
 
+    async consumeWilburMutationRate(
+      input: ConsumeWilburMutationRateInput,
+    ): Promise<ConsumeWilburMutationRateResult> {
+      assertText(input.userId, 'userId', 3, 255)
+      assertText(input.ipAddress, 'ipAddress', 1, 255)
+      if (input.kind !== 'action' && input.kind !== 'observation') {
+        throw new TypeError('kind must be action or observation.')
+      }
+      if (
+        input.operation !== 'create_action' &&
+        input.operation !== 'update_action' &&
+        input.operation !== 'append_observation'
+      ) {
+        throw new TypeError(
+          'operation must be create_action, update_action, or append_observation.',
+        )
+      }
+      if (
+        (input.operation === 'append_observation') !==
+        (input.kind === 'observation')
+      ) {
+        throw new TypeError('operation and kind must describe the same Wilbur mutation.')
+      }
+      assertUuid(input.idempotencyKey, 'idempotencyKey')
+      assertSha256(input.requestDigest, 'requestDigest')
+      const requestedAt = now()
+      const result = await db.transaction(
+        [
+          buildAcquireUsageLockStatement(),
+          buildCleanupExpiredRateBucketsStatement(requestedAt),
+          buildConsumeWilburMutationRateStatement(input, config, {
+            now: requestedAt,
+            userRateKey: hashUserRateKey(config.hmacSecret, input.userId),
+            ipRateKey: hashIpRateKey(config.hmacSecret, input.ipAddress),
+            deletedUserKey: hashDeletedUserKey(
+              config.deletionHmacSecret,
+              input.userId,
+            ),
+          }),
+        ],
+        { isolationLevel: 'ReadCommitted' },
+      )
+      const transactionResult = result[2]
+      if (!transactionResult) {
+        throw new Error('Wilbur mutation rate transaction returned no result.')
+      }
+      const row = firstRow<WilburRateRow>(transactionResult)
+      if (row.code !== 'ALLOW' && row.code !== 'EXISTING') {
+        return usageDenial(row.code, row.retry_at, requestedAt)
+      }
+      if (
+        row.code === 'ALLOW' &&
+        toSafeNumber(row.persisted, 'Wilbur admission persistence') !== 1
+      ) {
+        throw new Error('Wilbur mutation admission was not persisted exactly once.')
+      }
+
+      const userCount = toSafeNumber(row.user_count, 'user Wilbur rate')
+      const ipCount = toSafeNumber(row.ip_count, 'IP Wilbur rate')
+      const resetsAt = isoTimestamp(row.resets_at)
+      if (!resetsAt) {
+        throw new Error('Wilbur mutation rate query returned no reset timestamp.')
+      }
+      const userLimit = input.kind === 'action'
+        ? config.hourlyWilburActionLimit
+        : config.hourlyWilburObservationLimit
+      const ipLimit = input.kind === 'action'
+        ? config.hourlyIpWilburActionLimit
+        : config.hourlyIpWilburObservationLimit
+      return {
+        ok: true,
+        kind: row.code === 'EXISTING' ? 'existing' : 'consumed',
+        remaining: {
+          user: Math.max(0, userLimit - userCount),
+          ip: Math.max(0, ipLimit - ipCount),
+        },
+        resetsAt,
+      }
+    },
+
     async consumeReplayGameStart(
       input: ConsumeReplayGameStartInput,
     ): Promise<ConsumeReplayGameStartResult> {
@@ -938,6 +1032,11 @@ export function createUsageController(
         [
           buildAcquireUsageLockStatement(),
           buildCleanupExpiredLeasesStatement(requestedAt),
+          buildDeleteAccountGamesStatement(
+            userId,
+            requestedAt,
+            options.force === true,
+          ),
           buildDeleteAccountDataStatement(
             userId,
             hashUserRateKey(config.hmacSecret, userId),
@@ -951,7 +1050,7 @@ export function createUsageController(
         ],
         { isolationLevel: 'ReadCommitted' },
       )
-      const transactionResult = result[2]
+      const transactionResult = result[3]
       if (!transactionResult) {
         throw new Error('Account deletion transaction returned no result.')
       }

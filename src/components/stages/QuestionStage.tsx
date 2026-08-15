@@ -34,7 +34,7 @@ export function QuestionStage({
         <p className="eyebrow">
           <span />
           {provider.kind === 'openclaw'
-            ? 'WebChess 2.1 · OpenClaw local web'
+            ? 'WebChess 2.2 · OpenClaw local web'
             : 'A circular game of perspective'}
         </p>
         <h1><span>Bring a problem.</span><br /><em>Play toward clarity.</em></h1>
@@ -72,7 +72,7 @@ export function QuestionStage({
           <p className="form-data-note" id="problem-data-note">
             {provider.kind === 'openclaw' ? (
               <>
-                Your game, verified move log, and seven-stage visible WebChess 2.1 lifecycle stay
+                Your game, verified move log, and seven-stage visible WebChess 2.2 lifecycle stay
                 in a dedicated PostgreSQL database on this machine. A loopback-only WebChess
                 process sends model turns through {provider.label} using {provider.model}.
                 OpenClaw uses your configured provider and provider authentication—which may

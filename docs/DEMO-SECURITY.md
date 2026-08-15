@@ -4,6 +4,10 @@ This filename is retained for compatibility with earlier repository links. The
 production WebChess plan is one complete application, not a reduced
 visitor-key demonstration.
 
+This document describes the intended hosted surface, which is not claimed live.
+The OpenClaw and loopback source-checkout trust boundaries are documented
+separately in [SECURITY.md](../SECURITY.md).
+
 ## Public routes
 
 Public pages explain the real method and provide documentation, policies,
@@ -52,10 +56,26 @@ process or Vercel Function.
 New divisions and replays share daily game-start accounting and hourly user/IP
 game-start limits. Replay source validation, child cloning, idempotency,
 current-game activation, and the rate/quota debit are atomic. Account exports
-have separate hourly user/IP limits and a default 3,000,000-byte serialized
-response ceiling. Exports are synchronous single-file responses with no
+use `webchess-account-export/4`, have separate hourly user/IP limits, and have a
+default 3,000,000-byte serialized response ceiling. They include owner user-rate
+windows, all lifecycle recovery fields, `charlotteBindingVersion`, and sanitized
+Wilbur mutation-ledger rows. Private mutation capacity reservations, owner/IP
+identifiers, HMAC material, shared IP/global counters, Clerk/vendor data, and
+database-restore metadata are omitted. Exports are synchronous single-file
+responses with no
 pagination or asynchronous fallback; oversized exports are refused and the
-account owner is directed to `/support` for non-sensitive assistance.
+account owner is directed to `/support` for non-sensitive assistance. Wilbur's
+admission envelope preserves existing history and does not guarantee that every
+whole account fits the bounded response.
+
+Wilbur actions and observations have independent per-user/IP hourly limits.
+Each current action is version-bound to one exact Charlotte suggestion index,
+and the database permits at most one current-bound action for that suggestion in
+a lifecycle run. A durable owner-plus-key mutation claim supplies exact replay,
+conflict, and denial; charges rate admission once; expires abandoned pending
+claims after 24 hours; reserves capacity across durable Wilbur rows and pending
+future rows; preserves existing over-limit history; and atomically commits the
+artifact, lifecycle activity, and ledger result.
 
 A repeated model intent recovers its committed result or the existing pending
 request. Once a started provider lease expires without definitive settlement,
@@ -67,7 +87,9 @@ normalized usage when reported—not raw output or reasoning.
 Self-service deletion removes content but preserves a suspended raw-ID marker
 until Clerk confirms deletion. The signed `user.deleted` webhook replaces that
 state with only a lifetime-stable HMAC tombstone while deleting raw IDs and
-content.
+content. The foreign-key-safe deletion order is tested with Portia and Charlotte
+artifact rows. Shared IP rate windows and vendor backups age under their own
+retention policies.
 
 Vercel receives only the least-privileged runtime Postgres URL. Migration-owner
 credentials remain in a protected operator environment and are never stored in

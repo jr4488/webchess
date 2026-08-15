@@ -44,6 +44,9 @@ const compatibleRuntimeInspection = () => ({
   column_privileges_exact: true,
   owner_isolated: true,
   indexes_exact: true,
+  triggers_exact: true,
+  constraints_exact: true,
+  defaults_exact: true,
 })
 
 class FakeClient {
@@ -63,9 +66,7 @@ class FakeClient {
         rows: [
           {
             migration_ledger:
-              this.rows.length > 0
-                ? 'webchess_schema_migrations'
-                : null,
+              this.rows.length > 0 ? 'webchess_schema_migrations' : null,
             has_webchess_objects: false,
           },
         ],
@@ -86,9 +87,7 @@ describe('deployment database migration tooling', () => {
     const migrationDirectory = pathToFileURL(
       `${join(process.cwd(), 'db', 'migrations')}${sep}`,
     )
-    const migrations = await loadCanonicalMigrations(
-      migrationDirectory,
-    )
+    const migrations = await loadCanonicalMigrations(migrationDirectory)
 
     expect(migrations.map((migration) => migration.id)).toEqual([
       '0001_durable_webchess',
@@ -102,10 +101,10 @@ describe('deployment database migration tooling', () => {
       '0009_expand_research_timeout_ceiling',
       '0010_player_visible_answer_prompt',
       '0011_extend_research_timeout_ceiling',
+      '0012_unique_wilbur_charlotte_actions',
+      '0013_wilbur_mutation_requests',
     ])
-    expect(migrations[0].sql).toContain(
-      'CREATE TABLE IF NOT EXISTS games',
-    )
+    expect(migrations[0].sql).toContain('CREATE TABLE IF NOT EXISTS games')
     const researchMigration = migrations.find(
       (migration) => migration.id === '0008_visible_research_broker',
     )
@@ -118,6 +117,12 @@ describe('deployment database migration tooling', () => {
     const extendedTimeoutMigration = migrations.find(
       (migration) => migration.id === '0011_extend_research_timeout_ceiling',
     )
+    const uniqueWilburActionsMigration = migrations.find(
+      (migration) => migration.id === '0012_unique_wilbur_charlotte_actions',
+    )
+    const wilburMutationRequestsMigration = migrations.find(
+      (migration) => migration.id === '0013_wilbur_mutation_requests',
+    )
     expect(researchMigration?.sql).toContain(
       'CREATE TABLE IF NOT EXISTS research_requests',
     )
@@ -127,11 +132,18 @@ describe('deployment database migration tooling', () => {
     expect(timeoutMigration?.sql).toContain(
       'CHECK (timeout_ms BETWEEN 1000 AND 120000)',
     )
-    expect(answerPromptMigration?.sql).toContain(
-      'answer_user_prompt_sha256',
-    )
+    expect(answerPromptMigration?.sql).toContain('answer_user_prompt_sha256')
     expect(extendedTimeoutMigration?.sql).toContain(
       'CHECK (timeout_ms BETWEEN 1000 AND 150000)',
+    )
+    expect(uniqueWilburActionsMigration?.sql).toContain(
+      'wilbur_actions_one_per_charlotte_suggestion',
+    )
+    expect(uniqueWilburActionsMigration?.sql).toContain(
+      'wilbur_actions_charlotte_binding_guard',
+    )
+    expect(wilburMutationRequestsMigration?.sql).toContain(
+      'CREATE TABLE wilbur_mutation_requests',
     )
   })
 
@@ -148,9 +160,13 @@ describe('deployment database migration tooling', () => {
     const privileges = JSON.parse(probe.values[1])
     const indexes = JSON.parse(probe.values[2])
     const columnPrivileges = JSON.parse(probe.values[3])
+    const triggers = JSON.parse(probe.values[4])
+    const constraints = JSON.parse(probe.values[5])
+    const defaults = JSON.parse(probe.values[6])
 
-    const requestColumns = columns.filter(({ table_name }) =>
-      table_name === 'research_requests')
+    const requestColumns = columns.filter(
+      ({ table_name }) => table_name === 'research_requests',
+    )
     expect(requestColumns).toHaveLength(32)
     expect(requestColumns).toEqual(
       expect.arrayContaining([
@@ -166,67 +182,224 @@ describe('deployment database migration tooling', () => {
         }),
       ]),
     )
-    expect(columns.filter(({ table_name }) =>
-      table_name === 'research_sources')).toHaveLength(11)
+    expect(
+      columns.filter(({ table_name }) => table_name === 'research_sources'),
+    ).toHaveLength(11)
 
-    const allowedPrivileges = (tableName) => privileges
-      .filter(({ table_name, allowed }) =>
-        table_name === tableName && allowed)
-      .map(({ privilege }) => privilege)
+    const allowedPrivileges = (tableName) =>
+      privileges
+        .filter(
+          ({ table_name, allowed }) => table_name === tableName && allowed,
+        )
+        .map(({ privilege }) => privilege)
     expect(allowedPrivileges('research_requests')).toEqual([
       'SELECT',
       'INSERT',
       'UPDATE',
     ])
-    expect(allowedPrivileges('research_sources')).toEqual([
+    expect(allowedPrivileges('research_sources')).toEqual(['SELECT', 'INSERT'])
+    expect(allowedPrivileges('wilbur_actions')).toEqual(['SELECT', 'INSERT'])
+    expect(allowedPrivileges('wilbur_mutation_requests')).toEqual([
       'SELECT',
       'INSERT',
     ])
 
     const gateUpdateColumns = columnPrivileges
-      .filter(({ table_name, privilege, allowed }) =>
-        table_name === 'gate_decisions' && privilege === 'UPDATE' && allowed)
+      .filter(
+        ({ table_name, privilege, allowed }) =>
+          table_name === 'gate_decisions' && privilege === 'UPDATE' && allowed,
+      )
       .map(({ column_name }) => column_name)
     expect(gateUpdateColumns).toEqual([
       'answer_user_prompt',
       'answer_user_prompt_sha256',
     ])
+    const wilburActionUpdateColumns = columnPrivileges
+      .filter(
+        ({ table_name, privilege, allowed }) =>
+          table_name === 'wilbur_actions' && privilege === 'UPDATE' && allowed,
+      )
+      .map(({ column_name }) => column_name)
+    expect(wilburActionUpdateColumns).toEqual([
+      'status',
+      'revision',
+      'updated_at',
+    ])
+    const wilburMutationUpdateColumns = columnPrivileges
+      .filter(
+        ({ table_name, privilege, allowed }) =>
+          table_name === 'wilbur_mutation_requests' &&
+          privilege === 'UPDATE' &&
+          allowed,
+      )
+      .map(({ column_name }) => column_name)
+    expect(wilburMutationUpdateColumns).toEqual([
+      'rate_admitted_at',
+      'denial_code',
+      'retry_at',
+      'reserved_future_rows',
+      'reserved_text_bytes',
+      'status',
+      'result_entity_id',
+      'result_revision',
+      'result_status',
+      'result_updated_at',
+      'updated_at',
+    ])
 
-    expect(indexes).toEqual(expect.arrayContaining([
+    expect(indexes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          index_name: 'research_requests_game_id_stage_policy_version_key',
+          table_name: 'research_requests',
+          key_columns: 'game_id,stage,policy_version',
+        }),
+        expect.objectContaining({
+          index_name: 'research_sources_research_request_id_ordinal_key',
+          table_name: 'research_sources',
+          key_columns: 'research_request_id,ordinal',
+        }),
+        expect.objectContaining({
+          index_name: 'research_sources_research_request_id_url_key',
+          table_name: 'research_sources',
+          key_columns: 'research_request_id,url',
+        }),
+        expect.objectContaining({
+          index_name: 'wilbur_actions_one_per_charlotte_suggestion',
+          table_name: 'wilbur_actions',
+          key_columns: 'lifecycle_run_id,charlotte_action_index',
+          predicate:
+            "(charlotte_binding_version = 'webchess-charlotte-action-binding-v1'::text)",
+        }),
+        expect.objectContaining({
+          index_name: 'wilbur_mutation_requests_pkey',
+          table_name: 'wilbur_mutation_requests',
+          key_columns: 'clerk_user_id,idempotency_key',
+          predicate: null,
+        }),
+      ]),
+    )
+
+    expect(triggers).toEqual([
       expect.objectContaining({
-        index_name:
-          'research_requests_game_id_stage_policy_version_key',
-        table_name: 'research_requests',
-        key_columns: 'game_id,stage,policy_version',
+        table_name: 'wilbur_actions',
+        trigger_name: 'wilbur_actions_charlotte_binding_guard',
+        function_name: 'webchess_guard_wilbur_charlotte_binding',
+        function_config: 'search_path=pg_catalog, pg_temp',
+        security_definer: false,
+        leakproof: false,
+        function_owner_isolated: true,
+        volatility: 'v',
+        parallel_mode: 'u',
+        enabled_mode: 'O',
+        trigger_type: 23,
+        has_when_clause: false,
+        update_columns: '',
+        argument_count: 0,
+        argument_bytes: 0,
+        constraint_trigger: false,
+        trigger_deferrable: false,
+        initially_deferred: false,
+        parent_trigger: false,
+        function_source: expect.stringContaining(
+          'NEW.charlotte_binding_version IS DISTINCT FROM OLD.charlotte_binding_version',
+        ),
       }),
       expect.objectContaining({
-        index_name:
-          'research_sources_research_request_id_ordinal_key',
-        table_name: 'research_sources',
-        key_columns: 'research_request_id,ordinal',
+        table_name: 'wilbur_mutation_requests',
+        trigger_name: 'wilbur_mutation_requests_state_guard',
+        function_name: 'webchess_guard_wilbur_mutation_request',
+        function_config: 'search_path=pg_catalog, pg_temp',
+        security_definer: false,
+        leakproof: false,
+        function_owner_isolated: true,
+        volatility: 'v',
+        parallel_mode: 'u',
+        enabled_mode: 'O',
+        trigger_type: 23,
+        has_when_clause: false,
+        update_columns: '',
+        argument_count: 0,
+        argument_bytes: 0,
+        constraint_trigger: false,
+        trigger_deferrable: false,
+        initially_deferred: false,
+        parent_trigger: false,
+        function_source: expect.stringContaining("OLD.status <> 'pending'"),
       }),
-      expect.objectContaining({
-        index_name: 'research_sources_research_request_id_url_key',
-        table_name: 'research_sources',
-        key_columns: 'research_request_id,url',
-      }),
-    ]))
+    ])
+
+    for (const [index, filename] of [
+      [0, '0012_unique_wilbur_charlotte_actions.sql'],
+      [1, '0013_wilbur_mutation_requests.sql'],
+    ]) {
+      const functionBody = readFileSync(
+        join(process.cwd(), 'db', 'migrations', filename),
+        'utf8',
+      ).match(/AS \$function\$([\s\S]*?)\$function\$;/u)?.[1]
+      expect(functionBody).toBeDefined()
+      expect(triggers[index].function_source).toBe(
+        functionBody?.trim().replace(/\s+/gu, ' '),
+      )
+      expect(triggers[index].function_source).not.toBe('BEGIN RETURN NEW; END')
+    }
+
+    expect(constraints).toHaveLength(18)
+    expect(constraints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          constraint_name: 'wilbur_actions_charlotte_binding_version_valid',
+          definition: expect.stringContaining(
+            'webchess-charlotte-action-binding-v1',
+          ),
+        }),
+        expect.objectContaining({
+          constraint_name: 'wilbur_mutation_requests_clerk_user_id_fkey',
+          definition: expect.stringContaining('ON DELETE CASCADE'),
+        }),
+        expect.objectContaining({
+          constraint_name: 'wilbur_mutation_requests_reservation_shape',
+          definition: expect.stringContaining('reserved_future_rows'),
+        }),
+      ]),
+    )
+    expect(defaults).toHaveLength(5)
+    expect(defaults).toEqual(
+      expect.arrayContaining([
+        {
+          table_name: 'wilbur_mutation_requests',
+          column_name: 'reserved_future_rows',
+          definition: '0',
+        },
+        {
+          table_name: 'wilbur_mutation_requests',
+          column_name: 'status',
+          definition: "'pending'::text",
+        },
+      ]),
+    )
+  })
+
+  it('fails closed for a permissive same-name trigger function body', async () => {
+    const migrations = exampleMigrations()
+    const client = new FakeClient(ledgerFor(migrations), {
+      ...compatibleRuntimeInspection(),
+      triggers_exact: false,
+    })
+
+    await expect(
+      checkCanonicalMigrationsReadOnly(client, migrations),
+    ).rejects.toThrow('trigger contract')
+    expect(client.queries.at(-1).text).toBe('ROLLBACK')
   })
 
   it('uses the existing migration runner checksum semantics exactly', () => {
     const sql = readFileSync(
-      join(
-        process.cwd(),
-        'db',
-        'migrations',
-        '0001_durable_webchess.sql',
-      ),
+      join(process.cwd(), 'db', 'migrations', '0001_durable_webchess.sql'),
       'utf8',
     )
 
-    expect(deploymentMigrationChecksum(sql)).toBe(
-      migrationChecksum(sql),
-    )
+    expect(deploymentMigrationChecksum(sql)).toBe(migrationChecksum(sql))
     expect(deploymentMigrationChecksum('SELECT 1;\r\n')).toBe(
       migrationChecksum('SELECT 1;\r\n'),
     )
@@ -250,6 +423,18 @@ describe('deployment database migration tooling', () => {
         },
       ]),
     ).toThrow(/nontransactional DDL/)
+
+    for (const sql of [
+      'CREATE DATABASE bad_database;',
+      'DROP DATABASE bad_database;',
+      "CREATE TABLESPACE bad_space LOCATION '/tmp/bad';",
+      'DROP TABLESPACE bad_space;',
+      "ALTER SYSTEM SET work_mem = '1GB';",
+    ]) {
+      expect(() =>
+        validateCanonicalMigrations([{ id: '0001_bad', sql }]),
+      ).toThrow(/nontransactional DDL/)
+    }
 
     expect(() =>
       validateCanonicalMigrations([
@@ -275,17 +460,17 @@ describe('deployment database migration tooling', () => {
 
     const drifted = ledgerFor(migrations)
     drifted[0] = { ...drifted[0], checksum: '0'.repeat(64) }
-    expect(() =>
-      planCanonicalMigrations(migrations, drifted),
-    ).toThrow(/0001_example has a checksum mismatch/)
+    expect(() => planCanonicalMigrations(migrations, drifted)).toThrow(
+      /0001_example has a checksum mismatch/,
+    )
 
     const unexpected = [
       ...ledgerFor(migrations),
       { id: '0003_unknown', checksum: '1'.repeat(64) },
     ]
-    expect(() =>
-      planCanonicalMigrations(migrations, unexpected),
-    ).toThrow(/0003_unknown is not present in the release/)
+    expect(() => planCanonicalMigrations(migrations, unexpected)).toThrow(
+      /0003_unknown is not present in the release/,
+    )
 
     expect(() =>
       planCanonicalMigrations(migrations, ledgerFor(migrations.slice(1))),
@@ -308,9 +493,7 @@ describe('deployment database migration tooling', () => {
 
     expect(client.queries.map((query) => query.text.trim())).toEqual([
       'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY',
-      expect.stringContaining(
-        'webchess_runtime_compatibility_probe',
-      ),
+      expect.stringContaining('webchess_runtime_compatibility_probe'),
       expect.stringContaining('SELECT id, checksum'),
       'COMMIT',
     ])
@@ -324,6 +507,9 @@ describe('deployment database migration tooling', () => {
     ['tables_exact', false, /table set/],
     ['columns_exact', false, /column contract/],
     ['indexes_exact', false, /critical index contract/],
+    ['triggers_exact', false, /trigger contract/],
+    ['constraints_exact', false, /critical constraint contract/],
+    ['defaults_exact', false, /critical default contract/],
     ['owner_isolated', false, /assume ownership/],
     ['privileges_exact', false, /least-privilege contract/],
     ['column_privileges_exact', false, /column privileges/],
@@ -335,10 +521,7 @@ describe('deployment database migration tooling', () => {
         ...compatibleRuntimeInspection(),
         [field]: failedValue,
       }
-      const client = new FakeClient(
-        ledgerFor(migrations),
-        inspection,
-      )
+      const client = new FakeClient(ledgerFor(migrations), inspection)
 
       await expect(
         checkCanonicalMigrationsReadOnly(client, migrations),
@@ -378,21 +561,18 @@ describe('deployment database migration tooling', () => {
     const existing = ledgerFor(migrations.slice(0, 1))
     const client = new FakeClient(existing)
 
-    await expect(
-      applyCanonicalMigrations(client, migrations),
-    ).resolves.toEqual({
-      applied: ['0002_more'],
-      alreadyApplied: ['0001_example'],
-    })
-
-    expect(client.queries[0].text).toBe(
-      'BEGIN ISOLATION LEVEL READ COMMITTED',
+    await expect(applyCanonicalMigrations(client, migrations)).resolves.toEqual(
+      {
+        applied: ['0002_more'],
+        alreadyApplied: ['0001_example'],
+      },
     )
+
+    expect(client.queries[0].text).toBe('BEGIN ISOLATION LEVEL READ COMMITTED')
     expect(
       client.queries.some(
         (query) =>
-          query.text === migrations[1].sql &&
-          query.values === undefined,
+          query.text === migrations[1].sql && query.values === undefined,
       ),
     ).toBe(true)
     expect(client.rows).toEqual(ledgerFor(migrations))
@@ -431,9 +611,7 @@ describe('deployment database migration tooling', () => {
   it('reports a missing migration ledger without exposing driver details', async () => {
     const client = {
       async query(text) {
-        if (
-          text.includes('webchess_runtime_compatibility_probe')
-        ) {
+        if (text.includes('webchess_runtime_compatibility_probe')) {
           return { rows: [compatibleRuntimeInspection()] }
         }
         if (text.includes('SELECT id, checksum')) {

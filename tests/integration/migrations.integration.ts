@@ -33,6 +33,8 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         '0009_expand_research_timeout_ceiling',
         '0010_player_visible_answer_prompt',
         '0011_extend_research_timeout_ceiling',
+        '0012_unique_wilbur_charlotte_actions',
+        '0013_wilbur_mutation_requests',
       ],
       alreadyApplied: [],
     })
@@ -50,6 +52,8 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         '0009_expand_research_timeout_ceiling',
         '0010_player_visible_answer_prompt',
         '0011_extend_research_timeout_ceiling',
+        '0012_unique_wilbur_charlotte_actions',
+        '0013_wilbur_mutation_requests',
       ],
     })
 
@@ -85,6 +89,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
       'user_controls',
       'webchess_schema_migrations',
       'wilbur_actions',
+      'wilbur_mutation_requests',
       'wilbur_observations',
     ])
 
@@ -104,9 +109,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
   })
 
   it('expands the research timeout ceiling without changing the applied 0008 migration', async () => {
-    const upgrade = await createPostgresTestDatabase(
-      'research_timeout_upgrade',
-    )
+    const upgrade = await createPostgresTestDatabase('research_timeout_upgrade')
     try {
       const timeoutMigrationIndex = durableWebChessMigrations.findIndex(
         (migration) => migration.id === '0009_expand_research_timeout_ceiling',
@@ -156,28 +159,34 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         `,
       })
 
-      await expect(runMigrations(
-        upgrade.adapter,
-        durableWebChessMigrations.slice(0, timeoutMigrationIndex + 1),
-      )).resolves.toEqual({
+      await expect(
+        runMigrations(
+          upgrade.adapter,
+          durableWebChessMigrations.slice(0, timeoutMigrationIndex + 1),
+        ),
+      ).resolves.toEqual({
         applied: ['0009_expand_research_timeout_ceiling'],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })
 
-      await expect(upgrade.adapter.query({
-        text: `
+      await expect(
+        upgrade.adapter.query({
+          text: `
           UPDATE research_requests
           SET timeout_ms = 120000
           WHERE id = '65000000-0000-4000-8000-000000000002'
         `,
-      })).resolves.toMatchObject({ rowCount: 1 })
-      await expect(upgrade.adapter.query({
-        text: `
+        }),
+      ).resolves.toMatchObject({ rowCount: 1 })
+      await expect(
+        upgrade.adapter.query({
+          text: `
           UPDATE research_requests
           SET timeout_ms = 120001
           WHERE id = '65000000-0000-4000-8000-000000000002'
         `,
-      })).rejects.toMatchObject({
+        }),
+      ).rejects.toMatchObject({
         constraint: 'research_requests_timeout_valid',
       })
 
@@ -247,28 +256,34 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         `,
       })
 
-      await expect(runMigrations(
-        upgrade.adapter,
-        durableWebChessMigrations,
-      )).resolves.toEqual({
+      await expect(
+        runMigrations(
+          upgrade.adapter,
+          durableWebChessMigrations.slice(0, envelopeMigrationIndex + 1),
+        ),
+      ).resolves.toEqual({
         applied: ['0011_extend_research_timeout_ceiling'],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })
 
-      await expect(upgrade.adapter.query({
-        text: `
+      await expect(
+        upgrade.adapter.query({
+          text: `
           UPDATE research_requests
           SET timeout_ms = 150000
           WHERE id = '65000000-0000-4000-8000-000000000012'
         `,
-      })).resolves.toMatchObject({ rowCount: 1 })
-      await expect(upgrade.adapter.query({
-        text: `
+        }),
+      ).resolves.toMatchObject({ rowCount: 1 })
+      await expect(
+        upgrade.adapter.query({
+          text: `
           UPDATE research_requests
           SET timeout_ms = 150001
           WHERE id = '65000000-0000-4000-8000-000000000012'
         `,
-      })).rejects.toMatchObject({
+        }),
+      ).rejects.toMatchObject({
         constraint: 'research_requests_timeout_valid',
       })
     } finally {
@@ -281,7 +296,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
     try {
       await runMigrations(
         upgrade.adapter,
-        durableWebChessMigrations.slice(0, -5),
+        durableWebChessMigrations.slice(0, -7),
       )
       const owner = 'user_charlotte_migration_upgrade'
       await upgrade.adapter.query({
@@ -387,19 +402,20 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         values: [owner],
       })
 
-      await expect(runMigrations(
-        upgrade.adapter,
-        durableWebChessMigrations,
-      )).resolves.toEqual({
+      await expect(
+        runMigrations(upgrade.adapter, durableWebChessMigrations),
+      ).resolves.toEqual({
         applied: [
           '0007_bounded_charlotte_attempts',
           '0008_visible_research_broker',
           '0009_expand_research_timeout_ceiling',
           '0010_player_visible_answer_prompt',
           '0011_extend_research_timeout_ceiling',
+          '0012_unique_wilbur_charlotte_actions',
+          '0013_wilbur_mutation_requests',
         ],
         alreadyApplied: durableWebChessMigrations
-          .slice(0, -5)
+          .slice(0, -7)
           .map((migration) => migration.id),
       })
 
@@ -448,17 +464,538 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
             (SELECT prompt_version FROM charlotte_results LIMIT 1) AS result_prompt
         `,
       })
-      expect(preserved.rows).toEqual([{
-        request_count: 2,
-        result_count: 1,
-        result_prompt: 'webchess-charlotte-v3',
-      }])
+      expect(preserved.rows).toEqual([
+        {
+          request_count: 2,
+          result_count: 1,
+          result_prompt: 'webchess-charlotte-v3',
+        },
+      ])
     } finally {
       await upgrade.dispose()
     }
   })
 
-  it('installs the current-game and succeeded-operation uniqueness boundaries', async () => {
+  it('preserves legacy Wilbur rows while binding and freezing every new Charlotte action', async () => {
+    const upgrade = await createPostgresTestDatabase(
+      'wilbur_charlotte_binding_upgrade',
+    )
+    try {
+      const bindingMigrationIndex = durableWebChessMigrations.findIndex(
+        (migration) => migration.id === '0012_unique_wilbur_charlotte_actions',
+      )
+      const priorMigrations = durableWebChessMigrations.slice(
+        0,
+        bindingMigrationIndex,
+      )
+      await runMigrations(upgrade.adapter, priorMigrations)
+
+      const owner = 'user_wilbur_binding_migration'
+      const gameId = '71000000-0000-4000-8000-000000000001'
+      const runId = '71000000-0000-4000-8000-000000000002'
+      const legacyActionId = '71000000-0000-4000-8000-000000000003'
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO user_controls (clerk_user_id)
+          VALUES ($1::text)
+        `,
+        values: [owner],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO games (
+            id, clerk_user_id, status, problem, problem_sha256,
+            event_version, rules_version, engine_version, cast_version,
+            software_version
+          )
+          VALUES (
+            $1::uuid, $2::text, 'dividing',
+            'How should this migration preserve a legacy Wilbur action?',
+            repeat('a', 64), 1, 'rules-test', 'engine-test',
+            'cast-test', 'software-test'
+          )
+        `,
+        values: [gameId, owner],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO lifecycle_runs (
+            id, clerk_user_id, game_id, root_run_id, state,
+            division_seed, cast_seed, trajectory_seed,
+            software_version, lifecycle_version, rules_version,
+            engine_version, cast_version, event_version,
+            portia_prompt_version, portia_contract_version,
+            gate_algorithm_version, retry_policy_version,
+            charlotte_prompt_version, charlotte_contract_version,
+            wilbur_record_version
+          )
+          VALUES (
+            $1::uuid, $2::text, $3::uuid, $1::uuid, 'wilbur_planning',
+            'division-seed', 'cast-seed', 'trajectory-seed',
+            'software-test', 'lifecycle-test', 'rules-test',
+            'engine-test', 'cast-test', 1,
+            'portia-prompt-test', 'portia-contract-test',
+            'gate-test', 'retry-test', 'charlotte-prompt-test',
+            'charlotte-contract-test', 'wilbur-record-test'
+          )
+        `,
+        values: [runId, owner, gameId],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO wilbur_actions (
+            id, clerk_user_id, lifecycle_run_id, charlotte_action_index,
+            idempotency_key, request_digest, actor, action,
+            tested_assumption, expected_observation, decision_threshold,
+            review_horizon, status, record_version
+          )
+          VALUES (
+            $1::uuid, $2::text, $3::uuid, 0,
+            '71000000-0000-4000-8000-000000000004', repeat('b', 64),
+            'Legacy owner', 'Run the legacy bounded action.',
+            'The legacy action tests a bounded assumption.',
+            'The legacy action records one direct observation.',
+            'Continue only if the declared legacy threshold is met.',
+            'Within one week', 'planned', 'wilbur-record-test'
+          )
+        `,
+        values: [legacyActionId, owner, runId],
+      })
+
+      await expect(
+        runMigrations(upgrade.adapter, durableWebChessMigrations),
+      ).resolves.toEqual({
+        applied: [
+          '0012_unique_wilbur_charlotte_actions',
+          '0013_wilbur_mutation_requests',
+        ],
+        alreadyApplied: priorMigrations.map((migration) => migration.id),
+      })
+
+      const legacy = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT charlotte_binding_version
+          FROM wilbur_actions
+          WHERE id = $1::uuid
+        `,
+        values: [legacyActionId],
+      })
+      expect(legacy.rows).toEqual([{ charlotte_binding_version: null }])
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+          UPDATE wilbur_actions
+          SET status = 'in_progress', revision = revision + 1,
+            updated_at = now()
+          WHERE id = $1::uuid
+        `,
+          values: [legacyActionId],
+        }),
+      ).resolves.toMatchObject({ rowCount: 1 })
+      await expect(
+        upgrade.adapter.query({
+          text: `
+          UPDATE wilbur_actions
+          SET actor = 'Rewritten owner'
+          WHERE id = $1::uuid
+        `,
+          values: [legacyActionId],
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        upgrade.adapter.query({
+          text: `
+          UPDATE wilbur_actions
+          SET charlotte_binding_version =
+            'webchess-charlotte-action-binding-v1'
+          WHERE id = $1::uuid
+        `,
+          values: [legacyActionId],
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      const insertCurrent = (
+        id: string,
+        idempotencyKey: string,
+        actionIndex: number | null,
+        bindingVersion: string | null,
+        status = 'planned',
+        revision = 0,
+      ) =>
+        upgrade.adapter.query({
+          text: `
+          INSERT INTO wilbur_actions (
+            id, clerk_user_id, lifecycle_run_id, charlotte_action_index,
+            idempotency_key, request_digest, actor, action,
+            tested_assumption, expected_observation, decision_threshold,
+            review_horizon, status, record_version,
+            charlotte_binding_version, revision
+          )
+          VALUES (
+            $1::uuid, $2::text, $3::uuid, $4::smallint,
+            $5::uuid, repeat('c', 64),
+            'Current owner', 'Run the current bounded action.',
+            'The current action tests a bounded assumption.',
+            'The current action records one direct observation.',
+            'Continue only if the declared current threshold is met.',
+            'Within one week', $7::text, 'wilbur-record-test', $6::text,
+            $8::bigint
+          )
+        `,
+          values: [
+            id,
+            owner,
+            runId,
+            actionIndex,
+            idempotencyKey,
+            bindingVersion,
+            status,
+            revision,
+          ],
+        })
+
+      const currentActionId = '71000000-0000-4000-8000-000000000005'
+      await expect(
+        insertCurrent(
+          currentActionId,
+          '71000000-0000-4000-8000-000000000006',
+          0,
+          null,
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 })
+      const current = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT charlotte_binding_version
+          FROM wilbur_actions
+          WHERE id = $1::uuid
+        `,
+        values: [currentActionId],
+      })
+      expect(current.rows).toEqual([
+        {
+          charlotte_binding_version: 'webchess-charlotte-action-binding-v1',
+        },
+      ])
+
+      for (const assignment of [
+        "id = '71000000-0000-4000-8000-000000000099'::uuid",
+        "clerk_user_id = 'rewritten_owner'",
+        "lifecycle_run_id = '71000000-0000-4000-8000-000000000098'::uuid",
+        'charlotte_action_index = 1',
+        'charlotte_binding_version = NULL',
+        "idempotency_key = '71000000-0000-4000-8000-000000000097'::uuid",
+        "request_digest = repeat('d', 64)",
+        "actor = 'Rewritten owner'",
+        "action = 'Rewrite the bounded action.'",
+        "tested_assumption = 'Rewrite the tested assumption.'",
+        "expected_observation = 'Rewrite the expected observation.'",
+        "decision_threshold = 'Rewrite the decision threshold.'",
+        "review_horizon = 'Within two weeks'",
+        "record_version = 'rewritten-record-version'",
+        "created_at = created_at - interval '1 second'",
+      ]) {
+        await expect(
+          upgrade.adapter.query({
+            text: `
+            UPDATE wilbur_actions
+            SET ${assignment}, revision = revision + 1,
+              updated_at = now()
+            WHERE id = $1::uuid
+          `,
+            values: [currentActionId],
+          }),
+        ).rejects.toMatchObject({ code: '23514' })
+      }
+
+      for (const assignment of [
+        'revision = revision',
+        'revision = revision + 2',
+        "revision = revision + 1, updated_at = updated_at - interval '1 second'",
+      ]) {
+        await expect(
+          upgrade.adapter.query({
+            text: `
+              UPDATE wilbur_actions
+              SET status = 'in_progress', ${assignment}
+              WHERE id = $1::uuid
+            `,
+            values: [currentActionId],
+          }),
+        ).rejects.toMatchObject({ code: '23514' })
+      }
+
+      await expect(
+        insertCurrent(
+          '71000000-0000-4000-8000-000000000007',
+          '71000000-0000-4000-8000-000000000008',
+          0,
+          null,
+        ),
+      ).rejects.toMatchObject({
+        code: '23505',
+        constraint: 'wilbur_actions_one_per_charlotte_suggestion',
+      })
+      await expect(
+        insertCurrent(
+          '71000000-0000-4000-8000-000000000009',
+          '71000000-0000-4000-8000-000000000010',
+          null,
+          null,
+        ),
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        insertCurrent(
+          '71000000-0000-4000-8000-000000000011',
+          '71000000-0000-4000-8000-000000000012',
+          1,
+          'obsolete-binding-version',
+        ),
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        insertCurrent(
+          '71000000-0000-4000-8000-000000000014',
+          '71000000-0000-4000-8000-000000000015',
+          2,
+          null,
+          'completed',
+        ),
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        insertCurrent(
+          '71000000-0000-4000-8000-000000000016',
+          '71000000-0000-4000-8000-000000000017',
+          3,
+          null,
+          'planned',
+          1,
+        ),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      const mutationKey = '71000000-0000-4000-8000-000000000013'
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO wilbur_mutation_requests (
+            clerk_user_id, idempotency_key, operation, request_digest,
+            target_game_id, rate_kind, reserved_future_rows,
+            reserved_text_bytes
+          )
+          VALUES (
+            $1::text, $2::uuid, 'create_action', repeat('d', 64),
+            $3::uuid, 'action', 2, 256
+          )
+        `,
+        values: [owner, mutationKey, gameId],
+      })
+
+      for (const assignment of [
+        "clerk_user_id = 'rewritten_owner'",
+        "idempotency_key = '71000000-0000-4000-8000-000000000018'::uuid",
+        "operation = 'update_action'",
+        "request_digest = repeat('e', 64)",
+        "target_game_id = '71000000-0000-4000-8000-000000000019'::uuid",
+        `target_action_id = '${currentActionId}'::uuid`,
+        "rate_kind = 'observation'",
+        "created_at = created_at - interval '1 second'",
+      ]) {
+        await expect(
+          upgrade.adapter.query({
+            text: `
+              UPDATE wilbur_mutation_requests
+              SET ${assignment}
+              WHERE clerk_user_id = $1::text
+                AND idempotency_key = $2::uuid
+            `,
+            values: [owner, mutationKey],
+          }),
+        ).rejects.toMatchObject({ code: '23514' })
+      }
+
+      for (const reservation of [255, 257]) {
+        await expect(
+          upgrade.adapter.query({
+            text: `
+              UPDATE wilbur_mutation_requests
+              SET reserved_text_bytes = $3::bigint
+              WHERE clerk_user_id = $1::text
+                AND idempotency_key = $2::uuid
+            `,
+            values: [owner, mutationKey, reservation],
+          }),
+        ).rejects.toMatchObject({ code: '23514' })
+      }
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            UPDATE wilbur_mutation_requests
+            SET updated_at = updated_at - interval '1 second'
+            WHERE clerk_user_id = $1::text
+              AND idempotency_key = $2::uuid
+          `,
+          values: [owner, mutationKey],
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+          UPDATE wilbur_mutation_requests
+          SET rate_admitted_at = now(), status = 'committed',
+            result_entity_id = $3::uuid, result_revision = 0,
+            result_status = 'planned', result_updated_at = now(),
+            reserved_future_rows = 0, reserved_text_bytes = 0,
+            updated_at = now()
+          WHERE clerk_user_id = $1::text
+            AND idempotency_key = $2::uuid
+        `,
+          values: [owner, mutationKey, currentActionId],
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            UPDATE wilbur_mutation_requests
+            SET rate_admitted_at = now(), updated_at = now()
+            WHERE clerk_user_id = $1::text
+              AND idempotency_key = $2::uuid
+          `,
+          values: [owner, mutationKey],
+        }),
+      ).resolves.toMatchObject({ rowCount: 1 })
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            UPDATE wilbur_mutation_requests
+            SET rate_admitted_at = rate_admitted_at + interval '1 second',
+              updated_at = now()
+            WHERE clerk_user_id = $1::text
+              AND idempotency_key = $2::uuid
+          `,
+          values: [owner, mutationKey],
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            UPDATE wilbur_mutation_requests
+            SET status = 'committed',
+              result_entity_id = $3::uuid, result_revision = 0,
+              result_status = 'planned', result_updated_at = now(),
+              reserved_future_rows = 0, reserved_text_bytes = 0,
+              updated_at = now()
+            WHERE clerk_user_id = $1::text
+              AND idempotency_key = $2::uuid
+          `,
+          values: [owner, mutationKey, currentActionId],
+        }),
+      ).resolves.toMatchObject({ rowCount: 1 })
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            UPDATE wilbur_mutation_requests
+            SET status = 'pending', result_entity_id = NULL,
+              result_revision = NULL, result_status = NULL,
+              result_updated_at = NULL, reserved_future_rows = 2,
+              reserved_text_bytes = 256, updated_at = now()
+            WHERE clerk_user_id = $1::text
+              AND idempotency_key = $2::uuid
+          `,
+          values: [owner, mutationKey],
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            UPDATE wilbur_mutation_requests
+            SET result_status = 'completed', updated_at = now()
+            WHERE clerk_user_id = $1::text
+              AND idempotency_key = $2::uuid
+          `,
+          values: [owner, mutationKey],
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            INSERT INTO wilbur_mutation_requests (
+              clerk_user_id, idempotency_key, operation, request_digest,
+              target_game_id, rate_kind, rate_admitted_at,
+              reserved_future_rows, reserved_text_bytes
+            )
+            VALUES (
+              $1::text, '71000000-0000-4000-8000-000000000020',
+              'create_action', repeat('f', 64), $2::uuid, 'action', now(),
+              2, 256
+            )
+          `,
+          values: [owner, gameId],
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            INSERT INTO wilbur_mutation_requests (
+              clerk_user_id, idempotency_key, operation, request_digest,
+              target_game_id, rate_kind, rate_admitted_at,
+              reserved_future_rows, reserved_text_bytes, status,
+              result_entity_id, result_revision, result_status,
+              result_updated_at
+            )
+            VALUES (
+              $1::text, '71000000-0000-4000-8000-000000000021',
+              'create_action', repeat('f', 64), $2::uuid, 'action', now(),
+              0, 0, 'committed', $3::uuid, 0, 'planned', now()
+            )
+          `,
+          values: [owner, gameId, currentActionId],
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            INSERT INTO wilbur_mutation_requests (
+              clerk_user_id, idempotency_key, operation, request_digest,
+              target_game_id, rate_kind, denial_code,
+              reserved_future_rows, reserved_text_bytes, status
+            )
+            VALUES (
+              $1::text, '71000000-0000-4000-8000-000000000022',
+              'create_action', repeat('f', 64), $2::uuid, 'action',
+              'quota_exceeded', 0, 0, 'denied'
+            )
+          `,
+          values: [owner, gameId],
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+
+      await upgrade.adapter.query({
+        text: `DELETE FROM games WHERE id = $1::uuid`,
+        values: [gameId],
+      })
+      const cascaded = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT count(*)::integer AS mutation_count
+          FROM wilbur_mutation_requests
+          WHERE clerk_user_id = $1::text
+        `,
+        values: [owner],
+      })
+      expect(cascaded.rows).toEqual([{ mutation_count: 0 }])
+    } finally {
+      await upgrade.dispose()
+    }
+  })
+
+  it('installs the release uniqueness and Charlotte-binding boundaries', async () => {
     const indexes = await database.adapter.query<SqlRow>({
       text: `
         SELECT indexname, indexdef
@@ -466,19 +1003,75 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         WHERE schemaname = current_schema()
           AND indexname IN (
             'games_one_current_per_user',
-            'model_requests_one_succeeded_operation_per_game'
+            'model_requests_one_succeeded_operation_per_game',
+            'wilbur_actions_one_per_charlotte_suggestion',
+            'wilbur_mutation_requests_pkey'
           )
         ORDER BY indexname
       `,
     })
 
-    expect(indexes.rows).toHaveLength(2)
-    expect(indexes.rows[0]?.indexdef).toContain(
-      'WHERE is_current',
+    expect(indexes.rows).toHaveLength(4)
+    const byName = Object.fromEntries(
+      indexes.rows.map((row) => [String(row.indexname), String(row.indexdef)]),
     )
-    expect(indexes.rows[1]?.indexdef).toContain(
+    expect(byName.games_one_current_per_user).toContain('WHERE is_current')
+    expect(byName.model_requests_one_succeeded_operation_per_game).toContain(
       "WHERE ((game_id IS NOT NULL) AND (status = 'succeeded'::text))",
     )
+    expect(byName.wilbur_actions_one_per_charlotte_suggestion).toContain(
+      'UNIQUE INDEX wilbur_actions_one_per_charlotte_suggestion',
+    )
+    expect(byName.wilbur_actions_one_per_charlotte_suggestion).toContain(
+      '(lifecycle_run_id, charlotte_action_index)',
+    )
+    expect(byName.wilbur_actions_one_per_charlotte_suggestion).toContain(
+      "WHERE (charlotte_binding_version = 'webchess-charlotte-action-binding-v1'::text)",
+    )
+    expect(byName.wilbur_mutation_requests_pkey).toContain(
+      'UNIQUE INDEX wilbur_mutation_requests_pkey',
+    )
+    expect(byName.wilbur_mutation_requests_pkey).toContain(
+      '(clerk_user_id, idempotency_key)',
+    )
+
+    const binding = await database.adapter.query<SqlRow>({
+      text: `
+        SELECT
+          columns.is_nullable,
+          triggers.tgenabled,
+          procedures.proname,
+          languages.lanname,
+          pg_catalog.pg_get_function_result(procedures.oid)
+            AS function_result
+        FROM information_schema.columns AS columns
+        JOIN pg_catalog.pg_class AS relations
+          ON relations.relname = columns.table_name
+        JOIN pg_catalog.pg_namespace AS namespaces
+          ON namespaces.oid = relations.relnamespace
+          AND namespaces.nspname = columns.table_schema
+        JOIN pg_catalog.pg_trigger AS triggers
+          ON triggers.tgrelid = relations.oid
+          AND triggers.tgname =
+            'wilbur_actions_charlotte_binding_guard'
+        JOIN pg_catalog.pg_proc AS procedures
+          ON procedures.oid = triggers.tgfoid
+        JOIN pg_catalog.pg_language AS languages
+          ON languages.oid = procedures.prolang
+        WHERE columns.table_schema = current_schema()
+          AND columns.table_name = 'wilbur_actions'
+          AND columns.column_name = 'charlotte_binding_version'
+      `,
+    })
+    expect(binding.rows).toEqual([
+      {
+        is_nullable: 'YES',
+        tgenabled: 'O',
+        proname: 'webchess_guard_wilbur_charlotte_binding',
+        lanname: 'plpgsql',
+        function_result: 'trigger',
+      },
+    ])
   })
 
   it('enforces persisted replay-version and event-shape constraints', async () => {

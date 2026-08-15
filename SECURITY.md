@@ -16,9 +16,10 @@ support belongs in GitHub Discussions.
 
 ## Supported versions
 
-Security fixes target the current `main` branch and the current production
-release after one exists. Until tagged releases are published, older revisions
-are unsupported.
+Security fixes target the current `main` branch and any separately identified
+supported release. `2.1.0` is the latest tagged release; the `2.2.0` package
+identity in this source tree is a release candidate until it is verified and
+tagged. No production hosted deployment is claimed.
 
 ## Trust boundaries
 
@@ -66,6 +67,13 @@ provider credentials in the browser. OpenClaw resolves its own configured
 default model and authentication. That provider may be remote and may process
 the question or final game-derived prompt under its own data controls.
 
+Only this OpenClaw composition provides automatic external research. Its
+deterministic pre-Portia policy invokes local Codex Search at most once, accepts
+at most five result links and five stored citation candidates, and uses a
+150-second WebChess envelope. It does not fetch candidate pages. Search output,
+titles, and URLs remain untrusted model data and cannot authorize a mutation,
+provider selection, or Gate pass.
+
 The dedicated local PostgreSQL database is the persistence boundary, while the
 shared server handlers and append-only event log remain authoritative.
 WebChess recomputes the 64-cell cast from the saved facets and seed, replays the
@@ -75,10 +83,39 @@ on the same loopback installation restore the same owner-scoped game; another
 machine does not receive it, and WebChess provides no cloud backup or
 synchronization for local mode.
 
+### Local source-checkout runtime
+
+`npm run local:dev` is a third boundary: it binds the app to
+`127.0.0.1:3005`, uses Docker PostgreSQL on `127.0.0.1:55433`, never launches
+OpenClaw, and calls the fixed hosted-service model through a server-only OpenAI
+key. It selects exactly one authentication mode. Neither Clerk key activates a
+seven-day HMAC-signed, HttpOnly, SameSite=Lax cookie for one installation-owned
+machine principal; a complete `pk_test_...` / `sk_test_...` pair activates
+Clerk development identity. Partial pairs, live keys, non-loopback databases,
+and Vercel activation fail closed.
+
+The signed principal is a same-machine access boundary, not a password or proof
+of a person. Its dedicated `WEBCHESS_LOCAL_SESSION_SECRET` is separate from the
+general and deletion HMAC secrets. Losing it changes the derived local owner and
+makes prior owner-scoped rows inaccessible to the new session. Preserve it with
+the local database backup. Automatic Codex Search research is not available in
+this runtime.
+
+Only the local launcher sets the activation flag that permits canonical
+auto-migration. It accepts a genuinely empty database or an exact-prefix
+WebChess ledger and refuses a nonempty schema containing an unrelated relation;
+ordinary development, hosted, and Vercel starts never auto-migrate. A legacy
+same-name container without the immutable ownership label is also refused.
+Data-preserving adoption requires inspecting and backing up
+`webchess_local_pgdata`, removing only the stopped container, and running
+`npm run local:setup -- --adopt-volume` to reuse that volume. Never remove the
+volume during adoption.
+
 ### Authentication
 
-Clerk handles Google, verified-email, and passkey authentication. Configured
-deployments use Clerk's dynamic provider and nonce-bearing strict Content
+The hosted service and Clerk-enabled local source runtime use Clerk for Google,
+verified-email, and passkey authentication. Configured deployments use Clerk's
+dynamic provider and nonce-bearing strict Content
 Security Policy. `script-src` contains `strict-dynamic` and no
 `unsafe-inline`; Clerk token verification accepts only the authorized-party
 claim for the one exact resolved environment origin. The inline-compatible
@@ -96,7 +133,10 @@ marker that prevents the still-valid identity from returning with reset
 limits. Final marker cleanup is authenticated through Clerk's signed
 `user.deleted` webhook, not a browser assertion. Releases require Clerk's
 **Allow users to delete their accounts** setting and a real disposable-user
-smoke that proves `user.delete()` and the signed webhook both complete.
+smoke that proves `user.delete()` and the signed webhook both complete. The
+foreign-key-safe cleanup order is tested with Portia and Charlotte artifact
+rows. Shared IP rate windows and vendor backups remain subject to their own
+expiry and retention policies rather than immediate account-row deletion.
 
 ### Hosted OpenAI access
 
@@ -132,6 +172,20 @@ its configured live remote branch; it verifies the same commit before loading
 migration bytes and again before opening the owner connection. Direct
 invocation of the underlying migration script is forbidden.
 
+Hosted and local migration runners require the existing ledger to be an exact,
+checksum-matching prefix of the 13 canonical migrations through
+`0013_wilbur_mutation_requests`. Migration `0012` is upgrade-safe without a
+duplicate-data audit: pre-`0012` actions retain a null binding version,
+including duplicate suggestion indexes, while a trigger stamps current inserts
+before the partial unique constraint and makes their identity, canonical
+content, and binding immutable. Current actions start planned at revision zero;
+each status change advances revision exactly once without moving update time
+backward. Migration `0013` adds the durable Wilbur mutation ledger. Its state
+guard requires pending/unadmitted insertion, freezes claim identity and pending
+reservations, orders admission before settlement, prevents update time from
+moving backward, and makes admission timestamps and terminal rows immutable.
+Neither migration deletes or chooses among legacy rows.
+
 `db/migrations/0001_durable_webchess.sql` becomes immutable at its first
 durable application. Never edit, rename, reorder, or delete an applied
 migration; append `0002_*`, `0003_*`, and later files. Future changes use
@@ -146,18 +200,28 @@ the owner credential, and then reconnects through the exact runtime URL to run
 the schema check. The runtime role must have schema `USAGE` but not `CREATE`,
 must not own or be able to assume an owner of any application table, and must
 have only ledger `SELECT` and the required operations on each named application
-table. Its only column-scoped exception is `UPDATE` on
-`gate_decisions.answer_user_prompt` and
-`gate_decisions.answer_user_prompt_sha256`; mutation access to any other Gate
-column fails the compatibility check.
+table. Column-scoped `UPDATE` is limited to
+`gate_decisions.answer_user_prompt`,
+`gate_decisions.answer_user_prompt_sha256`, and `wilbur_actions.status`,
+`wilbur_actions.revision`, and `wilbur_actions.updated_at`. The mutation ledger
+can update only `rate_admitted_at`, `denial_code`, `retry_at`,
+`reserved_future_rows`, `reserved_text_bytes`, `status`, `result_entity_id`,
+`result_revision`, `result_status`, `result_updated_at`, and `updated_at`.
+Mutation access to any other Gate, Wilbur action, or ledger column fails the
+compatibility check.
 
 The Vercel build uses only the least-privileged runtime `DATABASE_URL` for a
-repeatable-read, read-only check of the exact migration ledger; the seventeen-table
-column catalog; the two critical partial unique indexes; and effective
-schema/table privileges obtained directly, through role membership, or through
-`PUBLIC`. Missing or unexpected tables or columns, an invalid index,
-under-privilege, or over-privilege fails closed without printing credentials or
-database identities.
+repeatable-read, read-only check of the exact migration ledger; 19 application
+tables plus the ledger—20 total; all eight contract unique indexes; exactly two
+origin-enabled, unfiltered `BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur
+trigger/function pairs; 18 critical Wilbur constraints; all five `0013`
+defaults; and effective schema/table privileges obtained directly, through role
+membership, or through `PUBLIC`. Missing or unexpected tables or columns, an
+invalid index, trigger, constraint, or default, under-privilege, or over-
+privilege fails closed without printing credentials or database identities.
+Unexpected noninternal triggers, trigger arguments/filters, altered constraint
+validation/deferrability/parent shape, or disabled foreign-key enforcement also
+fail closed.
 
 Mutations use idempotency keys and an expected game revision. Forced passes,
 captures, promotion, quiet-ply counts, ending precedence, and the final prompt
@@ -176,6 +240,11 @@ counters, daily quota, and concurrency gate are replaced by Clerk and Neon.
 Leases expire durably so an interrupted Function cannot hold model concurrency
 forever.
 
+Event replay, idempotency, leases, and persisted provider artifacts support
+transactional request recovery; they do not supply database backups, restore
+automation, a point-in-time recovery proof, or an account-import path. Account
+export `/4` is owner-scoped and bounded, not a disaster-recovery image.
+
 ### Abuse and cost controls
 
 Controls are layered:
@@ -184,6 +253,9 @@ Controls are layered:
 - per-user and HMAC-pseudonymized IP rate buckets;
 - daily game and model-request quotas;
 - an hourly model-request quota;
+- separate per-user/IP Wilbur action and observation limits;
+- a durable owner-plus-key Wilbur mutation ledger with once-only rate admission
+  and reserved lifetime row/text admission capacity;
 - one active model request per user by default;
 - global concurrency slots with expiring leases;
 - bounded request and response sizes;
@@ -196,6 +268,26 @@ Controls are layered:
 Raw IP addresses are not stored in rate-limit tables. `WEBCHESS_HMAC_SECRET`
 must be long and random, and every derived identifier must use a distinct
 purpose label.
+
+For each Wilbur create, update, or observation, an exact owner/key retry replays
+the committed result or stored denial; a changed operation or request digest
+conflicts. Pending claims abandoned for 24 hours expire durably. Capacity is
+reserved before mutation across actions, observations, Wilbur lifecycle events,
+mutation-ledger rows, and pending future rows. Existing over-limit history is
+preserved, and exact pending/committed replays remain valid if a cap is later
+lowered; a fresh status update still requires ledger-plus-event capacity. The
+artifact, lifecycle revision/activity, and ledger settlement commit atomically,
+so a retry neither double-debits the rate window nor creates a second artifact.
+
+The synchronous `webchess-account-export/4` includes the owner's pseudonymous
+user-rate windows without their HMAC key, all lifecycle recovery fields,
+`charlotteBindingVersion`, and sanitized Wilbur mutation-ledger rows. It omits
+the ledger's private capacity reservations, owner/IP identifiers, and HMAC
+material, and does not export shared IP/global counters, Clerk/vendor data,
+deletion tombstones, or database-restoration metadata. A configurable byte
+ceiling and second serialized-size check prevent an unbounded response. The
+Wilbur admission envelope preserves existing history and is not a whole-account
+export guarantee because other owner content also accumulates.
 
 ### Hosting and deployment
 

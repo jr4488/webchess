@@ -29,14 +29,17 @@ const mutation = (
   {
     url = 'https://webchess.anansiportia.com/api/games',
     fetchSite = 'same-origin',
+    host,
     method = 'POST',
   }: {
     url?: string
     fetchSite?: string | null
+    host?: string
     method?: string
   } = {},
 ) => {
   const headers = new Headers()
+  if (host) headers.set('host', host)
   if (origin !== null) headers.set('origin', origin)
   if (fetchSite !== null) headers.set('sec-fetch-site', fetchSite)
   return new Request(url, { method, headers })
@@ -122,5 +125,37 @@ describe('verifySameOriginMutation', () => {
     expect(
       verifySameOriginMutation(mutation(null, { method: 'GET' })),
     ).toBeNull()
+  })
+
+  it('uses the validated Host when Next canonicalizes a loopback request URL', () => {
+    expect(
+      verifySameOriginMutation(
+        mutation('http://127.0.0.1:3005', {
+          url: 'http://localhost:3005/api/auth/local/sign-in',
+          host: '127.0.0.1:3005',
+        }),
+      ),
+    ).toBeNull()
+  })
+
+  it('rejects a loopback Origin that does not match the browser-selected Host', () => {
+    expect(
+      verifySameOriginMutation(
+        mutation('http://localhost:3005', {
+          url: 'http://localhost:3005/api/auth/local/sign-in',
+          host: '127.0.0.1:3005',
+        }),
+      )?.status,
+    ).toBe(403)
+  })
+
+  it('rejects loopback origins that differ by port', () => {
+    expect(
+      verifySameOriginMutation(
+        mutation('http://127.0.0.1:3005', {
+          url: 'http://localhost:4000/api/auth/local/sign-in',
+        }),
+      )?.status,
+    ).toBe(403)
   })
 })

@@ -2,9 +2,9 @@
 
 **Effective date:** August 1, 2026
 
-This notice distinguishes the local OpenClaw plugin from the intended hosted
-WebChess service. It does not claim that a production hosted deployment is
-currently live.
+This notice distinguishes the local OpenClaw plugin, the loopback source-
+checkout runtime, and the intended hosted WebChess service. It does not claim
+that a production hosted deployment is currently live.
 
 ## Local OpenClaw plugin
 
@@ -27,6 +27,26 @@ Charlotte receives the exact generated answer afterward. The plugin does not
 receive or proxy the credential and does not add a WebChess-operated service to
 that path. Gate, Retry policy, Wilbur records, and provenance are local
 deterministic or user-authored operations.
+
+Immediately before Portia, only the OpenClaw runtime may send a bounded search
+query to its configured Codex Search provider. The broker makes at most one
+invocation, stores at most five citation-candidate links plus bounded search
+synthesis and provenance, and does not fetch the linked pages. The provider may
+receive the question and search query under the user's OpenClaw/provider
+configuration. A stored link is not proof that WebChess read or verified its
+page.
+
+## Local source-checkout runtime
+
+`npm run local:dev` keeps application data in a dedicated Docker PostgreSQL 17
+database on loopback and sends model work through the operator's server-side
+OpenAI Platform key. It does not launch OpenClaw and does not use Codex Search.
+With neither Clerk key it uses one signed machine principal; with a complete
+Clerk development pair, Clerk handles identity. Those owners are separate and
+their records are not merged. Preserve the generated
+`WEBCHESS_LOCAL_SESSION_SECRET` with the database, because losing it makes the
+prior signed owner's rows inaccessible. There is no WebChess cloud sync or
+backup for this runtime.
 
 The remainder of this notice describes the separate hosted-service
 architecture.
@@ -74,11 +94,14 @@ data.
 
 WebChess stores model-request status, sanitized provider response identifiers,
 normalized bounded token counts, quota use, replay-start idempotency records,
-rate-limit counters, suspensions, and timestamps. For provider responses that
-WebChess rejects, it does not retain raw output, refusal text, or reasoning.
-Client addresses may be processed transiently to enforce abuse controls;
-stored rate-limit identifiers are purpose-separated HMAC digests, not raw IP
-addresses.
+rate-limit counters, suspensions, and timestamps. It also stores durable Wilbur
+mutation claims: the owner/key operation and request digest, rate-admission and
+denial state, private capacity reservations, result references, and timestamps.
+An abandoned pending claim expires after 24 hours; committed and denied claims
+remain exact-replay authorities while the account exists. For provider responses
+that WebChess rejects, it does not retain raw output, refusal text, or reasoning.
+Client addresses may be processed transiently to enforce abuse controls; stored
+rate-limit identifiers are purpose-separated HMAC digests, not raw IP addresses.
 
 Application logs must exclude prompts, answers, secrets, authentication
 artifacts, database URLs, and raw request bodies.
@@ -126,7 +149,8 @@ even when provider work is active, deletes raw identifiers and remaining
 content, and retains only a lifetime-stable HMAC marker in
 `deleted_user_tombstones`. Because the raw ID is
 then unavailable, the deletion HMAC secret cannot be rotated while those
-tombstones remain. Limited security, abuse, billing, or legal records may
+tombstones remain. The tested deletion order includes games with Portia and
+Charlotte artifact rows. Limited security, abuse, billing, or legal records may
 otherwise be retained when reasonably necessary. Vendor backups may persist
 for their configured backup-retention period before aging out.
 
@@ -142,15 +166,31 @@ The deployed `/account` page is the self-service path to:
 - delete WebChess data; and
 - delete the account.
 
-Exports are subject to separate per-user and pseudonymous-IP hourly limits and
-a configurable serialized-response ceiling that defaults to 3,000,000 bytes.
-Each export is generated synchronously as one JSON file; WebChess does not
-paginate it or prepare it later in the background. The download is requested
+Export format `webchess-account-export/4` is subject to separate per-user and
+pseudonymous-IP hourly limits and a configurable serialized-response ceiling
+that defaults to 3,000,000 bytes. It includes owner-scoped application records,
+all ten lifecycle recovery fields, `charlotteBindingVersion`, sanitized Wilbur
+mutation-ledger rows, and the owner's pseudonymous user-rate windows without the
+HMAC key. It omits the ledger's private capacity-reservation fields, owner/IP
+identifiers, and HMAC material, and excludes shared IP/global counters, Clerk and
+vendor data, deletion tombstones, concurrency leases, and database-restore
+metadata. Each export is generated synchronously as one JSON file; WebChess does
+not paginate it or prepare it later in the background. The download is requested
 with an authenticated, same-origin POST so generating the rate-counted export
 cannot be triggered by a cross-origin link. An oversized export is refused
 rather than partially returned. If that happens, follow
 [SUPPORT.md](../SUPPORT.md) to ask for non-sensitive assistance through GitHub
 Discussions. Support does not promise a custom data handoff or response time.
+The Wilbur row/text admission envelope preserves existing history while bounding
+future Wilbur growth, but it does not guarantee whole-account exportability
+because games, model records, research, and provenance also accumulate.
+
+Event replay, request ledgers, leases, and persisted lifecycle artifacts provide
+transactional recovery, not disaster recovery. WebChess does not publish an
+account-import route, backup schedule, restore command, point-in-time recovery
+proof, recovery objective, or completed restore drill. Vendor backup retention
+and restore behavior remain subject to the configured provider service; local
+operators must separately preserve and test their database volume and secrets.
 
 Clerk handles authentication-method and profile controls. A signed Clerk
 `user.deleted` webhook performs durable application cleanup.

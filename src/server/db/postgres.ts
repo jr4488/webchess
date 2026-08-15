@@ -15,6 +15,10 @@ export type PostgresSqlAdapter = SqlAdapter & {
   close(): Promise<void>
 }
 
+export interface PostgresSqlAdapterOptions {
+  readonly applicationName?: string
+}
+
 function mapResult<Row extends SqlRow>(
   result: QueryResult<Record<string, unknown>>,
 ): SqlResult<Row> {
@@ -56,17 +60,18 @@ async function execute<Row extends SqlRow>(
 }
 
 /**
- * PostgreSQL wire-protocol adapter used only by the loopback OpenClaw runtime.
- * Hosted WebChess continues to use the Neon HTTP adapter.
+ * PostgreSQL wire-protocol adapter for loopback runtimes. Hosted Vercel
+ * continues to use the Neon HTTP adapter.
  */
 export function createPostgresSqlAdapter(
   connectionString: string,
+  options: PostgresSqlAdapterOptions = {},
 ): PostgresSqlAdapter {
   if (connectionString.trim().length === 0) {
     throw new Error('A non-empty PostgreSQL connection string is required.')
   }
   const pool = new Pool({
-    application_name: 'webchess-openclaw-v2',
+    application_name: options.applicationName ?? 'webchess-openclaw-v2',
     connectionTimeoutMillis: 5_000,
     connectionString,
     max: 8,

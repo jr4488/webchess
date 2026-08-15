@@ -6,6 +6,8 @@ const originalCommit = process.env.VERCEL_GIT_COMMIT_SHA
 const originalRelease = process.env.WEBCHESS_RELEASE_SHA
 const originalVercel = process.env.VERCEL
 const originalVercelEnvironment = process.env.VERCEL_ENV
+const originalVercelTargetEnvironment = process.env.VERCEL_TARGET_ENV
+const originalVercelUrl = process.env.VERCEL_URL
 
 afterEach(() => {
   if (originalCommit === undefined) {
@@ -19,6 +21,13 @@ afterEach(() => {
   else process.env.VERCEL = originalVercel
   if (originalVercelEnvironment === undefined) delete process.env.VERCEL_ENV
   else process.env.VERCEL_ENV = originalVercelEnvironment
+  if (originalVercelTargetEnvironment === undefined) {
+    delete process.env.VERCEL_TARGET_ENV
+  } else {
+    process.env.VERCEL_TARGET_ENV = originalVercelTargetEnvironment
+  }
+  if (originalVercelUrl === undefined) delete process.env.VERCEL_URL
+  else process.env.VERCEL_URL = originalVercelUrl
 })
 
 describe('source archive download', () => {
@@ -40,6 +49,8 @@ describe('source archive download', () => {
   it('uses the public main branch when no valid Vercel SHA is available', () => {
     delete process.env.VERCEL
     delete process.env.VERCEL_ENV
+    delete process.env.VERCEL_TARGET_ENV
+    delete process.env.VERCEL_URL
     process.env.VERCEL_GIT_COMMIT_SHA = 'not-a-commit'
 
     const response = GET()
@@ -50,8 +61,13 @@ describe('source archive download', () => {
     )
   })
 
-  it('fails closed on Vercel when release provenance is unavailable', async () => {
-    process.env.VERCEL = '1'
+  it.each([
+    ['VERCEL', '1'],
+    ['VERCEL_ENV', 'preview'],
+    ['VERCEL_TARGET_ENV', 'preview'],
+    ['VERCEL_URL', 'webchess-preview.vercel.app'],
+  ] as const)('fails closed with the %s marker when release provenance is unavailable', async (name, value) => {
+    process.env[name] = value
     process.env.VERCEL_GIT_COMMIT_SHA = 'not-a-commit'
 
     const response = GET()

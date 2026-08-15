@@ -16,7 +16,10 @@ const isLoopbackHostname = (hostname: string): boolean => {
 }
 
 const isVercelEnvironment = (environment: AuthEnvironment): boolean =>
-  environment.VERCEL !== undefined || environment.VERCEL_ENV !== undefined
+  environment.VERCEL !== undefined ||
+  environment.VERCEL_ENV !== undefined ||
+  environment.VERCEL_TARGET_ENV !== undefined ||
+  environment.VERCEL_URL !== undefined
 
 /**
  * Supplies a fixed test principal only to an explicitly opted-in loopback

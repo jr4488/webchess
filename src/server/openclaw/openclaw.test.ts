@@ -191,11 +191,18 @@ describe('OpenClaw local configuration and request boundary', () => {
       NODE_ENV: 'production',
       WEBCHESS_OPENCLAW_ENABLED: 'true',
     })).toBe(true)
-    expect(isOpenClawLocalModeEnabled({
-      NODE_ENV: 'development',
-      VERCEL: '1',
-      WEBCHESS_OPENCLAW_ENABLED: 'true',
-    })).toBe(false)
+    for (const marker of [
+      { VERCEL: '1' },
+      { VERCEL_ENV: 'preview' },
+      { VERCEL_TARGET_ENV: 'preview' },
+      { VERCEL_URL: 'webchess-preview.vercel.app' },
+    ]) {
+      expect(isOpenClawLocalModeEnabled({
+        NODE_ENV: 'development',
+        WEBCHESS_OPENCLAW_ENABLED: 'true',
+        ...marker,
+      })).toBe(false)
+    }
     expect(isOpenClawLocalModeEnabled({ NODE_ENV: 'production' })).toBe(false)
   })
 

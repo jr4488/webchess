@@ -40,7 +40,7 @@ describe('local OpenClaw WebChess experience', () => {
       ).toBeInTheDocument()
     })
     expect(localApi.getCurrentGame).toHaveBeenCalledOnce()
-    expect(screen.getByText(/seven-stage visible WebChess 2.1 lifecycle stay in a dedicated PostgreSQL database/i)).toBeInTheDocument()
+    expect(screen.getByText(/seven-stage visible WebChess 2.2 lifecycle stay in a dedicated PostgreSQL database/i)).toBeInTheDocument()
     expect(screen.getByText(/Portia validates the board-derived answer prompt/i)).toBeInTheDocument()
     expect(screen.getByText(/internal Gate checks sufficiency/i)).toBeInTheDocument()
     expect(screen.getByText(/Answer generation runs only after permission/i)).toBeInTheDocument()
@@ -48,7 +48,7 @@ describe('local OpenClaw WebChess experience', () => {
     expect(screen.getByText(/sends model turns through your local OpenClaw/i)).toBeInTheDocument()
     expect(screen.getByText(/credentials never enter the browser or a WebChess-operated service/i)).toBeInTheDocument()
     expect(screen.getByText(/runs locally through your OpenClaw configuration/i)).toBeInTheDocument()
-    expect(screen.getByLabelText(/WebChess version 2.1/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/WebChess version 2.2/i)).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: /account and usage/i })).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: /webchess home/i })).toHaveAttribute(
       'href',
