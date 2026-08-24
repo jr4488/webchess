@@ -226,9 +226,11 @@ untrusted. Injection-like lines and tokens are detected and excluded or
 quarantined rather than treated as model instructions. Retrieval proves only
 what bytes a host returned at a recorded time; it does not prove the host was
 correct, independent, current, or representative. The original question and
-bounded query may go to the configured search provider under the researcher's
-account, and contacted page hosts receive requests from the researcher's local
-machine. The exact contracts, policy, broker, and network guard are in
+bounded query may go only to the official pinned Codex Hosted Search provider
+under the same selected OpenAI account/OAuth profile as model inference, and
+contacted page hosts receive requests from the researcher's local machine. No
+WebChess, Codex, OpenAI, cloud-provider, or alternate-provider API key/token is
+an accepted fallback. The exact contracts, policy, broker, and network guard are in
 [`src/lib/research/contracts.ts`](../src/lib/research/contracts.ts),
 [`src/server/research/policy.ts`](../src/server/research/policy.ts),
 [`src/server/research/broker.ts`](../src/server/research/broker.ts), and
@@ -293,7 +295,7 @@ At publication, the paper and public site must expose the same generated
    source commit;
 3. the retained source archive path and its SHA-256;
 4. this edition 3.1 repository path and the exact published PDF SHA-256; and
-5. the pinned OpenClaw and toolchain identities.
+5. the pinned OpenClaw, official Codex Search plugin, and toolchain identities.
 
 The reader verifies the downloaded source archive and PDF bytes, clones the
 repository, checks out the full commit in detached state, and confirms `HEAD`
@@ -318,7 +320,11 @@ handoff to the published Markdown, HTML, and PDF only after the commit exists.
 The candidate replication pins Node.js `24.19.0`, npm `11.14.1`, OpenClaw
 `2026.7.1-2` at source commit
 `0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c`, PostgreSQL `17.10` from the image
-digest recorded in the release manifest, and Google Chrome `150.0.7871.128`.
+digest recorded in the release manifest, and Google Chrome `150.0.7871.128` on
+Linux x86_64. That is the only platform/architecture pair whose official Codex
+plugin, reviewed runtime modules, wrapper, and native executable this candidate
+attests; every other platform fails closed rather than selecting an unattested
+binary.
 WebGL 2 is optional: the accessible 2D board remains available when WebGL is
 missing, motion is reduced, or the player prefers it.
 
@@ -330,24 +336,43 @@ the account, and performs a profile-specific readiness probe. Browser OAuth or
 device-code confirmation is a human action; tokens must never be pasted into
 WebChess, a case export, the repository, or test output.
 
-On this path, WebChess does not request, receive, or require
-`OPENAI_API_KEY`. An API-key profile is a different authentication and billing
-path and does not satisfy this replication criterion. Account allowance,
-workspace controls, credits, provider policy, and any applicable billing still
-apply. A readiness probe and a lifecycle make real provider requests.
+On this path, WebChess rejects nonempty provider credential environment
+variables and permits no API-key profile or token fallback. Both inference and
+official Codex Hosted Search must use the one selected OpenAI account/OAuth
+profile. A different authentication or billing path does not satisfy this
+replication criterion. Account allowance, workspace controls, credits, OpenAI
+policy, and any applicable billing still apply. A readiness probe, a consented
+search, and a lifecycle make real provider requests.
+
+At launch and each search boundary, the packed plugin revalidates the exact
+official global plugin record, package/lock integrity, reviewed bytes and real
+paths, and binds a private official search client to the singleton selected
+OAuth store and profile. Any drift is a visible failure, not permission to use
+another credential, provider, executable, or transport.
+
+Before accepting a game, each launcher process performs two bounded readiness
+requests. The exact prepared `openai/*` model must answer `Reply with exactly
+this ASCII token and nothing else: WEBCHESS_READY` with exactly
+`WEBCHESS_READY`; the official `codex` provider must complete the fixed query
+`OpenAI official website`. Neither contains user/case content, repeats during
+status polling, triggers a WebChess direct-page fetch, or is persisted as case
+research. Both consume account/network allowance and remain subject to the
+provider's data policies. Launch fails closed unless both validate; case-scoped
+search consent governs later case content, not these launch gates.
 
 ### 5.3 Isolate persistence and install the packed plugin
 
 The reader creates a dedicated PostgreSQL 17 database bound only to
 `127.0.0.1`, verifies its exact server version and health, and never substitutes
-a production, hosted, Neon, or unrelated local database. The packed WebChess
-plugin is built from the checked-out commit, inspected, installed into the
-dedicated OpenClaw profile, and launched in the foreground. The launcher stages
+a production, hosted, Neon, or unrelated local database. The exact official
+`@openclaw/codex@2026.7.1-1` provider plugin and the packed WebChess plugin are
+integrity-checked, installed into the dedicated OpenClaw profile, inspected,
+and launched in the foreground. The launcher stages
 the application, binds it only to loopback, applies a checksum-matching
 migration prefix, and fails closed when source identity, OpenClaw readiness,
 model/auth configuration, PostgreSQL, or local-mode isolation is not ready.
-It must not silently fall through to Clerk, Vercel, a hosted provider, a cloud
-database, or a repository API key. The launcher boundary is in
+It must not silently fall through to Clerk, Vercel, a hosted or alternate
+provider, a cloud database, or any provider key/token. The launcher boundary is in
 [`openclaw-plugin/src/launcher.ts`](../openclaw-plugin/src/launcher.ts).
 
 ### 5.4 Complete the observable lifecycle
@@ -355,7 +380,9 @@ database, or a repository API key. The launcher boundary is in
 In connected Chrome, the researcher should:
 
 1. confirm the visible `webchess@2.2.0-rc.1` identity and full source commit;
-2. enter a non-secret question and make the separate research-consent choice;
+2. enter a non-secret question for which current external evidence is material,
+   give separate research consent, and inspect the persisted Codex Search and
+   direct-page provenance or an explicit visible failure before Portia;
 3. select the accessible 2D or 3D view and start Division;
 4. play manually, use guided moves, or autoplay until the canonical initial
    game reaches a real terminal state;
@@ -441,6 +468,7 @@ The following historical identities remain distinct from the candidate:
 | This integrated candidate | WebChess `2.2.0-rc.1`, full commit in the canonical release identity | Resolved only when that manifest reports `resolved` and its source evidence verifies; otherwise unresolved |
 | This paper | Edition 3.1 repository path and PDF SHA-256 in the same release identity | Resolved only when that manifest reports `resolved` and its paper evidence verifies; otherwise unresolved |
 | Provider harness | OpenClaw `2026.7.1-2` at `0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c` | Pinned external runtime dependency |
+| Research provider | `@openclaw/codex@2026.7.1-1` with npm integrity from the release identity | Official Codex Hosted Search under the same selected OpenAI account/OAuth profile |
 
 The exact citation is therefore a tuple, not a product name alone: paper
 edition 3.1, WebChess `2.2.0-rc.1`, the 40-character source commit, retained
@@ -455,8 +483,8 @@ are unavailable, the candidate is not citable as a completed public release.
 The release target is not merely merged code or a green suite. It is a public,
 auditable journey: encounter the Arachne paper or site; resolve the same
 immutable source and artifact digests; clone without private knowledge; use the
-documented OpenClaw OpenAI-account path without a WebChess API key; launch an
-isolated database and packed plugin; play a terminal game; inspect Portia,
+documented OpenClaw OpenAI-account path while rejecting provider keys/tokens;
+launch an isolated database and packed plugin; play a terminal game; inspect Portia,
 Gate, Retry, Answer, Charlotte, Wilbur, and the Web; reload; export; and replay
 the event history under an offline verifier.
 

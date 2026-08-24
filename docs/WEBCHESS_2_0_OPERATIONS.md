@@ -1,8 +1,13 @@
-# WebChess 2.0 operator guide
+# WebChess 2.2 account-authenticated operator guide
 
-This guide describes the implemented WebChess 2.0 lifecycle in the
-`2.2.0-rc.1` candidate. The latest tagged package remains `2.1.0`; this guide does
-not claim that a Preview or Production deployment exists.
+This guide describes the implemented lifecycle in the `2.2.0-rc.1` candidate.
+The latest tagged package remains `2.1.0`; this guide does not claim that a
+Preview or Production gameplay deployment exists. The sole supported runtime is
+the packed OpenClaw plugin with one selected OpenAI account/OAuth profile for
+both inference and official Codex Hosted Search. Provider API keys/tokens and
+non-OpenClaw principals fail closed. This candidate's attested runtime is Linux
+x86_64 only; other platforms fail closed until their exact provider/runtime and
+native-executable bytes receive equivalent review and end-to-end evidence.
 
 ## Lifecycle authority
 
@@ -34,8 +39,10 @@ and make no provider call.
 Automatic external research is available only in the OpenClaw runtime. Its
 deterministic broker runs immediately before Portia, invokes local Codex Search
 at most once, retains at most five citation candidates and bounded synthesis,
-uses a 150-second WebChess envelope, and never fetches candidate pages. Hosted
-and local source-checkout runtimes do not inject that broker.
+and uses a 150-second WebChess envelope. With separate case-scoped consent, the
+local broker may fetch at most three eligible public-HTTPS pages through bounded
+redirect, address, media, size, provenance, and injection filters. Accepted
+excerpts and every failure are retained as attributed, untrusted evidence.
 
 ## Retry and cost ceiling
 
@@ -63,19 +70,21 @@ existing durable quota, rate, lease, idempotency, deletion-barrier, and
 settlement behavior. An ambiguous provider completion is reconciled through
 the durable ledger before another bounded Portia attempt can begin.
 
-The operator should budget for the worst bounded path, not only the happy
-path. OpenAI spend alerts are notifications. Durable application quotas remain
-the primary control; an explicitly configured provider hard limit is only an
-external backstop.
+The operator should budget account allowance, context, runtime, and retries for
+the worst bounded path, not only the happy path. OpenAI account controls and
+allowance notices remain external to WebChess; a provider key or alternate
+billing route is not an accepted backstop.
 
 ## Migration and runtime roles
 
-Apply all 13 canonical migrations, from
+The supported OpenClaw launcher owns local bootstrap: it applies all 15
+canonical migrations, from
 `db/migrations/0001_durable_webchess.sql` through
-`db/migrations/0013_wilbur_mutation_requests.sql`, only through the
-documented `npm run db:migrate` owner boundary. Both hosted and local migration
-runners reject an existing ledger that is not an exact checksum-matching prefix.
-Never modify applied migration bytes.
+`db/migrations/0015_direct_page_research_evidence.sql`, to the dedicated
+loopback database and rejects an existing ledger that is not an exact checksum-
+matching prefix. A local player must not run the hosted deployment migration
+owner or supply its credentials. `npm run db:migrate` is retained solely for the
+retired hosted deployment boundary. Never modify applied migration bytes.
 
 Migration `0012` is upgrade-safe without a duplicate-data audit. It leaves all
 pre-`0012` actions at a null `charlotte_binding_version`, including duplicate
@@ -89,10 +98,18 @@ admission before settlement; prevents update time from moving backward; and
 makes admission timestamps and terminal rows immutable. Neither migration
 deletes or selects among legacy rows. After migration,
 reapply the exact runtime privilege contract and remove the owner credential
-before handing the runtime URL to the application.
+before handing a retained hosted runtime URL to the application. The local
+launcher instead uses its dedicated database owner within the loopback boundary.
 
-The runtime schema check expects 19 application tables plus
-`webchess_schema_migrations`—20 total—eight unique contract indexes, and the
+Migration `0014` adds owner-bound, explicitly selected Web-memory links and
+follow-up scheduling; no observation is silently reused. Migration `0015` adds
+bounded direct-page research evidence and request/source provenance. Both are
+append-only schema evolution and preserve earlier cases as historical records.
+
+The following least-privilege role details apply to the retained hosted design;
+they are not extra setup steps for the supported local player. Its runtime
+schema check expects 20 application tables plus
+`webchess_schema_migrations`—21 total—12 contract indexes, and the
 two exact, origin-enabled, unfiltered `BEFORE INSERT OR UPDATE FOR EACH ROW`
 Wilbur trigger/function pairs, 18 critical Wilbur constraints, and all five
 `0013` defaults. Unexpected noninternal triggers, trigger arguments/filters,
@@ -118,8 +135,9 @@ Charlotte artifact rows. Shared IP windows and vendor backups remain governed
 by their own expiry and retention policies.
 
 Migration `0012` supplies the current-binding unique index. Migration `0013`
-adds the owner-plus-idempotency-key primary key, the eighth unique contract
-index. It durably records exact replay, conflict, and denial; admits user/IP rate
+adds the owner-plus-idempotency-key primary key, then migrations `0014` and
+`0015` extend the contract to 12 checked indexes. The mutation ledger durably
+records exact replay, conflict, and denial; admits user/IP rate
 capacity once; expires abandoned pending claims after 24 hours; reserves
 lifetime row/text admission capacity across actions, observations, Wilbur
 lifecycle events, mutation-ledger rows, and pending future rows; and commits the
@@ -127,10 +145,9 @@ artifact, lifecycle activity/revision, and ledger result atomically. Existing
 over-limit history remains preserved. A fresh claim costs its ledger row plus two
 future rows for create/observation or one for update; commit substitutes actual
 rows for the reservation. Exact pending/committed replays remain valid after a
-cap is lowered, while a fresh over-limit status update is refused. Hosted
-defaults enforce 120/240 hourly user/IP
-Wilbur actions and 60/120 observations; local source development raises those to
-1,200/2,400 and 600/1,200 respectively.
+cap is lowered, while a fresh over-limit status update is refused. The supported
+launcher supplies bounded local quotas; changing them does not authorize a
+provider-key path or bypass the durable ledger.
 
 ## Recovery behavior
 
@@ -204,7 +221,7 @@ npm run plugin:build
 git diff --exit-code -- openclaw-plugin/dist
 npm run test
 DATABASE_URL='postgresql://…disposable-test-only…' npm run test:integration
-npm run test:coverage
+DATABASE_URL='postgresql://…disposable-test-only…' npm run test:coverage
 npm run build
 npm run test:a11y
 npm run test:e2e
@@ -213,26 +230,25 @@ npm audit --omit=dev --audit-level=high
 npm audit --audit-level=high
 ```
 
-Automated tests and CI must use deterministic model stubs and must never spend
-live OpenAI tokens. A manual Preview smoke, if separately authorized after all
-gates pass, uses a dedicated Preview key and the ordinary durable quotas.
+Automated tests and CI must use deterministic model/search stubs and must never
+spend account allowance. A separately authorized real smoke must use the packed
+plugin, one account/OAuth profile, a disposable loopback database, and no
+nonempty provider credential environment variable. It is not a Preview or
+API-key smoke.
 
-For the loopback source runtime, only `npm run local:dev` supplies the activation
-flag for automatic canonical migration. Initialization accepts a genuinely
-empty database or an exact-prefix WebChess ledger and refuses a nonempty schema
-with an unrelated relation. Hosted and ordinary development starts never take
-this path. A pre-hardening `webchess-local-postgres` container without the
-immutable ownership label is intentionally refused. Inspect and back up
-`webchess_local_pgdata`, stop and remove only that container, then run
-`npm run local:setup -- --adopt-volume` to reuse the named volume. Never remove
-the volume during adoption.
+The OpenClaw service initializes only against its dedicated loopback PostgreSQL
+17 URL. It accepts a genuinely empty database or an exact-prefix WebChess ledger
+and refuses a nonempty schema with an unrelated relation. Preserve and back up
+the dedicated database outside disposable verification; never point the
+launcher at hosted or production data.
 
 ## Rollback boundary
 
-The 13-migration history is append-only. Application rollback moves code back
+The 15-migration history is append-only. Application rollback moves code back
 but never reverses migration history or drops lifecycle data. Migration `0012`
 preserves legacy null-bound rows while protecting newly stamped bindings, and
-`0013` preserves committed or denied mutation history. Legacy v1 games remain
-readable through their stored answer path. New v2
+`0013` preserves committed or denied mutation history. Migrations `0014` and
+`0015` preserve Web-memory selection and research provenance. Legacy v1 games
+remain readable through their stored answer path. New v2
 games fail closed if their lifecycle authority is unavailable; the client does
 not fabricate a Portia review, Gate pass, or legacy answer.

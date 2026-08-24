@@ -2,28 +2,30 @@
 
 This is the supported public reader-to-running-game path for the WebChess
 `2.2.0-rc.1` candidate. It runs a packed WebChess plugin through OpenClaw on
-loopback, uses the researcher's OpenAI/ChatGPT account authentication held by
-OpenClaw, and stores the case in a dedicated local PostgreSQL 17 database.
+loopback, uses the researcher's OpenAI account/OAuth authentication held by
+OpenClaw for both model inference and official Codex Hosted Search, and stores
+the case in a dedicated local PostgreSQL 17 database.
 
 This guide does not deploy a hosted service. It does not require a WebChess
-account, Clerk, Neon, Vercel, or a WebChess-side `OPENAI_API_KEY`. The selected
-OpenAI account must still have access to the chosen model, and its allowance,
-credits, workspace controls, data policies, and provider billing rules still
-apply.
+account, Clerk, Neon, or Vercel. It permits no WebChess-side, Codex, OpenAI,
+alternate-provider API-key, API-token, service-account, or equivalent fallback.
+The selected OpenAI account must still have access to the chosen model and
+Hosted Search; its allowance, credits, workspace controls, data policies, and
+OpenAI billing rules still apply.
 
 The Arachne Method is the whole experimental method. WebChess is its software
 instrument. ANANSI is the Anansi/Division field-construction mnemonic inside
 that method. Software conformance and successful execution do not validate the
 method's efficacy or the truth of an answer.
 
-The command transcript below is the reviewed Linux/bash candidate path. Its
-source, contract, build, and deterministic-browser pieces are tested; the
-packed-plugin, account-OAuth, PostgreSQL, and connected-Chrome journey must
-still pass together before publication. On macOS,
-`shasum -a 256 <file>` is the built-in digest equivalent to `sha256sum`; the
-candidate does not yet claim a completed macOS acceptance pass. Windows users
-should use a Linux environment with equivalent loopback and Docker semantics
-until a native Windows path is separately verified.
+The command transcript below is the reviewed Linux/bash **x86_64** candidate
+path. Publication requires retained evidence that its source, exact packed
+plugin, account-OAuth inference and search, PostgreSQL, and connected-Chrome
+journey passed together; source/build tests alone do not establish that. The
+launcher attests exact Linux x86_64 Codex runtime and native-executable bytes and
+fails closed on every other platform/architecture pair. macOS, Windows, Linux
+ARM, WSL-on-ARM, and other native paths are therefore not supported by this
+candidate, even when their shell and Docker commands appear similar.
 
 Run the transcript in one dedicated Bash session. Its fail-closed shell mode
 must remain active, and a nonzero command is a stop condition—not permission to
@@ -31,12 +33,14 @@ continue with a guessed or previously installed component.
 
 ## 0. Prerequisites
 
-The verified Linux path requires Git, curl, GNU `sha256sum`, Node.js `24.19.0`,
-npm `11.14.1`, a reachable Docker Engine, and Google Chrome
+The verified Linux x86_64 path requires Git, curl, GNU `sha256sum`, Node.js
+`24.19.0`, npm `11.14.1`, a reachable Docker Engine, and Google Chrome
 `150.0.7871.128`. Run this before step 1:
 
 ```bash
 set -euo pipefail
+test "$(uname -s)" = 'Linux'
+test "$(uname -m)" = 'x86_64'
 for command_name in git curl sha256sum node npm docker; do
   command -v "$command_name" >/dev/null
 done
@@ -99,8 +103,10 @@ mismatch is a release failure. Do not silently fall back to a branch.
 
 The candidate gate is pinned to Node.js `24.19.0`, npm `11.14.1`, and OpenClaw
 `2026.7.1-2`. The pinned OpenClaw package supports Node 24 from `24.15.0`
-through the 24.x line. Install it into a dedicated tool directory and use an
-isolated profile instead of replacing an existing global OpenClaw setup:
+through the 24.x line. Codex Hosted Search additionally requires the official
+`@openclaw/codex@2026.7.1-1` provider plugin; its exact installation is pinned
+in step 4. Install OpenClaw into a dedicated tool directory and use an isolated
+profile instead of replacing an existing global OpenClaw setup:
 
 ```bash
 set -euo pipefail
@@ -110,6 +116,14 @@ test "$(node --version)" = 'v24.19.0'
 test "$(npm --version)" = '11.14.1'
 export WEBCHESS_OPENCLAW_RUNTIME="$(pwd)/../webchess-openclaw-2026.7.1-2"
 export WEBCHESS_OPENCLAW_PROFILE='webchess-rc1'
+WEBCHESS_OPENAI_MODEL='openai/gpt-5.6-sol'
+case "$WEBCHESS_OPENAI_MODEL" in
+  openai/?*) ;;
+  *)
+    echo 'WEBCHESS_OPENAI_MODEL must be an explicit openai/<model-id> reference.' >&2
+    exit 1
+    ;;
+esac
 test ! -e "$WEBCHESS_OPENCLAW_RUNTIME" || {
   echo "$WEBCHESS_OPENCLAW_RUNTIME already exists; inspect it or choose a new path." >&2
   exit 1
@@ -120,6 +134,30 @@ mkdir "$WEBCHESS_OPENCLAW_RUNTIME"
 npm install --prefix "$WEBCHESS_OPENCLAW_RUNTIME" --save-exact openclaw@2026.7.1-2
 export PATH="$WEBCHESS_OPENCLAW_RUNTIME/node_modules/.bin:$PATH"
 test "$(command -v openclaw)" = "$WEBCHESS_OPENCLAW_RUNTIME/node_modules/.bin/openclaw"
+webchess_assert_account_oauth_only() {
+  local webchess_env_name
+  local -a webchess_forbidden_provider_env=()
+  while IFS= read -r webchess_env_name; do
+    case "$webchess_env_name" in
+      *_API_KEY|*_API_KEYS|*_API_KEY_*|*_API_TOKEN|*_ACCESS_TOKEN|*_AUTH_TOKEN|*_OAUTH_TOKEN|OPENCLAW_LIVE_*_KEY|OPENCLAW_LIVE_*_KEYS|ANTHROPIC_ADMIN_KEY|AWS_ACCESS_KEY_ID|AWS_BEARER_TOKEN_BEDROCK|AWS_CONFIG_FILE|AWS_CONTAINER_AUTHORIZATION_TOKEN|AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE|AWS_CONTAINER_CREDENTIALS_FULL_URI|AWS_CONTAINER_CREDENTIALS_RELATIVE_URI|AWS_PROFILE|AWS_SECURITY_TOKEN|AWS_SECRET_ACCESS_KEY|AWS_SHARED_CREDENTIALS_FILE|AWS_SESSION_TOKEN|AWS_WEB_IDENTITY_TOKEN_FILE|AZURE_CLIENT_SECRET|AZURE_SPEECH_KEY|CODEX_TOKEN|COPILOT_GITHUB_TOKEN|FAL_KEY|GH_TOKEN|GITHUB_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|HF_TOKEN|HUGGINGFACE_HUB_TOKEN|MINIMAX_CODE_PLAN_KEY|OPENAI_ADMIN_KEY|OPENAI_TOKEN|OPENAI_WEBHOOK_SECRET|RUNWAYML_API_SECRET|SPEECH_KEY|VOLCENGINE_TTS_TOKEN|OPENAI_BASE_URL|OPENAI_API_BASE|OPENAI_CUSTOM_HEADERS|OPENAI_LOG|OPENAI_ORG_ID|OPENAI_PROJECT_ID|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|http_proxy|https_proxy|all_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|OPENCLAW_BUILD_PRIVATE_QA|OPENCLAW_QA_FORCE_RUNTIME|OPENCLAW_DEBUG_PROXY_ENABLED|OPENCLAW_DEBUG_PROXY_REQUIRE|OPENCLAW_DEBUG_PROXY_URL|OPENCLAW_DEBUG_PROXY_DB_PATH|OPENCLAW_DEBUG_PROXY_BLOB_DIR)
+        if [[ -n "${!webchess_env_name}" ]]; then
+          webchess_forbidden_provider_env+=("$webchess_env_name")
+        fi
+        ;;
+      NODE_TLS_REJECT_UNAUTHORIZED)
+        if [[ "${!webchess_env_name}" = '0' ]]; then
+          webchess_forbidden_provider_env+=("$webchess_env_name")
+        fi
+        ;;
+    esac
+  done < <(compgen -e)
+  if ((${#webchess_forbidden_provider_env[@]})); then
+    printf 'Refusing account-OAuth readiness; forbidden provider/runtime environment variable(s): %s\n' \
+      "${webchess_forbidden_provider_env[*]}" >&2
+    return 1
+  fi
+}
+webchess_assert_account_oauth_only
 openclaw --version | grep -Eq '^OpenClaw 2026\.7\.1-2 \('
 ```
 
@@ -128,8 +166,11 @@ browser OAuth or device-code interaction is a user-only step; never copy its
 tokens into WebChess, a shell transcript, an issue, or a case export.
 
 ```bash
-openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth login --provider openai
-openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set agents.defaults.model.primary openai/gpt-5.6-sol
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth login --provider openai --force
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models set "$WEBCHESS_OPENAI_MODEL"
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models fallbacks clear
+test "$(openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config get agents.defaults.model.primary)" = "$WEBCHESS_OPENAI_MODEL"
+test -z "$(openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models fallbacks list --plain)"
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config validate
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" doctor
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth list --provider openai
@@ -137,34 +178,68 @@ read -r -p 'Eligible OpenAI OAuth profile ID: ' WEBCHESS_OPENAI_PROFILE_ID
 test -n "$WEBCHESS_OPENAI_PROFILE_ID"
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth order set --provider openai "$WEBCHESS_OPENAI_PROFILE_ID"
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth order get --provider openai
+WEBCHESS_OPENAI_AUTH_ORDER="$(node -e 'process.stdout.write(JSON.stringify([process.argv[1]]))' "$WEBCHESS_OPENAI_PROFILE_ID")"
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set auth.order.openai "$WEBCHESS_OPENAI_AUTH_ORDER" --strict-json
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config get auth.order.openai
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models list --provider openai
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models status --probe --probe-provider openai --probe-profile "$WEBCHESS_OPENAI_PROFILE_ID"
 ```
 
+`--force` removes earlier OpenAI auth profiles only inside this newly dedicated
+WebChess profile; never point this command at a general-purpose OpenClaw profile.
 Do not proceed merely because these commands exit. Confirm that this dedicated
 profile shows an eligible `openai` OAuth profile without revealing secret
-material, no API-key profile, an auth-order override naming only the selected
-OAuth profile ID, the exact selected model, and a successful profile-specific
-probe. If an API-key credential appears, stop rather than letting a
+material, no API-key profile, both the effective per-agent order and the
+`auth.order.openai` config override naming only the selected OAuth profile ID,
+the primary as the explicit `openai/*` reference in `WEBCHESS_OPENAI_MODEL`, an
+empty fallback list, the exact selected model, and a successful
+profile-specific probe. If an
+API-key credential appears, stop rather than letting a
 provider-wide probe consume it. An API-key profile is a different billing/auth
-path and does not prove this guide's ChatGPT-account acceptance criterion.
+path and does not satisfy this guide's OpenAI-account acceptance criterion.
+The per-agent stored order takes precedence inside pinned OpenClaw; both order
+commands above must therefore show the same one-element OAuth profile list.
+
+The Bash gate checks the process environment inherited by every later
+`openclaw` command without printing credential values. It reports only variable
+names. Every matching singular, plural, or embedded API-key variable,
+OpenClaw live-test key variable, API-token, access-token, auth-token, and
+OAuth-token variable, plus every exact provider, cloud-profile,
+service-account, and administrative credential name enumerated in the
+function, must be empty or
+unset. The exact OpenAI endpoint, custom-header, organization/project, webhook,
+and SDK logging overrides, ambient proxy/TLS overrides, and
+OpenClaw debug-proxy variables named there must also be empty or unset so the
+selected account OAuth cannot be redirected or wrapped by an unreviewed
+transport. The two OpenClaw private-QA runtime overrides must be empty or
+unset, and `NODE_TLS_REJECT_UNAUTHORIZED=0` is rejected because it disables
+TLS verification. Keep the function in this
+dedicated Bash session and rerun it immediately before plugin inspection and
+launch. A nonempty variable, any API-key auth profile, or an auth-order entry
+other than the selected OAuth profile is a failed readiness result. Do not
+bypass the gate or continue via a key; start a clean environment and use the
+account/OAuth flow.
 
 The intended candidate model is `openai/gpt-5.6-sol`. If that model is not
-listed for the account, choose a model that the pinned OpenClaw version actually
-reports; its reviewed documentation identifies `openai/gpt-5.5` as the recovery
-choice. Do not claim that a model was used unless the case provenance reports
-it. A readiness probe is a real provider request and can consume allowance.
+listed for the account, set `WEBCHESS_OPENAI_MODEL` to an explicit
+`openai/<model-id>` that the pinned OpenClaw version actually reports; its
+reviewed documentation identifies `openai/gpt-5.5` as the recovery choice.
+Rerun `models set`, `models fallbacks clear`, and both assertions above. Do not
+use an alias, another provider, or any fallback. Do not claim that a model was
+used unless the case provenance reports it. A readiness probe is a real
+provider request and can consume allowance.
 
 Official references:
 
 - [OpenClaw 2026.7.1-2 OpenAI provider and OAuth route](https://github.com/openclaw/openclaw/blob/0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c/docs/providers/openai.md)
+- [OpenClaw 2026.7.1-2 web-search and Codex provider configuration](https://github.com/openclaw/openclaw/blob/0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c/docs/tools/web.md)
 - [OpenClaw 2026.7.1-2 installation requirements](https://github.com/openclaw/openclaw/blob/0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c/README.md)
 - [OpenAI Codex authentication](https://learn.chatgpt.com/docs/auth)
 
 OpenAI documents ChatGPT subscription sign-in and usage-based API-key
-authentication as distinct methods. This guide uses the former through
-OpenClaw. WebChess does not request, receive, or need `OPENAI_API_KEY` on this
-path.
+authentication as distinct methods. This guide uses only the former through
+OpenClaw for model inference and Codex Hosted Search. A WebChess-side, Codex,
+OpenAI, or alternate-provider API key/token is not a supported fallback.
 
 ## 3. Create the dedicated loopback PostgreSQL 17 database
 
@@ -276,7 +351,7 @@ docker exec webchess-rc1-postgres \
 ```
 
 Use a distinct loopback URL naming `webchess_restore` only when intentionally
-checking that restored copy. A WebChess **Export case** file is a portable,
+checking that restored copy. A WebChess **Download case bundle** file is a portable,
 redaction-aware case artifact; it is not a PostgreSQL backup.
 
 ### Teardown after step 8; do not run these commands yet
@@ -326,17 +401,45 @@ npm pack --pack-destination ..
 test -f ../webchess-2.2.0-rc.1.tgz
 npm run pack:verify -- ../webchess-2.2.0-rc.1.tgz
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
+test "$(npm view @openclaw/codex@2026.7.1-1 dist.integrity)" = \
+  'sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw=='
+webchess_assert_account_oauth_only
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install @openclaw/codex@2026.7.1-1 --pin
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install npm-pack:../webchess-2.2.0-rc.1.tgz
-openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set plugins.allow '["webchess"]' --strict-json
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set tools.web.search.provider codex
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set plugins.allow '["codex","webchess"]' --strict-json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config validate
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect codex --runtime --json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect webchess --runtime --json
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" capability web providers --json
 ```
 
 Use the packed archive, not a source-link install, for the release acceptance
 pass. The launcher stages application code in a disposable directory, listens
-only on loopback, and keeps game data in PostgreSQL. Credentials stay in
-OpenClaw/provider configuration and must never be returned to the browser or
-stored in a WebChess case.
+only on loopback, and keeps game data in PostgreSQL. OpenClaw resolves and
+applies the selected account/OAuth auth object inside the plugin runtime; it
+must never be logged, persisted, exported, sent through the loopback bridge, or
+returned to the browser or Next.js child.
+
+Treat `capability web providers --json` as a no-query setup check. Its `search`
+array must contain an available, selected `codex` entry, and both plugin
+inspections must report loaded runtimes. Stop if any of those conditions is
+missing. Provider inventory and plugin loading do not submit the research
+question or prove account-level Hosted Search execution; only the later
+consented, material request can do that. The Codex provider reuses OpenClaw's
+selected OpenAI account/OAuth profile, as does model inference. Neither may use
+a WebChess-side, Codex, OpenAI, or other provider API key/token. Missing account
+capability must fail visibly rather than select a substitute provider or
+credential.
+
+The packed bridge does not trust registration alone. At launch and before each
+search boundary it attests the exact official global Codex plugin record,
+package and lock integrity, reviewed runtime-module bytes, wrapper, and Linux
+x86_64 native executable. It binds official Hosted Search to a private client
+constructed from the one selected OAuth profile. A missing or modified file,
+symlink substitution, unsupported platform, changed auth order, or different
+profile fails closed; do not repair that failure by selecting another binary,
+credential, provider, or transport.
 
 ## 5. Launch WebChess
 
@@ -351,6 +454,7 @@ test -n "${WEBCHESS_POSTGRES_PASSWORD:-}" || {
 }
 export WEBCHESS_OPENCLAW_DATABASE_URL="postgresql://webchess:${WEBCHESS_POSTGRES_PASSWORD}@127.0.0.1:55432/webchess"
 export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("../webchess-release-identity.json"); process.stdout.write(m.source.commit)')"
+webchess_assert_account_oauth_only
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" webchess --no-open
 ```
 
@@ -361,9 +465,11 @@ browsers may work but are not represented by that pass. WebGL 2 is optional:
 the accessible 2D board remains available when WebGL is absent, the 3D renderer
 fails, or the user requests reduced motion.
 
-The startup must fail closed when the model, auth, OpenClaw runtime, database,
-migrations, or local-mode boundary is unavailable. It must not silently call a
-WebChess-hosted provider, Clerk, Neon, or a repository `.env` service.
+The startup must fail closed when the model, selected OAuth profile, provider
+credential environment gate, OpenClaw runtime, database, migrations, or
+local-mode boundary is unavailable. A provider-key variable or API-key profile
+is a startup failure. It must not silently call a WebChess-hosted or alternate
+provider, Clerk, Neon, or a repository `.env` service.
 
 ## 6. Choose research-search consent separately
 
@@ -383,14 +489,28 @@ Search results and pages are untrusted evidence candidates. Source provenance
 and prompt-injection filtering do not establish truth. Rejected, unavailable,
 filtered, and omitted material must remain visible to the player.
 
-The model/auth status check and `models status --probe` command do not test
-Codex Hosted Search. The reviewed integration has no separate search dry run,
-and the launcher must not transmit the question just to manufacture one.
-Search readiness is established only by the first consented, material research
-attempt. Inspect its durable record for capability `web.search`, provider
-`codex`, local transport, zero fallback attempts, and retained activity or an
-explicit failure/refusal. The subsequent maximum-three page retrieval is a
-separate local WebChess operation.
+Model/auth status and provider inventory alone do not prove live account
+readiness. Once per launcher process, before accepting a game, the packed bridge
+runs two bounded requests through the same selected OpenAI account/OAuth
+profile: the exact prepared `openai/*` model must answer the fixed prompt
+`Reply with exactly this ASCII token and nothing else: WEBCHESS_READY` with
+exactly `WEBCHESS_READY`, and the official `codex` provider tool must complete
+the fixed query `OpenAI official website`. Neither request contains user or
+case content, triggers WebChess direct-page retrieval, is written to
+game/research rows or a case export, or is repeated by status polling. Both are
+real account/network requests, so OpenAI/provider data policies and account
+allowance apply. Launch fails closed unless both bounded results validate. If
+either transmission is unacceptable, do not launch; case-scoped search consent
+does not disable these readiness gates.
+
+The launch probe proves only that the reviewed authenticated search route
+worked at that moment. A consented lifecycle search remains a separate request
+and can still fail. The packed bridge validates capability `web.search`,
+provider `codex`, local transport, and an empty fallback-attempt array before
+accepting a lifecycle response. Durable case research records retain provider,
+transport, bounded attempt count, planned and executed query data, evidence and
+provenance, and any explicit failure/refusal status and code. The subsequent
+maximum-three-page retrieval is a separate local WebChess operation.
 
 ## 7. Exercise the complete lifecycle
 
@@ -408,8 +528,8 @@ Follow the visible interface through the whole case:
 5. Choose one reversible Wilbur action, update it, and record an observation.
 6. Reload the page and verify that PostgreSQL restores the same case and
    lifecycle.
-7. Select **Export case** and retain its redaction summary and digest.
-8. Select **Import & verify case** for that file. Confirm schema
+7. Select **Download case bundle** and retain its redaction summary and digest.
+8. Select **Import & verify case bundle** for that file. Confirm schema
    `webchess-case-bundle/1`, internal section digests and integrity root,
    event-log replay, terminal board, and recorded provenance. This browser
    check does not compare the bundle with local checkout, runtime-payload, or

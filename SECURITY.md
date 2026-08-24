@@ -47,10 +47,11 @@ runs on the local machine.
 
 The launcher clears Clerk and hosted `DATABASE_URL` settings for the child
 process, admits only the dedicated loopback
-`WEBCHESS_OPENCLAW_DATABASE_URL`, and disables Next.js telemetry. Provider
-environment already present in the launching shell remains available to the
-user's OpenClaw; a missing OpenAI key is pinned empty so a repository
-`.env.local` cannot introduce a hosted-service key. Managed installs stage only
+`WEBCHESS_OPENCLAW_DATABASE_URL`, and disables Next.js telemetry. The bridge
+refuses to start if the parent OpenClaw process inherits any nonempty provider
+API-key, API-token, access-token, or OAuth-token environment variable. The
+allowlisted Next.js child receives none of them, and a repository `.env.local`
+cannot introduce a hosted-service key. Managed installs stage only
 bundled application code in a temporary local working directory, link the
 plugin's installed dependencies, and remove the directory at shutdown; game
 data remains in the dedicated local PostgreSQL database. Local model routes are
@@ -67,11 +68,21 @@ Prompts cross that authenticated loopback bridge as structured JSON request
 bodies, not shell text or one `argv` value. The plugin passes the complete user
 message directly to the pinned OpenClaw simple-completion runtime and records
 its exact UTF-8 byte count and SHA-256; it does not silently truncate evidence.
-OpenClaw resolves its own configured default model and authentication. The
-plugin does not read, copy, return, or place provider credentials in the
-browser, bridge payload, or Next.js child environment. The selected provider
-may be remote and may process the question or final game-derived prompt under
-its own data controls.
+OpenClaw resolves the sole selected OpenAI account/OAuth profile and selected
+OpenAI model. Its in-process runtime applies that auth object to the request;
+WebChess never logs, persists, exports, returns, or places it in the browser,
+bridge payload, PostgreSQL records, or Next.js child environment. Provider
+key/token environment variables and alternate-provider auth fail closed. OpenAI
+may process the question or final game-derived prompt under the account's data
+controls.
+
+The supported candidate is intentionally narrower than OpenClaw's general
+platform support. It runs only on Linux x86_64 and attests the exact official
+global Codex plugin record, package/lock tree, reviewed provider and private-
+client runtime modules, wrapper, and native executable. Those file identities,
+real paths, and the one-profile OAuth/config binding are revalidated at request
+boundaries. Unsupported platforms, altered bytes, link substitution, auth-store
+drift, or a different provider client fail closed rather than falling back.
 
 Only this OpenClaw composition provides automatic external research. It is off
 without case-scoped, versioned consent. Its deterministic pre-Portia policy
@@ -94,81 +105,40 @@ on the same loopback installation restore the same owner-scoped game; another
 machine does not receive it, and WebChess provides no cloud backup or
 synchronization for local mode.
 
-### Local source-checkout runtime
+### Retired hosted and source-checkout runtimes
 
-`npm run local:dev` is a third boundary: it binds the app to
-`127.0.0.1:3005`, uses Docker PostgreSQL on `127.0.0.1:55433`, never launches
-OpenClaw, and calls the fixed hosted-service model through a server-only OpenAI
-key. It selects exactly one authentication mode. Neither Clerk key activates a
-seven-day HMAC-signed, HttpOnly, SameSite=Lax cookie for one installation-owned
-machine principal; a complete `pk_test_...` / `sk_test_...` pair activates
-Clerk development identity. Partial pairs, live keys, non-loopback databases,
-and Vercel activation fail closed.
+Earlier candidates described a key-backed hosted model adapter and a separate
+source-checkout launcher with Clerk or a signed machine principal. Those paths
+are retained only as historical code and contract-test fixtures; they are not
+release instructions or supported WebChess 2.2 runtimes. The `local:setup`,
+`local:dev`, and `local:down` npm entry points have been removed, invoking the
+legacy launcher directly fails closed, and API service selection rejects every
+principal except `local-openclaw` before any hosted adapter can load.
 
-The signed principal is a same-machine access boundary, not a password or proof
-of a person. Its dedicated `WEBCHESS_LOCAL_SESSION_SECRET` is separate from the
-general and deletion HMAC secrets. Losing it changes the derived local owner and
-makes prior owner-scoped rows inaccessible to the new session. Preserve it with
-the local database backup. Automatic Codex Search research is not available in
-this runtime.
-
-Only the local launcher sets the activation flag that permits canonical
-auto-migration. It accepts a genuinely empty database or an exact-prefix
-WebChess ledger and refuses a nonempty schema containing an unrelated relation;
-ordinary development, hosted, and Vercel starts never auto-migrate. A legacy
-same-name container without the immutable ownership label is also refused.
-Data-preserving adoption requires inspecting and backing up
-`webchess_local_pgdata`, removing only the stopped container, and running
-`npm run local:setup -- --adopt-volume` to reuse that volume. Never remove the
-volume during adoption.
-
-### Authentication
-
-The hosted service and Clerk-enabled local source runtime use Clerk for Google,
-verified-email, and passkey authentication. Configured deployments use Clerk's
-dynamic provider and nonce-bearing strict Content
-Security Policy. `script-src` contains `strict-dynamic` and no
-`unsafe-inline`; Clerk token verification accepts only the authorized-party
-claim for the one exact resolved environment origin. The inline-compatible
-static policy is limited to unconfigured offline/local tests.
-
-Routing middleware may redirect signed-out users, but every protected route
-must independently verify the Clerk session and bind every database operation
-to the verified Clerk user ID. Client-supplied user IDs are ignored. Preview
-and Production use separate Clerk instances, credential classes, origins, and
-webhook secrets.
-
-User suspension and product-specific controls are durable in Neon. A browser
-deletion request can erase application content, but it leaves a suspended
-marker that prevents the still-valid identity from returning with reset
-limits. Final marker cleanup is authenticated through Clerk's signed
-`user.deleted` webhook, not a browser assertion. Releases require Clerk's
-**Allow users to delete their accounts** setting and a real disposable-user
-smoke that proves `user.delete()` and the signed webhook both complete. The
-foreign-key-safe cleanup order is tested with Portia and Charlotte artifact
-rows. Shared IP rate windows and vendor backups remain subject to their own
-expiry and retention policies rather than immediate account-row deletion.
-
-### Hosted OpenAI access
-
-The hosted architecture has one WebChess-owned OpenAI Platform project key,
-stored only as a server-side Vercel secret. Hosted visitors never supply an API
-key and cannot choose a model or provider. Clerk sign-in does not grant
-WebChess access to a user's ChatGPT account or allowance.
-
-The server uses a code-fixed `gpt-5.6-sol` model, bounded structured outputs,
-timeouts, `store: false`, and a purpose-separated, pseudonymous
-`safety_identifier`. `store: false` does not override OpenAI organization,
-project, abuse-monitoring, retention, or data-sharing policy.
+Do not configure a WebChess, OpenAI, Codex, cloud-provider, or alternate-provider
+key/token to revive those paths. The public website is a brochure and source/
+paper navigator, not a hosted gameplay or model service. The only supported
+authentication boundary is the dedicated OpenClaw profile and its one selected
+OpenAI account/OAuth profile for both model inference and official Codex Hosted
+Search. Historical Clerk, Neon, deletion, and hosted-provider controls remain
+useful review evidence, but they do not establish a runnable release surface.
 
 Trusted instructions, user text, persisted game data, and model output remain
 separate. User text and generated facets are data, not instructions. No model
 output can authorize a tool, change a quota, alter ownership, or write game
 state without deterministic validation.
 
-### Database and replay
+### Retained hosted database and replay controls
 
-Neon Postgres is authoritative for ownership, current games, append-only move
+The supported local launcher applies the same canonical append-only migrations
+to its dedicated loopback PostgreSQL database and validates the resulting
+ledger. It does not ask a player to configure a migration-owner credential.
+The Neon role separation and deployment commands in the remainder of this
+subsection describe the retired hosted design only; they are review evidence,
+not local installation instructions.
+
+In that retired hosted design, Neon Postgres is authoritative for ownership,
+current games, append-only move
 events, model-request accounting, usage quotas, rate buckets, and concurrency
 leases. The server reconstructs a position from the canonical initial board
 and ordered events before accepting a move or lifecycle request. Portia
@@ -246,7 +216,7 @@ captures, promotion, quiet-ply counts, ending precedence, and the final prompt
 payload are derived server-side. A malformed or impossible event log moves the
 game to an integrity-error state rather than trusting the client.
 
-### Serverless execution
+### Retained hosted serverless execution
 
 Vercel Function memory is ephemeral and may exist in several regions or
 instances. Module caches may improve performance, but no authentication,
@@ -263,7 +233,7 @@ transactional request recovery; they do not supply database backups, restore
 automation, a point-in-time recovery proof, or an account-import path. Account
 export `/4` is owner-scoped and bounded, not a disaster-recovery image.
 
-### Abuse and cost controls
+### Retained hosted abuse and cost controls
 
 Controls are layered:
 
@@ -281,7 +251,8 @@ Controls are layered:
 - hard lifecycle Retry bounds (two same-field games and one regenerated field);
 - durable provider response IDs and token counts;
 - suspensions and temporary blocks; and
-- an OpenAI project budget as the external spend backstop.
+- in the historical hosted design, an OpenAI project budget as an external
+  spend backstop.
 
 Raw IP addresses are not stored in rate-limit tables. `WEBCHESS_HMAC_SECRET`
 must be long and random, and every derived identifier must use a distinct
@@ -307,7 +278,7 @@ ceiling and second serialized-size check prevent an unbounded response. The
 Wilbur admission envelope preserves existing history and is not a whole-account
 export guarantee because other owner content also accumulates.
 
-### Hosting and deployment
+### Retained hosted deployment design
 
 WebChess targets an independent Vercel project named `webchess`. It must not
 reuse MadnessBot projects, secrets, domains, data, or billing configuration.

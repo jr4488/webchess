@@ -43,12 +43,43 @@ provenance. A search synthesis or fetched page is untrusted material for Portia
 to scrutinize—not a verified fact, study result, or validation of WebChess.
 Opting out must leave the non-search lifecycle usable.
 
-OpenClaw model/auth status is not a Hosted Search probe. The reviewed
-integration has no separate no-data search probe; only a consented, material
-research attempt can establish search behavior. Its durable record must name
-capability `web.search`, provider `codex`, local transport, zero fallback
-attempts, and retained activity or an explicit failure/refusal. Direct-page
-retrieval is a later WebChess-local operation.
+The reproducible path pins the official
+`@openclaw/codex@2026.7.1-1` provider plugin at npm integrity
+`sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==`.
+It must be installed with OpenClaw's supported `plugins install ... --pin`
+command, selected as `tools.web.search.provider=codex`, and allowlisted beside
+the packed `webchess` plugin. The exact commands are in
+[Installation](../INSTALL.md#4-build-and-inspect-the-exact-packed-plugin).
+Inspecting both plugins and running `capability web providers --json` verifies
+local registration without sending a query. A missing `codex` provider is a
+setup failure, not permission to substitute another search service or an API
+key. The only supported authenticated route uses the same selected OpenAI
+account/OAuth profile for model inference and official Codex Hosted Search.
+There is no WebChess-side, Codex, OpenAI, alternate-provider API-key, API-token,
+service-account, or equivalent fallback. All provider-key environment variables
+identified by the installation gate, including `OPENAI_API_KEY` and
+`CODEX_API_KEY`, must be empty or unset, and the dedicated OpenClaw auth order
+must contain only the chosen OAuth profile; readiness fails closed otherwise.
+The non-secret environment check and profile-specific probe are documented in
+[Installation](../INSTALL.md#2-install-and-authenticate-the-reviewed-openclaw-version).
+This candidate attests the official provider's exact reviewed runtime modules,
+wrapper, and native executable only on Linux x86_64. It revalidates those bytes
+and binds a private search client to the one selected OAuth profile at the
+request boundary; unsupported or changed components fail closed.
+
+Model/auth status and provider inventory alone are not live account proof. Once
+per launcher process, the packed bridge requires the exact prepared `openai/*`
+model to answer `Reply with exactly this ASCII token and nothing else:
+WEBCHESS_READY` with exactly `WEBCHESS_READY`, then sends the fixed non-case
+query `OpenAI official website` through the official `codex` provider. Neither
+bounded request contains case content, repeats during status polling, triggers
+a WebChess direct-page fetch, or enters case research rows or exports. Both
+reach the provider and consume account/network allowance; launch fails closed
+unless both results validate. Case-scoped consent does not disable these launch
+gates. A lifecycle search is a separate request and may still fail. Its durable
+request and source records retain provider, transport, bounded attempt count,
+planned and executed query data, evidence and provenance, and any explicit
+failure/refusal status and code.
 
 That operational search path is distinct from the evaluation program above.
 Method claims require preregistered or otherwise explicit comparisons, outcome

@@ -2,9 +2,10 @@
 
 **Effective date:** August 1, 2026
 
-This notice distinguishes the local OpenClaw plugin, the loopback source-
-checkout runtime, and the intended hosted WebChess service. It does not claim
-that a production hosted deployment is currently live.
+This notice distinguishes the supported local OpenClaw plugin from retained
+historical source-checkout and intended hosted-service code. Those older
+runtimes are not authentication or installation alternatives, and this notice
+does not claim that a production hosted gameplay deployment is live.
 
 ## Local OpenClaw plugin
 
@@ -16,23 +17,42 @@ synchronize it, or receive telemetry from the local app. Browser refreshes do
 not delete the local game; database retention and deletion remain under the
 local installation owner's control.
 
-Model work uses the user's own OpenClaw installation, configured default model,
-and existing provider authentication. The provider may be remote. In that case,
+On the supported public path, model work uses the user's own OpenClaw
+installation, an OpenAI model, and the selected OpenAI account/OAuth profile.
 OpenClaw sends bounded prompts for Division, Portia, the approved board-derived
-Answer, Charlotte, and legacy-v1 answer recovery where applicable, according to
-that provider's terms and data controls.
+Answer, Charlotte, and legacy-v1 answer recovery where applicable to OpenAI
+under that account's terms and data controls.
 Portia receives the concrete candidate prompt assembled from board weights,
 values, routes, captures, and survivor signals before an answer exists;
-Charlotte receives the exact generated answer afterward. The plugin does not
-receive or proxy the credential and does not add a WebChess-operated service to
-that path. Gate, Retry policy, Wilbur records, and provenance are local
-deterministic or user-authored operations.
+Charlotte receives the exact generated answer afterward. OpenClaw resolves and
+applies the selected account/OAuth auth object inside the plugin runtime.
+WebChess never logs, persists, exports, returns, or places that credential in
+the browser, loopback bridge payload, PostgreSQL records, or Next.js child
+environment, and adds no WebChess-operated service to the path. Gate, Retry
+policy, Wilbur records, and provenance are local deterministic or user-authored
+operations.
+
+This candidate supports that path only on Linux x86_64. Before inference or
+search, the plugin attests the exact reviewed official Codex package/runtime and
+native executable and revalidates the singleton OAuth binding. Other platforms,
+modified runtime bytes, and changed auth stores fail closed.
 
 Research search is a separate, case-scoped data flow and is off until the
 player gives versioned consent. When enabled and the bounded materiality rule
 triggers, the OpenClaw runtime sends the original question and a bounded query
 to its configured Codex Search provider under the user's OpenClaw/provider
-account. The local broker may then request at most three public HTTPS pages.
+account. The public installation path pins the official
+`@openclaw/codex@2026.7.1-1` provider plugin at npm integrity
+`sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==`,
+selects provider `codex`, and allowlists that plugin beside `webchess`. It uses
+the same selected OpenAI account/OAuth profile as model inference. The supported
+path permits no WebChess-side, Codex, OpenAI, alternate-provider API-key,
+API-token, service-account, or equivalent fallback. Relevant credential
+environment variables, including `OPENAI_API_KEY` and `CODEX_API_KEY`, must be
+empty or unset and the dedicated OpenClaw auth order must contain only the
+selected OAuth profile; readiness fails closed otherwise. The installation gate
+reports only offending variable names, never their values. The local broker may
+then request at most three public HTTPS pages.
 Those page hosts receive an ordinary request from the local machine. Redirects,
 private or special-use addresses, credential-bearing URLs, oversized bodies,
 unsupported media, and provenance inconsistencies fail closed.
@@ -44,20 +64,18 @@ filtering and provenance do not prove that a source or claim is true. Opting
 out leaves the non-search lifecycle available and must not select another
 hosted search service.
 
-## Local source-checkout runtime
+## Retired runtime privacy boundaries
 
-`npm run local:dev` keeps application data in a dedicated Docker PostgreSQL 17
-database on loopback and sends model work through the operator's server-side
-OpenAI Platform key. It does not launch OpenClaw and does not use Codex Search.
-With neither Clerk key it uses one signed machine principal; with a complete
-Clerk development pair, Clerk handles identity. Those owners are separate and
-their records are not merged. Preserve the generated
-`WEBCHESS_LOCAL_SESSION_SECRET` with the database, because losing it makes the
-prior signed owner's rows inaccessible. There is no WebChess cloud sync or
-backup for this runtime.
+Earlier candidates described a source-checkout launcher and a hosted gameplay
+service. Those paths are historical and non-instructional in WebChess 2.2: the
+`local:*` npm commands have been removed, the legacy launcher fails closed, and
+server service selection rejects every non-OpenClaw principal before loading a
+hosted adapter. A provider key/token, Clerk identity, or signed-machine session
+cannot act as a fallback for model inference or research.
 
-The remainder of this notice describes the separate hosted-service
-architecture.
+The remainder of this notice records privacy properties of retained hosted
+identity and database code for audit purposes. The public deployment is a
+brochure and source/paper navigator, not a hosted gameplay or model service.
 
 ## What WebChess processes
 
@@ -127,18 +145,25 @@ WebChess does not sell game content or use it for advertising.
 
 ## Service providers
 
-- **Clerk** processes authentication and account controls.
-- **Neon** stores durable application data.
+- **OpenClaw** runs the installed plugin locally, resolves the sole selected
+  OpenAI account/OAuth profile, and transports bounded inference and official
+  Codex Hosted Search requests. WebChess does not receive the auth object.
 - **OpenAI** processes bounded inputs for Division, Portia, the approved Answer,
-  and Charlotte. The deterministic Gate, Retry policy, and Wilbur record do not
-  call a model. Calls use `store: false`; OpenAI's organization, project, abuse-
-  monitoring, retention, and data-sharing policies still apply.
-- **Vercel** hosts the application and processes network and runtime data.
-- **Google** participates only if the user chooses Google sign-in.
+  Charlotte, and consented Codex Hosted Search under that account's controls.
+  The deterministic Gate, Retry policy, Wilbur record, and local page fetcher do
+  not make a model call.
+- **Public source-page hosts** receive at most three guarded local retrieval
+  requests when the player consents and research is material.
+- **Vercel** may host the public brochure and processes its network/runtime data;
+  it is not the supported gameplay, inference, research, identity, or database
+  runtime.
 - **GitHub** processes information a user voluntarily posts for support,
   issues, contributions, or security reporting.
 
-Each provider handles data under its own terms and configured account controls.
+Clerk and Neon appear in retained hosted-design code and historical data-model
+text, but they are not providers in the supported WebChess 2.2 player path.
+Each actual provider or contacted host handles data under its own terms and
+configured account controls.
 
 ## Retention
 
@@ -176,12 +201,25 @@ it does not rerun provider calls or prove that the answer is true. The UI action
 verification. A case bundle is not a PostgreSQL backup, an OpenAI
 subject-access export, or a substitute for retaining a tested database dump.
 
-The local OpenClaw model/auth status check is not a Codex Hosted Search probe.
-There is no separate no-data search probe in the reviewed path. Only a
-case-consented, material search attempt can establish search behavior, and its
-durable record must preserve the hosted search activity or visible
-failure/refusal. Any subsequent guarded retrieval of up to three public HTTPS
-pages is performed separately by local WebChess.
+Model/auth status and provider inventory alone are not live account proof. Once
+per launcher process, before a game, the packed bridge requires the exact
+prepared `openai/*` model to answer `Reply with exactly this ASCII token and
+nothing else: WEBCHESS_READY` with exactly `WEBCHESS_READY`, then sends the
+fixed query `OpenAI official website` through the official `codex` provider.
+Neither bounded request contains user/case content, repeats during status
+polling, triggers a WebChess direct-page fetch, or enters game/research rows or
+a case export. Both reach OpenAI/the provider under the account's data policies
+and consume account/network allowance. Launch fails closed unless both results
+validate. A person who does not accept those readiness transmissions must not
+launch; later case-scoped opt-out does not disable them.
+
+A consented lifecycle search is a separate request and may still fail. The
+packed bridge validates capability `web.search`, provider `codex`, local
+transport, and an empty fallback-attempt array. Durable case research records
+retain provider, transport, bounded attempt count, planned and executed query
+data, evidence and provenance, and a visible failure/refusal status and code
+when applicable. Any later guarded retrieval of up to three public HTTPS pages
+is performed separately by local WebChess.
 
 The deployed `/account` page is the self-service path to:
 

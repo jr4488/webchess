@@ -7,8 +7,9 @@ Using a deployed WebChess service means agreeing to these terms and the
 [Acceptable Use Policy](ACCEPTABLE_USE.md).
 
 The repository does not claim that a production hosted service is currently
-live. Local OpenClaw and source-checkout operation have separate identity,
-provider, persistence, and account-control boundaries.
+live. The supported runnable candidate is the packed local OpenClaw path.
+Archived source-checkout and key-backed hosted descriptions are retired
+snapshot evidence, not supported installation or authentication alternatives.
 
 ## What the service is
 

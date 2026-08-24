@@ -20,11 +20,12 @@ effect could be evaluated.
 
 ## Local setup
 
-Follow [INSTALL.md](INSTALL.md). For source-checkout play on this machine
-without OpenClaw, use `npm run local:dev` with a server-side OpenAI credential
-and the loopback PostgreSQL database. Omit both Clerk keys for the signed local
-principal, or provide a complete development Clerk pair. Never point an
-unreviewed branch at production data or secrets.
+Follow the account-authenticated OpenClaw path in [INSTALL.md](INSTALL.md).
+Install the reviewed packed plugin into a dedicated OpenClaw profile, use one
+ordered OpenAI account/OAuth profile for both inference and official Codex
+Hosted Search, and use a dedicated loopback PostgreSQL database. A WebChess,
+Codex, OpenAI, or alternate-provider API key/token is not an accepted substitute.
+Never point an unreviewed branch at production data or secrets.
 
 ## Verification
 
@@ -38,7 +39,7 @@ npm run typecheck
 npm run plugin:build
 git diff --exit-code -- openclaw-plugin/dist
 npm run test
-npm run test:coverage
+DATABASE_URL='postgresql://...disposable-test-only...' npm run test:coverage
 DATABASE_URL='postgresql://...disposable-test-only...' npm run test:integration
 npm audit --omit=dev --audit-level=high
 npm audit --audit-level=high

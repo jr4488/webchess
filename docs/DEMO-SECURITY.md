@@ -1,12 +1,12 @@
 # Public application security model
 
-This filename is retained for compatibility with earlier repository links. The
-production WebChess plan is one complete application, not a reduced
-visitor-key demonstration.
-
-This document describes the intended hosted surface, which is not claimed live.
-The OpenClaw and loopback source-checkout trust boundaries are documented
-separately in [SECURITY.md](../SECURITY.md).
+This filename and the hosted threat-model detail below are retained for audit
+compatibility with earlier repository links. They are not current deployment or
+installation instructions. WebChess 2.2 supports only the packed OpenClaw
+runtime with one selected OpenAI account/OAuth profile for both inference and
+official Codex Hosted Search. Every non-OpenClaw API principal and every
+provider key/token path fails closed. See [SECURITY.md](../SECURITY.md) and
+[INSTALL.md](../INSTALL.md) for the current boundary.
 
 ## Public routes
 
@@ -15,12 +15,12 @@ installation material, the Apache-2.0 license, and release downloads. Public
 routes do not call OpenAI, create a game, expose another user's data, or accept
 a model credential.
 
-## Protected routes
+## Retired hosted protected-route model
 
-Creating, resuming, replaying, moving, answering, exporting account data, or
-deleting account data requires a Clerk-authenticated session. Authentication
-is verified in each server route and database ownership is derived from the
-verified Clerk user ID.
+The earlier hosted target required a Clerk-authenticated session and derived
+database ownership from the verified Clerk user ID. That contract remains
+reviewable below, but Clerk cannot select the WebChess 2.2 API service graph and
+is not an alternate launch path.
 
 The browser never supplies:
 
@@ -31,22 +31,22 @@ The browser never supplies:
 - quota or token usage; or
 - a final model answer.
 
-## Credential path
+## Retired provider path
 
-The only OpenAI credential is a WebChess-owned Platform project key stored as a
-server-side Vercel environment secret. An authenticated route may use it only
-after durable ownership, rate, quota, idempotency, and concurrency checks.
+The earlier hosted provider route is retired. Its service adapter cannot load
+for a hosted principal, provider clients cannot self-construct from environment
+credentials, and deployment preflight rejects provider credential variables.
+Do not configure a project key, token, alternate endpoint, or separate billing
+path to reactivate it. The supported OpenClaw runtime keeps the selected account
+OAuth object inside OpenClaw and applies the durable ownership, rate, quota,
+idempotency, and concurrency contracts before model work.
 
-Requests use `store: false`. Vercel, Clerk, Neon, and OpenAI still process data
-under their own service and account policies. `store: false` alone does not
-establish Zero Data Retention.
+## Retained hosted durable enforcement
 
-OpenAI spend alerts notify the operator but do not stop traffic. An explicitly
-enabled hard spend limit is an external backstop; enforcement can lag while
-tracked spend propagates. WebChess therefore treats its own durable quotas,
-hourly user/IP limits, and concurrency leases as the primary controls.
-
-## Durable enforcement
+This section records the retired Clerk/Neon/Vercel design. The supported local
+plugin reuses the canonical data and lifecycle contracts in its dedicated
+loopback PostgreSQL database, but it does not use these hosted identities,
+credentials, deployment roles, or operator paths.
 
 Neon stores games, append-only events, model-call accounting, usage buckets,
 rate buckets, replay-start intents, deletion tombstones, and expiring

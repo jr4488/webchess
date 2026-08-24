@@ -40,12 +40,13 @@ access separate so that each has an inspectable provenance and failure mode.
 10. **Wilbur and Web** — the player owns action status and appends observations
     to the immutable genealogy; model output cannot declare real-world success.
 
-## Runtime topologies
+## Runtime topology
 
-The OpenClaw plugin, loopback source-checkout runtime, and intended hosted
-service share the visual experience, rules engine, cast construction, replay,
-model prompts, and output validation. They do not share identity, persistence,
-credentials, model billing, or automatic-research availability.
+The packed OpenClaw plugin is the sole supported WebChess 2.2 runtime. Earlier
+loopback source-checkout and intended hosted-service surfaces shared parts of
+the visual experience and server contracts, but they are now retired audit/test
+fixtures rather than alternate identity, persistence, credential, billing, or
+research choices.
 
 ### Local OpenClaw plugin
 
@@ -64,7 +65,8 @@ Foreground Next.js process bound to 127.0.0.1
   |
   +--> authenticated, ephemeral 127.0.0.1 JSON bridge
          +--> pinned OpenClaw simple-completion runtime
-                +--> user's configured default provider, model, and authentication
+                +--> selected OpenAI account/OAuth model
+                +--> official Codex Hosted Search under the same account profile
 ```
 
 The plugin is the install and launch boundary; it includes the complete
@@ -73,18 +75,27 @@ background service and starts no process until the user runs
 `openclaw webchess`. The launcher disables Next.js telemetry, clears hosted
 Clerk/generic database settings, requires a dedicated loopback PostgreSQL URL,
 blocks a repository `.env.local` from introducing an OpenAI key, binds only to
-IPv4 loopback, prints and optionally opens the local URL, and remains in the
+IPv4 loopback, rejects inherited provider key/token variables, prints and
+optionally opens the local URL, and remains in the
 foreground until Ctrl-C. For a managed install, it
 stages the bundled application code in an operating-system temporary directory,
 links the installed dependency tree, and removes that working directory on
 exit. Persistent game and lifecycle data remains in the local database.
+
+The supported platform is deliberately limited to Linux x86_64. The plugin
+attests the exact official global Codex plugin record, package and lock tree,
+reviewed provider/private-client modules, wrapper, and native executable, then
+revalidates their bytes, real paths, and singleton OAuth/config binding at
+request boundaries. Unsupported platforms or any identity drift fail closed.
 
 The launcher gives the Next.js child only a random bearer and the exact bridge
 origin. The bridge accepts versioned structured JSON from the loopback peer,
 enforces the exact `Host` and bearer plus byte, prompt, response, timeout, and
 concurrency bounds, and passes the complete prompt into OpenClaw's pinned
 simple-completion runtime. Prompts are not carried in `argv` and are not
-silently truncated. Provider credentials remain inside OpenClaw.
+silently truncated. OpenClaw resolves and applies the selected OpenAI
+account/OAuth auth object inside the plugin runtime; it never crosses the
+loopback bridge into Next.js or the browser and is never logged or persisted.
 
 The browser animates shared, server-accepted moves but cannot make arbitrary
 saved state authoritative. The shared service recomposes the cast from its
@@ -94,90 +105,49 @@ mutation and lifecycle transition.
 There is no Clerk login, cloud database, hosted WebChess request, sync, or
 shared operator credential. A stable installation-scoped principal owns local
 records; the browser header is a mode discriminator within the same-OS trust
-boundary, not a reusable hosted credential. The configured model provider may
-be remote; that network boundary belongs to the user's OpenClaw configuration.
+boundary, not a reusable hosted credential. The supported path contacts OpenAI
+for the selected account model and official Codex Hosted Search under that
+account's controls; alternate providers and provider key/token variables fail
+closed.
 
-### Local source checkout
+### Retired runtime surfaces and the public brochure
 
-The same application and server-side OpenAI path can run from a source
-checkout without OpenClaw (`npm run local:dev`). The launcher binds Next.js to
-`127.0.0.1:3005`, uses Docker PostgreSQL 17 at `127.0.0.1:55433`, and selects
-exactly one authentication mode: a signed installation-owned local principal
-when both Clerk keys are absent, or Clerk development identity when a complete
-`pk_test_...` / `sk_test_...` pair is present. A partial pair, live keys, or a
-non-loopback database fails closed. The modes have separate owner identifiers
-and never merge records.
-
-A launcher-only activation flag and dedicated, generated
-`WEBCHESS_LOCAL_SESSION_SECRET` prevent an ordinary or partially configured
-hosted process from silently entering local-auth mode. That secret must be
-preserved with the database: losing it changes the signed local owner and makes
-the previous owner's rows inaccessible to the new session. The signed session
-is a machine boundary, not proof of a human identity.
-
-Loopback `DATABASE_URL` values use the PostgreSQL wire adapter. The local
-runtime applies the same canonical migrations on first use, but only when the
-launcher-only activation flag is present and after requiring the existing
-ledger to be an exact checksum-matching prefix. A genuinely empty database is
-accepted; a nonempty schema with an unrelated relation is refused rather than
-adopted. Ordinary development, hosted, and Vercel starts never auto-migrate.
-The launcher reports the `2.2.0-rc.1-local` candidate identity, disables OpenClaw
-and test-auth bypasses, validates an existing named database container before
-starting it, and opens the browser only after a bounded readiness probe.
-Automatic Codex Search research is not wired into this runtime.
-
-A pre-hardening `webchess-local-postgres` container without the immutable
-ownership label is intentionally refused. The data-preserving adoption path is
-to inspect and back up `webchess_local_pgdata`, remove only the stopped
-container, and rerun `npm run local:setup -- --adopt-volume` so the named volume
-is reused. The volume must never be removed as part of adoption.
-
-### Hosted service
+Earlier candidates contained a source-checkout launcher and a hosted gameplay
+adapter. They are retained only for historical review and contract tests. They
+are not WebChess 2.2 installation choices: their `local:*` npm entry points are
+removed, direct legacy-launcher execution fails closed, and service selection
+rejects every principal except `local-openclaw` before the hosted adapter can
+load. No API key, provider token, Clerk session, or signed-machine session can
+reactivate model inference or research through those paths.
 
 ```text
 Unauthenticated browser
   +-- public Next.js pages
   +-- white paper, policies, installation, license, source downloads
 
-Authenticated browser
-  |
-  | Clerk session cookie
-  v
-Next.js route handler on Vercel
-  |-- verify Clerk identity and route authorization
-  |-- validate input, origin, idempotency key, and expected revision
-  |-- reserve quota/rate/concurrency state in Neon
-  |-- replay and mutate canonical game state
-  |-- call OpenAI from the server when required
-  |-- settle usage and persist provider provenance
-  v
-Neon Postgres                 OpenAI Responses API
+Any non-OpenClaw gameplay/model request
+  +-- 503 fail-closed response before provider-adapter import
 ```
 
-Vercel deployments never take the local PostgreSQL-wire migration path; they
-keep Neon HTTP and the guarded owner migration command. Automatic Codex Search
-research is not wired into this runtime. The repository describes this hosted
-architecture but does not claim that a production hosted deployment is live.
+The public deployment is therefore a brochure and immutable source/paper
+navigator, not a hosted game, database, identity, inference, or research
+service. The retained Clerk, Neon, Vercel, and provider-adapter design below is
+historical security evidence and test coverage, not current operational
+guidance. Vercel Functions remain stateless; a warm module cache was never an
+authority.
 
-Vercel Functions are stateless compute. A warm module cache is an optimization,
-not a source of truth.
-
-The Vercel `DATABASE_URL` belongs to a least-privileged runtime Postgres role
-that can use the application schema and read/write the required tables but
-cannot own or migrate the schema, manage roles, or create, alter, or drop
-schema objects. A separate migration-owner credential is used only from a
-protected operator environment and is never stored in Vercel or the
-application environment.
-
-`npm run db:migrate` is the sole public migration boundary. Before migration
-bytes are loaded and again before the owner connection is opened, it requires a
-clean attached checkout whose exact commit is published at its configured live
-remote branch; both checks must identify the same commit. Direct invocation of
-the underlying migration script is unsupported. The owner applies pending
-files atomically under an advisory lock and records their normalized checksums.
-Both the owner runner and the local runtime reject any existing ledger that is
-not an exact checksum-matching prefix of the 15 canonical migrations from
-`0001_durable_webchess` through `0015_direct_page_research_evidence`.
+For the retained hosted design, `npm run db:migrate` is the only migration-owner
+boundary. Before migration bytes are loaded and again before the owner
+connection is opened, it requires a clean attached checkout whose exact commit
+is published at its configured live remote branch; both checks must identify
+the same commit. Direct invocation of the underlying migration script is
+unsupported. The owner applies pending files atomically under an advisory lock
+and records their normalized checksums. The supported local player does not run
+that deployment command or supply its credential: the OpenClaw launcher applies
+the canonical tail to its dedicated loopback database. Both paths reject any
+existing ledger that is not an exact checksum-matching prefix of the 15
+canonical migrations from `0001_durable_webchess` through
+`0015_direct_page_research_evidence`.
 
 Migration `0012` is upgrade-safe without a duplicate-data audit. It preserves
 all pre-`0012` rows with a null `charlotte_binding_version`, including duplicate
@@ -240,17 +210,17 @@ triggers also fail.
 
 ## Authentication and ownership
 
-The hosted service uses Clerk for Google, email, and passkey authentication.
-The routing proxy improves navigation by redirecting signed-out requests, but
-it is not the authorization boundary. Each protected route calls Clerk's
-server authentication, obtains the verified Clerk user ID, and scopes all
-queries to that ID.
+The supported runtime uses one stable installation-scoped OpenClaw principal
+and a loopback mode discriminator for WebChess ownership. OpenClaw separately
+resolves the sole selected OpenAI account/OAuth profile for inference and
+official Codex Hosted Search. The installation principal is a same-machine
+ownership boundary, not a password or proof of a human identity.
 
-The local source runtime selects either the same Clerk route contract with a
-complete test-key pair or a seven-day, HMAC-signed, HttpOnly, SameSite=Lax
-cookie for one loopback machine principal. OpenClaw uses its installation
-principal and loopback mode discriminator. Neither local mechanism is a
-password or verified-human account, and neither may activate on Vercel.
+Retained hosted code verifies Clerk identity and scopes records to that ID, but
+Clerk and the historical signed-machine session are not release authentication
+paths and cannot select API services. They remain documented below so their
+data ownership and deletion contracts can be audited without presenting them
+as supported launch choices.
 
 The API does not accept a user ID as authority. A valid game UUID owned by a
 different user is indistinguishable from a missing game.
@@ -271,7 +241,7 @@ impersonate that event. Shared IP rate windows and vendor backups are outside
 the immediate account-row deletion and age out under their own retention
 policies.
 
-## Hosted durable data model
+## Durable data model and retained hosted tables
 
 ### `user_controls`
 
@@ -460,16 +430,18 @@ move is legal; a King captured on it wins before the limit draw applies.
 
 ## Model-call transaction boundary
 
-Database transactions do not remain open during a remote OpenAI request.
+Database transactions do not remain open during a remote account-authenticated
+OpenClaw request.
 
 1. In a short `READ COMMITTED` statement batch under one transaction-scoped
    advisory lock, check deletion, suspension, rate, quota, prior idempotency,
    and concurrency; reserve usage and a lease.
 2. Commit.
-3. Make the bounded server-side OpenAI request with `store: false` and a
-   pseudonymous, purpose-separated safety identifier.
-4. In another short transaction, settle token usage, release the lease, and
-   atomically attach the validated result to the game.
+3. Make the bounded OpenClaw request through the authenticated loopback bridge;
+   the selected OpenAI account/OAuth profile remains inside OpenClaw.
+4. In another short transaction, settle reported or explicitly unreported
+   usage, release the lease, and atomically attach the validated result to the
+   game.
 
 Failures are explicit. A retry with the same idempotency key recovers a
 committed result or reports the existing `reserved`/`in_progress` operation as
@@ -484,10 +456,10 @@ indeterminate provider-started attempts. Exhaustion produces
 settlement committed but final attachment was interrupted, the durable result
 payload is the recovery authority.
 
-The application quotas and concurrency leases are the primary cost controls.
-OpenAI spend alerts are notifications, not caps. An explicitly enabled OpenAI
-hard spend limit is an external backstop, but its enforcement is not
-instantaneous and recorded spend can slightly exceed the configured amount.
+The application quotas and concurrency leases bound WebChess operations, while
+the selected account's allowance and workspace controls remain external.
+WebChess cannot promise or enforce unmetered use, and no provider key or API-
+project billing path is a permitted backstop for the supported runtime.
 
 ## Automatic research boundary
 
@@ -557,19 +529,21 @@ Vercel because instances are short-lived, parallel, and regionally independent.
 | Provider epoch/readiness cache | Stale or contradictory state | fixed server configuration and request ledger |
 | Deleted raw identity needed as a barrier | Identity recreation can reset controls | stable HMAC-only `deleted_user_tombstones` |
 
-This is the smallest durable replacement because it uses the two services
-already required for identity and persistence—Clerk and one Neon database—
-without introducing a separate queue or cache as an authority.
+For the retired hosted design, this was the smallest durable replacement
+because it used Clerk and one Neon database without introducing a separate
+queue or cache as an authority. The supported release instead composes one
+dedicated OpenClaw profile and one loopback PostgreSQL database.
 
 ## Invariants
 
 - Randomization generates variation, not evidence.
 - Board events create salience, not factual warrant.
 - The original question and every transformation remain inspectable.
-- The local plugin never receives model credentials; OpenClaw owns provider
-  authentication and may contact the user's configured remote provider.
-- Hosted visitors never supply model credentials.
-- Hosted OpenAI calls occur only in authenticated server routes.
+- OpenClaw resolves and applies the selected OpenAI account/OAuth auth object
+  inside the local plugin runtime; WebChess never logs, persists, exports, or
+  sends it across the loopback bridge to Next.js or the browser.
+- Every non-OpenClaw principal is rejected before a provider adapter loads.
+- No key-backed hosted or source-checkout model route is a release surface.
 - The server is authoritative for ownership, moves, passes, captures, endings,
   prompts, quota, and usage.
 - No correctness or security property depends on Function memory.
