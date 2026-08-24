@@ -181,19 +181,13 @@ function validFacets(): DivisionFacet[] {
 }
 
 describe('OpenAI request resolution defensive branches', () => {
-  it('requires an object context and a configured provider', () => {
+  it('requires an object context and an explicitly injected test client', () => {
     expect(() =>
       resolveModelRequest(null as unknown as ModelRequestContext),
     ).toThrow(ModelConfigurationError)
     expect(() =>
       resolveModelRequest(requestContext({ client: undefined })),
-    ).toThrow('server-side OpenAI API key')
-    expect(() =>
-      resolveModelRequest(requestContext({
-        client: undefined,
-        apiKey: '   ',
-      })),
-    ).toThrow(ModelConfigurationError)
+    ).toThrow('injected OpenAI client')
   })
 
   it('uses default request controls when optional controls are absent', () => {
@@ -237,15 +231,6 @@ describe('OpenAI request resolution defensive branches', () => {
       ).toThrow(ModelConfigurationError)
     },
   )
-
-  it('constructs a server client without making a request', () => {
-    const resolved = resolveModelRequest(requestContext({
-      client: undefined,
-      apiKey: 'sk-test-never-sent',
-    }))
-
-    expect(resolved.client.responses.create).toBeTypeOf('function')
-  })
 
   it.each([
     {},

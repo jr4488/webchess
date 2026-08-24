@@ -3,44 +3,74 @@ import 'server-only'
 import type { AuthSource } from '@/server/auth'
 
 import { serviceUnavailable } from './errors'
-import type { WebChessApiServices } from './ports'
+import type {
+  WebChessApiServices,
+  WebChessDataControlServices,
+} from './ports'
 
 let apiServicesPromise: Promise<WebChessApiServices> | null = null
-let apiServicesLocalMode: boolean | null = null
+let dataControlServicesPromise: Promise<WebChessDataControlServices> | null = null
 
-async function loadApiServices(
-  localMode: boolean,
-): Promise<WebChessApiServices> {
-  if (localMode) {
-    const { getOpenClawApiServices } = await import('../openclaw/services')
-    return getOpenClawApiServices()
+async function loadOpenClawApiServices(): Promise<WebChessApiServices> {
+  const { getOpenClawApiServices } = await import('../openclaw/services')
+  return getOpenClawApiServices()
+}
+
+async function loadDataControlServices(): Promise<WebChessDataControlServices> {
+  const { createDataControlServices } = await import(
+    './data-control-service-adapter'
+  )
+  return createDataControlServices()
+}
+
+/**
+ * Retain only Clerk account status/export/deletion. This is intentionally a
+ * separate graph from gameplay so it cannot select a provider, invoke a model,
+ * conduct research, or export an individual lifecycle case.
+ */
+export async function getDataControlServices(
+  principalSource: AuthSource,
+): Promise<WebChessDataControlServices> {
+  if (principalSource !== 'clerk') {
+    throw serviceUnavailable(
+      'Clerk account data controls require an authenticated Clerk principal.',
+    )
   }
-  const { createApiServices } = await import('./service-adapter')
-  return createApiServices()
+
+  if (dataControlServicesPromise === null) {
+    dataControlServicesPromise = loadDataControlServices()
+  }
+
+  try {
+    return await dataControlServicesPromise
+  } catch (error) {
+    dataControlServicesPromise = null
+    throw error
+  }
 }
 
 export async function getApiServices(
   principalSource: AuthSource,
 ): Promise<WebChessApiServices> {
-  const { isOpenClawLocalModeEnabled } = await import('../openclaw/config')
-  const localMode = isOpenClawLocalModeEnabled()
-  if (localMode !== (principalSource === 'local-openclaw')) {
+  // WebChess 2.2 is deliberately account-authenticated through OpenClaw only.
+  // Reject every other principal before loading any provider/runtime adapter so
+  // a Clerk, test, or retired local-hosted session can never select a key-backed
+  // service graph by accident.
+  if (principalSource !== 'local-openclaw') {
     throw serviceUnavailable(
-      'The authenticated principal is not bound to this WebChess runtime.',
+      'WebChess model and research services require the local OpenClaw account-authenticated runtime.',
     )
   }
 
-  if (
-    apiServicesPromise !== null &&
-    apiServicesLocalMode !== localMode
-  ) {
+  const { isOpenClawLocalModeEnabled } = await import('../openclaw/config')
+  if (!isOpenClawLocalModeEnabled()) {
     throw serviceUnavailable(
-      'The WebChess runtime mode changed after service initialization.',
+      'The local OpenClaw account-authenticated runtime is disabled.',
     )
   }
+
   if (apiServicesPromise === null) {
-    apiServicesLocalMode = localMode
-    apiServicesPromise = loadApiServices(localMode)
+    apiServicesPromise = loadOpenClawApiServices()
   }
 
   try {
@@ -49,7 +79,6 @@ export async function getApiServices(
     // A missing environment variable can be fixed between local requests and a
     // transient initialization failure must not poison a warm instance forever.
     apiServicesPromise = null
-    apiServicesLocalMode = null
     throw error
   }
 }

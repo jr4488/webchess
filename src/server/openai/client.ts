@@ -1,6 +1,6 @@
 import 'server-only'
 
-import OpenAI from 'openai'
+import type OpenAI from 'openai'
 
 import { createSafetyIdentifier } from './safety'
 import {
@@ -64,19 +64,11 @@ export function resolveModelRequest(
     context.safetyHmacSecret,
   )
 
-  let client = context.client
+  const client = context.client
   if (!client) {
-    const apiKey = context.apiKey?.trim()
-    if (!apiKey) {
-      throw new ModelConfigurationError(
-        'The server-side OpenAI API key is not configured.',
-      )
-    }
-    client = new OpenAI({
-      apiKey,
-      maxRetries: 0,
-      timeout: timeoutMs,
-    })
+    throw new ModelConfigurationError(
+      'An injected OpenAI client is required for provider-contract tests; production model calls must use the account-authenticated OpenClaw generators.',
+    )
   }
 
   if (!client.responses || typeof client.responses.create !== 'function') {

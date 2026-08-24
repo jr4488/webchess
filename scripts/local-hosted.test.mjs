@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import {
   mkdir,
@@ -15,6 +16,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   LOCAL_HOSTNAME,
   LOCAL_HOSTED_AUTH_FLAG,
+  LOCAL_HOSTED_RETIRED_MESSAGE,
   LOCAL_HOSTED_QUOTAS,
   LOCAL_ENV_LOCK_DIRECTORY,
   LOCAL_POSTGRES_CONTAINER,
@@ -58,13 +60,6 @@ import {
   waitForLocalApp,
   writeDotEnvFile,
 } from './local-hosted.mjs'
-
-function fakeChild() {
-  const child = new EventEmitter()
-  child.kill = vi.fn()
-  setTimeout(() => child.emit('exit', 0, null), 0)
-  return child
-}
 
 function localAppEnv(existing = {}) {
   return buildLocalAppEnv({
@@ -172,6 +167,21 @@ function compliantVolumeInspection(overrides = {}) {
 }
 
 describe('local hosted launcher', () => {
+  it('has no npm entry point and fails closed when invoked directly', async () => {
+    const packageJson = JSON.parse(await readFile('package.json', 'utf8'))
+    expect(Object.keys(packageJson.scripts)).not.toContain('local:setup')
+    expect(Object.keys(packageJson.scripts)).not.toContain('local:dev')
+    expect(Object.keys(packageJson.scripts)).not.toContain('local:down')
+
+    const direct = spawnSync(
+      process.execPath,
+      ['scripts/local-hosted.mjs', 'dev', '--no-open'],
+      { cwd: process.cwd(), encoding: 'utf8' },
+    )
+    expect(direct.status).toBe(1)
+    expect(direct.stderr.trim()).toBe(LOCAL_HOSTED_RETIRED_MESSAGE)
+  })
+
   it('builds a loopback environment and never enables OpenClaw or test auth', () => {
     const env = localAppEnv()
 
@@ -197,6 +207,19 @@ describe('local hosted launcher', () => {
     expect(env.WEBCHESS_WILBUR_STORAGE_ROW_LIMIT).toBe('500')
     expect(env.WEBCHESS_WILBUR_STORAGE_TEXT_BYTES_LIMIT).toBe('250000')
     expect(buildChildEnvironment({
+      AWS_ACCESS_KEY_ID: 'must-not-survive',
+      AWS_BEARER_TOKEN_BEDROCK: 'must-not-survive',
+      CODEX_TOKEN: 'must-not-survive',
+      OPENAI_ADMIN_KEY: 'must-not-survive',
+      OPENAI_API_KEY: 'must-not-survive',
+      OPENAI_BASE_URL: 'must-not-survive',
+      OPENAI_CUSTOM_HEADERS: 'must-not-survive',
+      OPENAI_PROJECT_ID: 'must-not-survive',
+      OPENAI_WEBHOOK_SECRET: 'must-not-survive',
+      HTTPS_PROXY: 'must-not-survive',
+      NODE_EXTRA_CA_CERTS: 'must-not-survive',
+      OPENCLAW_DEBUG_PROXY_URL: 'must-not-survive',
+      PROVIDER_AUTH_TOKEN: 'must-not-survive',
       VERCEL: '1',
       WEBCHESS_E2E_AUTH: 'playwright',
       WEBCHESS_E2E_USER_ID: 'bypass',
@@ -402,7 +425,6 @@ describe('local hosted launcher', () => {
     expect(missingLocalHostedSecrets({})).not.toContain('CLERK_SECRET_KEY')
     expect(missingLocalHostedSecrets({
       DATABASE_URL: 'postgresql://webchess:local@127.0.0.1:55433/webchess',
-      OPENAI_API_KEY: 'sk-example',
       WEBCHESS_DELETION_HMAC_SECRET: 'd'.repeat(64),
       WEBCHESS_HMAC_SECRET: 'h'.repeat(64),
       [LOCAL_SESSION_SECRET_NAME]: 's'.repeat(64),
@@ -430,9 +452,9 @@ describe('local hosted launcher', () => {
       [LOCAL_SESSION_SECRET_NAME]: 's'.repeat(64),
     })).toThrow(/must be distinct/u)
     expect(combinedEnvironment(
-      { OPENAI_API_KEY: 'from-root' },
+      { WEBCHESS_TEST_SETTING: 'from-root' },
       { DATABASE_URL: 'postgresql://127.0.0.1/webchess' },
-    ).OPENAI_API_KEY).toBe('from-root')
+    ).WEBCHESS_TEST_SETTING).toBe('from-root')
   })
 
   it('parses setup, down, and bounded port options', () => {
@@ -484,149 +506,53 @@ describe('local hosted launcher', () => {
     ])).toThrow(/1024 through 65535/u)
   })
 
-  it('supports both signed local and Clerk development modes', async () => {
-    const logger = { error: vi.fn(), log: vi.fn() }
-    const ensureEnv = vi.fn().mockResolvedValue({
-      appEnv: localAppEnv(),
-      postgresPassword: 'local-pass',
-      rootEnv: { OPENAI_API_KEY: 'from-file' },
-    })
-    const startPostgres = vi.fn().mockResolvedValue(undefined)
-    const stopPostgres = vi.fn().mockResolvedValue(undefined)
-    const spawnDev = vi.fn(() => fakeChild())
-    const assertPortAvailable = vi.fn().mockResolvedValue(undefined)
-    const terminateChild = vi.fn().mockResolvedValue(undefined)
-    const waitForApp = vi.fn().mockResolvedValue(undefined)
-
-    await expect(runLocalHosted(
-      ['node', 'local-hosted.mjs', 'setup'],
-      {
-        assertPortAvailable,
-        ensureEnv,
-        environment: { OPENAI_API_KEY: 'from-shell' },
-        logger,
-        spawnDev,
-        startPostgres,
-        stopPostgres,
-        terminateChild,
+  it.each([
+    ['setup', ['node', 'local-hosted.mjs', 'setup', '--adopt-volume']],
+    ['dev', ['node', 'local-hosted.mjs', 'dev', '--port', '80']],
+    ['down', ['node', 'local-hosted.mjs', 'down']],
+  ])('fails closed for imported %s invocation without reading dependencies', async (
+    _command,
+    argv,
+  ) => {
+    const dependencyTouches = vi.fn()
+    const dependencies = new Proxy({}, {
+      defineProperty(_target, property) {
+        dependencyTouches('defineProperty', property)
+        throw new Error('dependencies must not be mutated')
       },
-    )).resolves.toEqual({
-      authMode: 'local-session',
-      command: 'setup',
-      missing: [],
-      ready: true,
-    })
-    expect(spawnDev).not.toHaveBeenCalled()
-
-    const opened = vi.fn()
-    await expect(runLocalHosted(
-      ['node', 'local-hosted.mjs', 'dev'],
-      {
-        assertPortAvailable,
-        ensureEnv,
-        environment: { OPENAI_API_KEY: 'from-shell' },
-        logger,
-        openBrowser: opened,
-        spawnDev,
-        startPostgres,
-        stopPostgres,
-        terminateChild,
-        waitForApp,
+      deleteProperty(_target, property) {
+        dependencyTouches('deleteProperty', property)
+        throw new Error('dependencies must not be mutated')
       },
-    )).resolves.toEqual({ command: 'dev', code: 0, signal: null })
-    expect(waitForApp).toHaveBeenCalledWith(expect.objectContaining({
-      probes: expect.arrayContaining([
-        expect.objectContaining({
-          bodyMarkers: [
-            'Every question arrives wrapped in its first frame.',
-            'Board events generate',
-          ],
-          url: 'http://127.0.0.1:3005/',
-        }),
-        expect.objectContaining({
-          bodyMarkers: ['WebChess', 'Continue on this computer.'],
-          url: 'http://127.0.0.1:3005/sign-in',
-        }),
-      ]),
-    }))
-    expect(opened).toHaveBeenCalledWith('http://localhost:3005/play')
-    expect(spawnDev).toHaveBeenCalledWith(
-      'npm',
-      localDevArgs(),
-      expect.objectContaining({
-        detached: true,
-        env: expect.objectContaining({
-          [LOCAL_HOSTED_AUTH_FLAG]: 'true',
-          OPENAI_API_KEY: 'from-file',
-          WEBCHESS_OPENCLAW_ENABLED: 'false',
-        }),
-      }),
-    )
-
-    ensureEnv.mockResolvedValue({
-      appEnv: localAppEnv({
-        CLERK_SECRET_KEY: 'sk_test_example',
-        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk_test_example',
-      }),
-      postgresPassword: 'local-pass',
-      rootEnv: { OPENAI_API_KEY: 'from-file' },
-    })
-    await expect(runLocalHosted(
-      ['node', 'local-hosted.mjs', 'setup'],
-      { ensureEnv, environment: {}, logger, startPostgres },
-    )).resolves.toMatchObject({ authMode: 'clerk', ready: true })
-
-    await runLocalHosted(
-      ['node', 'local-hosted.mjs', 'down'],
-      { logger, stopPostgres },
-    )
-    expect(stopPostgres).toHaveBeenCalledOnce()
-    expect(terminateChild).toHaveBeenCalledOnce()
-  })
-
-  it('rejects partial Clerk configuration and invalid ports before external side effects', async () => {
-    const ensureEnv = vi.fn().mockResolvedValue({
-      appEnv: localAppEnv({
-        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk_test_partial',
-      }),
-      postgresPassword: 'local-pass',
-      rootEnv: { OPENAI_API_KEY: 'from-file' },
-    })
-    const startPostgres = vi.fn()
-    const openBrowser = vi.fn()
-
-    await expect(runLocalHosted(
-      ['node', 'local-hosted.mjs', 'dev'],
-      { ensureEnv, openBrowser, startPostgres },
-    )).rejects.toThrow(/requires both/u)
-    expect(startPostgres).not.toHaveBeenCalled()
-    expect(openBrowser).not.toHaveBeenCalled()
-
-    ensureEnv.mockResolvedValue({
-      appEnv: localAppEnv(),
-      postgresPassword: 'local-pass',
-      rootEnv: { OPENAI_API_KEY: 'from-file' },
-    })
-    await expect(runLocalHosted(
-      ['node', 'local-hosted.mjs', 'dev'],
-      {
-        assertPortAvailable: vi.fn().mockRejectedValue(
-          new Error('port already occupied'),
-        ),
-        ensureEnv,
-        environment: {},
-        openBrowser,
-        startPostgres,
+      get(_target, property) {
+        dependencyTouches('get', property)
+        throw new Error('dependencies must not be read')
       },
-    )).rejects.toThrow(/port already occupied/u)
-    expect(startPostgres).not.toHaveBeenCalled()
+      ownKeys() {
+        dependencyTouches('ownKeys')
+        throw new Error('dependencies must not be enumerated')
+      },
+      set(_target, property) {
+        dependencyTouches('set', property)
+        throw new Error('dependencies must not be mutated')
+      },
+    })
+    const argvReads = vi.fn()
+    const originalArgv = [...argv]
+    const guardedArgv = new Proxy(argv, {
+      get(_target, property) {
+        argvReads(property)
+        throw new Error('arguments must not be parsed')
+      },
+    })
 
-    ensureEnv.mockClear()
-    await expect(runLocalHosted(
-      ['node', 'local-hosted.mjs', 'dev', '--port', '80'],
-      { ensureEnv, openBrowser, startPostgres },
-    )).rejects.toThrow(/1024 through 65535/u)
-    expect(ensureEnv).not.toHaveBeenCalled()
+    await expect(runLocalHosted(guardedArgv, dependencies)).rejects.toMatchObject({
+      message: LOCAL_HOSTED_RETIRED_MESSAGE,
+    })
+
+    expect(argvReads).not.toHaveBeenCalled()
+    expect(dependencyTouches).not.toHaveBeenCalled()
+    expect(argv).toEqual(originalArgv)
   })
 
   it('refuses a drifted named database container without changing it', async () => {
@@ -1098,71 +1024,4 @@ describe('local hosted launcher', () => {
     expect(child.kill).not.toHaveBeenCalled()
   })
 
-  it.each([
-    ['readiness', vi.fn().mockRejectedValue(new Error('probe failed'))],
-    ['browser opening', vi.fn().mockResolvedValue(undefined)],
-  ])('cleans up the owned dev process group after %s failure', async (kind, waitForApp) => {
-    const child = new EventEmitter()
-    child.kill = vi.fn()
-    const terminateChild = vi.fn().mockResolvedValue(undefined)
-    const openBrowser = kind === 'browser opening'
-      ? vi.fn().mockRejectedValue(new Error('browser failed'))
-      : vi.fn()
-
-    await expect(runLocalHosted(
-      ['node', 'local-hosted.mjs', 'dev'],
-      {
-        assertPortAvailable: vi.fn().mockResolvedValue(undefined),
-        ensureEnv: vi.fn().mockResolvedValue({
-          appEnv: localAppEnv(),
-          postgresPassword: 'local-pass',
-          rootEnv: { OPENAI_API_KEY: 'from-file' },
-        }),
-        environment: {},
-        logger: { error: vi.fn(), log: vi.fn() },
-        openBrowser,
-        spawnDev: vi.fn(() => child),
-        startPostgres: vi.fn().mockResolvedValue(undefined),
-        terminateChild,
-        waitForApp,
-      },
-    )).rejects.toThrow(kind === 'readiness' ? /probe failed/u : /browser failed/u)
-    expect(terminateChild).toHaveBeenCalledOnce()
-  })
-
-  it('cleans up the detached dev process group on terminal SIGHUP', async () => {
-    const child = new EventEmitter()
-    child.kill = vi.fn()
-    const signalTarget = new EventEmitter()
-    const terminateChild = vi.fn(async (_ownedChild, { signal }) => {
-      child.emit('exit', null, signal)
-    })
-
-    const launched = runLocalHosted(
-      ['node', 'local-hosted.mjs', 'dev', '--no-open'],
-      {
-        assertPortAvailable: vi.fn().mockResolvedValue(undefined),
-        ensureEnv: vi.fn().mockResolvedValue({
-          appEnv: localAppEnv(),
-          postgresPassword: 'local-pass',
-          rootEnv: { OPENAI_API_KEY: 'from-file' },
-        }),
-        environment: {},
-        logger: { error: vi.fn(), log: vi.fn() },
-        signalTarget,
-        spawnDev: vi.fn(() => child),
-        startPostgres: vi.fn().mockResolvedValue(undefined),
-        terminateChild,
-        waitForApp: vi.fn().mockResolvedValue(undefined),
-      },
-    )
-    await vi.waitFor(() => {
-      expect(signalTarget.listenerCount('SIGHUP')).toBe(1)
-    })
-    signalTarget.emit('SIGHUP')
-
-    await expect(launched).resolves.toMatchObject({ signal: 'SIGHUP' })
-    expect(terminateChild).toHaveBeenCalledWith(child, { signal: 'SIGHUP' })
-    expect(signalTarget.listenerCount('SIGHUP')).toBe(0)
-  })
 })

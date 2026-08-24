@@ -447,7 +447,6 @@ function createDependencies(): ApiServiceAdapterDependencies {
     repository: repository as ApiServiceAdapterDependencies['repository'],
     usage,
     hmacSecret: HMAC_SECRET,
-    openAiApiKey: 'server-test-key',
     softwareVersion: 'webchess-test',
     divisionGenerator: vi.fn(async () => ({
       providerId: 'resp_division',
@@ -2556,7 +2555,6 @@ describe('durable HTTP service adapter', () => {
       }),
       expect.objectContaining({
         userId: OWNER_ID,
-        apiKey: 'server-test-key',
         idempotencyKey: expect.stringMatching(/^[0-9a-f]{64}$/u),
         onProgress: expect.any(Function),
       }),
@@ -2580,7 +2578,8 @@ describe('durable HTTP service adapter', () => {
     expect(lifecycle.answerUserPrompt).toContain('"gate"')
     expect(lifecycle.answerUserPrompt).not.toContain('PORTIA AUTHORIZATION BOUNDARY')
     expect(lifecycle.answerUserPrompt).not.toContain('OUTPUT CONTRACT')
-    expect(lifecycle.answerUserPrompt).not.toContain('server-test-key')
+    expect(vi.mocked(dependencies.portiaGenerator!).mock.calls[0]?.[1])
+      .not.toHaveProperty('apiKey')
   })
 
   it('safely backfills the exact player-visible prompt for an unfinished historical Gate pass', async () => {
@@ -3235,9 +3234,10 @@ describe('durable HTTP service adapter', () => {
       },
       expect.objectContaining({
         userId: OWNER_ID,
-        apiKey: 'server-test-key',
       }),
     )
+    expect(vi.mocked(dependencies.charlotteGenerator!).mock.calls[0]?.[1])
+      .not.toHaveProperty('apiKey')
     expect(dependencies.lifecycleRepository?.storeCharlotte)
       .toHaveBeenCalledWith(expect.objectContaining({
         modelRequestId: REQUEST_ID,

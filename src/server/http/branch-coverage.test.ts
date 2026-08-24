@@ -3,11 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const {
   getApiServicesMock,
+  getDataControlServicesMock,
   requireApiUserMock,
   verifySameOriginMutationMock,
   verifyWebhookMock,
 } = vi.hoisted(() => ({
   getApiServicesMock: vi.fn(),
+  getDataControlServicesMock: vi.fn(),
   requireApiUserMock: vi.fn(),
   verifySameOriginMutationMock: vi.fn(),
   verifyWebhookMock: vi.fn(),
@@ -20,6 +22,7 @@ vi.mock('@/server/auth', () => ({
 
 vi.mock('./services', () => ({
   getApiServices: getApiServicesMock,
+  getDataControlServices: getDataControlServicesMock,
 }))
 
 vi.mock('@clerk/nextjs/webhooks', () => ({
@@ -165,6 +168,8 @@ beforeEach(() => {
   verifySameOriginMutationMock.mockReturnValue(null)
   getApiServicesMock.mockReset()
   getApiServicesMock.mockResolvedValue(services)
+  getDataControlServicesMock.mockReset()
+  getDataControlServicesMock.mockResolvedValue(services)
   verifyWebhookMock.mockReset()
   delete process.env.CLERK_WEBHOOK_SIGNING_SECRET
 })
@@ -471,6 +476,7 @@ describe('handler default dependency and webhook branches', () => {
     expect(response.status).toBe(200)
     expect(verifyWebhookMock).toHaveBeenCalledOnce()
     expect(getApiServicesMock).not.toHaveBeenCalled()
+    expect(getDataControlServicesMock).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -513,12 +519,14 @@ describe('handler default dependency and webhook branches', () => {
       data: { id: 'user_deleted' },
     })
     const services = createServices()
-    getApiServicesMock.mockResolvedValue(services)
+    getDataControlServicesMock.mockResolvedValue(services)
 
     const response = await handleClerkWebhookRequest(
       webhookRequest('msg_default_service'),
     )
     expect(response.status).toBe(200)
     expect(services.handleClerkUserDeleted).toHaveBeenCalledOnce()
+    expect(getApiServicesMock).not.toHaveBeenCalled()
+    expect(getDataControlServicesMock).toHaveBeenCalledWith('clerk')
   })
 })

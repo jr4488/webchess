@@ -219,7 +219,6 @@ function createServices() {
       database: database.adapter,
       divisionGenerator,
       hmacSecret: HMAC_SECRET,
-      openAiApiKey: 'sk-integration-stub-never-sent',
       repository,
       softwareVersion: SOFTWARE_VERSION,
       usage,

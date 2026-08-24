@@ -432,7 +432,6 @@ function createServices(stubs: ProviderStubs): WebChessApiServices {
     modelProvider: "deterministic-test-stub",
     portiaGenerator: stubs.portiaGenerator,
     repository,
-    requiresModelApiKey: false,
     softwareVersion: SOFTWARE_VERSION,
     usage: createUsageController({
       db: database.adapter,

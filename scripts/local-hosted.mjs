@@ -41,12 +41,13 @@ export const LOCAL_SITE_ORIGIN = `http://localhost:${LOCAL_PORT}`
 export const LOCAL_HOSTED_AUTH_FLAG = 'WEBCHESS_LOCAL_HOSTED_AUTH'
 export const LOCAL_SESSION_SECRET_NAME = 'WEBCHESS_LOCAL_SESSION_SECRET'
 export const LOCAL_ENV_LOCK_DIRECTORY = 'local/.webchess-setup.lock'
+export const LOCAL_HOSTED_RETIRED_MESSAGE =
+  'The key-backed local-hosted launcher is retired. Install and start WebChess through the account-authenticated OpenClaw path in INSTALL.md.'
 
 const PRESERVED_APP_KEYS = new Set([
   'CLERK_SECRET_KEY',
   'CLERK_WEBHOOK_SIGNING_SECRET',
   'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY',
-  'OPENAI_API_KEY',
   'WEBCHESS_DELETION_HMAC_SECRET',
   'WEBCHESS_HMAC_SECRET',
   LOCAL_SESSION_SECRET_NAME,
@@ -211,7 +212,6 @@ export function combinedEnvironment(...sources) {
 
 export function missingLocalHostedSecrets(environment) {
   const required = [
-    'OPENAI_API_KEY',
     'WEBCHESS_HMAC_SECRET',
     'WEBCHESS_DELETION_HMAC_SECRET',
     LOCAL_SESSION_SECRET_NAME,
@@ -297,6 +297,45 @@ export function buildLocalAppEnv({
 
 export function buildChildEnvironment(environment) {
   const child = { ...environment }
+  const exactForbiddenProviderEnvironmentNames = new Set([
+    'AWS_ACCESS_KEY_ID',
+    'AWS_BEARER_TOKEN_BEDROCK',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_SESSION_TOKEN',
+    'CODEX_TOKEN',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'HF_TOKEN',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'ALL_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'all_proxy',
+    'NODE_EXTRA_CA_CERTS',
+    'OPENAI_API_BASE',
+    'OPENAI_ADMIN_KEY',
+    'OPENAI_BASE_URL',
+    'OPENAI_CUSTOM_HEADERS',
+    'OPENAI_ORG_ID',
+    'OPENAI_PROJECT_ID',
+    'OPENAI_TOKEN',
+    'OPENAI_WEBHOOK_SECRET',
+    'OPENCLAW_DEBUG_PROXY_BLOB_DIR',
+    'OPENCLAW_DEBUG_PROXY_DB_PATH',
+    'OPENCLAW_DEBUG_PROXY_ENABLED',
+    'OPENCLAW_DEBUG_PROXY_REQUIRE',
+    'OPENCLAW_DEBUG_PROXY_URL',
+    'SSL_CERT_DIR',
+    'SSL_CERT_FILE',
+  ])
+  for (const name of Object.keys(child)) {
+    if (
+      exactForbiddenProviderEnvironmentNames.has(name) ||
+      /_(?:API_KEY|API_TOKEN|ACCESS_TOKEN|AUTH_TOKEN|OAUTH_TOKEN)$/u.test(name)
+    ) {
+      delete child[name]
+    }
+  }
   for (const name of [
     'VERCEL',
     'VERCEL_ENV',
@@ -1215,42 +1254,6 @@ export function parseLaunchOptions(argv) {
   return { adoptVolume, command, openBrowser, port }
 }
 
-const NEXT_READY_PATTERN = /\bReady in \d+(?:\.\d+)?(?:ms|s)\b/u
-
-function observeChild(child, {
-  stderr = process.stderr,
-  stdout = process.stdout,
-} = {}) {
-  let ready = false
-  let outputTail = ''
-  let resolveServerReady
-  const serverReady = new Promise((resolve) => {
-    resolveServerReady = resolve
-  })
-  const inspectOutput = (target) => (chunk) => {
-    target?.write?.(chunk)
-    outputTail = `${outputTail}${String(chunk)}`.slice(-512)
-    if (!ready && NEXT_READY_PATTERN.test(outputTail)) {
-      ready = true
-      resolveServerReady(true)
-    }
-  }
-  child.stdout?.on('data', inspectOutput(stdout))
-  child.stderr?.on('data', inspectOutput(stderr))
-
-  const outcome = new Promise((resolve, reject) => {
-    child.once('error', (error) => {
-      if (!ready) resolveServerReady(false)
-      reject(error)
-    })
-    child.once('exit', (code, signal) => {
-      if (!ready) resolveServerReady(false)
-      resolve({ command: 'dev', code, signal })
-    })
-  })
-  return { outcome, serverReady }
-}
-
 export function assertLocalAppPortAvailable({
   createServerImpl = createServer,
   hostname = LOCAL_HOSTNAME,
@@ -1468,166 +1471,13 @@ export async function waitForLocalApp({
   throw new Error('Timed out waiting for local WebChess to become ready.')
 }
 
-export async function runLocalHosted(argv, dependencies = {}) {
-  const {
-    assertPortAvailable = assertLocalAppPortAvailable,
-    environment = process.env,
-    logger = console,
-    openBrowser: openBrowserFn = openLocalBrowser,
-    ensureEnv = ensureLocalEnvFiles,
-    startPostgres = startLocalPostgres,
-    stopPostgres = stopLocalPostgres,
-    spawnDev = (command, args, options) => spawn(command, args, options),
-    terminateChild = terminateOwnedProcessGroup,
-    waitForApp = waitForLocalApp,
-    root = process.cwd(),
-    signalTarget = process,
-  } = dependencies
-  const options = parseLaunchOptions(argv)
-
-  if (options.command === 'down') {
-    const stopped = await stopPostgres({ root })
-    logger.log(
-      stopped === false
-        ? 'No owned local WebChess PostgreSQL container is present.'
-        : 'Stopped the owned local WebChess PostgreSQL container.',
-    )
-    return { command: 'down' }
-  }
-
-  const files = await ensureEnv({ root })
-  parseLoopbackPostgresUrl(files.appEnv.DATABASE_URL)
-
-  const resolved = combinedEnvironment(
-    environment,
-    files.rootEnv ?? {},
-    files.appEnv,
-  )
-  const authMode = resolveLocalAuthMode(resolved)
-  const missing = missingLocalHostedSecrets(resolved)
-  if (missing.length > 0) {
-    logger.error(`Local WebChess is missing: ${missing.join(', ')}.`)
-    if (options.command === 'setup') {
-      await startPostgres({
-        adoptUnlabeledVolume: options.adoptVolume,
-        password: files.postgresPassword,
-        root,
-      })
-      logger.log(`PostgreSQL is running on ${LOCAL_HOSTNAME}:${LOCAL_POSTGRES_PORT}.`)
-      return { authMode, command: 'setup', missing, ready: false }
-    }
-    throw new Error('Local WebChess is not fully configured.')
-  }
-  validateLocalHostedSecrets(resolved)
-
-  if (options.command === 'dev') {
-    await assertPortAvailable({
-      hostname: LOCAL_HOSTNAME,
-      port: options.port,
-    })
-  }
-
-  await startPostgres({
-    adoptUnlabeledVolume: options.adoptVolume,
-    password: files.postgresPassword,
-    root,
-  })
-
-  const origin = `http://localhost:${options.port}`
-  logger.log(`Local PostgreSQL is ready on ${LOCAL_HOSTNAME}:${LOCAL_POSTGRES_PORT}.`)
-  if (options.command === 'setup') {
-    logger.log(
-      authMode === 'clerk'
-        ? `Clerk development sign-in will be available at ${origin}/sign-in after starting npm run local:dev.`
-        : `A signed loopback session will be available at ${origin}/sign-in after starting npm run local:dev.`,
-    )
-    return { authMode, command: 'setup', missing: [], ready: true }
-  }
-
-  const url = `${origin}/play`
-  logger.log(`Starting local WebChess at ${url}`)
-
-  const child = spawnDev(
-    'npm',
-    localDevArgs(options.port),
-    {
-      cwd: root,
-      env: buildChildEnvironment({
-        ...resolved,
-        NEXT_PUBLIC_SITE_URL: origin,
-      }),
-      detached: process.platform !== 'win32',
-      stdio: ['inherit', 'pipe', 'pipe'],
-    },
-  )
-  const observedChild = observeChild(child)
-  const childOutcome = observedChild.outcome
-
-  let termination
-  const stopChild = (signal = 'SIGTERM') => {
-    termination ??= Promise.resolve(terminateChild(child, { signal }))
-    return termination
-  }
-  const stopForSigint = () => {
-    void stopChild('SIGINT')
-  }
-  const stopForSigterm = () => {
-    void stopChild('SIGTERM')
-  }
-  const stopForSighup = () => {
-    void stopChild('SIGHUP')
-  }
-  signalTarget.once('SIGHUP', stopForSighup)
-  signalTarget.once('SIGINT', stopForSigint)
-  signalTarget.once('SIGTERM', stopForSigterm)
-
-  try {
-    await waitForApp({
-      childOutcome,
-      probes: [
-        {
-          bodyMarkers: [
-            'Every question arrives wrapped in its first frame.',
-            'Board events generate',
-          ],
-          url: `http://${LOCAL_HOSTNAME}:${options.port}/`,
-        },
-        {
-          bodyMarkers: authMode === 'clerk'
-            ? ['WebChess', 'Sign in to play.']
-            : ['WebChess', 'Continue on this computer.'],
-          url: `http://${LOCAL_HOSTNAME}:${options.port}/sign-in`,
-        },
-      ],
-      serverReady: observedChild.serverReady,
-    })
-    logger.log(
-      authMode === 'clerk'
-        ? `Local WebChess is ready with Clerk development authentication at ${url}`
-        : `Local WebChess is ready with a signed loopback session at ${url}`,
-    )
-    if (options.openBrowser) {
-      await openBrowserFn(url)
-    }
-    return await childOutcome
-  } finally {
-    signalTarget.removeListener('SIGHUP', stopForSighup)
-    signalTarget.removeListener('SIGINT', stopForSigint)
-    signalTarget.removeListener('SIGTERM', stopForSigterm)
-    await stopChild('SIGTERM')
-  }
+export async function runLocalHosted() {
+  throw new Error(LOCAL_HOSTED_RETIRED_MESSAGE)
 }
 
 async function run() {
-  try {
-    const result = await runLocalHosted(process.argv)
-    if (result.command === 'dev' && result.code && result.code !== 0) {
-      process.exitCode = result.code
-    }
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : error)
-    process.exitCode = 1
-  }
+  console.error(LOCAL_HOSTED_RETIRED_MESSAGE)
+  process.exitCode = 1
 }
 
 if (

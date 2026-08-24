@@ -192,6 +192,22 @@ export interface WebChessApiServices {
   }): Promise<void>
 }
 
+/**
+ * The only retained service surface for an authenticated Clerk account.
+ *
+ * This deliberately excludes every game, lifecycle, model, case-export, and
+ * research operation. Clerk can inspect quota/status and exercise statutory
+ * data controls, but it cannot select a gameplay provider or reach a model
+ * generator through this interface.
+ */
+export type WebChessDataControlServices = Pick<
+  WebChessApiServices,
+  | 'getAccountUsage'
+  | 'exportAccount'
+  | 'deleteAccountData'
+  | 'handleClerkUserDeleted'
+>
+
 export interface AuthenticatedApiUser {
   userId: string
   source: 'clerk' | 'local-e2e' | 'local-openclaw' | 'local-hosted'
@@ -217,5 +233,5 @@ export type ClerkWebhookEvent =
 
 export interface ClerkWebhookDependencies {
   verify(request: Request): Promise<ClerkWebhookEvent>
-  services: WebChessApiServices
+  services: WebChessDataControlServices
 }

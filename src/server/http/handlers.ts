@@ -28,6 +28,7 @@ import type {
   ClerkWebhookEvent,
   HttpDependencies,
   WebChessApiServices,
+  WebChessDataControlServices,
 } from './ports'
 import {
   emptyResponse,
@@ -36,13 +37,25 @@ import {
   noStoreHeaders,
   withNoStore,
 } from './responses'
-import { getApiServices } from './services'
+import { getApiServices, getDataControlServices } from './services'
 
 type HandlerDependencies = Partial<HttpDependencies>
+
+interface DataControlHandlerDependencies {
+  authenticate?: HttpDependencies['authenticate']
+  verifySameOrigin?: HttpDependencies['verifySameOrigin']
+  services?: WebChessDataControlServices
+}
 
 interface RequestScope {
   requestId: string
   services: WebChessApiServices
+  user: AuthenticatedApiUser
+}
+
+interface DataControlRequestScope {
+  requestId: string
+  services: WebChessDataControlServices
   user: AuthenticatedApiUser
 }
 
@@ -97,7 +110,67 @@ async function runAuthenticated(
   }
 }
 
-function ownerContext(scope: RequestScope, request: Request) {
+async function establishDataControlRequestScope(
+  request: Request,
+  mutation: boolean,
+  dependencies?: DataControlHandlerDependencies,
+): Promise<DataControlRequestScope | Response> {
+  const requestId = createRequestId()
+  const authenticate = dependencies?.authenticate ?? requireApiUser
+  const user = await authenticate(request)
+
+  if (user instanceof Response) {
+    return withNoStore(user, requestId)
+  }
+
+  if (mutation) {
+    const sameOrigin = dependencies?.verifySameOrigin ?? verifySameOriginMutation
+    const rejection = sameOrigin(request)
+
+    if (rejection) {
+      return withNoStore(rejection, requestId)
+    }
+  }
+
+  const services = dependencies?.services ?? (
+    user.source === 'local-openclaw'
+      ? await getApiServices(user.source)
+      : await getDataControlServices(user.source)
+  )
+
+  return { requestId, services, user }
+}
+
+async function runAuthenticatedDataControl(
+  request: Request,
+  mutation: boolean,
+  operation: (scope: DataControlRequestScope) => Promise<Response>,
+  dependencies?: DataControlHandlerDependencies,
+): Promise<Response> {
+  let requestId = createRequestId()
+
+  try {
+    const scope = await establishDataControlRequestScope(
+      request,
+      mutation,
+      dependencies,
+    )
+
+    if (scope instanceof Response) {
+      return scope
+    }
+
+    requestId = scope.requestId
+    return withNoStore(await operation(scope), requestId)
+  } catch (error) {
+    return errorResponse(error, requestId)
+  }
+}
+
+function ownerContext(
+  scope: Pick<RequestScope, 'requestId' | 'user'>,
+  request: Request,
+) {
   return {
     ownerId: scope.user.userId,
     requestId: scope.requestId,
@@ -105,7 +178,10 @@ function ownerContext(scope: RequestScope, request: Request) {
   }
 }
 
-function operationContext(scope: RequestScope, request: Request) {
+function operationContext(
+  scope: Pick<RequestScope, 'requestId' | 'user'>,
+  request: Request,
+) {
   return {
     ...ownerContext(scope, request),
     ipAddress: getClientIpAddress(request),
@@ -485,9 +561,9 @@ async function runRevisionMutation(
 
 export function handleAccountUsageRequest(
   request: Request,
-  dependencies?: HandlerDependencies,
+  dependencies?: DataControlHandlerDependencies,
 ): Promise<Response> {
-  return runAuthenticated(
+  return runAuthenticatedDataControl(
     request,
     false,
     async (scope) => {
@@ -500,9 +576,9 @@ export function handleAccountUsageRequest(
 
 export function handleAccountExportRequest(
   request: Request,
-  dependencies?: HandlerDependencies,
+  dependencies?: DataControlHandlerDependencies,
 ): Promise<Response> {
-  return runAuthenticated(
+  return runAuthenticatedDataControl(
     request,
     true,
     async (scope) => {
@@ -558,9 +634,9 @@ export function handleCaseExportRequest(
 
 export function handleDeleteAccountRequest(
   request: Request,
-  dependencies?: HandlerDependencies,
+  dependencies?: DataControlHandlerDependencies,
 ): Promise<Response> {
-  return runAuthenticated(
+  return runAuthenticatedDataControl(
     request,
     true,
     async (scope) => {
@@ -629,7 +705,7 @@ export async function handleClerkWebhookRequest(
       throw new ApiError('BAD_REQUEST', 400, 'The webhook event identifier is invalid.')
     }
 
-    const services = dependencies?.services ?? (await getApiServices('clerk'))
+    const services = dependencies?.services ?? (await getDataControlServices('clerk'))
     await services.handleClerkUserDeleted({
       clerkUserId: data.id,
       webhookEventId,

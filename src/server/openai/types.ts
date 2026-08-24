@@ -22,10 +22,7 @@ export interface ModelRequestContext {
    * A server-only secret dedicated to safety-identifier HMACs.
    */
   safetyHmacSecret: string | Uint8Array
-  /**
-   * The Vercel server secret. Callers may instead inject a client in tests.
-   */
-  apiKey?: string
+  /** Injected only by provider-contract tests. Production uses OpenClaw generators. */
   client?: OpenAIClientLike
   signal?: AbortSignal
   timeoutMs?: number
