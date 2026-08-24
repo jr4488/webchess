@@ -1,14 +1,18 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { CURRENT_GAME_VERSIONS } from '../../src/lib/game-contract'
 import { CURRENT_LIFECYCLE_VERSIONS } from '../../src/lib/lifecycle'
 import {
+  LEGACY_RESEARCH_CONSENT_VERSION,
   RESEARCH_CONSENT_VERSION,
+  type ResearchConsent,
   type ResearchFetchFailure,
   type ResearchRetrievedFact,
+  type ResearchStage,
 } from '../../src/lib/research'
+import { DurableGameRepository } from '../../src/server/games'
 import { DurableLifecycleRepository } from '../../src/server/lifecycle'
 import {
   DurableResearchRepository,
@@ -21,7 +25,10 @@ const OWNER = 'user_research_repository_integration'
 const OTHER_OWNER = 'user_other_research_repository_integration'
 const GAME_ID = '72000000-0000-4000-8000-000000000001'
 const RUN_ID = '73000000-0000-4000-8000-000000000001'
+const PRECISION_GAME_ID = '72000000-0000-4000-8000-000000000002'
+const PRECISION_RUN_ID = '73000000-0000-4000-8000-000000000002'
 const PROBLEM = 'What is the latest safe way to improve a current technical system?'
+const PRECISION_PROBLEM = 'Can service consent preserve authoritative timestamp precision?'
 const CONFIGURATION_DIGEST = 'd'.repeat(64)
 const CONSENT_RECORDED_AT = '2026-08-02T16:00:00.000Z'
 const RESEARCH_CONSENT = {
@@ -29,6 +36,66 @@ const RESEARCH_CONSENT = {
   decision: 'allow_search_and_page_fetch',
   recordedAt: CONSENT_RECORDED_AT,
 } as const
+
+const START_CONSENT_MISMATCHES = [
+  {
+    label: 'decision',
+    stage: 'chess',
+    consent: {
+      ...RESEARCH_CONSENT,
+      decision: 'no_external_research',
+    },
+  },
+  {
+    label: 'version',
+    stage: 'anansi',
+    consent: {
+      version: LEGACY_RESEARCH_CONSENT_VERSION,
+      decision: 'no_external_research',
+      recordedAt: null,
+    },
+  },
+  {
+    label: 'recording timestamp',
+    stage: 'answer',
+    consent: {
+      ...RESEARCH_CONSENT,
+      recordedAt: '2026-08-02T16:00:00.001Z',
+    },
+  },
+] satisfies readonly {
+  readonly label: string
+  readonly stage: ResearchStage
+  readonly consent: ResearchConsent
+}[]
+
+const STORED_CONSENT_MISMATCHES = [
+  {
+    label: 'decision',
+    consent: {
+      ...RESEARCH_CONSENT,
+      decision: 'no_external_research',
+    },
+  },
+  {
+    label: 'timestamp',
+    consent: {
+      ...RESEARCH_CONSENT,
+      recordedAt: '2026-08-02T16:00:00.001Z',
+    },
+  },
+  {
+    label: 'legacy version',
+    consent: {
+      version: LEGACY_RESEARCH_CONSENT_VERSION,
+      decision: 'no_external_research',
+      recordedAt: null,
+    },
+  },
+] satisfies readonly {
+  readonly label: string
+  readonly consent: ResearchConsent
+}[]
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
@@ -88,12 +155,14 @@ function fetchFailure(): ResearchFetchFailure {
 }
 
 let database: PostgresTestDatabase
+let games: DurableGameRepository
 let research: DurableResearchRepository
 let lifecycle: DurableLifecycleRepository
 
 beforeAll(async () => {
   database = await createPostgresTestDatabase('research_repository')
   await database.migrate()
+  games = new DurableGameRepository(database.adapter)
   research = new DurableResearchRepository(database.adapter)
   lifecycle = new DurableLifecycleRepository(database.adapter)
 
@@ -141,6 +210,33 @@ beforeAll(async () => {
   })
   await database.adapter.query({
     text: `
+      INSERT INTO games (
+        id, clerk_user_id, is_current, revision, status, problem,
+        problem_sha256, rules_version, engine_version, cast_version,
+        event_version, software_version, research_consent_version,
+        research_consent_decision, research_consent_recorded_at
+      ) VALUES (
+        $1::uuid, $2::text, false, 0, 'dividing', $3::text,
+        $4::char(64), $5::text, $6::text, $7::text,
+        $8::smallint, '2.0.0', $9::text, $10::text,
+        date_trunc('milliseconds', clock_timestamp()) + interval '999 microseconds'
+      )
+    `,
+    values: [
+      PRECISION_GAME_ID,
+      OWNER,
+      PRECISION_PROBLEM,
+      sha256(PRECISION_PROBLEM),
+      CURRENT_GAME_VERSIONS.rules,
+      CURRENT_GAME_VERSIONS.engine,
+      CURRENT_GAME_VERSIONS.cast,
+      CURRENT_GAME_VERSIONS.event,
+      RESEARCH_CONSENT.version,
+      RESEARCH_CONSENT.decision,
+    ],
+  })
+  await database.adapter.query({
+    text: `
       INSERT INTO lifecycle_runs (
         id, clerk_user_id, game_id, root_run_id, state, revision,
         division_seed, cast_seed, trajectory_seed,
@@ -177,6 +273,31 @@ beforeAll(async () => {
       CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
     ],
   })
+  await database.adapter.query({
+    text: `
+      INSERT INTO lifecycle_runs (
+        id, clerk_user_id, game_id, root_run_id, state, revision,
+        division_seed, cast_seed, trajectory_seed,
+        software_version, lifecycle_version, rules_version, engine_version,
+        cast_version, event_version, portia_prompt_version,
+        portia_contract_version, gate_algorithm_version,
+        retry_policy_version, charlotte_prompt_version,
+        charlotte_contract_version, wilbur_record_version
+      )
+      SELECT
+        $1::uuid, clerk_user_id, $2::uuid, $1::uuid, state, revision,
+        'precision-field-seed', 'precision-cast-seed',
+        'precision-trajectory-seed', software_version, lifecycle_version,
+        rules_version, engine_version, cast_version, event_version,
+        portia_prompt_version, portia_contract_version,
+        gate_algorithm_version, retry_policy_version,
+        charlotte_prompt_version, charlotte_contract_version,
+        wilbur_record_version
+      FROM lifecycle_runs
+      WHERE id = $3::uuid AND clerk_user_id = $4::text
+    `,
+    values: [PRECISION_RUN_ID, PRECISION_GAME_ID, RUN_ID, OWNER],
+  })
 })
 
 afterAll(async () => {
@@ -184,6 +305,112 @@ afterAll(async () => {
 })
 
 describe('durable visible research repository on PostgreSQL 17', () => {
+  it('binds repository-serialized consent to authoritative sub-millisecond precision', async () => {
+    const serviceGame = await games.getOwnedGame(OWNER, PRECISION_GAME_ID)
+    expect(serviceGame).toMatchObject({
+      id: PRECISION_GAME_ID,
+      status: 'dividing',
+      researchConsent: {
+        version: RESEARCH_CONSENT.version,
+        decision: RESEARCH_CONSENT.decision,
+        recordedAt: expect.stringMatching(/\.\d{3}Z$/u),
+      },
+    })
+
+    const started = await research.start({
+      ownerId: OWNER,
+      gameId: PRECISION_GAME_ID,
+      lifecycleRunId: PRECISION_RUN_ID,
+      lifecycleState: 'portia_pending',
+      stage: 'web',
+      problem: PRECISION_PROBLEM,
+      researchConsent: serviceGame.researchConsent,
+      policyVersion: `${RESEARCH_POLICY_VERSION}-precision-start`,
+      materiality: 'required',
+      reason: 'Service-returned consent must bind to the authoritative game timestamp.',
+      query: 'authoritative consent timestamp precision',
+      timeoutMs: 30_000,
+      configurationDigest: CONFIGURATION_DIGEST,
+    })
+    expect(started).toMatchObject({
+      created: true,
+      record: { consent: serviceGame.researchConsent },
+    })
+
+    const notNeededInput = {
+      ownerId: OWNER,
+      gameId: PRECISION_GAME_ID,
+      lifecycleRunId: PRECISION_RUN_ID,
+      lifecycleState: 'portia_pending',
+      stage: 'chess',
+      problem: PRECISION_PROBLEM,
+      researchConsent: serviceGame.researchConsent,
+      policyVersion: `${RESEARCH_POLICY_VERSION}-precision-not-needed`,
+      reason: 'The same service consent must bind to a not-needed decision.',
+      configurationDigest: CONFIGURATION_DIGEST,
+    } as const
+    const notNeeded = await research.recordNotNeeded(notNeededInput)
+    expect(notNeeded).toMatchObject({
+      status: 'not_needed',
+      consent: serviceGame.researchConsent,
+    })
+    await expect(research.recordNotNeeded(notNeededInput)).resolves.toEqual(
+      notNeeded,
+    )
+
+    const storedConsentPrecision = await database.adapter.query({
+      text: `
+        SELECT
+          requests.stage,
+          to_char(
+            games.research_consent_recorded_at AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+          ) AS game_recorded_at,
+          to_char(
+            requests.research_consent_recorded_at AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+          ) AS request_recorded_at,
+          games.research_consent_recorded_at =
+            requests.research_consent_recorded_at AS copied_from_game
+        FROM games
+        INNER JOIN research_requests AS requests
+          ON requests.game_id = games.id
+        WHERE games.clerk_user_id = $1::text
+          AND games.id = $2::uuid
+          AND requests.id IN ($3::uuid, $4::uuid)
+        ORDER BY requests.stage
+      `,
+      values: [
+        OWNER,
+        PRECISION_GAME_ID,
+        started.record.id,
+        notNeeded.id,
+      ],
+    })
+    expect(storedConsentPrecision.rows).toHaveLength(2)
+    const exactGameTimestamp = String(
+      storedConsentPrecision.rows[0]?.game_recorded_at,
+    )
+    expect(exactGameTimestamp).toMatch(/\.\d{3}999Z$/u)
+    expect(exactGameTimestamp.replace(/999Z$/u, 'Z')).toBe(
+      serviceGame.researchConsent.recordedAt,
+    )
+    expect(storedConsentPrecision.rows).toEqual([
+      {
+        stage: 'chess',
+        game_recorded_at: exactGameTimestamp,
+        request_recorded_at: exactGameTimestamp,
+        copied_from_game: true,
+      },
+      {
+        stage: 'web',
+        game_recorded_at: exactGameTimestamp,
+        request_recorded_at: exactGameTimestamp,
+        copied_from_game: true,
+      },
+    ])
+  })
+
   it('records searching, citations, and completion without changing lifecycle fences', async () => {
     const before = await lifecycle.getForGame(OWNER, GAME_ID)
     expect(before).toMatchObject({ state: 'portia_pending', revision: 7 })
@@ -316,6 +543,371 @@ describe('durable visible research repository on PostgreSQL 17', () => {
     const duplicate = duplicateResult.record
     expect(duplicate.id).toBe(completed.id)
     expect(duplicate.status).toBe('completed')
+  })
+
+  it('rejects mismatched consent before returning an existing policy claim', async () => {
+    await expect(research.start({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      lifecycleRunId: RUN_ID,
+      lifecycleState: 'portia_pending',
+      stage: 'portia',
+      problem: PROBLEM,
+      researchConsent: {
+        ...RESEARCH_CONSENT,
+        decision: 'no_external_research',
+      },
+      policyVersion: RESEARCH_POLICY_VERSION,
+      materiality: 'required',
+      reason: 'This mismatched consent must not recover the existing durable research claim.',
+      query: 'mismatched consent must not begin external research',
+      timeoutMs: 30_000,
+      configurationDigest: CONFIGURATION_DIGEST,
+    })).rejects.toMatchObject({
+      code: 'conflict',
+      message: 'The supplied research consent does not match the owning game.',
+    })
+
+    const persisted = await research.getForGame(OWNER, GAME_ID)
+    expect(persisted.filter((record) =>
+      record.stage === 'portia' &&
+      record.policyVersion === RESEARCH_POLICY_VERSION)).toHaveLength(1)
+  })
+
+  it.each(START_CONSENT_MISMATCHES)(
+    'rejects a mismatched game consent $label without recording a search start',
+    async ({ label, stage, consent }) => {
+      const policyVersion = `${RESEARCH_POLICY_VERSION}-consent-${label.replaceAll(' ', '-')}`
+      await expect(research.start({
+        ownerId: OWNER,
+        gameId: GAME_ID,
+        lifecycleRunId: RUN_ID,
+        lifecycleState: 'portia_pending',
+        stage,
+        problem: PROBLEM,
+        researchConsent: consent,
+        policyVersion,
+        materiality: 'required',
+        reason: 'The repository must reject consent that differs from the owning game.',
+        query: 'mismatched game consent must not begin external research',
+        timeoutMs: 30_000,
+        configurationDigest: CONFIGURATION_DIGEST,
+      })).rejects.toMatchObject({
+        code: 'conflict',
+        message: 'The supplied research consent does not match the owning game.',
+      })
+
+      const persisted = await database.adapter.query({
+        text: `
+          SELECT
+            (
+              SELECT count(*)::integer
+              FROM research_requests
+              WHERE game_id = $1::uuid AND policy_version = $2::text
+            ) AS request_count,
+            (
+              SELECT count(*)::integer
+              FROM lifecycle_events
+              WHERE lifecycle_run_id = $3::uuid
+                AND stage = $4::text
+                AND activity_type = 'research_search_started'
+            ) AS activity_count
+        `,
+        values: [GAME_ID, policyVersion, RUN_ID, stage],
+      })
+      expect(persisted.rows).toEqual([{
+        request_count: 0,
+        activity_count: 0,
+      }])
+    },
+  )
+
+  it.each(START_CONSENT_MISMATCHES)(
+    'rejects mismatched $label consent without recording a not-needed decision or event',
+    async ({ label, stage, consent }) => {
+      const policyVersion = `${RESEARCH_POLICY_VERSION}-not-needed-${label.replaceAll(' ', '-')}`
+      await expect(research.recordNotNeeded({
+        ownerId: OWNER,
+        gameId: GAME_ID,
+        lifecycleRunId: RUN_ID,
+        lifecycleState: 'portia_pending',
+        stage,
+        problem: PROBLEM,
+        researchConsent: consent,
+        policyVersion,
+        reason: 'The repository must reject a decision that differs from the owning game.',
+        configurationDigest: CONFIGURATION_DIGEST,
+      })).rejects.toMatchObject({
+        code: 'conflict',
+        message: 'The supplied research consent does not match the owning game.',
+      })
+
+      const persisted = await database.adapter.query({
+        text: `
+          SELECT
+            (
+              SELECT count(*)::integer
+              FROM research_requests
+              WHERE game_id = $1::uuid AND policy_version = $2::text
+            ) AS request_count,
+            (
+              SELECT count(*)::integer
+              FROM lifecycle_events
+              WHERE lifecycle_run_id = $3::uuid
+                AND stage = $4::text
+                AND activity_type = 'research_not_needed'
+            ) AS activity_count
+        `,
+        values: [GAME_ID, policyVersion, RUN_ID, stage],
+      })
+      expect(persisted.rows).toEqual([{
+        request_count: 0,
+        activity_count: 0,
+      }])
+    },
+  )
+
+  it.each(STORED_CONSENT_MISMATCHES)(
+    'rejects existing policy rows with a conflicting stored $label on both idempotent paths',
+    async ({ label, consent }) => {
+      const suffix = label.replaceAll(' ', '-')
+      const cases = [
+        {
+          requestId: randomUUID(),
+          stage: 'anansi',
+          policyVersion: `${RESEARCH_POLICY_VERSION}-stored-${suffix}-start`,
+          method: 'start',
+        },
+        {
+          requestId: randomUUID(),
+          stage: 'web',
+          policyVersion: `${RESEARCH_POLICY_VERSION}-stored-${suffix}-not-needed`,
+          method: 'recordNotNeeded',
+        },
+      ] as const
+
+      for (const testCase of cases) {
+        await database.adapter.query({
+          text: `
+            INSERT INTO research_requests (
+              id, clerk_user_id, game_id, lifecycle_run_id, stage,
+              policy_version, research_consent_version,
+              research_consent_decision, research_consent_recorded_at,
+              materiality, reason, query, status,
+              result_limit, source_limit, timeout_ms,
+              synthesis_character_limit, completed_at
+            ) VALUES (
+              $1::uuid, $2::text, $3::uuid, $4::uuid, $5::text,
+              $6::text, $7::text, $8::text, $9::timestamptz,
+              NULL, $10::text, NULL, 'not_needed',
+              $11::smallint, $12::smallint, $13::integer,
+              $14::integer, now()
+            )
+          `,
+          values: [
+            testCase.requestId,
+            OWNER,
+            GAME_ID,
+            RUN_ID,
+            testCase.stage,
+            testCase.policyVersion,
+            consent.version,
+            consent.decision,
+            consent.recordedAt,
+            'This pre-fix row deliberately conflicts with authoritative game consent.',
+            5,
+            8,
+            150_000,
+            32_000,
+          ],
+        })
+      }
+
+      const persistedState = () => database.adapter.query({
+        text: `
+          SELECT
+            id,
+            stage,
+            policy_version,
+            research_consent_version,
+            research_consent_decision,
+            research_consent_recorded_at,
+            status,
+            updated_at
+          FROM research_requests
+          WHERE id = ANY($1::uuid[])
+          ORDER BY id
+        `,
+        values: [cases.map((testCase) => testCase.requestId)],
+      })
+      const before = await persistedState()
+      expect(before.rows).toHaveLength(2)
+
+      for (const testCase of cases) {
+        const common = {
+          ownerId: OWNER,
+          gameId: GAME_ID,
+          lifecycleRunId: RUN_ID,
+          lifecycleState: 'portia_pending' as const,
+          stage: testCase.stage,
+          problem: PROBLEM,
+          researchConsent: RESEARCH_CONSENT,
+          policyVersion: testCase.policyVersion,
+          configurationDigest: CONFIGURATION_DIGEST,
+        }
+        const operation = testCase.method === 'start'
+          ? research.start({
+              ...common,
+              materiality: 'required',
+              reason: 'A conflicting pre-fix claim must not be returned as an idempotent search.',
+              query: 'conflicting stored consent must fail closed',
+              timeoutMs: 30_000,
+            })
+          : research.recordNotNeeded({
+              ...common,
+              reason: 'A conflicting pre-fix decision must not be returned as not needed.',
+            })
+
+        await expect(operation).rejects.toMatchObject({
+          code: 'integrity-error',
+          message: 'The existing research request consent does not match the owning game.',
+        })
+      }
+
+      expect((await persistedState()).rows).toEqual(before.rows)
+      const activities = await database.adapter.query({
+        text: `
+          SELECT count(*)::integer AS count
+          FROM lifecycle_events
+          WHERE lifecycle_run_id = $1::uuid
+            AND output_entity_ids ?| $2::text[]
+            AND activity_type IN (
+              'research_search_started',
+              'research_not_needed'
+            )
+        `,
+        values: [RUN_ID, cases.map((testCase) => testCase.requestId)],
+      })
+      expect(activities.rows).toEqual([{ count: 0 }])
+
+      await database.adapter.query({
+        text: 'DELETE FROM research_requests WHERE id = ANY($1::uuid[])',
+        values: [cases.map((testCase) => testCase.requestId)],
+      })
+    },
+  )
+
+  it('rejects a pre-fix policy row with mismatched consent without mutating it', async () => {
+    const malformedRecordedAt = '2026-08-02T16:00:00.000500Z'
+    await database.adapter.query({
+      text: `
+        UPDATE research_requests
+        SET research_consent_recorded_at = $4::timestamptz
+        WHERE clerk_user_id = $1::text
+          AND game_id = $2::uuid
+          AND stage = 'portia'
+          AND policy_version = $3::text
+      `,
+      values: [OWNER, GAME_ID, RESEARCH_POLICY_VERSION, malformedRecordedAt],
+    })
+
+    const persistedState = () => database.adapter.query({
+      text: `
+        SELECT
+          request.research_consent_version,
+          request.research_consent_decision,
+          request.research_consent_recorded_at,
+          to_char(
+            request.research_consent_recorded_at AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+          ) AS research_consent_recorded_at_exact,
+          request.status,
+          request.updated_at,
+          (
+            SELECT count(*)::integer
+            FROM lifecycle_events
+            WHERE lifecycle_run_id = $4::uuid
+              AND stage = 'portia'
+              AND activity_type IN (
+                'research_search_started',
+                'research_not_needed'
+              )
+          ) AS activity_count
+        FROM research_requests AS request
+        WHERE request.clerk_user_id = $1::text
+          AND request.game_id = $2::uuid
+          AND request.stage = 'portia'
+          AND request.policy_version = $3::text
+      `,
+      values: [OWNER, GAME_ID, RESEARCH_POLICY_VERSION, RUN_ID],
+    })
+    const before = await persistedState()
+    expect(before.rows).toHaveLength(1)
+    expect(before.rows[0]).toMatchObject({
+      research_consent_version: RESEARCH_CONSENT.version,
+      research_consent_decision: RESEARCH_CONSENT.decision,
+      research_consent_recorded_at: new Date(malformedRecordedAt),
+      research_consent_recorded_at_exact: malformedRecordedAt,
+      status: 'completed',
+      activity_count: 1,
+    })
+
+    try {
+      await expect(research.start({
+        ownerId: OWNER,
+        gameId: GAME_ID,
+        lifecycleRunId: RUN_ID,
+        lifecycleState: 'portia_pending',
+        stage: 'portia',
+        problem: PROBLEM,
+        researchConsent: RESEARCH_CONSENT,
+        policyVersion: RESEARCH_POLICY_VERSION,
+        materiality: 'required',
+        reason: 'A malformed pre-fix row must not be recovered as an idempotent search claim.',
+        query: 'malformed durable consent must fail closed',
+        timeoutMs: 30_000,
+        configurationDigest: CONFIGURATION_DIGEST,
+      })).rejects.toMatchObject({
+        code: 'integrity-error',
+        message: 'The existing research request consent does not match the owning game.',
+      })
+
+      await expect(research.recordNotNeeded({
+        ownerId: OWNER,
+        gameId: GAME_ID,
+        lifecycleRunId: RUN_ID,
+        lifecycleState: 'portia_pending',
+        stage: 'portia',
+        problem: PROBLEM,
+        researchConsent: RESEARCH_CONSENT,
+        policyVersion: RESEARCH_POLICY_VERSION,
+        reason: 'A malformed pre-fix row must not be recovered as a no-research decision.',
+        configurationDigest: CONFIGURATION_DIGEST,
+      })).rejects.toMatchObject({
+        code: 'integrity-error',
+        message: 'The existing research request consent does not match the owning game.',
+      })
+
+      const after = await persistedState()
+      expect(after.rows).toEqual(before.rows)
+    } finally {
+      await database.adapter.query({
+        text: `
+          UPDATE research_requests
+          SET research_consent_recorded_at = $4::timestamptz
+          WHERE clerk_user_id = $1::text
+            AND game_id = $2::uuid
+            AND stage = 'portia'
+            AND policy_version = $3::text
+        `,
+        values: [
+          OWNER,
+          GAME_ID,
+          RESEARCH_POLICY_VERSION,
+          CONSENT_RECORDED_AT,
+        ],
+      })
+    }
   })
 
   it('persists bounded terminal failures and not-needed decisions visibly', async () => {

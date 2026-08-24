@@ -124,6 +124,9 @@ function gameRow(state: ReplayState): SqlRow {
     castVersion: state.versions.cast,
     eventVersion: state.versions.event,
     softwareVersion: 'webchess@2.2.0-rc.1-openclaw',
+    researchConsentVersion: 'webchess-research-consent-v1',
+    researchConsentDecision: 'allow_search_and_page_fetch',
+    researchConsentRecordedAt: NOW,
     outcome: state.outcome,
     answer: {
       answer: `${PRIVATE_SENTINEL} generated answer.`,
@@ -331,6 +334,125 @@ function sourceRows(): CaseBundleSourceRows {
   }
 }
 
+function researchFailureRows(): Pick<
+  CaseBundleSourceRows,
+  'researchRequests' | 'researchSources'
+> {
+  const researchRequestId = '71000000-0000-4000-8000-000000000060'
+  const requestedUrl = 'https://example.edu/private-case-evidence'
+  return {
+    researchRequests: [{
+      id: researchRequestId,
+      gameId: GAME_ID,
+      lifecycleRunId: RUN_ID,
+      stage: 'portia',
+      requestedBy: 'research-policy',
+      policyVersion: 'webchess-research-policy-v1',
+      researchConsentVersion: 'webchess-research-consent-v1',
+      researchConsentDecision: 'allow_search_and_page_fetch',
+      researchConsentRecordedAt: NOW,
+      materiality: 'required',
+      reason: `${PRIVATE_SENTINEL} research reason`,
+      query: `${PRIVATE_SENTINEL} research query`,
+      status: 'completed',
+      provider: 'codex',
+      transport: 'local',
+      model: 'gpt-5.6-sol',
+      invocationLimit: 1,
+      resultLimit: 5,
+      sourceLimit: 8,
+      timeoutMs: 90_000,
+      synthesisCharacterLimit: 12_000,
+      attemptCount: 1,
+      executedQueries: [`${PRIVATE_SENTINEL} research query`],
+      searchSynthesis: `${PRIVATE_SENTINEL} search synthesis`,
+      directPageTextFetched: false,
+      retrievedFacts: [],
+      fetchFailures: [{
+        citationId: 'R1',
+        requestedUrl,
+        finalUrl: requestedUrl,
+        status: 'failed',
+        failureCode: 'page_fetch_http_status',
+        httpStatus: 503,
+        fetchVersion: 'webchess-direct-page-fetch-v1',
+        extractor: 'webchess-readable-text-v1',
+        rawByteLength: 0,
+        rawContentDigest: null,
+        rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+        acceptedCharacterLength: 0,
+        truncated: false,
+        contentDigest: null,
+        digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+        redirectChain: [requestedUrl],
+        injectionSignalsDetected: [],
+        retrievedAt: NOW,
+      }],
+      omittedSourceCount: 0,
+      injectionSignals: [],
+      contentDigest: '8'.repeat(64),
+      failureCode: null,
+      startedAt: NOW,
+      completedAt: NOW,
+      createdAt: NOW,
+      updatedAt: NOW,
+    }],
+    researchSources: [{
+      id: '71000000-0000-4000-8000-000000000061',
+      researchRequestId,
+      ordinal: 1,
+      citationId: 'R1',
+      title: `${PRIVATE_SENTINEL} source title`,
+      url: requestedUrl,
+      hostname: 'example.edu',
+      trust: 'government_or_education',
+      discoveredFrom: 'search_activity',
+      createdAt: NOW,
+    }],
+  }
+}
+
+function researchFactRows(): Pick<
+  CaseBundleSourceRows,
+  'researchRequests' | 'researchSources'
+> {
+  const rows = researchFailureRows()
+  const request = rows.researchRequests[0]!
+  const requestedUrl = 'https://example.edu/private-case-evidence'
+  const text = 'Bounded directly retrieved evidence.'
+  return {
+    ...rows,
+    researchRequests: [{
+      ...request,
+      directPageTextFetched: true,
+      retrievedFacts: [{
+        citationId: 'R1',
+        requestedUrl,
+        finalUrl: requestedUrl,
+        title: 'Direct evidence',
+        provider: 'webchess-direct-https',
+        fetchVersion: 'webchess-direct-page-fetch-v1',
+        retrievedAt: NOW,
+        httpStatus: 200,
+        contentType: 'text/html',
+        extractor: 'webchess-readable-text-v1',
+        rawByteLength: text.length,
+        rawContentDigest: sha256Hex(text),
+        rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+        acceptedCharacterLength: text.length,
+        contentDigest: sha256Hex(text),
+        digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+        redirectChain: [requestedUrl],
+        text,
+        truncated: false,
+        untrusted: true,
+        contentKind: 'direct_page_text',
+      }],
+      fetchFailures: [],
+    }],
+  }
+}
+
 function bundle(
   profile: 'private-full-v1' | 'research-redacted-v1' | 'metadata-only-v1',
   overrides: Partial<CaseBundleSourceRows> = {},
@@ -403,6 +525,61 @@ describe('webchess-case-bundle/1', () => {
     expect(result.notVerified.join(' ')).toMatch(/efficacy/u)
   })
 
+  it.each([
+    'private-full-v1',
+    'research-redacted-v1',
+    'metadata-only-v1',
+  ] as const)('continues to verify a pre-provenance %s bundle', (profile) => {
+    const created = structuredClone(bundle(
+      profile,
+      profile === 'private-full-v1' ? researchFailureRows() : {},
+    )) as unknown as MutableBundle
+    const game = created.data.game as Record<string, CanonicalJson>
+    const gameRecord = game.record as Record<string, CanonicalJson>
+    const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+    const researchRequests = lifecycle.researchRequests as Record<
+      string,
+      CanonicalJson
+    >[]
+    const redaction = created.data.redaction as Record<string, CanonicalJson>
+    const allowlists = redaction.allowlists as Record<string, CanonicalJson>
+    const provenanceFields = new Set([
+      'researchConsentVersion',
+      'researchConsentDecision',
+      'researchConsentRecordedAt',
+    ])
+    for (const field of provenanceFields) delete gameRecord[field]
+    allowlists.gameRecord = (allowlists.gameRecord as string[])
+      .filter((field) => !provenanceFields.has(field))
+    allowlists.researchRequests = (allowlists.researchRequests as string[])
+      .filter((field) => !provenanceFields.has(field) && field !== 'fetchFailures')
+    for (const request of researchRequests) {
+      for (const field of provenanceFields) delete request[field]
+      delete request.fetchFailures
+    }
+    redaction.omissions = (
+      redaction.omissions as Record<string, CanonicalJson>[]
+    ).filter(
+      (row) => row.path !==
+        '/data/lifecycle/researchRequests/*/fetchFailures',
+    )
+    rebuildManifest(created)
+
+    expect(verifyCaseBundle(created).errors).toEqual([])
+    if (profile === 'private-full-v1') {
+      const legacyRequest = researchRequests[0]!
+      const factRequest = researchFactRows().researchRequests[0]!
+      legacyRequest.directPageTextFetched = true
+      legacyRequest.retrievedFacts = structuredClone(
+        factRequest.retrievedFacts,
+      ) as CanonicalJson
+      rebuildManifest(created)
+      expect(verifyCaseBundle(created).errors).toContain(
+        'data.lifecycle.researchRequests[0] legacy retrievedFacts must be empty.',
+      )
+    }
+  })
+
   it('uses explicit allowlists and removes private text from research export', () => {
     const privateBundle = bundle('private-full-v1')
     const redacted = bundle('research-redacted-v1')
@@ -432,6 +609,141 @@ describe('webchess-case-bundle/1', () => {
     }
   })
 
+  it('retains consent and fetch-failure provenance only where the profile allows it', () => {
+    const research = researchFailureRows()
+    const privateBundle = bundle('private-full-v1', research)
+    const redacted = bundle('research-redacted-v1', research)
+
+    expect(verifyCaseBundle(privateBundle).errors).toEqual([])
+    expect(verifyCaseBundle(redacted).errors).toEqual([])
+    expect(privateBundle.data.lifecycle).toMatchObject({
+      researchRequests: [{
+        researchConsentVersion: 'webchess-research-consent-v1',
+        researchConsentDecision: 'allow_search_and_page_fetch',
+        researchConsentRecordedAt: NOW,
+        fetchFailures: [{
+          citationId: 'R1',
+          failureCode: 'page_fetch_http_status',
+        }],
+      }],
+    })
+    expect(redacted.data.lifecycle).toMatchObject({
+      researchRequests: [{
+        researchConsentVersion: 'webchess-research-consent-v1',
+        researchConsentDecision: 'allow_search_and_page_fetch',
+        researchConsentRecordedAt: NOW,
+      }],
+    })
+    expect(JSON.stringify(redacted)).not.toContain('private-case-evidence')
+    const redaction = redacted.data.redaction as Record<string, CanonicalJson>
+    expect(redaction.omissions).toContainEqual(expect.objectContaining({
+      path: '/data/lifecycle/researchRequests/*/fetchFailures',
+      omittedCount: 1,
+    }))
+  })
+
+  it('rejects rehashed direct-page evidence detached from its source route', () => {
+    const mismatchedSource = structuredClone(
+      bundle('private-full-v1', researchFailureRows()),
+    ) as unknown as MutableBundle
+    const mismatchLifecycle = mismatchedSource.data.lifecycle as Record<
+      string,
+      CanonicalJson
+    >
+    const mismatchRequest = (
+      mismatchLifecycle.researchRequests as Record<string, CanonicalJson>[]
+    )[0]!
+    const mismatchFailure = (
+      mismatchRequest.fetchFailures as Record<string, CanonicalJson>[]
+    )[0]!
+    mismatchFailure.requestedUrl = 'https://example.edu/different-evidence'
+    mismatchFailure.finalUrl = 'https://example.edu/different-evidence'
+    mismatchFailure.redirectChain = ['https://example.edu/different-evidence']
+    rebuildManifest(mismatchedSource)
+
+    const duplicateCitation = structuredClone(
+      bundle('private-full-v1', researchFailureRows()),
+    ) as unknown as MutableBundle
+    const duplicateLifecycle = duplicateCitation.data.lifecycle as Record<
+      string,
+      CanonicalJson
+    >
+    const duplicateRequest = (
+      duplicateLifecycle.researchRequests as Record<string, CanonicalJson>[]
+    )[0]!
+    const duplicateFailures = duplicateRequest.fetchFailures as Record<
+      string,
+      CanonicalJson
+    >[]
+    duplicateFailures.push(structuredClone(duplicateFailures[0]!))
+    rebuildManifest(duplicateCitation)
+
+    const crossHost = structuredClone(
+      bundle('private-full-v1', researchFailureRows()),
+    ) as unknown as MutableBundle
+    const crossHostLifecycle = crossHost.data.lifecycle as Record<
+      string,
+      CanonicalJson
+    >
+    const crossHostRequest = (
+      crossHostLifecycle.researchRequests as Record<string, CanonicalJson>[]
+    )[0]!
+    const crossHostFailure = (
+      crossHostRequest.fetchFailures as Record<string, CanonicalJson>[]
+    )[0]!
+    crossHostFailure.finalUrl = 'https://other.example/evidence'
+    crossHostFailure.redirectChain = [
+      'https://example.edu/private-case-evidence',
+      'https://other.example/evidence',
+    ]
+    rebuildManifest(crossHost)
+
+    const invalidFact = structuredClone(
+      bundle('private-full-v1', researchFactRows()),
+    ) as unknown as MutableBundle
+    const factLifecycle = invalidFact.data.lifecycle as Record<string, CanonicalJson>
+    const factRequest = (
+      factLifecycle.researchRequests as Record<string, CanonicalJson>[]
+    )[0]!
+    const fact = (
+      factRequest.retrievedFacts as Record<string, CanonicalJson>[]
+    )[0]!
+    fact.httpStatus = 201
+    rebuildManifest(invalidFact)
+
+    const nullFinalFact = structuredClone(
+      bundle('private-full-v1', researchFactRows()),
+    ) as unknown as MutableBundle
+    const nullFinalLifecycle = nullFinalFact.data.lifecycle as Record<
+      string,
+      CanonicalJson
+    >
+    const nullFinalRequest = (
+      nullFinalLifecycle.researchRequests as Record<string, CanonicalJson>[]
+    )[0]!
+    const factWithoutFinalUrl = (
+      nullFinalRequest.retrievedFacts as Record<string, CanonicalJson>[]
+    )[0]!
+    factWithoutFinalUrl.finalUrl = null
+    rebuildManifest(nullFinalFact)
+
+    expect(verifyCaseBundle(mismatchedSource).errors).toContain(
+      'researchRequests[0] direct-page evidence does not match its disclosed source citation and URL.',
+    )
+    expect(verifyCaseBundle(duplicateCitation).errors).toContain(
+      'researchRequests[0] contains duplicate direct-page evidence for R1.',
+    )
+    expect(verifyCaseBundle(crossHost).errors).toContain(
+      'data.lifecycle.researchRequests[0].fetchFailures[0] contains a cross-host redirect.',
+    )
+    expect(verifyCaseBundle(invalidFact).errors).toContain(
+      'data.lifecycle.researchRequests[0].retrievedFacts[0] has an invalid directly-retrieved fact shape.',
+    )
+    expect(verifyCaseBundle(nullFinalFact).errors).toContain(
+      'data.lifecycle.researchRequests[0].retrievedFacts[0] has an invalid directly-retrieved fact shape.',
+    )
+  })
+
   it('records field-level counts for omitted lifecycle, outcome, and provider identifiers', () => {
     const rows = sourceRows()
     const redacted = bundle('research-redacted-v1', {
@@ -446,7 +758,7 @@ describe('webchess-case-bundle/1', () => {
     const omissions = redaction.omissions as Record<string, CanonicalJson>[]
     const byPath = new Map(omissions.map((row) => [row.path, row.omittedCount]))
 
-    expect(omissions).toHaveLength(43)
+    expect(omissions).toHaveLength(44)
     expect(Object.fromEntries(byPath)).toMatchObject({
       '/data/game/record/outcome': 1,
       '/data/lifecycle/run/retryReason': 1,

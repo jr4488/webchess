@@ -28,6 +28,9 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u
 const MIGRATION_ID_PATTERN = /^\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*$/u
+const DIRECT_PAGE_MAX_RAW_BYTES = 1_048_576
+const DIRECT_PAGE_FAILURE_MAX_RAW_BYTES = DIRECT_PAGE_MAX_RAW_BYTES + 65_536
+const DIRECT_PAGE_MAX_ACCEPTED_CHARACTERS = 6_000
 
 const PORTIA_EVIDENCE_STATES = new Set<string>([
   'portia_complete',
@@ -158,6 +161,9 @@ const GAME_PRIVATE_FIELDS = [
   'castVersion',
   'eventVersion',
   'softwareVersion',
+  'researchConsentVersion',
+  'researchConsentDecision',
+  'researchConsentRecordedAt',
   'outcome',
   'answer',
   'createdAt',
@@ -182,6 +188,9 @@ const GAME_RESEARCH_FIELDS = [
   'castVersion',
   'eventVersion',
   'softwareVersion',
+  'researchConsentVersion',
+  'researchConsentDecision',
+  'researchConsentRecordedAt',
   'createdAt',
   'updatedAt',
   'completedAt',
@@ -202,6 +211,9 @@ const GAME_METADATA_FIELDS = [
   'castVersion',
   'eventVersion',
   'softwareVersion',
+  'researchConsentVersion',
+  'researchConsentDecision',
+  'researchConsentRecordedAt',
   'createdAt',
   'updatedAt',
   'completedAt',
@@ -300,6 +312,9 @@ const RESEARCH_PRIVATE_FIELDS = [
   'stage',
   'requestedBy',
   'policyVersion',
+  'researchConsentVersion',
+  'researchConsentDecision',
+  'researchConsentRecordedAt',
   'materiality',
   'reason',
   'query',
@@ -317,6 +332,7 @@ const RESEARCH_PRIVATE_FIELDS = [
   'searchSynthesis',
   'directPageTextFetched',
   'retrievedFacts',
+  'fetchFailures',
   'omittedSourceCount',
   'injectionSignals',
   'contentDigest',
@@ -334,6 +350,9 @@ const RESEARCH_METADATA_FIELDS = [
   'stage',
   'requestedBy',
   'policyVersion',
+  'researchConsentVersion',
+  'researchConsentDecision',
+  'researchConsentRecordedAt',
   'materiality',
   'status',
   'provider',
@@ -650,6 +669,47 @@ const PROFILE_FIELD_POLICIES: Readonly<Record<WebChessCaseProfile, FieldPolicy>>
   },
 }
 
+const RESEARCH_CONSENT_FIELD_NAMES = new Set<string>([
+  'researchConsentVersion',
+  'researchConsentDecision',
+  'researchConsentRecordedAt',
+])
+
+function withoutFields(
+  fields: FieldList,
+  omitted: ReadonlySet<string>,
+): readonly string[] {
+  return fields.filter((field) => !omitted.has(field))
+}
+
+/**
+ * Bundles emitted before direct-page provenance was added used the same public
+ * format identifier. Retain their exact declared allowlists during import;
+ * all newly-created bundles use PROFILE_FIELD_POLICIES above.
+ */
+const LEGACY_PROFILE_FIELD_POLICIES: Readonly<Record<
+  WebChessCaseProfile,
+  FieldPolicy
+>> = Object.fromEntries(
+  WEBCHESS_CASE_PROFILES.map((profile) => {
+    const current = PROFILE_FIELD_POLICIES[profile]
+    return [profile, {
+      ...current,
+      gameRecord: withoutFields(
+        current.gameRecord,
+        RESEARCH_CONSENT_FIELD_NAMES,
+      ),
+      researchRequests: withoutFields(
+        current.researchRequests,
+        new Set([
+          ...RESEARCH_CONSENT_FIELD_NAMES,
+          'fetchFailures',
+        ]),
+      ),
+    }]
+  }),
+) as unknown as Readonly<Record<WebChessCaseProfile, FieldPolicy>>
+
 export interface CaseBundleSourceRows {
   readonly game: SqlRow
   readonly events: readonly SqlRow[]
@@ -923,7 +983,10 @@ const REDACTED_OMISSION_DEFINITIONS = [{
   '/data/lifecycle/researchSources/*',
   ['title', 'url'],
   'Source titles and full URLs are omitted; hostname and trust metadata remain.',
-), ...omissionRows(
+), {
+  path: '/data/lifecycle/researchRequests/*/fetchFailures',
+  reason: 'Direct-page fetch failure URLs, redirect history, response digests, and injection-signal details are omitted.',
+}, ...omissionRows(
   '/data/lifecycle/wilburActions/*',
   [
     'actor',
@@ -954,6 +1017,14 @@ const REDACTED_OMISSION_DEFINITIONS = [{
   reason: 'Move idempotency keys are omitted by share-oriented profiles; request digests remain in the research-redacted profile.',
 }] as const
 
+const FETCH_FAILURE_OMISSION_PATH =
+  '/data/lifecycle/researchRequests/*/fetchFailures'
+
+const LEGACY_REDACTED_OMISSION_DEFINITIONS =
+  REDACTED_OMISSION_DEFINITIONS.filter(
+    ({ path }) => path !== FETCH_FAILURE_OMISSION_PATH,
+  )
+
 const METADATA_OMISSION_DEFINITIONS = [{
     path: '/data/game/record/divisionSeed',
     reason: 'The narrowest profile omits the persisted division seed.',
@@ -965,62 +1036,76 @@ const METADATA_OMISSION_DEFINITIONS = [{
     reason: 'The narrowest profile omits per-move request digests.',
   }] as const
 
-function omittedPolicyPaths(profile: WebChessCaseProfile): readonly string[] {
+function omittedPolicyPaths(
+  profile: WebChessCaseProfile,
+  policies: Readonly<Record<WebChessCaseProfile, FieldPolicy>> =
+    PROFILE_FIELD_POLICIES,
+): readonly string[] {
   if (profile === 'private-full-v1') return []
-  const retained = PROFILE_FIELD_POLICIES[profile]
+  const retained = policies[profile]
+  const privateFields = policies['private-full-v1']
   return [
-    ...GAME_PRIVATE_FIELDS
+    ...privateFields.gameRecord
       .filter((field) => !retained.gameRecord.includes(field))
       .map((field) => `/data/game/record/${field}`),
     '/data/game/replay/parts',
-    ...LIFECYCLE_PRIVATE_FIELDS
+    ...privateFields.lifecycleRun
       .filter((field) => !retained.lifecycleRun.includes(field))
       .map((field) => `/data/lifecycle/run/${field}`),
-    ...RESEARCH_PRIVATE_FIELDS
+    ...privateFields.researchRequests
       .filter((field) => !retained.researchRequests.includes(field))
       .map((field) => `/data/lifecycle/researchRequests/*/${field}`),
-    ...SOURCE_PRIVATE_FIELDS
+    ...privateFields.researchSources
       .filter((field) => !retained.researchSources.includes(field))
       .map((field) => `/data/lifecycle/researchSources/*/${field}`),
-    ...PORTIA_PRIVATE_FIELDS
+    ...privateFields.portiaReviews
       .filter((field) => !retained.portiaReviews.includes(field))
       .map((field) => `/data/lifecycle/portiaReviews/*/${field}`),
-    ...GATE_PRIVATE_FIELDS
+    ...privateFields.gateDecisions
       .filter((field) => !retained.gateDecisions.includes(field))
       .map((field) => `/data/lifecycle/gateDecisions/*/${field}`),
-    ...CHARLOTTE_PRIVATE_FIELDS
+    ...privateFields.charlotteResults
       .filter((field) => !retained.charlotteResults.includes(field))
       .map((field) => `/data/lifecycle/charlotteResults/*/${field}`),
-    ...WILBUR_ACTION_PRIVATE_FIELDS
+    ...privateFields.wilburActions
       .filter((field) => !retained.wilburActions.includes(field))
       .map((field) => `/data/lifecycle/wilburActions/*/${field}`),
-    ...WILBUR_OBSERVATION_PRIVATE_FIELDS
+    ...privateFields.wilburObservations
       .filter((field) => !retained.wilburObservations.includes(field))
       .map((field) => `/data/lifecycle/wilburObservations/*/${field}`),
-    ...MODEL_PRIVATE_FIELDS
+    ...privateFields.modelRequests
       .filter((field) => !retained.modelRequests.includes(field))
       .map((field) => `/data/providerInvocations/modelRequests/*/${field}`),
-    ...EVENT_PROVENANCE_PRIVATE_FIELDS
+    ...privateFields.eventProvenance
       .filter((field) => !retained.eventProvenance.includes(field))
       .map((field) => `/data/game/replay/events/*/provenance/${field}`),
   ].sort()
 }
 
-function omissionDefinitions(profile: WebChessCaseProfile) {
+function omissionDefinitions(
+  profile: WebChessCaseProfile,
+  legacy = false,
+) {
+  const redactedDefinitions = legacy
+    ? LEGACY_REDACTED_OMISSION_DEFINITIONS
+    : REDACTED_OMISSION_DEFINITIONS
   const definitions = profile === 'private-full-v1'
     ? [...ALWAYS_OMISSION_DEFINITIONS]
     : profile === 'research-redacted-v1'
-      ? [...ALWAYS_OMISSION_DEFINITIONS, ...REDACTED_OMISSION_DEFINITIONS]
+      ? [...ALWAYS_OMISSION_DEFINITIONS, ...redactedDefinitions]
       : [
     ...ALWAYS_OMISSION_DEFINITIONS,
-    ...REDACTED_OMISSION_DEFINITIONS,
+    ...redactedDefinitions,
     ...METADATA_OMISSION_DEFINITIONS,
   ]
   const declaredPolicyPaths = definitions
     .slice(ALWAYS_OMISSION_DEFINITIONS.length)
     .map(({ path }) => path)
     .sort()
-  const expectedPolicyPaths = omittedPolicyPaths(profile)
+  const expectedPolicyPaths = omittedPolicyPaths(
+    profile,
+    legacy ? LEGACY_PROFILE_FIELD_POLICIES : PROFILE_FIELD_POLICIES,
+  )
   if (
     declaredPolicyPaths.length !== expectedPolicyPaths.length ||
     declaredPolicyPaths.some(
@@ -1491,6 +1576,8 @@ const STRUCTURED_ARRAY_VALUE_FIELDS = new Set([
   'divisionFacets',
   'survivors',
   'portiaAssessmentDrafts',
+  'retrievedFacts',
+  'fetchFailures',
 ])
 
 const OBJECT_VALUE_FIELDS = new Set([
@@ -1515,6 +1602,15 @@ function validIntegerValue(value: unknown): boolean {
   )
 }
 
+function validJsonInteger(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) &&
+    value >= minimum && value <= maximum
+}
+
 function checkKnownFieldValueShapes(
   record: Record<string, unknown>,
   label: string,
@@ -1536,12 +1632,6 @@ function checkKnownFieldValueShapes(
       }
       continue
     }
-    if (field === 'retrievedFacts') {
-      if (!Array.isArray(value) || value.length !== 0) {
-        errors.push(`${label}.${field} must be the schema-defined empty array.`)
-      }
-      continue
-    }
     if (STRUCTURED_ARRAY_VALUE_FIELDS.has(field)) {
       if (field === 'survivors' && value === null) continue
       if (!Array.isArray(value)) {
@@ -1550,7 +1640,11 @@ function checkKnownFieldValueShapes(
         }.`)
         continue
       }
-      const maximum = field === 'divisionFacets' ? 64 : 32
+      const maximum = field === 'divisionFacets'
+        ? 64
+        : ['retrievedFacts', 'fetchFailures'].includes(field)
+          ? 3
+          : 32
       if (
         value.length > maximum ||
         (field === 'divisionFacets' && value.length !== 64) ||
@@ -1635,6 +1729,266 @@ function checkKnownFieldValueShapes(
     } else if (value !== null && typeof value !== 'string') {
       errors.push(`${label}.${field} must be a string or null.`)
     }
+  }
+}
+
+const RETRIEVED_FACT_FIELDS = [
+  'citationId',
+  'requestedUrl',
+  'finalUrl',
+  'title',
+  'provider',
+  'fetchVersion',
+  'retrievedAt',
+  'httpStatus',
+  'contentType',
+  'extractor',
+  'rawByteLength',
+  'rawContentDigest',
+  'rawDigestAlgorithm',
+  'acceptedCharacterLength',
+  'contentDigest',
+  'digestAlgorithm',
+  'redirectChain',
+  'text',
+  'truncated',
+  'untrusted',
+  'contentKind',
+] as const
+
+const FETCH_FAILURE_FIELDS = [
+  'citationId',
+  'requestedUrl',
+  'finalUrl',
+  'status',
+  'failureCode',
+  'httpStatus',
+  'fetchVersion',
+  'extractor',
+  'rawByteLength',
+  'rawContentDigest',
+  'rawDigestAlgorithm',
+  'acceptedCharacterLength',
+  'truncated',
+  'contentDigest',
+  'digestAlgorithm',
+  'redirectChain',
+  'injectionSignalsDetected',
+  'retrievedAt',
+] as const
+
+function validPublicHttpsUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 2_048) return false
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.username === '' && url.password === ''
+  } catch {
+    return false
+  }
+}
+
+function validBoundedStringArray(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  pattern?: RegExp,
+): value is string[] {
+  return Array.isArray(value) &&
+    value.length >= minimum &&
+    value.length <= maximum &&
+    value.every((item) =>
+      typeof item === 'string' && (!pattern || pattern.test(item)))
+}
+
+function checkResearchConsentShape(
+  record: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): void {
+  const fields = [
+    'researchConsentVersion',
+    'researchConsentDecision',
+    'researchConsentRecordedAt',
+  ] as const
+  const present = fields.map((field) => Object.hasOwn(record, field))
+  if (present.every((value) => !value)) return
+  if (present.some((value) => !value)) {
+    errors.push(`${label} has an incomplete research-consent provenance tuple.`)
+    return
+  }
+  const version = record.researchConsentVersion
+  const decision = record.researchConsentDecision
+  const recordedAt = record.researchConsentRecordedAt
+  const legacy = version === 'legacy-no-research-consent-v0' &&
+    decision === 'no_external_research' && recordedAt === null
+  const current = version === 'webchess-research-consent-v1' &&
+    ['allow_search_and_page_fetch', 'no_external_research'].includes(
+      String(decision),
+    ) && typeof recordedAt === 'string' &&
+    Number.isFinite(Date.parse(recordedAt))
+  if (!legacy && !current) {
+    errors.push(`${label} has an invalid research-consent provenance tuple.`)
+  }
+}
+
+function checkFetchRoute(
+  record: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): void {
+  const chain = record.redirectChain
+  const validRoute = validPublicHttpsUrl(record.requestedUrl) &&
+    (record.finalUrl === null || validPublicHttpsUrl(record.finalUrl)) &&
+    validBoundedStringArray(chain, 1, 4) &&
+    chain.every((url) => validPublicHttpsUrl(url)) &&
+    chain[0] === record.requestedUrl &&
+    chain.at(-1) === (record.finalUrl ?? record.requestedUrl)
+  if (!validRoute) {
+    errors.push(`${label} has an invalid direct-page URL or redirect chain.`)
+    return
+  }
+  const requestedHost = new URL(record.requestedUrl as string).hostname
+  if ((chain as string[]).some((url) => new URL(url).hostname !== requestedHost)) {
+    errors.push(`${label} contains a cross-host redirect.`)
+  }
+}
+
+function checkRetrievedFact(
+  value: unknown,
+  label: string,
+  errors: string[],
+): void {
+  const record = objectAt(value, label)
+  exactKeys(record, RETRIEVED_FACT_FIELDS, label)
+  checkFetchRoute(record, label, errors)
+  if (
+    typeof record.citationId !== 'string' ||
+    !/^R[1-8]$/u.test(record.citationId) ||
+    !validPublicHttpsUrl(record.finalUrl) ||
+    typeof record.title !== 'string' ||
+    record.title.length < 1 ||
+    record.title.length > 500 ||
+    record.provider !== 'webchess-direct-https' ||
+    record.fetchVersion !== 'webchess-direct-page-fetch-v1' ||
+    record.extractor !== 'webchess-readable-text-v1' ||
+    !['application/xhtml+xml', 'text/html', 'text/plain'].includes(
+      String(record.contentType),
+    ) ||
+    record.rawDigestAlgorithm !== 'sha256-raw-response-bytes-v1' ||
+    record.digestAlgorithm !== 'sha256-utf8-accepted-text-v1' ||
+    record.contentKind !== 'direct_page_text' ||
+    record.untrusted !== true ||
+    typeof record.truncated !== 'boolean' ||
+    typeof record.retrievedAt !== 'string' ||
+    !Number.isFinite(Date.parse(record.retrievedAt)) ||
+    !validJsonInteger(record.httpStatus, 200, 200) ||
+    !validJsonInteger(record.rawByteLength, 1, DIRECT_PAGE_MAX_RAW_BYTES) ||
+    typeof record.rawContentDigest !== 'string' ||
+    !SHA256_PATTERN.test(record.rawContentDigest) ||
+    typeof record.text !== 'string' ||
+    record.text.length < 1 ||
+    record.text.length > DIRECT_PAGE_MAX_ACCEPTED_CHARACTERS ||
+    !validJsonInteger(
+      record.acceptedCharacterLength,
+      1,
+      DIRECT_PAGE_MAX_ACCEPTED_CHARACTERS,
+    ) ||
+    Number(record.acceptedCharacterLength) !== record.text.length ||
+    typeof record.contentDigest !== 'string' ||
+    record.contentDigest !== sha256Hex(record.text)
+  ) {
+    errors.push(`${label} has an invalid directly-retrieved fact shape.`)
+  }
+}
+
+function checkFetchFailure(
+  value: unknown,
+  label: string,
+  errors: string[],
+): void {
+  const record = objectAt(value, label)
+  exactKeys(record, FETCH_FAILURE_FIELDS, label)
+  checkFetchRoute(record, label, errors)
+  if (
+    typeof record.citationId !== 'string' ||
+    !/^R[1-8]$/u.test(record.citationId) ||
+    !['failed', 'refused', 'timed_out'].includes(String(record.status)) ||
+    typeof record.failureCode !== 'string' ||
+    !/^[a-z0-9_]{3,80}$/u.test(record.failureCode) ||
+    (record.httpStatus !== null && (
+      !validJsonInteger(record.httpStatus, 100, 599)
+    )) ||
+    record.fetchVersion !== 'webchess-direct-page-fetch-v1' ||
+    record.extractor !== 'webchess-readable-text-v1' ||
+    !validJsonInteger(
+      record.rawByteLength,
+      0,
+      DIRECT_PAGE_FAILURE_MAX_RAW_BYTES,
+    ) ||
+    (Number(record.rawByteLength) > 0 && (
+      typeof record.rawContentDigest !== 'string' ||
+      !SHA256_PATTERN.test(record.rawContentDigest)
+    )) ||
+    (record.rawContentDigest !== null && (
+      typeof record.rawContentDigest !== 'string' ||
+      !SHA256_PATTERN.test(record.rawContentDigest)
+    )) ||
+    record.rawDigestAlgorithm !== 'sha256-raw-response-bytes-v1' ||
+    record.acceptedCharacterLength !== 0 ||
+    typeof record.truncated !== 'boolean' ||
+    record.contentDigest !== null ||
+    record.digestAlgorithm !== 'sha256-utf8-accepted-text-v1' ||
+    !validBoundedStringArray(
+      record.injectionSignalsDetected,
+      0,
+      8,
+      /^[a-z0-9_]{3,120}$/u,
+    ) ||
+    typeof record.retrievedAt !== 'string' ||
+    !Number.isFinite(Date.parse(record.retrievedAt))
+  ) {
+    errors.push(`${label} has an invalid direct-page fetch-failure shape.`)
+  }
+}
+
+function checkResearchEvidenceShape(
+  record: Record<string, unknown>,
+  label: string,
+  errors: string[],
+  legacy: boolean,
+): void {
+  if (!Object.hasOwn(record, 'retrievedFacts') &&
+      !Object.hasOwn(record, 'fetchFailures')) return
+  const facts = record.retrievedFacts
+  const failures = legacy && !Object.hasOwn(record, 'fetchFailures')
+    ? []
+    : record.fetchFailures
+  if (!Array.isArray(facts) || !Array.isArray(failures)) {
+    errors.push(`${label} direct-page evidence fields must both be arrays.`)
+    return
+  }
+  if (legacy && facts.length !== 0) {
+    errors.push(`${label} legacy retrievedFacts must be empty.`)
+  }
+  if (facts.length + failures.length > 3) {
+    errors.push(`${label} exceeds the combined direct-page evidence limit.`)
+  }
+  facts.forEach((fact, index) =>
+    checkRetrievedFact(fact, `${label}.retrievedFacts[${index}]`, errors))
+  failures.forEach((failure, index) =>
+    checkFetchFailure(
+      failure,
+      `${label}.fetchFailures[${index}]`,
+      errors,
+    ))
+  if (record.directPageTextFetched !== (facts.length > 0)) {
+    errors.push(`${label}.directPageTextFetched does not match retrievedFacts.`)
+  }
+  if (
+    record.researchConsentDecision === 'no_external_research' &&
+    (facts.length > 0 || failures.length > 0)
+  ) {
+    errors.push(`${label} contains direct-page evidence despite research opt-out.`)
   }
 }
 
@@ -1769,7 +2123,22 @@ function verifyProfileShape(
   profile: WebChessCaseProfile,
   errors: string[],
 ): void {
-  const policy = PROFILE_FIELD_POLICIES[profile]
+  const redaction = objectAt(data.redaction, 'data.redaction')
+  const currentPolicy = PROFILE_FIELD_POLICIES[profile]
+  const legacyPolicy = LEGACY_PROFILE_FIELD_POLICIES[profile]
+  const currentAllowlist = sameCanonicalJson(
+    redaction.allowlists,
+    fieldPolicyJson(currentPolicy),
+  )
+  const legacyAllowlist = sameCanonicalJson(
+    redaction.allowlists,
+    fieldPolicyJson(legacyPolicy),
+  )
+  const legacy = !currentAllowlist && legacyAllowlist
+  const policy = legacy ? legacyPolicy : currentPolicy
+  if (!currentAllowlist && !legacyAllowlist) {
+    errors.push('Declared redaction allowlists do not match the selected profile.')
+  }
   const identity = objectAt(data.identity, 'data.identity')
   exactKeys(
     identity,
@@ -1873,6 +2242,7 @@ function verifyProfileShape(
     'data.game.record',
   )
   checkKnownFieldValueShapes(gameRecord, 'data.game.record', errors)
+  checkResearchConsentShape(gameRecord, 'data.game.record', errors)
   if (
     profile === 'private-full-v1' &&
     (
@@ -2025,13 +2395,28 @@ function verifyProfileShape(
     'data.lifecycle.run',
   )
   checkKnownFieldValueShapes(lifecycleRun, 'data.lifecycle.run', errors)
-  exactRows(
+  const researchRequests = exactRows(
     lifecycle.researchRequests,
     'data.lifecycle.researchRequests',
     policy.researchRequests,
     512,
     errors,
   )
+  for (const [index, request] of researchRequests.entries()) {
+    const label = `data.lifecycle.researchRequests[${index}]`
+    checkResearchConsentShape(request, label, errors)
+    checkResearchEvidenceShape(request, label, errors, legacy)
+    if (
+      Object.hasOwn(request, 'researchConsentVersion') &&
+      (
+        request.researchConsentVersion !== gameRecord.researchConsentVersion ||
+        request.researchConsentDecision !== gameRecord.researchConsentDecision ||
+        request.researchConsentRecordedAt !== gameRecord.researchConsentRecordedAt
+      )
+    ) {
+      errors.push(`${label} consent provenance does not match the owning game.`)
+    }
+  }
   exactRows(
     lifecycle.researchSources,
     'data.lifecycle.researchSources',
@@ -2156,15 +2541,11 @@ function verifyProfileShape(
     errors,
   )
 
-  const redaction = objectAt(data.redaction, 'data.redaction')
   exactKeys(
     redaction,
     ['policy', 'profile', 'selection', 'allowlists', 'omissions'],
     'data.redaction',
   )
-  if (!sameCanonicalJson(redaction.allowlists, fieldPolicyJson(policy))) {
-    errors.push('Declared redaction allowlists do not match the selected profile.')
-  }
   const omissionRows = exactRows(
     redaction.omissions,
     'data.redaction.omissions',
@@ -2172,7 +2553,7 @@ function verifyProfileShape(
     64,
     errors,
   )
-  const expectedOmissions = omissionDefinitions(profile)
+  const expectedOmissions = omissionDefinitions(profile, legacy)
   if (omissionRows.length !== expectedOmissions.length) {
     errors.push('The omission ledger does not match the selected profile.')
   }
@@ -2318,13 +2699,71 @@ function checkLifecycleReferences(
     2_048,
   )
   addUniqueId(researchSources, 'researchSources', errors)
+  const sourcesByRequest = new Map<
+    string,
+    Map<string, Record<string, unknown>>
+  >()
   for (const [index, value] of researchSources.entries()) {
+    const source = objectAt(value, `researchSources[${index}]`)
     const requestId = stringAt(
-      objectAt(value, `researchSources[${index}]`).researchRequestId,
+      source.researchRequestId,
       `researchSources[${index}].researchRequestId`,
     )
     if (!researchIds.has(requestId)) {
       errors.push(`researchSources[${index}] refers to a missing research request.`)
+    }
+    const citationId = stringAt(
+      source.citationId,
+      `researchSources[${index}].citationId`,
+    )
+    const requestSources = sourcesByRequest.get(requestId) ?? new Map()
+    if (requestSources.has(citationId)) {
+      errors.push(
+        `researchSources contains duplicate citation ${citationId} for request ${requestId}.`,
+      )
+    }
+    requestSources.set(citationId, source)
+    sourcesByRequest.set(requestId, requestSources)
+  }
+  for (const [requestIndex, value] of researchRequests.entries()) {
+    const request = objectAt(value, `researchRequests[${requestIndex}]`)
+    const facts = Array.isArray(request.retrievedFacts)
+      ? request.retrievedFacts
+      : []
+    const failures = Array.isArray(request.fetchFailures)
+      ? request.fetchFailures
+      : []
+    if (facts.length === 0 && failures.length === 0) continue
+    const requestId = stringAt(
+      request.id,
+      `researchRequests[${requestIndex}].id`,
+    )
+    const requestSources = sourcesByRequest.get(requestId)
+    const fetchedCitations = new Set<string>()
+    for (const [evidenceIndex, evidenceValue] of [
+      ...facts,
+      ...failures,
+    ].entries()) {
+      const evidence = objectAt(
+        evidenceValue,
+        `researchRequests[${requestIndex}].directPageEvidence[${evidenceIndex}]`,
+      )
+      const citationId = stringAt(
+        evidence.citationId,
+        `researchRequests[${requestIndex}].directPageEvidence[${evidenceIndex}].citationId`,
+      )
+      if (fetchedCitations.has(citationId)) {
+        errors.push(
+          `researchRequests[${requestIndex}] contains duplicate direct-page evidence for ${citationId}.`,
+        )
+      }
+      fetchedCitations.add(citationId)
+      const source = requestSources?.get(citationId)
+      if (!source || source.url !== evidence.requestedUrl) {
+        errors.push(
+          `researchRequests[${requestIndex}] direct-page evidence does not match its disclosed source citation and URL.`,
+        )
+      }
     }
   }
 
@@ -2982,6 +3421,9 @@ export function caseBundleStatements(
           division_digest AS "divisionDigest", rules_version AS "rulesVersion",
           engine_version AS "engineVersion", cast_version AS "castVersion",
           event_version AS "eventVersion", software_version AS "softwareVersion",
+          research_consent_version AS "researchConsentVersion",
+          research_consent_decision AS "researchConsentDecision",
+          research_consent_recorded_at AS "researchConsentRecordedAt",
           outcome, answer_payload AS answer, created_at AS "createdAt",
           updated_at AS "updatedAt", completed_at AS "completedAt",
           answered_at AS "answeredAt"
@@ -3051,6 +3493,9 @@ export function caseBundleStatements(
         SELECT id::text, game_id::text AS "gameId",
           lifecycle_run_id::text AS "lifecycleRunId", stage,
           requested_by AS "requestedBy", policy_version AS "policyVersion",
+          research_consent_version AS "researchConsentVersion",
+          research_consent_decision AS "researchConsentDecision",
+          research_consent_recorded_at AS "researchConsentRecordedAt",
           materiality, reason, query, status, provider, transport, model,
           invocation_limit AS "invocationLimit", result_limit AS "resultLimit",
           source_limit AS "sourceLimit", timeout_ms AS "timeoutMs",
@@ -3059,6 +3504,7 @@ export function caseBundleStatements(
           search_synthesis AS "searchSynthesis",
           direct_page_text_fetched AS "directPageTextFetched",
           retrieved_facts AS "retrievedFacts",
+          fetch_failures AS "fetchFailures",
           omitted_source_count AS "omittedSourceCount",
           injection_signals AS "injectionSignals", content_digest AS "contentDigest",
           failure_code AS "failureCode", started_at AS "startedAt",

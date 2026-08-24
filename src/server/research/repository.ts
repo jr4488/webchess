@@ -483,13 +483,95 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
     gameId: string
     stage: string
     policyVersion: string
+    consent: ResearchConsent
   }): Promise<ResearchRecord | null> {
-    const records = await this.getForGame(input.ownerId, input.gameId)
-    return records.find(
-      (record) =>
-        record.stage === input.stage &&
-        record.policyVersion === input.policyVersion,
-    ) ?? null
+    const values = [
+      input.ownerId,
+      input.gameId,
+      input.stage,
+      input.policyVersion,
+      input.consent.version,
+      input.consent.decision,
+      input.consent.recordedAt,
+    ] as const
+    const results = await this.database.transaction([
+      {
+        text: `
+          SELECT
+            requests.id,
+            (
+              requests.research_consent_version =
+                games.research_consent_version
+              AND requests.research_consent_decision =
+                games.research_consent_decision
+              AND requests.research_consent_recorded_at
+                IS NOT DISTINCT FROM games.research_consent_recorded_at
+            ) AS consent_matches_game,
+            (
+              games.research_consent_version = $5::text
+              AND games.research_consent_decision = $6::text
+              AND date_trunc(
+                'milliseconds',
+                games.research_consent_recorded_at
+              ) IS NOT DISTINCT FROM date_trunc(
+                'milliseconds',
+                $7::timestamptz
+              )
+            ) AS consent_matches_input
+          FROM research_requests AS requests
+          INNER JOIN games AS games
+            ON games.id = requests.game_id
+            AND games.clerk_user_id = requests.clerk_user_id
+          WHERE requests.clerk_user_id = $1::text
+            AND requests.game_id = $2::uuid
+            AND requests.stage = $3::text
+            AND requests.policy_version = $4::text
+          FOR UPDATE OF games, requests
+        `,
+        values,
+      },
+      {
+        text: `SELECT ${SELECT_RESEARCH_REQUEST_COLUMNS} FROM research_requests WHERE clerk_user_id = $1::text AND game_id = $2::uuid AND stage = $3::text AND policy_version = $4::text`,
+        values: values.slice(0, 4),
+      },
+      {
+        text: `SELECT ${SELECT_RESEARCH_SOURCE_COLUMNS} FROM research_sources WHERE clerk_user_id = $1::text AND research_request_id IN (SELECT id FROM research_requests WHERE clerk_user_id = $1::text AND game_id = $2::uuid AND stage = $3::text AND policy_version = $4::text) ORDER BY ordinal`,
+        values: values.slice(0, 4),
+      },
+    ], { isolationLevel: 'RepeatableRead' })
+    const integrity = results[0]!
+    if (integrity.rows.length === 0) return null
+    const existingId = resultId(integrity)
+    if (!existingId) {
+      throw new ResearchRepositoryError(
+        'integrity-error',
+        'The database returned an invalid existing research request.',
+      )
+    }
+    if (integrity.rows[0]?.consent_matches_game !== true) {
+      throw new ResearchRepositoryError(
+        'integrity-error',
+        'The existing research request consent does not match the owning game.',
+      )
+    }
+    if (integrity.rows[0]?.consent_matches_input !== true) {
+      throw new ResearchRepositoryError(
+        'conflict',
+        'The supplied research consent does not match the owning game.',
+      )
+    }
+    const records = researchRecordsFromRows(
+      parseRows(results[1]!, researchRequestRowSchema),
+      parseRows(results[2]!, researchSourceRowSchema),
+    )
+    const record = records[0]
+    if (!record || records.length !== 1 || record.id !== existingId) {
+      throw new ResearchRepositoryError(
+        'integrity-error',
+        'The database returned an invalid existing research request.',
+      )
+    }
+    return record
   }
 
   async recordNotNeeded(input: RecordNoResearchInput): Promise<ResearchRecord> {
@@ -504,11 +586,33 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
     const result = await this.database.query({
       text: `
         WITH target AS (
-          SELECT id, state, event_version
-          FROM lifecycle_runs
-          WHERE id = $4::uuid AND game_id = $3::uuid AND clerk_user_id = $2::text
-            AND state = $5::text
-          FOR UPDATE
+          SELECT
+            runs.id,
+            runs.state,
+            runs.event_version,
+            games.research_consent_version,
+            games.research_consent_decision,
+            games.research_consent_recorded_at,
+            (
+              games.research_consent_version = $8::text
+              AND games.research_consent_decision = $9::text
+              AND date_trunc(
+                'milliseconds',
+                games.research_consent_recorded_at
+              ) IS NOT DISTINCT FROM date_trunc(
+                'milliseconds',
+                $10::timestamptz
+              )
+            ) AS consent_matches
+          FROM lifecycle_runs AS runs
+          INNER JOIN games AS games
+            ON games.id = runs.game_id
+            AND games.clerk_user_id = runs.clerk_user_id
+          WHERE runs.id = $4::uuid
+            AND runs.game_id = $3::uuid
+            AND runs.clerk_user_id = $2::text
+            AND runs.state = $5::text
+          FOR UPDATE OF runs, games
         ), inserted AS (
           INSERT INTO research_requests (
             id, clerk_user_id, game_id, lifecycle_run_id, stage,
@@ -520,10 +624,13 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
           )
           SELECT
             $1::uuid, $2::text, $3::uuid, target.id, $6::text,
-            $7::text, $8::text, $9::text, $10::timestamptz,
+            $7::text, target.research_consent_version,
+            target.research_consent_decision,
+            target.research_consent_recorded_at,
             NULL, $11::text, NULL, 'not_needed',
             $12::smallint, $13::smallint, $14::integer, $15::integer, now()
           FROM target
+          WHERE target.consent_matches
           ON CONFLICT (game_id, stage, policy_version) DO NOTHING
           RETURNING id, lifecycle_run_id, stage
         ), activity AS (
@@ -542,7 +649,11 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
             'completed', target.event_version
           FROM inserted CROSS JOIN target
         )
-        SELECT id FROM inserted
+        SELECT id, false AS consent_mismatch FROM inserted
+        UNION ALL
+        SELECT NULL::uuid AS id, true AS consent_mismatch
+        FROM target
+        WHERE NOT target.consent_matches
       `,
       values: [
         id,
@@ -563,6 +674,12 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
         configurationDigest,
       ],
     })
+    if (result.rows[0]?.consent_mismatch === true) {
+      throw new ResearchRepositoryError(
+        'conflict',
+        'The supplied research consent does not match the owning game.',
+      )
+    }
     const storedId = resultId(result)
     if (storedId) return this.getById(owner, storedId)
     const existing = await this.existingForPolicy({
@@ -570,6 +687,7 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
       gameId,
       stage: input.stage,
       policyVersion: input.policyVersion,
+      consent,
     })
     if (existing) return existing
     throw new ResearchRepositoryError(
@@ -601,11 +719,33 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
     const result = await this.database.query({
       text: `
         WITH target AS (
-          SELECT id, state, event_version
-          FROM lifecycle_runs
-          WHERE id = $4::uuid AND game_id = $3::uuid AND clerk_user_id = $2::text
-            AND state = $5::text
-          FOR UPDATE
+          SELECT
+            runs.id,
+            runs.state,
+            runs.event_version,
+            games.research_consent_version,
+            games.research_consent_decision,
+            games.research_consent_recorded_at,
+            (
+              games.research_consent_version = $8::text
+              AND games.research_consent_decision = $9::text
+              AND date_trunc(
+                'milliseconds',
+                games.research_consent_recorded_at
+              ) IS NOT DISTINCT FROM date_trunc(
+                'milliseconds',
+                $10::timestamptz
+              )
+            ) AS consent_matches
+          FROM lifecycle_runs AS runs
+          INNER JOIN games AS games
+            ON games.id = runs.game_id
+            AND games.clerk_user_id = runs.clerk_user_id
+          WHERE runs.id = $4::uuid
+            AND runs.game_id = $3::uuid
+            AND runs.clerk_user_id = $2::text
+            AND runs.state = $5::text
+          FOR UPDATE OF runs, games
         ), inserted AS (
           INSERT INTO research_requests (
             id, clerk_user_id, game_id, lifecycle_run_id, stage,
@@ -617,11 +757,14 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
           )
           SELECT
             $1::uuid, $2::text, $3::uuid, target.id, $6::text,
-            $7::text, $8::text, $9::text, $10::timestamptz,
+            $7::text, target.research_consent_version,
+            target.research_consent_decision,
+            target.research_consent_recorded_at,
             $11::text, $12::text, $13::text, 'searching',
             $14::smallint, $15::smallint, $16::integer,
             $17::integer, 1, now()
           FROM target
+          WHERE target.consent_matches
           ON CONFLICT (game_id, stage, policy_version) DO NOTHING
           RETURNING id, lifecycle_run_id, stage
         ), activity AS (
@@ -640,7 +783,11 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
             $18::char(64), 'started', target.event_version
           FROM inserted CROSS JOIN target
         )
-        SELECT id FROM inserted
+        SELECT id, false AS consent_mismatch FROM inserted
+        UNION ALL
+        SELECT NULL::uuid AS id, true AS consent_mismatch
+        FROM target
+        WHERE NOT target.consent_matches
       `,
       values: [
         id,
@@ -663,6 +810,12 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
         configurationDigest,
       ],
     })
+    if (result.rows[0]?.consent_mismatch === true) {
+      throw new ResearchRepositoryError(
+        'conflict',
+        'The supplied research consent does not match the owning game.',
+      )
+    }
     const storedId = resultId(result)
     if (storedId) {
       return {
@@ -675,6 +828,7 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
       gameId,
       stage: input.stage,
       policyVersion: input.policyVersion,
+      consent,
     })
     if (existing) return { created: false, record: existing }
     throw new ResearchRepositoryError(

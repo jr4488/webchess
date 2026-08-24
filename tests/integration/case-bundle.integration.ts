@@ -2,16 +2,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getLegalMoves } from '../../src/lib/game'
 import { CURRENT_LIFECYCLE_VERSIONS } from '../../src/lib/lifecycle'
-import { RESEARCH_CONSENT_VERSION } from '../../src/lib/research'
+import {
+  RESEARCH_CONSENT_VERSION,
+  type ResearchFetchFailure,
+} from '../../src/lib/research'
 import type { DurableGame } from '../../src/lib/webchess-api'
 import { verifyCaseBundle } from '../../src/server/case-bundle'
-import { sha256Hex } from '../../src/server/db'
+import { hashCanonicalJson, sha256Hex } from '../../src/server/db'
+import type { CanonicalJson } from '../../src/server/db'
 import { DurableGameRepository } from '../../src/server/games'
 import {
   createApiServicesWithDependencies,
 } from '../../src/server/http/service-adapter'
 import { DurableLifecycleRepository } from '../../src/server/lifecycle'
 import { generateAnswer, generateDivision } from '../../src/server/openai'
+import {
+  DurableResearchRepository,
+  RESEARCH_POLICY_VERSION,
+} from '../../src/server/research'
 import { createUsageController } from '../../src/server/usage'
 import type { UsageConfig } from '../../src/server/usage'
 import type { ProblemFacet } from '../../src/types'
@@ -26,6 +34,7 @@ const NOW = new Date('2026-08-24T01:00:00.000Z')
 const SOURCE_COMMIT = '7'.repeat(40)
 const HMAC_SECRET = 'case-bundle-integration-hmac-secret'.repeat(2)
 const PRIVATE_SENTINEL = 'PRIVATE_POSTGRES_CASE_SENTINEL'
+const PRIVATE_FAILURE_URL = 'https://example.edu/private-case-evidence'
 
 const USAGE_CONFIG: UsageConfig = {
   hmacSecret: HMAC_SECRET,
@@ -104,6 +113,32 @@ function stateOf(game: DurableGame) {
   return game.state
 }
 
+interface MutableCaseBundle {
+  format: string
+  profile: string
+  manifest: {
+    algorithm: string
+    canonicalization: string
+    entries: { path: string; sha256: string }[]
+    integrityRoot: string
+  }
+  data: Record<string, CanonicalJson>
+}
+
+function rebuildCaseManifest(value: MutableCaseBundle): void {
+  value.manifest.entries = value.manifest.entries.map(({ path }) => ({
+    path,
+    sha256: hashCanonicalJson(value.data[path.slice('/data/'.length)]!),
+  }))
+  value.manifest.integrityRoot = hashCanonicalJson({
+    format: value.format,
+    profile: value.profile,
+    algorithm: value.manifest.algorithm,
+    canonicalization: value.manifest.canonicalization,
+    entries: value.manifest.entries,
+  })
+}
+
 function services() {
   if (!database) throw new Error('The disposable case database is unavailable.')
   const repository = new DurableGameRepository(database.adapter)
@@ -117,7 +152,6 @@ function services() {
     modelName: 'configured-default',
     modelProvider: 'openclaw',
     repository,
-    requiresModelApiKey: false,
     softwareVersion: 'webchess@2.2.0-rc.1-openclaw',
     sourceCommit: SOURCE_COMMIT,
     usage: createUsageController({
@@ -127,6 +161,94 @@ function services() {
     }),
     wilburStorageRowLimit: 500,
     wilburStorageTextBytesLimit: 250_000,
+  })
+}
+
+function directPageFetchFailure(retrievedAt: string): ResearchFetchFailure {
+  return {
+    citationId: 'R1',
+    requestedUrl: PRIVATE_FAILURE_URL,
+    finalUrl: PRIVATE_FAILURE_URL,
+    status: 'failed',
+    failureCode: 'page_fetch_http_status',
+    httpStatus: 503,
+    fetchVersion: 'webchess-direct-page-fetch-v1',
+    extractor: 'webchess-readable-text-v1',
+    rawByteLength: 0,
+    rawContentDigest: null,
+    rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+    acceptedCharacterLength: 0,
+    truncated: false,
+    contentDigest: null,
+    digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+    redirectChain: [PRIVATE_FAILURE_URL],
+    injectionSignalsDetected: [],
+    retrievedAt,
+  }
+}
+
+async function persistDirectPageFetchFailure(game: DurableGame): Promise<void> {
+  if (!database) throw new Error('The disposable case database is unavailable.')
+  if (game.researchConsent.recordedAt === null) {
+    throw new Error('Expected recorded consent for direct-page research.')
+  }
+  const runResult = await database.adapter.query({
+    text: `
+      SELECT id::text, state
+      FROM lifecycle_runs
+      WHERE clerk_user_id = $1::text AND game_id = $2::uuid
+    `,
+    values: [OWNER, game.id],
+  })
+  const run = runResult.rows[0]
+  if (!run || run.state !== 'chess_terminal') {
+    throw new Error(`Expected chess_terminal lifecycle, received ${String(run?.state)}.`)
+  }
+  const research = new DurableResearchRepository(database.adapter)
+  const started = await research.start({
+    ownerId: OWNER,
+    gameId: game.id,
+    lifecycleRunId: String(run.id),
+    lifecycleState: 'chess_terminal',
+    stage: 'portia',
+    problem: game.problem,
+    researchConsent: game.researchConsent,
+    policyVersion: RESEARCH_POLICY_VERSION,
+    materiality: 'required',
+    reason: `${PRIVATE_SENTINEL} requires a direct-page provenance check.`,
+    query: `${PRIVATE_SENTINEL} authoritative direct-page evidence`,
+    timeoutMs: 90_000,
+    configurationDigest: '3'.repeat(64),
+  })
+  const failure = directPageFetchFailure(game.researchConsent.recordedAt)
+  const completed = await research.complete({
+    ownerId: OWNER,
+    requestId: started.record.id,
+    lifecycleState: 'chess_terminal',
+    model: 'gpt-5.6-sol',
+    executedQueries: [`${PRIVATE_SENTINEL} authoritative direct-page evidence`],
+    searchSynthesis: `${PRIVATE_SENTINEL} synthesis retained only in the private bundle.`,
+    directPageTextFetched: false,
+    retrievedFacts: [],
+    fetchFailures: [failure],
+    sources: [{
+      citationId: 'R1',
+      ordinal: 1,
+      title: `${PRIVATE_SENTINEL} source title`,
+      url: PRIVATE_FAILURE_URL,
+      hostname: 'example.edu',
+      trust: 'government_or_education',
+      discoveredFrom: 'search_activity',
+    }],
+    omittedSourceCount: 0,
+    injectionSignalsDetected: [],
+    contentDigest: '8'.repeat(64),
+    configurationDigest: '3'.repeat(64),
+  })
+  expect(completed).toMatchObject({
+    consent: game.researchConsent,
+    fetchFailures: [failure],
+    directPageTextFetched: false,
   })
 }
 
@@ -373,7 +495,7 @@ describe('single-lifecycle case export against PostgreSQL', () => {
       problem: `Which bounded decision contains ${PRIVATE_SENTINEL} for export?`,
       researchConsent: {
         version: RESEARCH_CONSENT_VERSION,
-        decision: 'no_external_research',
+        decision: 'allow_search_and_page_fetch',
       },
       ...context(GAME_ID),
     })
@@ -403,6 +525,7 @@ describe('single-lifecycle case export against PostgreSQL', () => {
       })
       moveIndex += 1
     }
+    await persistDirectPageFetchFailure(game)
     await persistCompletedLifecycle(game.id)
     const providerCallsBeforeExport = vi.mocked(divisionGenerator).mock.calls.length
 
@@ -456,6 +579,64 @@ describe('single-lifecycle case export against PostgreSQL', () => {
       .not.toContain(PRIVATE_SENTINEL)
     expect(JSON.stringify(exportedByProfile.get('metadata-only-v1')))
       .not.toContain(PRIVATE_SENTINEL)
+    expect(JSON.stringify(exportedByProfile.get('research-redacted-v1')))
+      .not.toContain(PRIVATE_FAILURE_URL)
+    expect(JSON.stringify(exportedByProfile.get('metadata-only-v1')))
+      .not.toContain(PRIVATE_FAILURE_URL)
+    expect(exportedByProfile.get('private-full-v1')).toMatchObject({
+      data: {
+        game: {
+          record: {
+            researchConsentVersion: RESEARCH_CONSENT_VERSION,
+            researchConsentDecision: 'allow_search_and_page_fetch',
+            researchConsentRecordedAt: game.researchConsent.recordedAt,
+          },
+        },
+        lifecycle: {
+          researchRequests: [{
+            researchConsentVersion: RESEARCH_CONSENT_VERSION,
+            researchConsentDecision: 'allow_search_and_page_fetch',
+            researchConsentRecordedAt: game.researchConsent.recordedAt,
+            fetchFailures: [{
+              citationId: 'R1',
+              requestedUrl: PRIVATE_FAILURE_URL,
+              failureCode: 'page_fetch_http_status',
+            }],
+          }],
+        },
+      },
+    })
+    for (const profile of ['research-redacted-v1', 'metadata-only-v1'] as const) {
+      const exported = exportedByProfile.get(profile)
+      expect(exported).toMatchObject({
+        data: {
+          game: {
+            record: {
+              researchConsentVersion: RESEARCH_CONSENT_VERSION,
+              researchConsentDecision: 'allow_search_and_page_fetch',
+              researchConsentRecordedAt: game.researchConsent.recordedAt,
+            },
+          },
+          lifecycle: {
+            researchRequests: [{
+              researchConsentVersion: RESEARCH_CONSENT_VERSION,
+              researchConsentDecision: 'allow_search_and_page_fetch',
+              researchConsentRecordedAt: game.researchConsent.recordedAt,
+            }],
+          },
+        },
+      })
+      const lifecycle = exported.data.lifecycle as {
+        researchRequests: Record<string, unknown>[]
+      }
+      expect(lifecycle.researchRequests[0]).not.toHaveProperty('fetchFailures')
+      expect(exported.data.redaction.omissions).toContainEqual(
+        expect.objectContaining({
+          path: '/data/lifecycle/researchRequests/*/fetchFailures',
+          omittedCount: 1,
+        }),
+      )
+    }
     expect(exportedByProfile.get('research-redacted-v1')).toMatchObject({
       data: {
         game: {
@@ -465,6 +646,25 @@ describe('single-lifecycle case export against PostgreSQL', () => {
         },
       },
     })
+
+    const detachedEvidence = structuredClone(
+      exportedByProfile.get('private-full-v1'),
+    ) as unknown as MutableCaseBundle
+    const detachedLifecycle = detachedEvidence.data.lifecycle as Record<
+      string,
+      CanonicalJson
+    >
+    const detachedRequest = (
+      detachedLifecycle.researchRequests as Record<string, CanonicalJson>[]
+    )[0]!
+    const detachedFailure = (
+      detachedRequest.fetchFailures as Record<string, CanonicalJson>[]
+    )[0]!
+    detachedFailure.citationId = 'R2'
+    rebuildCaseManifest(detachedEvidence)
+    expect(verifyCaseBundle(detachedEvidence).errors).toContain(
+      'researchRequests[0] direct-page evidence does not match its disclosed source citation and URL.',
+    )
     expect(vi.mocked(divisionGenerator)).toHaveBeenCalledTimes(
       providerCallsBeforeExport,
     )
