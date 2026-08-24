@@ -1111,9 +1111,14 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
       const webMemoryMigrationIndex = durableWebChessMigrations.findIndex(
         (migration) => migration.id === '0014_web_memory_feedback',
       )
+      expect(webMemoryMigrationIndex).toBeGreaterThan(0)
       const priorMigrations = durableWebChessMigrations.slice(
         0,
         webMemoryMigrationIndex,
+      )
+      const webMemoryUpgradeMigrations = durableWebChessMigrations.slice(
+        0,
+        webMemoryMigrationIndex + 1,
       )
       await runMigrations(upgrade.adapter, priorMigrations)
 
@@ -1325,7 +1330,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
       })
 
       await expect(
-        runMigrations(upgrade.adapter, durableWebChessMigrations),
+        runMigrations(upgrade.adapter, webMemoryUpgradeMigrations),
       ).resolves.toEqual({
         applied: ['0014_web_memory_feedback'],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
