@@ -121,6 +121,20 @@ describe('OpenClaw WebChess launcher', () => {
         OPENAI_TOKEN: 'must-not-reach-next',
         OPENCLAW_GATEWAY_TOKEN: 'must-stay-in-openclaw',
         PATH: '/usr/bin',
+        PGDATABASE: 'production',
+        PGHOST: 'database.example.invalid',
+        PGPASSFILE: '/private/pgpass',
+        PGPASSWORD: 'must-not-reach-next',
+        PGPORT: '6432',
+        PGSERVICE: 'production',
+        PGSERVICEFILE: '/private/pg_service.conf',
+        PGSSLCERT: '/private/client.crt',
+        PGSSLCRL: '/private/root.crl',
+        PGSSLINJECTED_SETTING: 'must-not-reach-next',
+        PGSSLKEY: '/private/client.key',
+        PGSSLMODE: 'disable',
+        PGSSLROOTCERT: '/private/root.crt',
+        PGUSER: 'production-owner',
         THIRD_PARTY_API_KEY: 'must-not-reach-next',
         THIRD_PARTY_API_TOKEN: 'must-not-reach-next',
         THIRD_PARTY_ACCESS_TOKEN: 'must-not-reach-next',
@@ -199,6 +213,20 @@ describe('OpenClaw WebChess launcher', () => {
       'OPENAI_OAUTH_TOKEN',
       'OPENAI_TOKEN',
       'OPENCLAW_GATEWAY_TOKEN',
+      'PGDATABASE',
+      'PGHOST',
+      'PGPASSFILE',
+      'PGPASSWORD',
+      'PGPORT',
+      'PGSERVICE',
+      'PGSERVICEFILE',
+      'PGSSLCERT',
+      'PGSSLCRL',
+      'PGSSLINJECTED_SETTING',
+      'PGSSLKEY',
+      'PGSSLMODE',
+      'PGSSLROOTCERT',
+      'PGUSER',
       'THIRD_PARTY_API_KEY',
       'THIRD_PARTY_API_TOKEN',
       'THIRD_PARTY_ACCESS_TOKEN',
@@ -206,6 +234,8 @@ describe('OpenClaw WebChess launcher', () => {
     ]) {
       expect(spec.env).not.toHaveProperty(forbidden)
     }
+    expect(Object.keys(spec.env).filter((name) => name.startsWith('PG')))
+      .toEqual([])
 
     const withoutProviderEnvironment = buildNextLaunchSpec(
       '/plugin/webchess',
@@ -220,6 +250,94 @@ describe('OpenClaw WebChess launcher', () => {
       BRIDGE,
     )
     expect(withoutProviderEnvironment.env).not.toHaveProperty('OPENAI_API_KEY')
+  })
+
+  it.each([
+    ['remote hostname',
+      'postgresql://webchess:secret@database.example.invalid:55432/webchess'],
+    ['localhost alias',
+      'postgresql://webchess:secret@localhost:55432/webchess'],
+    ['missing username',
+      'postgresql://:secret@127.0.0.1:55432/webchess'],
+    ['missing password',
+      'postgresql://webchess@127.0.0.1:55432/webchess'],
+    ['missing explicit port',
+      'postgresql://webchess:secret@127.0.0.1/webchess'],
+    ['missing database name',
+      'postgresql://webchess:secret@127.0.0.1:55432/'],
+    ['multiple database path segments',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess/other'],
+    ['fragment',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess#other'],
+    ['empty query marker',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?'],
+    ['empty fragment marker',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess#'],
+    ['host query override',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?host=database.example.invalid'],
+    ['port query override',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?port=6432'],
+    ['user query override',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?user=owner'],
+    ['password query override',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?password=other'],
+    ['dbname query override',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?dbname=other'],
+    ['database query override',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?database=other'],
+    ['ssl disabled query',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?ssl=0'],
+    ['sslmode no-verify query',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?sslmode=no-verify'],
+    ['sslmode disable query',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?sslmode=disable'],
+    ['sslmode allow query',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?sslmode=allow'],
+    ['sslmode prefer query',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?sslmode=prefer'],
+    ['sslmode require query',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?sslmode=require'],
+    ['sslmode verify-ca query',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?sslmode=verify-ca'],
+    ['libpq compatibility query',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?uselibpqcompat=true'],
+    ['otherwise benign query',
+      'postgresql://webchess:secret@127.0.0.1:55432/webchess?application_name=webchess'],
+    ['surrounding whitespace',
+      ' postgresql://webchess:secret@127.0.0.1:55432/webchess'],
+    ['decoded control character',
+      'postgresql://webchess:sec%00ret@127.0.0.1:55432/webchess'],
+  ])('rejects a PostgreSQL URL with %s', (_case, databaseUrl) => {
+    expect(() => buildNextLaunchSpec(
+      '/plugin/webchess',
+      parseLaunchOptions({}),
+      {
+        NODE_ENV: 'test',
+        WEBCHESS_OPENCLAW_DATABASE_URL: databaseUrl,
+      },
+      '/managed/node_modules/next/dist/bin/next',
+      IDENTITY,
+      BRIDGE,
+    )).toThrow(/WEBCHESS_OPENCLAW_DATABASE_URL/u)
+  })
+
+  it.each([
+    'postgresql://webchess:p%40ss%3Aword@127.0.0.1:55432/webchess',
+    'postgres://webchess:p%40ss%3Aword@[::1]:55432/webchess',
+  ])('preserves a complete loopback PostgreSQL URL: %s', (databaseUrl) => {
+    const spec = buildNextLaunchSpec(
+      '/plugin/webchess',
+      parseLaunchOptions({}),
+      {
+        NODE_ENV: 'test',
+        WEBCHESS_OPENCLAW_DATABASE_URL: databaseUrl,
+      },
+      '/managed/node_modules/next/dist/bin/next',
+      IDENTITY,
+      BRIDGE,
+    )
+
+    expect(spec.env.WEBCHESS_OPENCLAW_DATABASE_URL).toBe(databaseUrl)
   })
 
   it('persists one random private runtime identity and refuses permissive files', async () => {

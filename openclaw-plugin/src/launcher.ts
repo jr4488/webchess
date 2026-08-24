@@ -35,6 +35,7 @@ const RUNTIME_IDENTITY_FORMAT = 'webchess-openclaw-runtime-identity/1'
 const RUNTIME_IDENTITY_FILENAME = 'runtime-identity.json'
 const MAX_RUNTIME_IDENTITY_BYTES = 4_096
 const LOCAL_OWNER_PATTERN = /^openclaw_[a-z0-9_-]{8,80}$/u
+const LOOPBACK_POSTGRESQL_HOSTS = new Set(['127.0.0.1', '::1'])
 export const WEBCHESS_LOCAL_DATA_NOTICE =
   'WebChess software 2.2.0-rc.1 stores game history and the webchess-2.0 lifecycle schema in the dedicated local PostgreSQL database. Inference and official Codex Hosted Search use your selected OpenAI account/OAuth profile and contact OpenAI; provider key/token fallbacks are rejected.'
 const RUNTIME_ENTRIES = [
@@ -274,6 +275,13 @@ function optionString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
+function hasUrlControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint <= 0x1f || codePoint === 0x7f
+  })
+}
+
 export function parseLaunchOptions(
   raw: Record<string, unknown>,
 ): WebChessLaunchOptions {
@@ -302,10 +310,16 @@ export function nodeModulesRootForNextBinary(nextBinary: string): string {
 }
 
 function dedicatedDatabaseUrl(environment: NodeJS.ProcessEnv): string {
-  const value = environment.WEBCHESS_OPENCLAW_DATABASE_URL?.trim()
+  const rawValue = environment.WEBCHESS_OPENCLAW_DATABASE_URL
+  const value = rawValue?.trim()
   if (!value) {
     throw new Error(
       'WEBCHESS_OPENCLAW_DATABASE_URL is required and must point to a dedicated loopback PostgreSQL database.',
+    )
+  }
+  if (rawValue !== value) {
+    throw new Error(
+      'WEBCHESS_OPENCLAW_DATABASE_URL must not contain surrounding whitespace.',
     )
   }
   let parsed: URL
@@ -315,15 +329,39 @@ function dedicatedDatabaseUrl(environment: NodeJS.ProcessEnv): string {
     throw new Error('WEBCHESS_OPENCLAW_DATABASE_URL is not a valid URL.')
   }
   const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/gu, '')
-  if (
-    !['postgres:', 'postgresql:'].includes(parsed.protocol) ||
-    !['localhost', '127.0.0.1', '::1'].includes(hostname)
-  ) {
+  if (!['postgres:', 'postgresql:'].includes(parsed.protocol) ||
+    !LOOPBACK_POSTGRESQL_HOSTS.has(hostname)) {
     throw new Error(
-      'WEBCHESS_OPENCLAW_DATABASE_URL must use PostgreSQL on a loopback host.',
+      'WEBCHESS_OPENCLAW_DATABASE_URL must use PostgreSQL on a numeric loopback host.',
     )
   }
-  return value
+  if (value.includes('?') || value.includes('#')) {
+    throw new Error(
+      'WEBCHESS_OPENCLAW_DATABASE_URL must not contain query parameters or a fragment.',
+    )
+  }
+
+  const databaseComponent = parsed.pathname.startsWith('/')
+    ? parsed.pathname.slice(1)
+    : ''
+  const port = Number(parsed.port)
+  const components = [parsed.username, parsed.password, databaseComponent]
+  const componentsAreValid = components.every((component) => {
+    try {
+      const decoded = decodeURIComponent(component)
+      return Boolean(decoded) && !hasUrlControlCharacter(decoded)
+    } catch {
+      return false
+    }
+  })
+  if (!componentsAreValid || databaseComponent.includes('/') ||
+    !/^[1-9][0-9]{0,4}$/u.test(parsed.port) ||
+    !Number.isSafeInteger(port) || port > 65_535) {
+    throw new Error(
+      'WEBCHESS_OPENCLAW_DATABASE_URL must include one username, password, explicit port, and database name.',
+    )
+  }
+  return parsed.href
 }
 
 function validatedOwnerId(value: string, name: string): string {
