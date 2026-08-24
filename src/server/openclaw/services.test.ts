@@ -161,6 +161,23 @@ describe('OpenClaw durable service bootstrap', () => {
       'postgresql://webchess_test:webchess_test@db.example/webchess_test'
     await expect(getOpenClawApiServices()).rejects.toThrow(/loopback host/u)
 
+    for (const value of [
+      'postgresql://webchess_test:webchess_test@localhost:55432/webchess_test',
+      'postgresql://webchess_test:webchess_test@127.0.0.1:55432/webchess_test?host=db.example',
+      'postgresql://webchess_test:webchess_test@127.0.0.1:55432/webchess_test?ssl=0',
+      'postgresql://webchess_test:webchess_test@127.0.0.1:55432/webchess_test?sslmode=disable',
+      'postgresql://webchess_test:webchess_test@127.0.0.1:55432/webchess_test?uselibpqcompat=true',
+      'postgresql://webchess_test@127.0.0.1:55432/webchess_test',
+      'postgresql://webchess_test:webchess_test@127.0.0.1/webchess_test',
+      'postgresql://webchess_test:webchess_test@127.0.0.1:55432/',
+      'postgresql://webchess_test:sec%00ret@127.0.0.1:55432/webchess_test',
+    ]) {
+      process.env.WEBCHESS_OPENCLAW_DATABASE_URL = value
+      await expect(getOpenClawApiServices()).rejects.toThrow(
+        /WEBCHESS_OPENCLAW_DATABASE_URL/u,
+      )
+    }
+
     expect(harness.createPostgresSqlAdapter).not.toHaveBeenCalled()
   })
 

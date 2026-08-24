@@ -1,7 +1,9 @@
 import 'server-only'
 
-import { Pool } from 'pg'
-import type { PoolClient, QueryResult } from 'pg'
+import type { Pool, PoolClient, PoolConfig, QueryResult } from 'pg'
+
+import { parseLoopbackPostgresUrl } from './adapter-kind'
+import { loadPostgresPool } from './postgres-runtime'
 
 import type {
   SqlAdapter,
@@ -17,6 +19,28 @@ export type PostgresSqlAdapter = SqlAdapter & {
 
 export interface PostgresSqlAdapterOptions {
   readonly applicationName?: string
+}
+
+const REJECTED_POSTGRES_ENVIRONMENT_KEYS = [
+  'NODE_PG_FORCE_NATIVE',
+  'PGBINARY',
+  'PGCLIENT_ENCODING',
+  'PGCLIENTENCODING',
+  'PGHOSTADDR',
+  'PGREPLICATION',
+] as const
+
+function assertNoEffectivePostgresEnvironmentOverrides(
+  environment: NodeJS.ProcessEnv = process.env,
+): void {
+  const configured = REJECTED_POSTGRES_ENVIRONMENT_KEYS.filter(
+    (key) => Boolean(environment[key]),
+  )
+  if (configured.length > 0) {
+    throw new Error(
+      `${configured.join(', ')} must be unset for a validated local PostgreSQL connection.`,
+    )
+  }
 }
 
 function mapResult<Row extends SqlRow>(
@@ -70,12 +94,31 @@ export function createPostgresSqlAdapter(
   if (connectionString.trim().length === 0) {
     throw new Error('A non-empty PostgreSQL connection string is required.')
   }
-  const pool = new Pool({
-    application_name: options.applicationName ?? 'webchess-openclaw-v2',
-    connectionTimeoutMillis: 5_000,
+  const parsed = parseLoopbackPostgresUrl(
     connectionString,
+    'PostgreSQL connection string',
+  )
+  assertNoEffectivePostgresEnvironmentOverrides()
+  const applicationName = options.applicationName?.trim() ||
+    'webchess-openclaw-v2'
+  if (applicationName.length > 120 || /[\p{C}]/gu.test(applicationName)) {
+    throw new Error('The PostgreSQL application name is invalid.')
+  }
+  const poolConfig: PoolConfig & { sslnegotiation: 'postgres' } = {
+    application_name: applicationName,
+    connectionTimeoutMillis: 5_000,
+    database: decodeURIComponent(parsed.pathname.slice(1)),
+    host: parsed.hostname.toLowerCase().replace(/^\[|\]$/gu, ''),
     max: 8,
-  })
+    options: '-c search_path=public',
+    password: decodeURIComponent(parsed.password),
+    port: Number(parsed.port),
+    ssl: false,
+    sslnegotiation: 'postgres',
+    user: decodeURIComponent(parsed.username),
+  }
+  const PostgresPool = loadPostgresPool()
+  const pool = new PostgresPool(poolConfig)
 
   return {
     query<Row extends SqlRow = SqlRow>(

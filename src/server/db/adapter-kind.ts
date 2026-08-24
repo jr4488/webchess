@@ -12,6 +12,24 @@ function normalizedHostname(value: string): string {
   return value.toLowerCase().replace(/^\[|\]$/gu, '')
 }
 
+const NUMERIC_LOOPBACK_POSTGRES_HOSTS = new Set(['127.0.0.1', '::1'])
+
+function decodedUrlComponent(
+  value: string,
+  variableName: string,
+): string {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(value)
+  } catch {
+    throw new Error(`${variableName} contains invalid percent encoding.`)
+  }
+  if (decoded.length === 0 || /[\p{C}]/gu.test(decoded)) {
+    throw new Error(`${variableName} contains an empty or control-bearing component.`)
+  }
+  return decoded
+}
+
 export function isVercelRuntime(
   environment: DatabaseEnvironment = process.env,
 ): boolean {
@@ -37,7 +55,11 @@ export function parseLoopbackPostgresUrl(
   variableName: string,
 ): URL {
   const trimmed = value.trim()
-  if (trimmed.length === 0 || trimmed !== value) {
+  if (
+    trimmed.length === 0 ||
+    trimmed !== value ||
+    /[\p{C}]/gu.test(value)
+  ) {
     throw new Error(`${variableName} must be a PostgreSQL URL on a loopback host.`)
   }
 
@@ -48,16 +70,52 @@ export function parseLoopbackPostgresUrl(
     throw new Error(`${variableName} is not a valid URL.`)
   }
 
-  if (
-    !['postgres:', 'postgresql:'].includes(parsed.protocol) ||
-    !isLoopbackHostname(parsed.hostname)
-  ) {
+  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) {
     throw new Error(
-      `${variableName} must use PostgreSQL on a loopback host.`,
+      `${variableName} must use PostgreSQL on a numeric loopback host.`,
     )
   }
 
+  const hostname = normalizedHostname(parsed.hostname)
+  if (!NUMERIC_LOOPBACK_POSTGRES_HOSTS.has(hostname)) {
+    throw new Error(
+      `${variableName} must use PostgreSQL on a numeric loopback host.`,
+    )
+  }
+  if (value.includes('?') || value.includes('#') ||
+      parsed.search !== '' || parsed.hash !== '') {
+    throw new Error(`${variableName} must not contain a query or fragment.`)
+  }
+
+  const databaseComponent = parsed.pathname.startsWith('/')
+    ? parsed.pathname.slice(1)
+    : ''
+  decodedUrlComponent(parsed.username, variableName)
+  decodedUrlComponent(parsed.password, variableName)
+  const database = decodedUrlComponent(databaseComponent, variableName)
+  const port = Number(parsed.port)
+  if (
+    databaseComponent.includes('/') ||
+    database.includes('/') ||
+    !/^[1-9][0-9]{0,4}$/u.test(parsed.port) ||
+    !Number.isSafeInteger(port) ||
+    port > 65_535
+  ) {
+    throw new Error(
+      `${variableName} must include one username, password, explicit port, and database name.`,
+    )
+  }
   return parsed
+}
+
+function isPostgresUrlWithLoopbackAuthority(value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    return ['postgres:', 'postgresql:'].includes(parsed.protocol) &&
+      isLoopbackHostname(parsed.hostname)
+  } catch {
+    return false
+  }
 }
 
 function nonBlank(value: string | undefined): value is string {
@@ -151,12 +209,9 @@ export function shouldUseLocalPostgresWireProtocol(
     return false
   }
 
-  try {
-    parseLoopbackPostgresUrl(connectionString, 'DATABASE_URL')
-    return true
-  } catch {
-    return false
-  }
+  if (!isPostgresUrlWithLoopbackAuthority(connectionString)) return false
+  parseLoopbackPostgresUrl(connectionString, 'DATABASE_URL')
+  return true
 }
 
 export function resolveDatabaseAdapterKind(

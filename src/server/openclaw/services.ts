@@ -7,6 +7,7 @@ import {
   assertDedicatedLocalSchema,
   loadCanonicalFilesystemMigrations,
 } from '@/server/db/local-postgres'
+import { parseLoopbackPostgresUrl } from '@/server/db/adapter-kind'
 import { runMigrations } from '@/server/db/migrations'
 import { DurableGameRepository } from '@/server/games'
 import {
@@ -26,7 +27,6 @@ import {
   configuredCaseSourceCommit,
 } from '@/server/case-bundle'
 
-import { isLoopbackHostname } from './request-guard'
 import {
   generateOpenClawAnswerV2,
   generateOpenClawCharlotteV2,
@@ -82,27 +82,16 @@ function databaseUrl(): string {
   ) {
     throw new Error('The local OpenClaw database is disabled in this environment.')
   }
-  const value = process.env.WEBCHESS_OPENCLAW_DATABASE_URL?.trim()
+  const value = process.env.WEBCHESS_OPENCLAW_DATABASE_URL
   if (!value) {
     throw new Error(
       'WEBCHESS_OPENCLAW_DATABASE_URL must point to the dedicated local PostgreSQL database.',
     )
   }
-  let parsed: URL
-  try {
-    parsed = new URL(value)
-  } catch {
-    throw new Error('WEBCHESS_OPENCLAW_DATABASE_URL is not a valid URL.')
-  }
-  if (
-    !['postgres:', 'postgresql:'].includes(parsed.protocol) ||
-    !isLoopbackHostname(parsed.hostname)
-  ) {
-    throw new Error(
-      'The OpenClaw database URL must use PostgreSQL on a loopback host.',
-    )
-  }
-  return value
+  return parseLoopbackPostgresUrl(
+    value,
+    'WEBCHESS_OPENCLAW_DATABASE_URL',
+  ).href
 }
 
 async function inspectPostgres17(

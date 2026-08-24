@@ -122,4 +122,41 @@ describe('local database adapter selection', () => {
       /loopback host/u,
     )
   })
+
+  it.each([
+    ['host override', `${LOOPBACK}?host=database.example.invalid`],
+    ['SSL disable override', `${LOOPBACK}?ssl=0`],
+    ['libpq SSL override', `${LOOPBACK}?sslmode=disable`],
+    ['libpq compatibility override', `${LOOPBACK}?uselibpqcompat=true`],
+    ['fragment', `${LOOPBACK}#database.example.invalid`],
+    ['empty query marker', `${LOOPBACK}?`],
+    ['empty fragment marker', `${LOOPBACK}#`],
+  ])('rejects a local PostgreSQL URL with %s', (_label, value) => {
+    expect(() => parseLoopbackPostgresUrl(value, 'DATABASE_URL')).toThrow(
+      /must not contain a query or fragment/u,
+    )
+    expect(() => shouldUseLocalPostgresWireProtocol(value, {})).toThrow(
+      /must not contain a query or fragment/u,
+    )
+  })
+
+  it.each([
+    ['DNS loopback', 'postgresql://webchess:secret@localhost:55433/webchess'],
+    ['username', 'postgresql://:secret@127.0.0.1:55433/webchess'],
+    ['password', 'postgresql://webchess@127.0.0.1:55433/webchess'],
+    ['port', 'postgresql://webchess:secret@127.0.0.1/webchess'],
+    ['database', 'postgresql://webchess:secret@127.0.0.1:55433/'],
+    ['one database name', 'postgresql://webchess:secret@127.0.0.1:55433/one/two'],
+    ['decoded database slash', 'postgresql://webchess:secret@127.0.0.1:55433/one%2Ftwo'],
+    ['decoded control', 'postgresql://webchess:sec%00ret@127.0.0.1:55433/webchess'],
+    ['raw control', 'postgresql://webchess:sec\nret@127.0.0.1:55433/webchess'],
+    ['surrounding whitespace', ` ${LOOPBACK}`],
+  ])('requires a complete numeric-loopback URL: %s', (_label, value) => {
+    expect(() => parseLoopbackPostgresUrl(value, 'DATABASE_URL')).toThrow()
+  })
+
+  it('preserves hosted adapter selection for a complete remote URL', () => {
+    expect(shouldUseLocalPostgresWireProtocol(NEON, {})).toBe(false)
+    expect(resolveDatabaseAdapterKind(NEON, {})).toBe('neon-http')
+  })
 })
