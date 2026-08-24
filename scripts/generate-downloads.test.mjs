@@ -6,6 +6,7 @@ import {
   createPdf,
   downloadableMarkdown,
   downloadablePdfMarkdown,
+  historicalWhitePaperForDistribution,
   pdfAscii,
   renderWhitePaperHtml,
 } from './generate-downloads.mjs'
@@ -54,6 +55,18 @@ describe('downloadable white-paper formulas', () => {
       'https://github.com/jr4488/webchess/blob/0384978b2ba709da4c9824f2821c8623d3f84364/INSTALL.md#requirements',
     )
     expect(html).not.toContain('/blob/main/')
+  })
+
+  it('wraps the preserved historical manuscript with a retirement warning', () => {
+    const source = '# Historical manuscript\n\nOriginal bytes remain evidence.\n'
+    const distributed = historicalWhitePaperForDistribution(source)
+
+    expect(distributed).toContain(
+      '**HISTORICAL AND RETIRED — not installation or runtime instructions.**',
+    )
+    expect(distributed).toContain('provider keys/tokens and non-OpenClaw')
+    expect(distributed.endsWith(source)).toBe(true)
+    expect(source).toBe('# Historical manuscript\n\nOriginal bytes remain evidence.\n')
   })
 
   it('pins candidate paper links only when an exact release commit is supplied', () => {
@@ -163,7 +176,7 @@ describe('downloadable white-paper formulas', () => {
 
   it('preserves underscores inside inline-code paths and environment names', () => {
     const pdf = createPdf([
-      'Use `OPENAI_API_KEY` only on the separately billed API-key path.',
+      'The auth-only launcher rejects `OPENAI_API_KEY` by variable name.',
       'See [`docs/CASE_BUNDLES.md`](CASE_BUNDLES.md) and',
       '[`docs/WEBCHESS_WHITE_PAPER_V3.md`](WEBCHESS_WHITE_PAPER_V3.md).',
       'Keep _emphasized prose_ free of Markdown delimiters.',

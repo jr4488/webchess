@@ -28,6 +28,18 @@ function identity() {
         },
       },
     },
+    dependencies: {
+      codexSearch: {
+        package: '@openclaw/codex',
+        version: '2026.7.1-1',
+        npmIntegrity:
+          'sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==',
+        provider: 'codex',
+        authPolicy: 'same-openai-account-oauth',
+        transport: 'managed-private-stdio-agent-scoped',
+        apiKeyFallback: false,
+      },
+    },
   })
   if (!parsed) throw new Error('Invalid release identity test fixture.')
   return parsed

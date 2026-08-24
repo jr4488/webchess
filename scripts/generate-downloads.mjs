@@ -64,6 +64,18 @@ const canonicalPublicUrl = 'https://webchess.anansiportia.com'
 const releaseHandoffMarker = '<!-- WEBCHESS_RELEASE_HANDOFF -->'
 const candidateWhitePaperTitle = 'The Arachne Method and WebChess'
 const historicalWhitePaperTitle = 'The First Answer Is Not Enough'
+const historicalRetirementNotice = [
+  '> **HISTORICAL AND RETIRED — not installation or runtime instructions.**',
+  '> This distribution wraps the byte-preserved edition 3.0 manuscript for audit.',
+  '> Its runtime, migration, research, and release-status descriptions apply only',
+  '> to the historical snapshot. WebChess 2.2 supports only the packed OpenClaw',
+  '> account/OAuth path in `INSTALL.md`; provider keys/tokens and non-OpenClaw',
+  '> principals fail closed. Read edition 3.1 for the current candidate mapping.',
+].join('\n')
+
+function historicalWhitePaperForDistribution(source) {
+  return `${historicalRetirementNotice}\n\n${source}`
+}
 
 function htmlText(value) {
   return value
@@ -1317,6 +1329,9 @@ async function main() {
     candidateWhitePaper,
     configuredSourceCommit,
   )
+  const historicalDistribution = historicalWhitePaperForDistribution(
+    historicalWhitePaper,
+  )
 
   const [candidateImages, historicalImages] = await Promise.all([
     loadWhitePaperImages(
@@ -1347,11 +1362,11 @@ async function main() {
     },
   )
   const historicalWhitePaperHtml = renderWhitePaperHtml(
-    historicalWhitePaper,
+    historicalDistribution,
     historicalImages,
   )
   const historicalWhitePaperPdf = createPdf(
-    downloadablePdfMarkdown(historicalWhitePaper),
+    downloadablePdfMarkdown(historicalDistribution),
     historicalWhitePaperSoftwareVersion,
     historicalImages,
   )
@@ -1367,7 +1382,7 @@ async function main() {
     ),
     writeFile(
       outputPaths.historicalWhitePaperMarkdown,
-      historicalWhitePaper,
+      historicalDistribution,
       'utf8',
     ),
     writeFile(
@@ -1412,6 +1427,7 @@ export {
   createPdf,
   downloadableMarkdown,
   downloadablePdfMarkdown,
+  historicalWhitePaperForDistribution,
   pdfAscii,
   readableInlineMath,
   renderWhitePaperHtml,

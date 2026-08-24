@@ -28,6 +28,16 @@ const COMMIT = '0384978b2ba709da4c9824f2821c8623d3f84364'
 const CANDIDATE_PAPER_PATH = 'docs/WEBCHESS_WHITE_PAPER_V3_1.md'
 const HISTORICAL_PAPER_PATH = 'docs/WEBCHESS_WHITE_PAPER_V3.md'
 const PAPER_PDF = Buffer.from('%PDF-1.4\nexact paper PDF bytes')
+const CODEX_SEARCH_DEPENDENCY = Object.freeze({
+  package: '@openclaw/codex',
+  version: '2026.7.1-1',
+  npmIntegrity:
+    'sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==',
+  provider: 'codex',
+  authPolicy: 'same-openai-account-oauth',
+  transport: 'managed-private-stdio-agent-scoped',
+  apiKeyFallback: false,
+})
 
 function fixtureSourceArchive(commit) {
   const prefix = `webchess-${commit}/`
@@ -172,13 +182,14 @@ describe('release identity provenance', () => {
         },
       },
       dependencies: {
-      openclaw: {
-        version: '2026.7.1-2',
-        sourceTag: 'v2026.7.1-2',
-        sourceCommit: '0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c',
-        npmIntegrity:
-          'sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==',
+        openclaw: {
+          version: '2026.7.1-2',
+          sourceTag: 'v2026.7.1-2',
+          sourceCommit: '0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c',
+          npmIntegrity:
+            'sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==',
         },
+        codexSearch: CODEX_SEARCH_DEPENDENCY,
       },
       toolchains: {
         node: '24.19.0',
@@ -195,6 +206,28 @@ describe('release identity provenance', () => {
     })
     expect(() => validateResolvedReleaseIdentity(template)).toThrow(
       'source.commit is unresolved',
+    )
+  })
+
+  it.each([
+    ['package', '@openclaw/codex-next'],
+    ['version', '2026.7.1'],
+    ['npmIntegrity', 'sha512-unreviewed'],
+    ['provider', 'alternate'],
+    ['authPolicy', 'api-key'],
+    ['transport', 'custom-network'],
+    ['apiKeyFallback', true],
+  ])('rejects Codex Search dependency drift in %s', (field, driftedValue) => {
+    const template = structuredClone(unresolvedReleaseIdentityTemplate())
+    template.dependencies.codexSearch[field] = driftedValue
+    expect(() => validateReleaseIdentityTemplate(template)).toThrow(
+      'must retain the exact unresolved',
+    )
+
+    const identity = structuredClone(resolveReleaseIdentity(releaseInputs()))
+    identity.dependencies.codexSearch[field] = driftedValue
+    expect(() => validateResolvedReleaseIdentity(identity)).toThrow(
+      'does not match the canonical',
     )
   })
 
@@ -227,6 +260,9 @@ describe('release identity provenance', () => {
         sha256: PAPER_PDF_SHA256,
       },
     })
+    expect(identity.dependencies.codexSearch).toEqual(
+      CODEX_SEARCH_DEPENDENCY,
+    )
     await expect(readFile(fixture.identityPath, 'utf8')).resolves.toBe(
       `${JSON.stringify(identity, null, 2)}\n`,
     )

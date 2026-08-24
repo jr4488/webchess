@@ -46,6 +46,8 @@ export default defineConfig({
             process.env.WEBCHESS_E2E_USER_ID ?? 'e2e_playwright',
           WEBCHESS_OPENCLAW_ENABLED: 'true',
           WEBCHESS_OPENCLAW_OWNER_ID: 'openclaw_e2e_playwright',
+          WEBCHESS_RELEASE_SHA: process.env.WEBCHESS_RELEASE_SHA ?? '',
+          VERCEL_GIT_COMMIT_SHA: process.env.VERCEL_GIT_COMMIT_SHA ?? '',
         },
       },
   projects: [

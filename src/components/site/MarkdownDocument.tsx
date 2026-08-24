@@ -47,13 +47,28 @@ function headingId(children: ReactNode): string {
     .replace(/\s+/g, '-')
 }
 
-function publicDocumentHref(href: string | undefined): string | undefined {
+export function publicDocumentHref(
+  href: string | undefined,
+  immutableSourceUrl: string | null = immutableReleaseSourceUrl(),
+): string | undefined {
   if (!href || href.startsWith('/') || href.startsWith('#') || /^[a-z]+:/i.test(href)) {
     return href
   }
 
   const [path, fragment] = href.split('#', 2)
   const normalizedPath = path?.replace(/^(\.\.\/|\.\/)+/, '')
+  const resolvedArchitectureHref = immutableSourceUrl
+    ? '/white-paper#12-webchess'
+    : '/white-paper#214-three-runtime-surfaces-three-separate-promises'
+  const resolvedResearchHref = immutableSourceUrl
+    ? '/white-paper#7-research-status-and-falsifiable-next-work'
+    : '/white-paper#18-falsifiable-evaluation-program'
+  const resolvedHistoricalV3Href = immutableSourceUrl
+    ? '/downloads/webchess-white-paper-v3-historical.html'
+    : '/white-paper'
+  const resolvedCandidatePaperHref = immutableSourceUrl
+    ? '/white-paper'
+    : '/research'
   const mappedPaths: Readonly<Record<string, string>> = {
     'README.md': '/',
     'INSTALL.md': '/install',
@@ -63,23 +78,45 @@ function publicDocumentHref(href: string | undefined): string | undefined {
     'SUPPORT.md': '/support',
     'ACCEPTABLE_USE.md': '/acceptable-use',
     'docs/ACCEPTABLE_USE.md': '/acceptable-use',
-    'docs/ARCHITECTURE.md':
-      '/white-paper#214-three-runtime-surfaces-three-separate-promises',
+    'docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md': resolvedCandidatePaperHref,
+    'docs/ARCHITECTURE.md': resolvedArchitectureHref,
     'docs/WEBCHESS_2_0_OPERATIONS.md': '/operations',
     'docs/PRIVACY.md': '/privacy',
-    'docs/RESEARCH.md': '/white-paper#18-falsifiable-evaluation-program',
+    'docs/RESEARCH.md': resolvedResearchHref,
     'docs/TERMS.md': '/terms',
-    'docs/WEBCHESS_WHITE_PAPER.md': '/white-paper',
-    'docs/WEBCHESS_WHITE_PAPER_V2.md': '/white-paper',
-    'docs/WEBCHESS_WHITE_PAPER_V3.md': '/white-paper',
+    'docs/WEBCHESS_WHITE_PAPER_V3.md': resolvedHistoricalV3Href,
+    'ARCHITECTURE.md': resolvedArchitectureHref,
+    'ARACHNE_METHOD_WHITE_PAPER_3_1.md': resolvedCandidatePaperHref,
+    'PRIVACY.md': '/privacy',
+    'RESEARCH.md': resolvedResearchHref,
+    'WEBCHESS_WHITE_PAPER_V3.md': resolvedHistoricalV3Href,
   }
   const destination = normalizedPath ? mappedPaths[normalizedPath] : undefined
 
-  if (!destination) {
+  if (destination) {
+    return fragment && !destination.includes('#') ? `${destination}#${fragment}` : destination
+  }
+
+  if (!normalizedPath || !immutableSourceUrl) return href
+
+  const repositoryPath = normalizedPath === 'CASE_BUNDLES.md' ||
+    normalizedPath.startsWith('releases/')
+    ? `docs/${normalizedPath}`
+    : normalizedPath
+  if (
+    repositoryPath.includes('\\') ||
+    repositoryPath.split('/').some((part) => part === '..' || part === '')
+  ) {
     return href
   }
 
-  return fragment && !destination.includes('#') ? `${destination}#${fragment}` : destination
+  const blobRoot = immutableSourceUrl.replace(
+    /\/tree\/([a-f0-9]{40})$/u,
+    '/blob/$1',
+  )
+  if (blobRoot === immutableSourceUrl) return href
+  const blobHref = `${blobRoot}/${encodeURI(repositoryPath)}`
+  return fragment ? `${blobHref}#${fragment}` : blobHref
 }
 
 function publicDocumentImageSrc(src: string | undefined): string | undefined {
@@ -312,9 +349,10 @@ export function MarkdownDocument({
   sourceHref,
   sourceLabel = 'Download source',
 }: MarkdownDocumentProps) {
+  const immutableSourceUrl = immutableReleaseSourceUrl()
   const immutableSourcePending =
     sourceHref === '/downloads/webchess-source.zip' &&
-    !immutableReleaseSourceUrl()
+    !immutableSourceUrl
 
   return (
     <PublicShell>
@@ -345,7 +383,10 @@ export function MarkdownDocument({
             remarkPlugins={[remarkGfm]}
             components={{
               a: ({ children, href, title }) => (
-                <a href={publicDocumentHref(href)} title={title}>
+                <a
+                  href={publicDocumentHref(href, immutableSourceUrl)}
+                  title={title}
+                >
                   {children}
                 </a>
               ),

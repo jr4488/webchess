@@ -8,6 +8,16 @@ import {
 } from './release-source'
 
 const SHA = '0123456789abcdef0123456789abcdef01234567'
+const CODEX_SEARCH_DEPENDENCY = {
+  package: '@openclaw/codex',
+  version: '2026.7.1-1',
+  npmIntegrity:
+    'sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==',
+  provider: 'codex',
+  authPolicy: 'same-openai-account-oauth',
+  transport: 'managed-private-stdio-agent-scoped',
+  apiKeyFallback: false,
+} as const
 
 function identity(overrides: Record<string, unknown> = {}) {
   return {
@@ -32,8 +42,24 @@ function identity(overrides: Record<string, unknown> = {}) {
         },
       },
     },
+    dependencies: {
+      codexSearch: CODEX_SEARCH_DEPENDENCY,
+    },
     ...overrides,
   }
+}
+
+function identityWithCodexSearch(
+  overrides: Record<string, unknown>,
+) {
+  return identity({
+    dependencies: {
+      codexSearch: {
+        ...CODEX_SEARCH_DEPENDENCY,
+        ...overrides,
+      },
+    },
+  })
 }
 
 describe('immutable release source identity', () => {
@@ -78,6 +104,20 @@ describe('immutable release source identity', () => {
   })
 
   it.each([
+    ['package', '@openclaw/codex-next'],
+    ['version', '2026.7.1'],
+    ['npmIntegrity', 'sha512-unreviewed'],
+    ['provider', 'alternate'],
+    ['authPolicy', 'api-key'],
+    ['transport', 'custom-network'],
+    ['apiKeyFallback', true],
+  ])('rejects public Codex Search dependency drift in %s', (field, driftedValue) => {
+    expect(parsePublicReleaseIdentity(
+      identityWithCodexSearch({ [field]: driftedValue }),
+    )).toBeNull()
+  })
+
+  it.each([
     identity({ status: 'unresolved' }),
     identity({
       source: {
@@ -99,6 +139,7 @@ describe('immutable release source identity', () => {
         },
       },
     }),
+    identity({ dependencies: {} }),
   ])('rejects malformed, noncanonical, or unresolved manifests', (value) => {
     expect(parsePublicReleaseIdentity(value)).toBeNull()
   })

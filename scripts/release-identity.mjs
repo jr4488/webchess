@@ -120,6 +120,16 @@ function releaseIdentityShape({
         npmIntegrity:
           'sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==',
       },
+      codexSearch: {
+        package: '@openclaw/codex',
+        version: '2026.7.1-1',
+        npmIntegrity:
+          'sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==',
+        provider: 'codex',
+        authPolicy: 'same-openai-account-oauth',
+        transport: 'managed-private-stdio-agent-scoped',
+        apiKeyFallback: false,
+      },
     },
     toolchains: {
       node: '24.19.0',

@@ -5,9 +5,27 @@ import {
   GITHUB_SECURITY_ADVISORY_URL,
   PUBLIC_ROUTES,
 } from './fixtures/routes'
+import { expectedPublicRelease } from './fixtures/release'
 import { expect, test } from './fixtures/test'
 
 const skippedProtocols = /^(?:mailto|tel|javascript|data):/i
+const escapedRepositoryUrl = GITHUB_REPOSITORY_URL.replace(
+  /[.*+?^${}()|[\]\\]/gu,
+  '\\$&',
+)
+const immutableTreeUrlPattern = new RegExp(
+  `^${escapedRepositoryUrl}/tree/[a-f0-9]{40}$`,
+  'u',
+)
+const immutableBlobUrlPattern = new RegExp(
+  `^${escapedRepositoryUrl}/blob/[a-f0-9]{40}/.+$`,
+  'u',
+)
+const mutableMainUrlPattern = new RegExp(
+  `^${escapedRepositoryUrl}/(?:(?:blob|tree)/main(?:[/?#]|$)|archive/refs/heads/main\\.zip(?:[?#]|$))`,
+  'u',
+)
+const resolvedRelease = expectedPublicRelease()
 
 test('every public page has working internal and external links', async ({
   baseURL,
@@ -46,11 +64,38 @@ test('every public page has working internal and external links', async ({
     ).toBe(true)
   }
 
+  const mutableMainLinks = [...discovered].filter((href) =>
+    mutableMainUrlPattern.test(href),
+  )
   expect(
-    discovered.has(`${GITHUB_REPOSITORY_URL}/tree/main`) ||
-      discovered.has(`${GITHUB_REPOSITORY_URL}/archive/refs/heads/main.zip`),
-    'The unresolved site must not advertise mutable main source as its release identity.',
-  ).toBe(false)
+    mutableMainLinks,
+    'The public site must never advertise mutable main source as its release identity.',
+  ).toEqual([])
+
+  const immutableTreeLinks = [...discovered].filter((href) =>
+    href.startsWith(`${GITHUB_REPOSITORY_URL}/tree/`),
+  )
+  for (const href of immutableTreeLinks) {
+    expect(
+      href,
+      `Repository tree links must identify an exact 40-character commit: ${href}`,
+    ).toMatch(immutableTreeUrlPattern)
+  }
+  const immutableBlobLinks = [...discovered].filter((href) =>
+    href.startsWith(`${GITHUB_REPOSITORY_URL}/blob/`),
+  )
+  for (const href of immutableBlobLinks) {
+    expect(
+      href,
+      `Repository file links must identify an exact 40-character commit: ${href}`,
+    ).toMatch(immutableBlobUrlPattern)
+  }
+  if (resolvedRelease) {
+    expect(
+      discovered.has(resolvedRelease.sourceUrl),
+      'The resolved site must advertise its exact immutable release commit.',
+    ).toBe(true)
+  }
 
   const requestLinks: string[] = []
   for (const href of discovered) {
@@ -92,10 +137,9 @@ test('every public page has working internal and external links', async ({
             url.pathname === '/downloads/webchess-source.zip'
           const response = await request.get(href, {
             failOnStatusCode: false,
-            // The reviewed source route intentionally redirects to the
-            // repository archive. Validate that local contract here without
-            // turning a private repository's anonymous response into a local
-            // 404.
+            // The reviewed source route intentionally redirects to the exact
+            // retained local archive. Validate the redirect contract without
+            // obscuring it behind the request client's automatic follow.
             maxRedirects: sourceArchiveRedirect ? 0 : 5,
             timeout: 20_000,
           })

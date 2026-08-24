@@ -1,11 +1,65 @@
 import { render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { MarkdownDocument } from './MarkdownDocument'
+import { MarkdownDocument, publicDocumentHref } from './MarkdownDocument'
 
 describe('MarkdownDocument', () => {
   afterEach(() => {
     vi.unstubAllEnvs()
+  })
+
+  it('maps repository-only links to immutable blobs only after identity resolves', () => {
+    const commit = 'a'.repeat(40)
+    const immutableSource = `https://github.com/jr4488/webchess/tree/${commit}`
+
+    expect(publicDocumentHref(
+      '../src/server/openai/division.ts#generate',
+      immutableSource,
+    )).toBe(
+      `https://github.com/jr4488/webchess/blob/${commit}/src/server/openai/division.ts#generate`,
+    )
+    expect(publicDocumentHref(
+      'CASE_BUNDLES.md',
+      immutableSource,
+    )).toBe(
+      `https://github.com/jr4488/webchess/blob/${commit}/docs/CASE_BUNDLES.md`,
+    )
+    expect(publicDocumentHref(
+      'releases/webchess-release-identity.template.json',
+      immutableSource,
+    )).toBe(
+      `https://github.com/jr4488/webchess/blob/${commit}/docs/releases/webchess-release-identity.template.json`,
+    )
+    expect(publicDocumentHref('../src/server/openai/division.ts', null)).toBe(
+      '../src/server/openai/division.ts',
+    )
+    expect(publicDocumentHref('https://example.com', immutableSource)).toBe(
+      'https://example.com',
+    )
+    expect(publicDocumentHref('ARCHITECTURE.md', immutableSource)).toBe(
+      '/white-paper#12-webchess',
+    )
+    expect(publicDocumentHref('ARCHITECTURE.md', null)).toBe(
+      '/white-paper#214-three-runtime-surfaces-three-separate-promises',
+    )
+    expect(publicDocumentHref('RESEARCH.md', immutableSource)).toBe(
+      '/white-paper#7-research-status-and-falsifiable-next-work',
+    )
+    expect(publicDocumentHref('RESEARCH.md', null)).toBe(
+      '/white-paper#18-falsifiable-evaluation-program',
+    )
+    expect(publicDocumentHref('WEBCHESS_WHITE_PAPER_V3.md', immutableSource))
+      .toBe('/downloads/webchess-white-paper-v3-historical.html')
+    expect(publicDocumentHref('WEBCHESS_WHITE_PAPER_V3.md', null))
+      .toBe('/white-paper')
+    expect(publicDocumentHref(
+      'docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md',
+      immutableSource,
+    )).toBe('/white-paper')
+    expect(publicDocumentHref(
+      'ARACHNE_METHOD_WHITE_PAPER_3_1.md',
+      null,
+    )).toBe('/research')
   })
 
   it('renders accessible document controls, headings, tables, formulas, and mapped links', () => {
@@ -34,7 +88,7 @@ describe('MarkdownDocument', () => {
           '',
           '[Operator guide](docs/WEBCHESS_2_0_OPERATIONS.md)',
           '',
-          '[Current white paper](docs/WEBCHESS_WHITE_PAPER_V3.md)',
+          '[Historical V3 paper](docs/WEBCHESS_WHITE_PAPER_V3.md)',
           '',
           '[Research program](docs/RESEARCH.md)',
           '',
@@ -96,11 +150,14 @@ describe('MarkdownDocument', () => {
       '/operations',
     )
     expect(
-      screen.getByRole('link', { name: 'Current white paper' }),
+      screen.getByRole('link', { name: 'Historical V3 paper' }),
     ).toHaveAttribute('href', '/white-paper')
     expect(
       screen.getAllByRole('link', { name: 'Research program' })[0],
-    ).toHaveAttribute('href', '/white-paper#18-falsifiable-evaluation-program')
+    ).toHaveAttribute(
+      'href',
+      '/white-paper#18-falsifiable-evaluation-program',
+    )
     expect(
       screen.getByRole('link', { name: 'Terms section' }),
     ).toHaveAttribute('href', '/terms#limits')

@@ -38,6 +38,17 @@ export interface PublicReleaseIdentity {
       }
     }
   }
+  readonly dependencies: {
+    readonly codexSearch: {
+      readonly package: '@openclaw/codex'
+      readonly version: '2026.7.1-1'
+      readonly npmIntegrity: 'sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw=='
+      readonly provider: 'codex'
+      readonly authPolicy: 'same-openai-account-oauth'
+      readonly transport: 'managed-private-stdio-agent-scoped'
+      readonly apiKeyFallback: false
+    }
+  }
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -56,6 +67,8 @@ export function parsePublicReleaseIdentity(
   const paper = record(identity?.paper)
   const candidate = record(paper?.candidate)
   const pdf = record(candidate?.pdf)
+  const dependencies = record(identity?.dependencies)
+  const codexSearch = record(dependencies?.codexSearch)
   const commit = typeof source?.commit === 'string'
     ? source.commit.toLowerCase()
     : ''
@@ -78,7 +91,15 @@ export function parsePublicReleaseIdentity(
     candidate.repositoryPath.includes('..') ||
     pdf?.downloadPath !== '/downloads/webchess-white-paper.pdf' ||
     typeof pdf.sha256 !== 'string' ||
-    !SHA256_PATTERN.test(pdf.sha256)
+    !SHA256_PATTERN.test(pdf.sha256) ||
+    codexSearch?.package !== '@openclaw/codex' ||
+    codexSearch.version !== '2026.7.1-1' ||
+    codexSearch.npmIntegrity !==
+      'sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==' ||
+    codexSearch.provider !== 'codex' ||
+    codexSearch.authPolicy !== 'same-openai-account-oauth' ||
+    codexSearch.transport !== 'managed-private-stdio-agent-scoped' ||
+    codexSearch.apiKeyFallback !== false
   ) {
     return null
   }
