@@ -218,7 +218,7 @@ Use a disposable PostgreSQL 17 database that contains no production data. Run:
 npm run lint
 npm run typecheck
 npm run plugin:build
-git diff --exit-code -- openclaw-plugin/dist
+npm run plugin:verify
 npm run test
 DATABASE_URL='postgresql://…disposable-test-only…' npm run test:integration
 DATABASE_URL='postgresql://…disposable-test-only…' npm run test:coverage

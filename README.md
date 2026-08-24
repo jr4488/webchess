@@ -302,7 +302,7 @@ the plugin at production, Neon, or an unrelated local database.
 set -euo pipefail
 npm ci
 npm run plugin:build
-git diff --exit-code -- openclaw-plugin/dist
+npm run plugin:verify
 mkdir -p public/downloads
 cp ../webchess-release-identity.json public/downloads/webchess-release-identity.json
 export WEBCHESS_SOURCE_ARCHIVE_NAME="$(node -e 'const m=require("../webchess-release-identity.json"); process.stdout.write(m.source.archive.downloadPath.split("/").at(-1))')"
