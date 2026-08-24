@@ -1,5 +1,10 @@
 import Link from 'next/link'
 
+import {
+  configuredReleaseCommit,
+  immutableReleaseSourceUrl,
+} from '@/lib/release-source'
+
 import { AmbientWeb } from './AmbientWeb'
 import { EpisodePlayer } from './EpisodePlayer'
 import { PublicShell } from './PublicShell'
@@ -127,13 +132,16 @@ const PHASES = [
 ] as const
 
 export function ProductHome() {
+  const releaseCommit = configuredReleaseCommit()
+  const immutableSourceUrl = immutableReleaseSourceUrl()
+
   return (
     <PublicShell>
       <section className="wc-hero" id="top" aria-labelledby="wc-home-title">
         <AmbientWeb />
         <div className="wc-hero-veil" aria-hidden="true" />
         <div className="wc-hero-in">
-          <div className="wc-kicker">WebChess 2.0 · Deliberative Middleware</div>
+          <div className="wc-kicker">WebChess 2.2.0-rc.1 · Research instrument</div>
           <h1 id="wc-home-title">
             Every question arrives wrapped in its first frame.{' '}
             <span className="wc-goldline">WebChess cuts it loose.</span>
@@ -146,8 +154,13 @@ export function ProductHome() {
             survives.
           </p>
           <div className="wc-hero-ctas">
-            <Link className="wc-btn" href="/play">Play WebChess</Link>
-            <Link className="wc-btn wc-btn-plain" href="/white-paper">Read the white paper</Link>
+            <Link className="wc-btn" href="/install">Run WebChess locally</Link>
+            <Link className="wc-btn wc-btn-plain" href="/white-paper">Read historical paper 3.0</Link>
+            {immutableSourceUrl ? (
+              <a className="wc-btn wc-btn-plain" href="/downloads/webchess-white-paper.pdf" download>
+                Download mapped paper 3.1
+              </a>
+            ) : null}
             <a className="wc-btn wc-btn-plain" href="#episode">Watch an episode</a>
           </div>
         </div>
@@ -217,13 +230,14 @@ export function ProductHome() {
 
       <section className="wc-block" id="lifecycle">
         <div className="wc-wrap">
-          <div className="wc-kicker" data-wc-reveal>The ANANSI lifecycle</div>
+          <div className="wc-kicker" data-wc-reveal>The Arachne lifecycle</div>
           <h2 className="wc-sec" data-wc-reveal>
             Eight authorities. None may adjudicate its own proposal.
           </h2>
           <p className="wc-sec-lede" data-wc-reveal>
-            ANANSI—Analyze, Name, Associate, Navigate, Synthesize, Iterate—governs the episode.
-            Each stage holds a narrow power and an explicit prohibition.
+            The Arachne Method names the whole deliberative architecture, and WebChess is its
+            software instrument. ANANSI names only Anansi&apos;s initial Division and field
+            construction. Each lifecycle stage holds a narrow power and an explicit prohibition.
           </p>
           <div className="wc-stages">
             {LIFECYCLE.map((stage) => (
@@ -307,32 +321,49 @@ export function ProductHome() {
         <div className="wc-wrap">
           <div className="wc-paper-card" data-wc-reveal>
             <div className="wc-paper-left">
-              <div className="wc-kicker">Technical white paper</div>
+              <div className="wc-kicker">Historical technical paper · edition 3.0</div>
               <h3>The First Answer Is Not Enough</h3>
               <p>
                 Deliberation before decision. An engaging, repository-audited account of the Arachne
                 Method: circular chess, Portia's thirteen attacks, the deterministic Gate, bounded
                 Retry, qualified action, provenance, measured evidence, repaired release boundaries,
-                and a falsifiable research program.
+                and a falsifiable research program. It records the audited pre-integration
+                <a href="https://github.com/jr4488/webchess/tree/0384978b2ba709da4c9824f2821c8623d3f84364">
+                  <code>0384978b2ba709da4c9824f2821c8623d3f84364</code>
+                </a>{' '}
+                snapshot; candidate paper 3.1 remains
+                publication-blocked until code freeze and artifact verification.
               </p>
               <div className="wc-paper-actions">
-                <Link className="wc-btn" href="/white-paper">Read online</Link>
-                <a className="wc-btn wc-btn-plain" href="/downloads/webchess-white-paper.pdf" download>
-                  Download PDF
+                <Link className="wc-btn" href="/white-paper">Read historical paper</Link>
+                <a className="wc-btn wc-btn-plain" href="/downloads/webchess-white-paper-v3-historical.pdf" download>
+                  Download historical PDF
                 </a>
-                <a className="wc-btn wc-btn-plain" href="/downloads/webchess-source.zip" download>
-                  Download source
-                </a>
+                {immutableSourceUrl ? (
+                  <>
+                    <a className="wc-btn wc-btn-plain" href="/downloads/webchess-source.zip" download>
+                      Download immutable source
+                    </a>
+                    <a className="wc-btn wc-btn-plain" href="/downloads/webchess-release-identity.json" download>
+                      Verify release identity
+                    </a>
+                  </>
+                ) : (
+                  <span className="wc-btn wc-btn-plain" role="status" aria-disabled="true">
+                    Source identity pending
+                  </span>
+                )}
               </div>
             </div>
             <div className="wc-paper-right">
               <h4>Reference implementation manifest</h4>
               <ul className="wc-manifest">
-                <li><span className="wc-manifest-key">architecture</span><span className="wc-manifest-value">Arachne Method</span></li>
-                <li><span className="wc-manifest-key">candidate</span><span className="wc-manifest-value">2.2.0 · committed</span></li>
-                <li><span className="wc-manifest-key">code baseline</span><span className="wc-manifest-value">7a3749c…43f3a2</span></li>
-                <li><span className="wc-manifest-key">released tag</span><span className="wc-manifest-value">v2.1.0 · 9980328</span></li>
-                <li><span className="wc-manifest-key">boundary</span><span className="wc-manifest-value">not tagged or deployed</span></li>
+                <li><span className="wc-manifest-key">whole method</span><span className="wc-manifest-value">The Arachne Method</span></li>
+                <li><span className="wc-manifest-key">software</span><span className="wc-manifest-value">WebChess 2.2.0-rc.1</span></li>
+                <li><span className="wc-manifest-key">ANANSI</span><span className="wc-manifest-value">Anansi / Division field construction</span></li>
+                <li><span className="wc-manifest-key">code freeze</span><span className="wc-manifest-value">{releaseCommit ?? 'unresolved · publication blocked'}</span></li>
+                <li><span className="wc-manifest-key">released tag</span><span className="wc-manifest-value">v2.1.0 · 9980328581ba3e6fed6f2c4fc99b555fec4773bc</span></li>
+                <li><span className="wc-manifest-key">boundary</span><span className="wc-manifest-value">candidate · efficacy not validated</span></li>
                 <li><span className="wc-manifest-key">board</span><span className="wc-manifest-value">8 rings × 8 sectors</span></li>
                 <li><span className="wc-manifest-key">engine</span><span className="wc-manifest-value">150,000-node default · depth cap 12</span></li>
                 <li><span className="wc-manifest-key">retry budget</span><span className="wc-manifest-value">2 same-field · 1 regenerated-field</span></li>

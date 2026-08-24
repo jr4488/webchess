@@ -1,6 +1,10 @@
 import Link from 'next/link'
 
+import { immutableReleaseSourceUrl } from '@/lib/release-source'
+
 export function SiteFooter() {
+  const immutableSourceUrl = immutableReleaseSourceUrl()
+
   return (
     <footer className="wc-footer">
       <div className="wc-wrap">
@@ -22,8 +26,18 @@ export function SiteFooter() {
               <li><Link href="/#episode">Episode</Link></li>
               <li><Link href="/#lifecycle">Lifecycle</Link></li>
               <li><Link href="/research">Research program</Link></li>
-              <li><Link href="/white-paper">White paper</Link></li>
-              <li><a href="https://github.com/jr4488/webchess">Source repository</a></li>
+              <li><Link href="/white-paper">Historical paper 3.0</Link></li>
+              <li><Link href="/install">Install the local research build</Link></li>
+              <li>
+                {immutableSourceUrl ? (
+                  <>
+                    <a href={immutableSourceUrl}>Immutable source</a>{' · '}
+                    <a href="/downloads/webchess-release-identity.json">Release identity</a>
+                  </>
+                ) : (
+                  <span role="status">Source identity pending</span>
+                )}
+              </li>
             </ul>
           </nav>
 

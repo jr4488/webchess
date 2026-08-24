@@ -35,22 +35,22 @@ export const PROTECTED_ROUTES: readonly RouteFixture[] = [
 
 export const DOWNLOADS: readonly DownloadFixture[] = [
   {
-    path: '/downloads/webchess-white-paper.md',
-    label: 'white paper Markdown',
-    sourcePath: 'public/downloads/webchess-white-paper.md',
+    path: '/downloads/webchess-white-paper-v3-historical.md',
+    label: 'historical white paper Markdown',
+    sourcePath: 'public/downloads/webchess-white-paper-v3-historical.md',
     contentType: /(?:text\/(?:markdown|plain)|application\/octet-stream)/i,
   },
   {
-    path: '/downloads/webchess-white-paper.html',
-    label: 'white paper HTML',
-    sourcePath: 'public/downloads/webchess-white-paper.html',
+    path: '/downloads/webchess-white-paper-v3-historical.html',
+    label: 'historical white paper HTML',
+    sourcePath: 'public/downloads/webchess-white-paper-v3-historical.html',
     contentType: /text\/html/i,
     signature: '<!doctype html',
   },
   {
-    path: '/downloads/webchess-white-paper.pdf',
-    label: 'white paper PDF',
-    sourcePath: 'public/downloads/webchess-white-paper.pdf',
+    path: '/downloads/webchess-white-paper-v3-historical.pdf',
+    label: 'historical white paper PDF',
+    sourcePath: 'public/downloads/webchess-white-paper-v3-historical.pdf',
     contentType: /application\/pdf/i,
     signature: '%PDF-',
   },
@@ -65,14 +65,6 @@ export const DOWNLOADS: readonly DownloadFixture[] = [
     label: 'Apache-2.0 license',
     sourcePath: 'public/downloads/LICENSE',
     contentType: /(?:text\/plain|application\/octet-stream)/i,
-  },
-  {
-    path: '/downloads/webchess-source.zip',
-    label: 'source archive',
-    contentType: /(?:application\/(?:zip|x-zip-compressed|octet-stream))/i,
-    signature: 'PK',
-    redirectLocation:
-      /^https:\/\/github\.com\/jr4488\/webchess\/archive\/(?:[a-f0-9]{40}\.zip|refs\/heads\/main\.zip)$/i,
   },
 ] as const
 

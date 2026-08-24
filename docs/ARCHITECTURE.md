@@ -113,7 +113,7 @@ launcher-only activation flag is present and after requiring the existing
 ledger to be an exact checksum-matching prefix. A genuinely empty database is
 accepted; a nonempty schema with an unrelated relation is refused rather than
 adopted. Ordinary development, hosted, and Vercel starts never auto-migrate.
-The launcher reports the `2.2.0-local` candidate identity, disables OpenClaw
+The launcher reports the `2.2.0-rc.1-local` candidate identity, disables OpenClaw
 and test-auth bypasses, validates an existing named database container before
 starting it, and opens the browser only after a bounded readiness probe.
 Automatic Codex Search research is not wired into this runtime.

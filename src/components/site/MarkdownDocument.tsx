@@ -6,6 +6,8 @@ import {
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
+import { immutableReleaseSourceUrl } from '@/lib/release-source'
+
 import styles from './PublicSite.module.css'
 import { PublicShell } from './PublicShell'
 
@@ -310,19 +312,25 @@ export function MarkdownDocument({
   sourceHref,
   sourceLabel = 'Download source',
 }: MarkdownDocumentProps) {
+  const immutableSourcePending =
+    sourceHref === '/downloads/webchess-source.zip' &&
+    !immutableReleaseSourceUrl()
+
   return (
     <PublicShell>
       <article className={styles.document} data-public-document>
         <aside className={styles.documentUtility} aria-label="Document resources">
           <p>Repository-backed document</p>
           <div className={styles.documentActions}>
-            {sourceHref ? (
+            {sourceHref && !immutableSourcePending ? (
               <a
                 href={sourceHref}
                 download={sourceHref.startsWith('/downloads/') || undefined}
               >
                 {sourceLabel}
               </a>
+            ) : immutableSourcePending ? (
+              <span role="status">Source identity pending</span>
             ) : null}
             {downloads.map((download) => (
               <a href={download.href} key={download.href} download>

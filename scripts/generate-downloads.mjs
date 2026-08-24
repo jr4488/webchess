@@ -10,6 +10,9 @@ import remarkGfm from 'remark-gfm'
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const downloadDirectory = join(repositoryRoot, 'public', 'downloads')
 const whitePaperRepositoryPath = 'docs/WEBCHESS_WHITE_PAPER_V3.md'
+const historicalWhitePaperSourceCommit =
+  '0384978b2ba709da4c9824f2821c8623d3f84364'
+const historicalWhitePaperSoftwareVersion = '2.2.0'
 
 const sourcePaths = {
   installation: join(repositoryRoot, 'INSTALL.md'),
@@ -21,9 +24,18 @@ const sourcePaths = {
 const outputPaths = {
   installation: join(downloadDirectory, 'webchess-installation.md'),
   license: join(downloadDirectory, 'LICENSE'),
-  whitePaperHtml: join(downloadDirectory, 'webchess-white-paper.html'),
-  whitePaperMarkdown: join(downloadDirectory, 'webchess-white-paper.md'),
-  whitePaperPdf: join(downloadDirectory, 'webchess-white-paper.pdf'),
+  whitePaperHtml: join(
+    downloadDirectory,
+    'webchess-white-paper-v3-historical.html',
+  ),
+  whitePaperMarkdown: join(
+    downloadDirectory,
+    'webchess-white-paper-v3-historical.md',
+  ),
+  whitePaperPdf: join(
+    downloadDirectory,
+    'webchess-white-paper-v3-historical.pdf',
+  ),
 }
 
 const repositoryUrl = 'https://github.com/jr4488/webchess'
@@ -264,7 +276,7 @@ function repositoryHref(sourcePath, href) {
   }
 
   const suffix = fragment ? `#${fragment}` : ''
-  return `${repositoryUrl}/blob/main/${normalizedParts.join('/')}${suffix}`
+  return `${repositoryUrl}/blob/${historicalWhitePaperSourceCommit}/${normalizedParts.join('/')}${suffix}`
 }
 
 function renderWhitePaperHtml(markdown, images) {
@@ -1077,7 +1089,10 @@ async function main() {
   assertDocument(whitePaperRepositoryPath, whitePaper)
 
   const softwareVersion = JSON.parse(packageSource).version
-  if (typeof softwareVersion !== 'string' || !/^\d+\.\d+\.\d+$/u.test(softwareVersion)) {
+  if (
+    typeof softwareVersion !== 'string' ||
+    !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/u.test(softwareVersion)
+  ) {
     throw new Error('package.json must provide a semantic software version')
   }
 
@@ -1085,7 +1100,7 @@ async function main() {
   const whitePaperHtml = renderWhitePaperHtml(whitePaper, whitePaperImages)
   const whitePaperPdf = createPdf(
     downloadablePdfMarkdown(whitePaper),
-    softwareVersion,
+    historicalWhitePaperSoftwareVersion,
     whitePaperImages,
   )
 

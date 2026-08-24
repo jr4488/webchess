@@ -1,7 +1,7 @@
 # WebChess 2.0 operator guide
 
-This guide describes the implemented WebChess 2.0 lifecycle in the `2.2.0`
-release candidate. The latest tagged package remains `2.1.0`; this guide does
+This guide describes the implemented WebChess 2.0 lifecycle in the
+`2.2.0-rc.1` candidate. The latest tagged package remains `2.1.0`; this guide does
 not claim that a Preview or Production deployment exists.
 
 ## Lifecycle authority

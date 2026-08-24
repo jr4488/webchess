@@ -1,9 +1,14 @@
 {
   "schema": "webchess-release-identity/1",
+  "status": "unresolved",
   "release": {
     "product": "WebChess",
     "version": "2.2.0-rc.1",
-    "method": "Arachne Method",
+    "naming": {
+      "method": "The Arachne Method",
+      "software": "WebChess",
+      "anansi": "Anansi/Division field-construction mnemonic"
+    },
     "caseBundleSchema": "webchess-case-bundle/1"
   },
   "source": {
@@ -31,12 +36,21 @@
   "dependencies": {
     "openclaw": {
       "version": "2026.7.1-2",
-      "commit": "0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c"
+      "sourceTag": "v2026.7.1-2",
+      "sourceCommit": "0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c",
+      "npmIntegrity": "sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g=="
     }
   },
   "toolchains": {
     "node": "24.19.0",
     "npm": "11.14.1",
-    "postgresql": "17"
+    "postgresql": {
+      "version": "17.10",
+      "image": "postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193"
+    },
+    "browser": {
+      "name": "Google Chrome",
+      "version": "150.0.7871.128"
+    }
   }
 }

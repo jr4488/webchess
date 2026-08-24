@@ -39,6 +39,18 @@ describe('downloadable white-paper formulas', () => {
     )
   })
 
+  it('pins historical paper links to its immutable source snapshot', () => {
+    const html = renderWhitePaperHtml(
+      '[Install](../INSTALL.md#requirements)',
+      new Map(),
+    )
+
+    expect(html).toContain(
+      'https://github.com/jr4488/webchess/blob/0384978b2ba709da4c9824f2821c8623d3f84364/INSTALL.md#requirements',
+    )
+    expect(html).not.toContain('/blob/main/')
+  })
+
   it('removes CommonMark hard-break markers from PDF text', () => {
     const portable = downloadablePdfMarkdown(
       ['**Paper version:** 3.0\\', '**Date:** August 15, 2026'].join('\n'),

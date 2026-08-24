@@ -6,7 +6,7 @@ name: webchess-local
 
 services:
   postgres:
-    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    image: postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
     container_name: webchess-local-postgres
     labels:
       com.anansiportia.webchess.local-postgres: managed-v1

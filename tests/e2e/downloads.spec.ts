@@ -5,9 +5,9 @@ const advertisedDownloads = [
   {
     page: '/white-paper',
     paths: [
-      '/downloads/webchess-white-paper.md',
-      '/downloads/webchess-white-paper.html',
-      '/downloads/webchess-white-paper.pdf',
+      '/downloads/webchess-white-paper-v3-historical.md',
+      '/downloads/webchess-white-paper-v3-historical.html',
+      '/downloads/webchess-white-paper-v3-historical.pdf',
     ],
   },
   {
@@ -17,10 +17,6 @@ const advertisedDownloads = [
   {
     page: '/license',
     paths: ['/downloads/LICENSE'],
-  },
-  {
-    page: '/',
-    paths: ['/downloads/webchess-source.zip'],
   },
 ] as const
 

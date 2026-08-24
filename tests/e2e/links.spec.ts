@@ -33,7 +33,6 @@ test('every public page has working internal and external links', async ({
   }
 
   for (const [url, purpose] of [
-    [GITHUB_REPOSITORY_URL, 'the public GitHub repository'],
     [GITHUB_DISCUSSIONS_URL, 'GitHub Discussions for support'],
     [GITHUB_ISSUES_URL, 'GitHub Issues for bounded defects'],
     [
@@ -46,6 +45,12 @@ test('every public page has working internal and external links', async ({
       `The site must link to ${purpose}.`,
     ).toBe(true)
   }
+
+  expect(
+    discovered.has(`${GITHUB_REPOSITORY_URL}/tree/main`) ||
+      discovered.has(`${GITHUB_REPOSITORY_URL}/archive/refs/heads/main.zip`),
+    'The unresolved site must not advertise mutable main source as its release identity.',
+  ).toBe(false)
 
   const requestLinks: string[] = []
   for (const href of discovered) {

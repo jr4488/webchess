@@ -26,11 +26,12 @@ import {
 const COMMIT = '0384978b2ba709da4c9824f2821c8623d3f84364'
 const CANDIDATE_PAPER_PATH = 'docs/WEBCHESS_WHITE_PAPER_V3_1.md'
 const HISTORICAL_PAPER_PATH = 'docs/WEBCHESS_WHITE_PAPER_V3.md'
+const PAPER_PDF = Buffer.from('%PDF-1.4\nexact paper PDF bytes')
 const SOURCE_ARCHIVE_SHA256 = createHash('sha256')
   .update('exact source archive bytes')
   .digest('hex')
 const PAPER_PDF_SHA256 = createHash('sha256')
-  .update('exact paper PDF bytes')
+  .update(PAPER_PDF)
   .digest('hex')
 const execFileAsync = promisify(execFile)
 
@@ -69,6 +70,11 @@ async function releaseFixture() {
     root,
     HISTORICAL_PAPER_PATH,
     '# Historical\n\n**Paper version:** 3.0\\\n',
+  )
+  await writeFixtureFile(
+    root,
+    'public/downloads/webchess-white-paper.pdf',
+    PAPER_PDF,
   )
   await writeFixtureFile(root, '.gitignore', 'public/downloads\n')
   return {
@@ -117,9 +123,14 @@ describe('release identity provenance', () => {
     expect(validateReleaseIdentityTemplate(template)).toBe(template)
     expect(template).toMatchObject({
       schema: 'webchess-release-identity/1',
+      status: 'unresolved',
       release: {
         version: '2.2.0-rc.1',
-        method: 'Arachne Method',
+        naming: {
+          method: 'The Arachne Method',
+          software: 'WebChess',
+          anansi: 'Anansi/Division field-construction mnemonic',
+        },
         caseBundleSchema: 'webchess-case-bundle/1',
       },
       paper: {
@@ -130,15 +141,25 @@ describe('release identity provenance', () => {
         },
       },
       dependencies: {
-        openclaw: {
-          version: '2026.7.1-2',
-          commit: '0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c',
+      openclaw: {
+        version: '2026.7.1-2',
+        sourceTag: 'v2026.7.1-2',
+        sourceCommit: '0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c',
+        npmIntegrity:
+          'sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==',
         },
       },
       toolchains: {
         node: '24.19.0',
         npm: '11.14.1',
-        postgresql: '17',
+        postgresql: {
+          version: '17.10',
+          image: 'postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193',
+        },
+        browser: {
+          name: 'Google Chrome',
+          version: '150.0.7871.128',
+        },
       },
     })
     expect(() => validateResolvedReleaseIdentity(template)).toThrow(
@@ -166,6 +187,7 @@ describe('release identity provenance', () => {
         sha256: SOURCE_ARCHIVE_SHA256,
       },
     })
+    expect(identity.status).toBe('resolved')
     expect(identity.paper.candidate).toEqual({
       edition: '3.1',
       repositoryPath: CANDIDATE_PAPER_PATH,
@@ -298,6 +320,29 @@ describe('release identity provenance', () => {
       root: fixture.root,
     })).rejects.toThrow(
       'does not identify itself as paper version or edition 3.1',
+    )
+  })
+
+  it('rejects candidate PDF bytes that do not match the declared digest', async () => {
+    const fixture = await releaseFixture()
+    const identity = resolveReleaseIdentity(releaseInputs())
+    await writeFixtureFile(
+      fixture.root,
+      'public/downloads/webchess-release-identity.json',
+      `${JSON.stringify(identity, null, 2)}\n`,
+    )
+    await writeFixtureFile(
+      fixture.root,
+      'public/downloads/webchess-white-paper.pdf',
+      Buffer.from('%PDF-1.4\ndifferent candidate paper'),
+    )
+
+    await expect(checkReleaseIdentity({
+      git: cleanGit(),
+      identityPath: fixture.identityPath,
+      root: fixture.root,
+    })).rejects.toThrow(
+      'edition 3.1 PDF bytes do not match paper.candidate.pdf.sha256',
     )
   })
 })

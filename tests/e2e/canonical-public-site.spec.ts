@@ -12,11 +12,11 @@ test.describe('canonical WebChess public site', () => {
       }),
     ).toBeVisible()
 
-    await expect(page.getByRole('link', { name: 'Play WebChess' }).first()).toHaveAttribute(
+    await expect(page.getByRole('link', { name: 'Run WebChess locally' })).toHaveAttribute(
       'href',
-      '/play',
+      '/install',
     )
-    await expect(page.getByRole('link', { name: 'Read the white paper' })).toHaveAttribute(
+    await expect(page.getByRole('link', { name: 'Read historical paper 3.0' })).toHaveAttribute(
       'href',
       '/white-paper',
     )
@@ -24,14 +24,14 @@ test.describe('canonical WebChess public site', () => {
       'href',
       '#episode',
     )
-    await expect(page.getByRole('link', { name: 'Download PDF' })).toHaveAttribute(
+    await expect(page.getByRole('link', { name: 'Download historical PDF' })).toHaveAttribute(
       'href',
-      '/downloads/webchess-white-paper.pdf',
+      '/downloads/webchess-white-paper-v3-historical.pdf',
     )
-    await expect(page.getByRole('link', { name: 'Download source' })).toHaveAttribute(
-      'href',
-      '/downloads/webchess-source.zip',
-    )
+    await expect(page.getByText('Source identity pending').first()).toBeVisible()
+    await expect(
+      page.getByRole('link', { name: 'Download immutable source' }),
+    ).toHaveCount(0)
 
     const illustrativeDisclosure = page.getByText('Illustrative sequence, not the live engine.')
     await expect(illustrativeDisclosure).toBeVisible()
@@ -46,13 +46,20 @@ test.describe('canonical WebChess public site', () => {
     const response = await page.goto('/research', { waitUntil: 'domcontentloaded' })
     expect(response?.status()).toBeLessThan(400)
 
-    await expect(page.getByRole('link', { name: 'Read online' })).toHaveAttribute(
+    await expect(page.getByRole('link', { name: 'Read historical edition 3.0' })).toHaveAttribute(
       'href',
       '/white-paper',
     )
-    await expect(page.getByRole('link', { name: 'Inspect GitHub' })).toHaveAttribute(
+    await expect(page.getByText('Immutable source pending code freeze')).toBeVisible()
+    await expect(
+      page.getByRole('link', { name: 'Inspect immutable GitHub source' }),
+    ).toHaveCount(0)
+    await expect(
+      page.getByText('Edition 3.1 publication pending code freeze'),
+    ).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Run the candidate locally' })).toHaveAttribute(
       'href',
-      'https://github.com/jr4488/webchess',
+      '/install',
     )
     await expect(page.getByRole('link', { name: 'Join the discussion' })).toHaveAttribute(
       'href',

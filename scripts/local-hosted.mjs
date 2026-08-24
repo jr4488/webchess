@@ -21,7 +21,7 @@ export const LOCAL_PORT = 3005
 export const LOCAL_POSTGRES_CONTAINER = 'webchess-local-postgres'
 export const LOCAL_POSTGRES_DATABASE = 'webchess'
 export const LOCAL_POSTGRES_IMAGE =
-  'postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193'
+  'postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193'
 export const LOCAL_POSTGRES_OWNER_LABEL =
   'com.anansiportia.webchess.local-postgres'
 export const LOCAL_POSTGRES_OWNER_LABEL_VALUE = 'managed-v1'

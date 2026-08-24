@@ -11,7 +11,8 @@ playwright-report
 test-results
 tsconfig.tsbuildinfo
 .vite
-public/downloads
+public/downloads/*
+!public/downloads/.npmignore
 webchess-build-identity.json
 .env
 .env.*

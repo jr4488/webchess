@@ -1,27 +1,11 @@
+import { configuredReleaseCommit } from '@/lib/release-source'
+
 const REPOSITORY_ARCHIVE_ROOT =
   'https://github.com/jr4488/webchess/archive'
-const GIT_COMMIT_PATTERN = /^[a-f0-9]{40}$/i
 
 function archiveUrl(): string | null {
-  const commit = (
-    process.env.WEBCHESS_RELEASE_SHA ??
-    process.env.VERCEL_GIT_COMMIT_SHA
-  )?.trim()
-
-  if (commit && GIT_COMMIT_PATTERN.test(commit)) {
-    return `${REPOSITORY_ARCHIVE_ROOT}/${commit}.zip`
-  }
-
-  if (
-    process.env.VERCEL !== undefined ||
-    process.env.VERCEL_ENV !== undefined ||
-    process.env.VERCEL_TARGET_ENV !== undefined ||
-    process.env.VERCEL_URL !== undefined
-  ) {
-    return null
-  }
-
-  return `${REPOSITORY_ARCHIVE_ROOT}/refs/heads/main.zip`
+  const commit = configuredReleaseCommit()
+  return commit ? `${REPOSITORY_ARCHIVE_ROOT}/${commit}.zip` : null
 }
 
 export function GET(): Response {
@@ -31,7 +15,8 @@ export function GET(): Response {
       {
         error: {
           code: 'RELEASE_SHA_UNAVAILABLE',
-          message: 'The source archive is temporarily unavailable.',
+          message:
+            'The immutable release source identity is unavailable; branch archives are never substituted.',
         },
       },
       {

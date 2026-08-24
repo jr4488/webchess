@@ -1,9 +1,13 @@
 import { render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { MarkdownDocument } from './MarkdownDocument'
 
 describe('MarkdownDocument', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
   it('renders accessible document controls, headings, tables, formulas, and mapped links', () => {
     render(
       <MarkdownDocument
@@ -157,5 +161,25 @@ describe('MarkdownDocument', () => {
       screen.queryByRole('link', { name: 'Download source' }),
     ).not.toBeInTheDocument()
     expect(screen.getByText(/unfinished expression/)).toBeInTheDocument()
+  })
+
+  it('does not advertise the source archive without reviewed release identity', () => {
+    vi.stubEnv('WEBCHESS_RELEASE_SHA', '')
+    vi.stubEnv('VERCEL_GIT_COMMIT_SHA', '')
+
+    render(
+      <MarkdownDocument
+        source="# Policy"
+        sourceHref="/downloads/webchess-source.zip"
+      />,
+    )
+
+    expect(screen.getAllByRole('status')).toHaveLength(2)
+    expect(screen.getAllByRole('status')[0]).toHaveTextContent(
+      'Source identity pending',
+    )
+    expect(
+      screen.queryByRole('link', { name: 'Download source' }),
+    ).not.toBeInTheDocument()
   })
 })

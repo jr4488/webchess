@@ -5,7 +5,8 @@ const NAVIGATION = [
   { href: '/#episode', label: 'Episode' },
   { href: '/#lifecycle', label: 'Lifecycle' },
   { href: '/research', label: 'Research' },
-  { href: '/white-paper', label: 'White paper' },
+  { href: '/white-paper', label: 'Historical paper' },
+  { href: '/install', label: 'Install' },
 ] as const
 
 export function SiteHeader() {
@@ -28,7 +29,7 @@ export function SiteHeader() {
 
         <div className="wc-nav-actions">
           <Link className="wc-nav-signin" href="/sign-in">Sign in</Link>
-          <Link className="wc-nav-play" href="/play">Play WebChess</Link>
+          <Link className="wc-nav-play" href="/install">Run locally</Link>
         </div>
       </div>
     </header>

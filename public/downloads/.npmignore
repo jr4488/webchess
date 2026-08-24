@@ -1,0 +1,9 @@
+# Only the reviewed release/download artifacts may enter an npm package.
+*
+!LICENSE
+!webchess-installation.md
+!webchess-release-identity.json
+!webchess-white-paper.pdf
+!webchess-white-paper-v3-historical.html
+!webchess-white-paper-v3-historical.md
+!webchess-white-paper-v3-historical.pdf

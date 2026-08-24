@@ -1,5 +1,7 @@
 import Link from 'next/link'
 
+import { immutableReleaseSourceUrl } from '@/lib/release-source'
+
 import { PublicShell } from './PublicShell'
 
 const PRINCIPLES = [
@@ -31,6 +33,8 @@ const LINEAGE = [
 ] as const
 
 export function ResearchHome() {
+  const immutableSourceUrl = immutableReleaseSourceUrl()
+
   return (
     <PublicShell>
       <section className="wc-research-hero" aria-labelledby="wc-research-title">
@@ -51,13 +55,36 @@ export function ResearchHome() {
           </h2>
           <div className="wc-research-documents" data-wc-reveal>
             <article className="wc-research-document">
-              <small>Primary document</small>
+              <small>Candidate paper · edition 3.1</small>
+              <h2>Code-freeze release mapping</h2>
+              <p>
+                The integrated candidate paper must name the same immutable source commit and
+                artifact digests as the release identity. Until those values resolve, edition
+                3.1 is not presented as a public artifact.
+              </p>
+              {immutableSourceUrl ? (
+                <a href="/downloads/webchess-white-paper.pdf" download>
+                  Download mapped edition 3.1
+                </a>
+              ) : (
+                <span role="status">Edition 3.1 publication pending code freeze</span>
+              )}
+            </article>
+            <article className="wc-research-document">
+              <small>Historical audit document · edition 3.0</small>
               <h2>The First Answer Is Not Enough</h2>
               <p>
                 The Arachne Method, circular-chess computation, Portia, Gate, Retry, Answer,
                 Charlotte, Wilbur, provenance, implementation audit, and evaluation program.
+                WebChess is the software instrument; ANANSI names its initial Anansi/Division
+                field-construction stage, not the whole method. This preserved edition maps to{' '}
+                <a href="https://github.com/jr4488/webchess/tree/0384978b2ba709da4c9824f2821c8623d3f84364">
+                  exact source <code>0384978b2ba709da4c9824f2821c8623d3f84364</code>
+                </a>
+                ; edition 3.1 remains unresolved
+                until the integrated code and artifacts are frozen.
               </p>
-              <Link href="/white-paper">Read online</Link>
+              <Link href="/white-paper">Read historical edition 3.0</Link>
             </article>
             <article className="wc-research-document">
               <small>Canonical implementation</small>
@@ -66,7 +93,16 @@ export function ResearchHome() {
                 Complete Next.js application, circular rules engine, durable lifecycle, tests,
                 operational documentation, research fixtures, and Apache-2.0 source.
               </p>
-              <a href="https://github.com/jr4488/webchess">Inspect GitHub</a>
+              {immutableSourceUrl ? (
+                <>
+                  <a href={immutableSourceUrl}>Inspect immutable GitHub source</a>{' '}
+                  <a href="/downloads/webchess-release-identity.json">
+                    Verify release identity
+                  </a>
+                </>
+              ) : (
+                <span role="status">Immutable source pending code freeze</span>
+              )}
             </article>
           </div>
         </div>
@@ -149,11 +185,12 @@ export function ResearchHome() {
               <div className="wc-kicker">Open research</div>
               <h3 id="research-actions-title">Attack the architecture. Keep what survives.</h3>
               <p>
-                Read the paper, inspect the code, reproduce the lifecycle, and challenge the
-                assumptions in public.
+                Read the paper, verify its release identity, inspect that exact code, reproduce
+                the lifecycle, and challenge the assumptions in public.
               </p>
               <div className="wc-paper-actions">
-                <Link className="wc-btn" href="/white-paper">Read the paper</Link>
+                <Link className="wc-btn" href="/white-paper">Read historical paper 3.0</Link>
+                <Link className="wc-btn wc-btn-plain" href="/install">Run the candidate locally</Link>
                 <a className="wc-btn wc-btn-plain" href="https://github.com/jr4488/webchess/discussions">
                   Join the discussion
                 </a>

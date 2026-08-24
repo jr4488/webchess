@@ -1,7 +1,13 @@
 cff-version: 1.2.0
-message: "If you use WebChess in research, please cite the software and its white paper."
-title: "WebChess"
+message: "Cite the exact immutable WebChess release identity and its mapped paper for The Arachne Method; this candidate has no DOI."
+title: "WebChess: reference software instrument for The Arachne Method"
 type: software
+abstract: >-
+  WebChess is the reference software instrument for the experimental program
+  called The Arachne Method. Version 2.2.0-rc.1 is a release candidate whose exact source commit,
+  paper edition 3.1, and artifact digests must be read from the generated
+  webchess-release-identity/1 manifest. Software conformance does not establish
+  efficacy, and no DOI is claimed for this candidate.
 authors:
   - family-names: "Reynolds"
     given-names: "Jack"

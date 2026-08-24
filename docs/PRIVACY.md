@@ -28,13 +28,21 @@ receive or proxy the credential and does not add a WebChess-operated service to
 that path. Gate, Retry policy, Wilbur records, and provenance are local
 deterministic or user-authored operations.
 
-Immediately before Portia, only the OpenClaw runtime may send a bounded search
-query to its configured Codex Search provider. The broker makes at most one
-invocation, stores at most five citation-candidate links plus bounded search
-synthesis and provenance, and does not fetch the linked pages. The provider may
-receive the question and search query under the user's OpenClaw/provider
-configuration. A stored link is not proof that WebChess read or verified its
-page.
+Research search is a separate, case-scoped data flow and is off until the
+player gives versioned consent. When enabled and the bounded materiality rule
+triggers, the OpenClaw runtime sends the original question and a bounded query
+to its configured Codex Search provider under the user's OpenClaw/provider
+account. The local broker may then request at most three public HTTPS pages.
+Those page hosts receive an ordinary request from the local machine. Redirects,
+private or special-use addresses, credential-bearing URLs, oversized bodies,
+unsupported media, and provenance inconsistencies fail closed.
+
+Retained URLs, excerpts, timestamps, failures, and content digests become
+case provenance and may be included in Portia, Answer, and Charlotte prompts.
+Search synthesis and fetched page text remain untrusted evidence candidates;
+filtering and provenance do not prove that a source or claim is true. Opting
+out leaves the non-search lifecycle available and must not select another
+hosted search service.
 
 ## Local source-checkout runtime
 
@@ -158,7 +166,22 @@ WebChess does not promise a retention period that the deployed vendor
 configuration cannot enforce. The production operator must publish any
 material retention change before it takes effect.
 
-## Export, correction, and deletion
+## Export, verification, correction, and deletion
+
+The local plugin exposes **Export case** and **Import & verify case** for a
+redaction-aware `webchess-case-bundle/1` artifact. Verification checks the
+bundle's digests, event-log replay, terminal board, and recorded provenance;
+it does not rerun provider calls or prove that the answer is true. The UI action
+**Start another game on this field** creates a new trajectory and is not replay
+verification. A case bundle is not a PostgreSQL backup, an OpenAI
+subject-access export, or a substitute for retaining a tested database dump.
+
+The local OpenClaw model/auth status check is not a Codex Hosted Search probe.
+There is no separate no-data search probe in the reviewed path. Only a
+case-consented, material search attempt can establish search behavior, and its
+durable record must preserve the hosted search activity or visible
+failure/refusal. Any subsequent guarded retrieval of up to three public HTTPS
+pages is performed separately by local WebChess.
 
 The deployed `/account` page is the self-service path to:
 

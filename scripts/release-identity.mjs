@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   mkdir,
   readFile,
@@ -66,12 +66,24 @@ function releaseIdentityShape({
   sourceArchiveSha256 = null,
   sourceCommit = null,
 } = {}) {
+  const resolved = Boolean(
+    paperPdfSha256 &&
+    paperRepositoryPath &&
+    sourceArchiveSha256 &&
+    sourceCommit,
+  )
+
   return {
     schema: 'webchess-release-identity/1',
+    status: resolved ? 'resolved' : 'unresolved',
     release: {
       product: 'WebChess',
       version: '2.2.0-rc.1',
-      method: 'Arachne Method',
+      naming: {
+        method: 'The Arachne Method',
+        software: 'WebChess',
+        anansi: 'Anansi/Division field-construction mnemonic',
+      },
       caseBundleSchema: 'webchess-case-bundle/1',
     },
     source: {
@@ -99,13 +111,23 @@ function releaseIdentityShape({
     dependencies: {
       openclaw: {
         version: '2026.7.1-2',
-        commit: OPENCLAW_COMMIT,
+        sourceTag: 'v2026.7.1-2',
+        sourceCommit: OPENCLAW_COMMIT,
+        npmIntegrity:
+          'sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==',
       },
     },
     toolchains: {
       node: '24.19.0',
       npm: '11.14.1',
-      postgresql: '17',
+      postgresql: {
+        version: '17.10',
+        image: 'postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193',
+      },
+      browser: {
+        name: 'Google Chrome',
+        version: '150.0.7871.128',
+      },
     },
   }
 }
@@ -369,6 +391,33 @@ async function verifyDeclaredPapers({ git, identity, root }) {
   })
 }
 
+async function verifyCandidatePaperPdf({ identity, root }) {
+  const pdfPath = resolve(
+    root,
+    'public',
+    `.${identity.paper.candidate.pdf.downloadPath}`,
+  )
+  let pdf
+  try {
+    pdf = await readFile(pdfPath)
+  } catch {
+    throw new ReleaseIdentityError(
+      'The exact edition 3.1 PDF must exist at public/downloads/webchess-white-paper.pdf before release identity generation or checking.',
+    )
+  }
+  if (!pdf.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
+    throw new ReleaseIdentityError(
+      'The declared edition 3.1 paper artifact is not a PDF.',
+    )
+  }
+  const digest = createHash('sha256').update(pdf).digest('hex')
+  if (digest !== identity.paper.candidate.pdf.sha256) {
+    throw new ReleaseIdentityError(
+      'The edition 3.1 PDF bytes do not match paper.candidate.pdf.sha256.',
+    )
+  }
+}
+
 export function releaseInputsFromEnvironment(environment = process.env) {
   return {
     paperPdfSha256:
@@ -406,6 +455,7 @@ export async function generateReleaseIdentity({
     )
   }
   await verifyDeclaredPapers({ git: runGit, identity, root })
+  await verifyCandidatePaperPdf({ identity, root })
 
   await mkdir(dirname(outputPath), { recursive: true })
   const temporaryPath = `${outputPath}.${process.pid}.${randomUUID()}.tmp`
@@ -456,6 +506,7 @@ export async function checkReleaseIdentity({
     )
   }
   await verifyDeclaredPapers({ git: runGit, identity, root })
+  await verifyCandidatePaperPdf({ identity, root })
   const finalHead = await exactCleanHead(runGit)
   if (finalHead !== initialHead) {
     throw new ReleaseIdentityError(

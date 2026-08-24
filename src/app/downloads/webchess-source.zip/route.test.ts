@@ -31,7 +31,9 @@ afterEach(() => {
 })
 
 describe('source archive download', () => {
-  it('redirects a Vercel deployment to its immutable Git commit archive', () => {
+  it('redirects only when the reviewed release and deployment commits match', () => {
+    process.env.WEBCHESS_RELEASE_SHA =
+      '0123456789abcdef0123456789abcdef01234567'
     process.env.VERCEL_GIT_COMMIT_SHA =
       '0123456789abcdef0123456789abcdef01234567'
 
@@ -46,7 +48,7 @@ describe('source archive download', () => {
     )
   })
 
-  it('uses the public main branch when no valid Vercel SHA is available', () => {
+  it('fails closed outside Vercel when no immutable SHA is available', async () => {
     delete process.env.VERCEL
     delete process.env.VERCEL_ENV
     delete process.env.VERCEL_TARGET_ENV
@@ -55,10 +57,25 @@ describe('source archive download', () => {
 
     const response = GET()
 
-    expect(response.status).toBe(307)
-    expect(response.headers.get('location')).toBe(
-      'https://github.com/jr4488/webchess/archive/refs/heads/main.zip',
-    )
+    expect(response.status).toBe(503)
+    expect(response.headers.get('location')).toBeNull()
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'RELEASE_SHA_UNAVAILABLE' },
+    })
+  })
+
+  it('does not treat deployment metadata alone as reviewed release identity', async () => {
+    delete process.env.WEBCHESS_RELEASE_SHA
+    process.env.VERCEL_GIT_COMMIT_SHA =
+      '0123456789abcdef0123456789abcdef01234567'
+
+    const response = GET()
+
+    expect(response.status).toBe(503)
+    expect(response.headers.get('location')).toBeNull()
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'RELEASE_SHA_UNAVAILABLE' },
+    })
   })
 
   it.each([
@@ -79,14 +96,28 @@ describe('source archive download', () => {
     })
   })
 
-  it('allows an explicit reviewed release SHA to override Git metadata', () => {
+  it('allows an explicit reviewed release SHA when deployment metadata is absent', () => {
     process.env.VERCEL = '1'
-    process.env.VERCEL_GIT_COMMIT_SHA = 'not-a-commit'
+    delete process.env.VERCEL_GIT_COMMIT_SHA
     process.env.WEBCHESS_RELEASE_SHA =
       'fedcba9876543210fedcba9876543210fedcba98'
 
     expect(GET().headers.get('location')).toBe(
       'https://github.com/jr4488/webchess/archive/fedcba9876543210fedcba9876543210fedcba98.zip',
     )
+  })
+
+  it('fails closed when explicit and deployment SHAs conflict', async () => {
+    process.env.WEBCHESS_RELEASE_SHA =
+      'fedcba9876543210fedcba9876543210fedcba98'
+    process.env.VERCEL_GIT_COMMIT_SHA =
+      '0123456789abcdef0123456789abcdef01234567'
+
+    const response = GET()
+
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'RELEASE_SHA_UNAVAILABLE' },
+    })
   })
 })

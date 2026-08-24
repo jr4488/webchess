@@ -1,498 +1,429 @@
 # WebChess
 
-WebChess is a circular problem-solving game for examining a difficult question
-from many angles before acting. It combines:
+WebChess is the reference software instrument for **The Arachne Method**, an
+experimental architecture for slowing down a difficult question before acting.
+It constructs a 64-facet field, plays a complete circular-chess trajectory,
+attacks what survives, permits a deterministic Gate to refuse, qualifies any
+answer, and records human-owned action and observation.
 
-1. a structured model pass that proposes exactly 64 problem-specific facets;
-2. independent, seeded placement of those facets and 64 I Ching-inspired
-   change lenses on an eight-ring by eight-sector board;
-3. a complete circular-chess game whose captures create an inspectable trail
-   of attention;
-4. a concrete answer-generation prompt assembled from the board-derived
-   weights, values, routes, and terminal survivors;
-5. Portia, a pre-generation adversarial validation of that exact prompt, backed
-   by a deterministic Gate and bounded internal Retry policy;
-6. an Answer generated only after approval, followed by Charlotte's
-   audience-aware qualification and exactly three reversible actions; and
-7. Wilbur, a human-owned action and observation record that lets the Web learn
-   from what actually happened.
+**Research boundary:** the software and its contracts can be inspected and
+tested. The method's efficacy has not been established. A board event creates
+salience, not evidence, and WebChess is not a validated safety, medical, legal,
+financial, or emergency-decision system.
 
-WebChess is a thinking aid, not divination, prediction, or evidence. A board
-event makes a facet salient; it does not make that facet true. The full method,
-limitations, and proposed validation program are documented in the
-[The First Answer Is Not Enough](docs/WEBCHESS_WHITE_PAPER_V3.md), the current
-research and technical white paper.
+## Candidate and publication status
 
-## Project status
+This tree is being prepared as **WebChess `2.2.0-rc.1`**. It is not a published
+release, deployed-service claim, DOI claim, or evidence that a credentialed
+OpenAI lifecycle has passed. Publication is blocked until the release identity
+generator is given the exact code-freeze commit and artifact digests and the
+public site and paper expose that same immutable mapping.
 
-The latest tagged product release is **WebChess 2.1** (`2.1.0`). This source
-tree identifies the next release candidate as `2.2.0`; until that candidate is
-verified and tagged, it is not a published release or evidence of a hosted
-deployment.
+Do not substitute `main`, `main.zip`, a short SHA, or an unverified mirror for
+the source named by the paper. If the public identity manifest or exact GitHub
+commit is unavailable, the reader-to-source path is incomplete and should fail
+closed.
 
-This repository is the sole canonical WebChess product. The same rules and
-visual game now have three deliberately separate runtime surfaces:
+The latest verified released baseline before this candidate is `v2.1.0` at
+`9980328581ba3e6fed6f2c4fc99b555fec4773bc`. The historical V3 manuscript in
+this tree records the prior local `2.2.0` audit; it is preserved as audit
+evidence and is not silently relabeled as the still-unfrozen paper edition 3.1.
 
-- an installable, startup-lazy OpenClaw plugin that launches the complete app
-  on the user's own machine, uses that user's configured OpenClaw model and
-  provider authentication, and keeps games and lifecycle provenance in a
-  dedicated local PostgreSQL 17 database;
-- a source-checkout runtime that binds the application and a dedicated Docker
-  PostgreSQL 17 database to loopback, uses a server-side OpenAI key, and
-  selects either a signed machine principal or a complete Clerk development
-  identity; and
-- the existing account-backed service architecture for a future independent
-  Vercel project named `webchess`.
+## Names that are easy to confuse
 
-It is not part of MadnessBot. The public repository and GitHub Discussions are
-available now. A production hosted deployment is **not** claimed by this
-document. The hosted release process still requires a passing preview,
-owner inspection, and explicit approval before production promotion or domain
-attachment.
-
-## The real method
-
-### 1. Divide the question
-
-The first structured model request receives the user's question and proposes
-one facet for each intersection of eight practical dimensions and eight
-movements of change:
-
-| Dimensions | Movements |
+| Name | Meaning |
 | --- | --- |
-| Purpose, People, Resources, Timing, Risks, Values, Evidence, Possibilities | Begin, Receive, Clarify, Connect, Challenge, Adapt, Consolidate, Release |
+| **The Arachne Method** | The whole research method: Division, field construction, chess, Portia, Gate/Retry, Answer, Charlotte, Wilbur, and the Web. |
+| **WebChess** | The software and research instrument that implements and records the method. |
+| **ANANSI** | The Anansi/Division field-construction mnemonic inside WebChess. It is not the name of the whole lifecycle. |
+| **Anansi** | The model-mediated stage that proposes the 64 problem facets. |
+| **The Web** | The within-case provenance and feedback record. It is not proof that an outcome is true. |
 
-The response must contain exactly 64 schema-valid facets. Deterministic checks
-reject missing IDs, duplicate normalized titles or focuses, obvious numbered
-scaffolds, dominant number-substitution templates, and widespread lexical
-near-duplication. Those checks cannot prove relevance, conceptual
-distinctness, correctness, or completeness.
+The project tagline is **Deliberation before decision.** The operational rule
+is plainer: explore widely, challenge what remains, act reversibly, and do not
+mistake salience for evidence.
 
-### 2. Cast the field
+## What one complete lifecycle does
 
-WebChess creates a fresh random seed and derives three domain-separated,
-deterministic permutations:
+1. **Anansi / Division** produces exactly 64 bounded, schema-valid facets for
+   the question. Structural validation cannot prove relevance or completeness.
+2. **Field construction** independently and deterministically permutes facets,
+   I Ching-inspired change lenses, and board locations from recorded seeds.
+3. **Chess** plays the cylindrical 8-by-8 variant to a terminal state. Kings
+   are captured directly; sectors wrap; rings do not; passes and bounded draw
+   rules are part of the variant.
+4. **Research, when explicitly enabled**, runs one bounded search and guarded
+   direct-page evidence collection before Portia. Failure is visible and the
+   source provenance is retained.
+5. **Portia** applies all 13 attack types to every surviving signal and then
+   produces a cross-signal summary before an Answer is allowed.
+6. **Gate and Retry** use deterministic rules to pass, refuse, start another
+   game on the same field, or construct one fresh field. Retry is bounded.
+7. **Answer** receives the exact prompt Portia reviewed and Gate approved.
+8. **Charlotte** qualifies that stored answer and proposes exactly three
+   reversible actions without silently replacing it.
+9. **Wilbur and the Web** let the person own an action, record observation, and
+   preserve the case genealogy for export and later verification.
 
-- the 64 facets;
-- the 64 I Ching-inspired lenses; and
-- the completed facet–lens pairs' board locations.
+See [Architecture](docs/ARCHITECTURE.md) for the implementation boundaries and
+[The First Answer Is Not Enough](docs/WEBCHESS_WHITE_PAPER_V3.md) for the
+historical V3 manuscript and falsifiable research program.
 
-The resulting field is saved with its seed and version provenance in the
-runtime's owner-scoped PostgreSQL database. A replay uses the same field; a new
-division creates a new field.
+## Reproducible local path: OpenClaw plus OpenAI account authentication
 
-### 3. Play the complete circular game
+The recommended researcher path is a packed WebChess plugin running on
+loopback through **OpenClaw `2026.7.1-2`** and a dedicated PostgreSQL 17
+database. OpenClaw authenticates directly with the researcher's ChatGPT/Codex
+account. WebChess neither asks for nor receives an `OPENAI_API_KEY` on this
+path.
 
-The board has eight bounded concentric rings and eight wrapping angular
-sectors. Black begins at the center and moves outward, representing inside-out
-intent. White begins outside and moves inward, representing outside-in
-evidence.
+The exact environment used for this candidate's final gate is intended to be:
 
-The variant deliberately differs from orthodox chess:
+- Node.js `24.19.0`;
+- npm `11.14.1`;
+- OpenClaw `2026.7.1-2` (source commit
+  `0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c`);
+- PostgreSQL `17.10` from the pinned `postgres:17-alpine` image digest in the
+  repository;
+- Google Chrome `150.0.7871.128` for the connected interactive acceptance
+  pass; and
+- WebGL 2 for the optional 3D board. The accessible 2D board must remain
+  available when WebGL is absent or motion is reduced.
 
-- sectors wrap from 7 to 0, while rings stop at the inner and outer edges;
-- Kings are captured directly;
-- check, castling, and en passant are absent;
-- pawns may make their initial two-ring move and promote to Queens;
-- a side with no legal move passes if the other side can move;
-- a King capture wins;
-- mutual immobility, 100 quiet plies, or 256 total plies produces a draw; and
-- a King capture on ply 256 takes precedence over the move-limit draw.
+These are reproducibility pins, not claims that all newer versions are broken.
+Node 24 is the recommended line in the pinned OpenClaw documentation.
 
-Seven captures mark reflection depth in the interface. They do not stop the
-game and are not evidence.
+Before downloading anything, use the full prerequisite gate in
+[Installation](INSTALL.md#0-prerequisites). It checks the exact Node, npm, and
+Chrome versions plus Git, curl, SHA-256 tooling, and a reachable Docker daemon.
 
-Manual moves, one guided turn, and autoplay all use the same rules. The
-purpose-built Engine V2 supplies guided play through iterative principal-
-variation search, alpha-beta pruning, aspiration windows, a dual-word hashed
-transposition table, rules-aware quiescence and static exchange evaluation,
-move-ordering heuristics, promotion-race and King-danger evaluation, and a
-deterministic seeded root tie-break. Search runs in a worker so the board stays
-responsive. The engine is specific to WebChess's cylindrical, direct-capture,
-pass-enabled rules; it is not Stockfish and does not claim an Elo rating.
+### 1. Verify the public identity before cloning
 
-### 4. Replay and validate
-
-Across all three runtimes, the browser sends only a requested piece and
-destination plus the expected game revision. The shared server handler
-reconstructs the board from the durable event log, validates the move, and
-commits the derived event. The OpenClaw plugin replaces Clerk with a
-loopback-only installation principal, Neon with dedicated local PostgreSQL, and
-hosted OpenAI calls with OpenClaw. The source-checkout runtime instead uses its
-loopback database, the server-side OpenAI path, and either its signed machine
-principal or Clerk development identity. The game and lifecycle authority are
-unchanged.
-
-No runtime trusts supplied pieces, captures, passes, outcomes, attention
-weights, or answers. Each reconstructs the board from the canonical initial
-position, checks moves, derives forced passes and captures, applies ending
-precedence, and rejects stale or fabricated state.
-
-### 5. Test what survives, then act
-
-Only after server replay proves a terminal position does WebChess derive the
-terminal survivor set. The original question and the board's weights, values,
-routes, captures, and survivor ecology are assembled into one concrete
-answer-generation prompt package. Portia receives that exact package before any
-answer exists. It performs all thirteen versioned attack types against every
-survivor and classifies each as `preserved`, `wounded`, `consumed`, or
-`unresolved`. Survival is explicitly not treated as truth.
-
-Only the OpenClaw runtime can insert automatic external research before
-Portia. Its deterministic broker makes at most one Codex Search invocation,
-accepts at most five result links and five stored citation candidates, and runs
-inside a 150-second envelope. It does not fetch cited pages, and a candidate
-link is not proof that WebChess read or verified the source. Hosted and local
-source-checkout runtimes do not inject this broker.
-
-Each validated per-signal assessment is persisted as Portia advances, so a
-recovered attempt resumes from saved work instead of starting a decorative or
-random traversal. Provider-started technical failures are bounded to three
-attempts for the run. If the third cannot complete prompt validation, the
-lifecycle ends visibly as `portia_unavailable`, preserves completed checks, and
-generates no answer.
-
-After a complete Portia review, the internal deterministic Gate requires enough
-usable, independent, covered material, a non-redundant tension, and no fatal
-unaddressed contradiction. A failed Gate can authorize no more than two
-same-field replays and one fresh field generation. Semantic exhaustion ends as
-`insufficient_basis`; it never silently reaches Answer or Charlotte.
-
-Only Portia's permission and a persisted Gate pass authorize the Answer model
-to receive the exact reviewed board prompt. The generated answer is saved with
-that prompt and Gate provenance. Charlotte then reviews and qualifies that
-exact answer for truthfulness, uncertainty, stakeholder impact, and audience
-fit; it does not replace the approved answer with an unrelated synthesis.
-Charlotte cites only the smallest material subset of Portia-approved signals,
-retains every cited wound exactly once, and has its own durable three-attempt
-technical budget so a provider or contract failure cannot leave the web
-spinning forever. The already generated Answer remains visible if that budget
-is exhausted, clearly marked as not Charlotte-qualified.
-Wilbur lets the authenticated player select one of exactly three bounded,
-reversible Charlotte suggestions, mark it in progress, and append a real-world
-observation. The stored action is bound to that exact suggestion index, and the
-database permits at most one current-bound action for each suggestion in a
-lifecycle run; upgrade-preserved legacy actions remain explicitly unbound. Each
-create, update, or observation is durably claimed by owner and idempotency key,
-so exact retries replay a committed result or denial, changed requests conflict,
-and rate admission occurs once. Claims abandoned for 24 hours expire, future
-durable-row and exact-text capacity is reserved against a lifetime admission
-envelope, and the
-artifact, lifecycle activity, and ledger result commit atomically. Action and
-observation mutations have independent per-user/IP hourly limits.
-The lifecycle, retry ancestry, artifacts, versions, actions, and observations
-remain in an owner-scoped provenance record.
-
-## Local OpenClaw plugin
-
-The OpenClaw package is the installation and launch layer for the full visual
-WebChess application. It is not a headless game tool. The command starts a
-foreground Next.js process bound only to `127.0.0.1`, opens the animated board
-in the user's browser, and stops when the user presses Ctrl-C:
-
-```text
-openclaw webchess
-  |
-  +--> local Next.js process at http://127.0.0.1:3210/openclaw
-         |-- visual Anansi → Chess → Portia → Answer → Charlotte → Wilbur → Web lifecycle
-         |-- shared durable game, replay, usage, and lifecycle handlers
-         |
-         +--> dedicated PostgreSQL 17 on loopback
-         |      +--> question, cast, events, Portia progress, Gate, Answer, Charlotte, Wilbur
-         |
-         +--> openclaw infer model run --local
-                +--> the user's configured model, provider, and authentication
-```
-
-It needs no Clerk account, hosted Neon database, Vercel deployment, hosted
-WebChess service, or operator-owned API key. It does require a dedicated
-PostgreSQL 17 database exposed only on loopback through
-`WEBCHESS_OPENCLAW_DATABASE_URL`. The launcher disables hosted identity and
-database settings for this process, disables Next.js telemetry, and never puts
-a provider credential in the browser. OpenClaw's configured provider may
-itself be remote, so model prompts may leave the machine under that provider's
-own settings. WebChess does not add a hosted proxy, account, or sync service.
-For managed installs, the launcher stages the bundled application in an
-operating-system temporary directory, links the plugin's installed
-dependencies, and removes that working directory when the command exits. Game
-data is never stored there; it remains in the dedicated local database.
-
-The board shows piece movement, the understandable public lifecycle, and the
-status of each model request. During Portia it shows the actual persisted
-current signal and completed-signal count, moves the spider only when that
-durable progress advances, and settles into a stable `portia_unavailable` stop
-if the technical budget is exhausted. Answer generation and Charlotte
-qualification have their own visible states. Every animation has a text
-equivalent and reduced-motion behavior. The interface displays validated facets,
-model attribution, elapsed
-status, and the final structured reading; it does not request or expose private
-chain-of-thought.
-
-From a source checkout:
+At publication, the paper and public site must both expose
+`/downloads/webchess-release-identity.json`. Its `source.commit` must be a full
+40-character SHA, its status must be resolved, and the GitHub link must name
+that SHA. If any of those conditions is missing, stop: this candidate has not
+completed publication.
 
 ```bash
+set -euo pipefail
+export WEBCHESS_IDENTITY_URL='https://webchess.anansiportia.com/downloads/webchess-release-identity.json'
+curl --fail --location --output webchess-release-identity.json "$WEBCHESS_IDENTITY_URL"
+node -e 'const m=require("./webchess-release-identity.json"); if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved") process.exit(1)'
+export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.source.commit ?? "")')"
+test "${#WEBCHESS_RELEASE_SHA}" -eq 40
+```
+
+Verify the bytes published beside the manifest as well as the Git object:
+
+```bash
+export WEBCHESS_SOURCE_ARCHIVE_URL="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(new URL(m.source.archive.downloadPath, process.env.WEBCHESS_IDENTITY_URL).href)')"
+export WEBCHESS_SOURCE_ARCHIVE_SHA256="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.source.archive.sha256)')"
+curl --fail --location --output webchess-source.zip "$WEBCHESS_SOURCE_ARCHIVE_URL"
+printf '%s  %s\n' "$WEBCHESS_SOURCE_ARCHIVE_SHA256" webchess-source.zip | sha256sum --check
+export WEBCHESS_PAPER_URL="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(new URL(m.paper.candidate.pdf.downloadPath, process.env.WEBCHESS_IDENTITY_URL).href)')"
+export WEBCHESS_PAPER_SHA256="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.paper.candidate.pdf.sha256)')"
+curl --fail --location --output webchess-paper-3.1.pdf "$WEBCHESS_PAPER_URL"
+printf '%s  %s\n' "$WEBCHESS_PAPER_SHA256" webchess-paper-3.1.pdf | sha256sum --check
+```
+
+Then clone and detach at the exact verified Git object:
+
+```bash
+git clone https://github.com/jr4488/webchess.git
+cd webchess
+git checkout --detach "$WEBCHESS_RELEASE_SHA"
+test "$(git rev-parse HEAD)" = "$WEBCHESS_RELEASE_SHA"
+```
+
+An authentication error or 404 from GitHub is a publication blocker. Do not
+work around it by checking out `main` or downloading a mutable archive.
+
+### 2. Install and authenticate pinned OpenClaw
+
+Install the exact reviewed OpenClaw package into a dedicated tool directory,
+then use a dedicated OpenClaw profile so this walkthrough does not overwrite a
+reader's existing default model, plugins, auth order, or daemon:
+
+```bash
+set -euo pipefail
+node --version
+npm --version
+test "$(node --version)" = 'v24.19.0'
+test "$(npm --version)" = '11.14.1'
+export WEBCHESS_OPENCLAW_RUNTIME="$(pwd)/../webchess-openclaw-2026.7.1-2"
+export WEBCHESS_OPENCLAW_PROFILE='webchess-rc1'
+test ! -e "$WEBCHESS_OPENCLAW_RUNTIME" || {
+  echo "$WEBCHESS_OPENCLAW_RUNTIME already exists; inspect it or choose a new path." >&2
+  exit 1
+}
+test "$(npm view openclaw@2026.7.1-2 dist.integrity)" = \
+  'sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g=='
+mkdir "$WEBCHESS_OPENCLAW_RUNTIME"
+npm install --prefix "$WEBCHESS_OPENCLAW_RUNTIME" --save-exact openclaw@2026.7.1-2
+export PATH="$WEBCHESS_OPENCLAW_RUNTIME/node_modules/.bin:$PATH"
+test "$(command -v openclaw)" = "$WEBCHESS_OPENCLAW_RUNTIME/node_modules/.bin/openclaw"
+openclaw --version | grep -Eq '^OpenClaw 2026\.7\.1-2 \('
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth login --provider openai
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set agents.defaults.model.primary openai/gpt-5.6-sol
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config validate
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" doctor
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth list --provider openai
+read -r -p 'Eligible OpenAI OAuth profile ID: ' WEBCHESS_OPENAI_PROFILE_ID
+test -n "$WEBCHESS_OPENAI_PROFILE_ID"
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth order set --provider openai "$WEBCHESS_OPENAI_PROFILE_ID"
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth order get --provider openai
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models list --provider openai
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models status --probe --probe-provider openai --probe-profile "$WEBCHESS_OPENAI_PROFILE_ID"
+```
+
+Confirm that this dedicated profile reports an eligible `openai` OAuth profile
+and no API-key profile, the stored auth-order override names only the OAuth
+profile ID you selected, the exact selected model appears in the provider list,
+and the profile-specific probe succeeds. If an API-key credential appears, stop
+rather than letting a provider-wide probe consume it. A successful API-key
+profile is a different auth and billing path and does not satisfy this
+candidate's ChatGPT-account acceptance criterion.
+
+The browser OAuth or device-code step is a user action. Do not paste tokens into
+WebChess, the repository, an issue, or a test log. If the account does not expose
+`openai/gpt-5.6-sol`, select an explicitly available model (the pinned OpenClaw
+docs name `openai/gpt-5.5` as the recovery choice); OpenClaw does not silently
+downgrade. A live probe can consume account allowance.
+
+Official references:
+
+- [OpenClaw 2026.7.1-2 OpenAI provider and OAuth route](https://github.com/openclaw/openclaw/blob/0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c/docs/providers/openai.md)
+- [OpenClaw 2026.7.1-2 install requirements](https://github.com/openclaw/openclaw/blob/0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c/README.md)
+- [OpenAI Codex authentication options](https://learn.chatgpt.com/docs/auth)
+
+OpenAI's documentation distinguishes ChatGPT subscription sign-in from
+usage-based API-key authentication. On this path the account's ChatGPT/Codex
+workspace access, allowance windows, credits, and provider policies apply. A
+WebChess-side API key is neither required nor a substitute for that entitlement.
+
+### 3. Start a dedicated loopback PostgreSQL 17 database
+
+Use the exact Docker commands in [Installation](INSTALL.md#3-create-the-dedicated-loopback-postgresql-17-database).
+They bind only `127.0.0.1:55432`, use a WebChess-specific container and volume,
+and include health, migration, backup, restore, and teardown checks. Never point
+the plugin at production, Neon, or an unrelated local database.
+
+### 4. Pack, inspect, install, and launch this exact source
+
+```bash
+set -euo pipefail
 npm ci
-npm run plugin:build
-npm run verify:openclaw
-openclaw plugins install --link .
-openclaw plugins inspect webchess --runtime --json
-openclaw config set tools.web.search.timeoutSeconds 120
-export WEBCHESS_OPENCLAW_DATABASE_URL=postgresql://webchess:password@127.0.0.1:55432/webchess
-openclaw webchess
-```
-
-Use `openclaw webchess --no-open` to print the URL without opening a browser,
-or `--port 4312` to choose another loopback port. See
-[Installation](INSTALL.md) for source-link and packed-plugin workflows.
-`verify:openclaw` builds the plugin entry and exercises the application and UI
-checks, but it does not install a packed archive or prove a live OpenClaw
-provider/database round trip. A release also rebuilds the committed entry,
-requires `git diff --exit-code -- openclaw-plugin/dist`, inspects the `npm pack`
-contents, installs that exact archive, and manually exercises the configured
-provider, database, and research path. Run `npm run test:integration` with
-`DATABASE_URL` pointed at a disposable PostgreSQL 17 database to verify the
-shared persistence contract.
-
-## Hosted architecture
-
-```text
-Browser
-  |
-  | Clerk session; no model credential
-  v
-Next.js on Vercel
-  |-- public pages and static downloads
-  |-- authenticated game route handlers
-  |-- server-only OpenAI Responses API calls
-  |
-  +--> Clerk: Google, email, and passkey authentication
-  +--> Neon Postgres: games, events, usage, quotas, rate limits, leases
-  +--> OpenAI: fixed gpt-5.6-sol Division, Portia, Answer, and Charlotte calls; store: false
-```
-
-The OpenAI key is a Vercel server secret owned by WebChess. Visitors never
-enter, store, or transmit an API key. Clerk sign-in establishes identity only;
-it does not use a person's ChatGPT plan or spend that person's ChatGPT tokens.
-The WebChess operator pays OpenAI API usage and controls it with durable
-per-user and global accounting, rate limits, daily quotas, one active model
-request per user, four globally by default, bounded inputs and outputs,
-idempotency, and application-owned cost controls. OpenAI spend alerts notify
-but do not cap usage. If the operator explicitly enables an OpenAI hard spend
-limit, it is a backstop rather than the primary quota and can lag slightly
-while tracked spend propagates.
-
-New divisions and replays share the daily game-start allowance and hourly
-per-user/IP game-start limits. A replay validates its source, clones the saved
-field, records its idempotency intent, activates the child, and consumes the
-rate/quota counts in one atomic database transaction—there is no debit-before-clone
-window. Wilbur actions and observations have their own per-user/IP hourly
-limits. Account export format `webchess-account-export/4` has separate
-per-user/IP hourly limits and a 3,000,000-byte default response ceiling. It adds
-the owner's pseudonymous user-rate windows and all ten lifecycle recovery fields
-to the owner-scoped game, request, research, lifecycle, and artifact data. It
-also includes `charlotteBindingVersion` and sanitized Wilbur mutation-ledger
-rows, but omits the ledger's private capacity reservations, owner/IP identifiers,
-and HMAC material. It does not include shared IP/global counters, Clerk or
-vendor data, or a database-restorable backup. The export is generated
-synchronously as one JSON file, with no pagination or background preparation.
-Oversized exports are refused; Wilbur's admission envelope preserves existing
-history and does not guarantee that all other accumulated account data fits. The
-owner can follow [Support](SUPPORT.md) to ask for non-sensitive help through GitHub Discussions,
-without a promise of a custom data handoff or response time.
-
-A same-key model retry recovers an already committed result or the existing
-pending request; WebChess never silently replays the same provider intent. If a
-provider-started Portia lease expires without definitive settlement, that
-request becomes `indeterminate`. A distinct fenced Portia attempt may resume
-from persisted per-signal work, but only within the run's three-attempt
-technical budget; exhaustion becomes `portia_unavailable` and blocks Answer.
-Rejected provider responses retain only sanitized provider identifiers, safe
-statuses, and normalized usage values when available.
-
-The previous Express prototype kept access sessions, CSRF state, revocations,
-rate counters, daily quotas, and concurrency in one Node process. That state
-would reset or diverge across Vercel Functions. The production replacement is:
-
-| Process-local prototype state | Durable replacement |
-| --- | --- |
-| Shared access code and signed process session | Clerk user session verified on every protected route |
-| Session revocation, deletion pending, and user blocking | Clerk plus `user_controls` in Neon |
-| Deleted raw identity used to reset controls | lifetime-stable HMAC marker in `deleted_user_tombstones` |
-| Current board and answer | `games` plus append-only `game_events` |
-| Per-session and global request counters | `usage_buckets` |
-| User/IP request throttles | `rate_buckets` with purpose-separated HMAC identifiers |
-| Replay debit followed by an interruptible clone | atomic `game_start_requests`, clone, activation, and counter mutation |
-| Model concurrency boolean/counter | leased `model_concurrency_slots` |
-| Provider request status and token counts | durable, auditable `model_requests` lifecycle ledger |
-
-Self-service deletion removes content but leaves a suspended raw-ID
-`user_controls` marker until Clerk confirms identity deletion; it cancels
-reserved work but waits for a provider call already in progress. The signed
-`user.deleted` webhook installs the stable HMAC barrier first, wins even over
-active work, and then removes raw identifiers and content. Late calls cannot
-recreate the account. Artifact-bearing games are deleted through the tested
-foreign-key-safe order, including Portia and Charlotte model requests; shared
-IP rate windows and vendor backups remain subject to their separate expiry and
-retention policies.
-
-No correctness, security, quota, or ownership decision may depend on Vercel
-Function memory. See [Architecture](docs/ARCHITECTURE.md) and
-[Security](SECURITY.md).
-
-## Local source-checkout development
-
-To run the hosted-service architecture on this machine without OpenClaw:
-
-```bash
-npm ci
-npm run local:setup
-npm run local:dev
-```
-
-That command starts loopback PostgreSQL 17, binds Next.js to
-`127.0.0.1:3005`, and uses the server-side OpenAI Platform key. With neither
-Clerk key, it offers one signed local machine principal. To use Clerk instead,
-put a complete development `pk_test_` / `sk_test_` pair in `.env.local`; a
-partial pair or live keys fail closed. The launcher identifies this source
-candidate as `2.2.0-local` and generates a dedicated
-`WEBCHESS_LOCAL_SESSION_SECRET`; preserve that secret with the local database or
-the signed principal will no longer address its prior rows. See
-[INSTALL.md](INSTALL.md#local-source-checkout-development-without-openclaw).
-Only this launcher can auto-migrate the dedicated local database, and it refuses
-unrelated pre-existing relations. If it refuses a legacy same-name container
-that lacks the ownership label, follow the data-preserving volume-adoption
-procedure in the installation guide; never remove the named volume.
-
-## Hosted-service development
-
-The hosted-service development environment remains Node.js 22 and npm 11.
-
-```bash
-npm ci
-cp .env.example .env.local
-npm run dev
-```
-
-Local play requires development Clerk credentials, a Neon Postgres database,
-and a server-side OpenAI Platform project key. Apply every ordered file in
-[`db/migrations`](db/migrations) with `npm run db:migrate` and a separate
-`MIGRATION_DATABASE_URL` owner credential before using authenticated routes.
-The command records canonical checksums and never falls back to `DATABASE_URL`.
-The runtime `DATABASE_URL` must use a least-privileged role; do not put the
-migration-owner URL in `.env.local`, CI, or Vercel.
-
-Do not place any secret in a `NEXT_PUBLIC_*` variable. The exact site origin,
-Clerk publishable key, custom sign-in/sign-up paths, and Clerk fallback
-redirects in `.env.example` are intentionally available to the browser.
-
-Detailed setup, Clerk configuration, database migration, preview deployment,
-and DNS instructions are in [INSTALL.md](INSTALL.md).
-
-## Verification
-
-Install exactly from the lockfile, then run:
-
-```bash
-npm run lint
-npm run typecheck
 npm run plugin:build
 git diff --exit-code -- openclaw-plugin/dist
-npm run test
-npm run test:coverage
-DATABASE_URL='postgresql://...disposable-test-only...' npm run test:integration
-npm audit --omit=dev --audit-level=high
-npm audit --audit-level=high
-npm run build
-npm run test:a11y
-npm run test:e2e
-npm run test:links
+mkdir -p public/downloads
+cp ../webchess-release-identity.json public/downloads/webchess-release-identity.json
+cp ../webchess-paper-3.1.pdf public/downloads/webchess-white-paper.pdf
+printf '%s  %s\n' "$WEBCHESS_PAPER_SHA256" public/downloads/webchess-white-paper.pdf | sha256sum --check
+npm run downloads:generate
+npm run release:identity:check
 npm pack --dry-run
+npm pack
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install npm-pack:./webchess-2.2.0-rc.1.tgz
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect webchess --runtime --json
+test -n "${WEBCHESS_POSTGRES_PASSWORD:-}"
+export WEBCHESS_OPENCLAW_DATABASE_URL="postgresql://webchess:${WEBCHESS_POSTGRES_PASSWORD}@127.0.0.1:55432/webchess"
+export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("../webchess-release-identity.json"); process.stdout.write(m.source.commit)')"
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" webchess --no-open
 ```
 
-The integration URL must name a disposable PostgreSQL 17 database. The plugin
-build must leave committed `openclaw-plugin/dist` unchanged, and the package dry
-run must contain the intended runtime files without local secrets or test
-output.
+Open the printed `http://127.0.0.1:<port>/openclaw` URL. The launcher must fail
+closed if OpenClaw auth, model capability, PostgreSQL, migration
+history, or the local-mode boundary is not ready. It must not fall through to
+Clerk, Neon, Vercel, a hosted WebChess provider, or a repository `.env` secret.
 
-The Playwright suite is expected to cover every public route, authentication
-redirects, the complete play flow, refresh recovery, downloads, GitHub links,
-keyboard operation, accessibility, reduced motion, mobile layout, and desktop
-layout. Automated tests must stub OpenAI deterministically, and CI must not
-spend live model tokens. After every gate passes, the owner's bounded manual
-Preview smoke may use the dedicated Preview key for one complete game and its
-approved Portia → Answer → Charlotte ending under the normal durable quotas.
+### 5. Complete and inspect one case
 
-The complete Playwright play fixture uses a loopback-only test principal and
-stubbed API responses. That principal is disabled on Vercel by design. Preview
-inspection therefore uses a dedicated real Clerk test account; a test bypass
-must never be enabled in a Vercel environment.
+Use the visible interface, not a hidden endpoint:
 
-A Vercel preview may be created only after the local and CI gates pass.
-Vercel Git auto-deployments are disabled, so Preview and Production releases
-are manual exact-revision operations. Production promotion remains separate
-and explicitly approved. It rebuilds the inspected source with separately
-provisioned Production environment values and is followed by production smoke
-checks before the custom domain is attached. Vercel prebuild fails unless the
-system project ID exactly matches the separately configured expected WebChess
-project ID and the runtime database contains exactly the checked-in migration
-IDs and checksums.
+1. confirm the page identifies the exact source commit and
+   `webchess@2.2.0-rc.1`;
+2. enter a non-secret research question;
+3. choose whether to consent to research search for this case;
+4. choose the accessible 2D or 3D board and start Division;
+5. play manually, request guided moves, or use autoplay until the canonical
+   initial board reaches a real terminal game state;
+6. inspect Portia's per-signal progress, Gate decision, Retry ancestry if any,
+   the board-derived Answer, and Charlotte's qualifications;
+7. choose one reversible Wilbur action, update it, and add an observation;
+8. reload the page and confirm the same case and lifecycle return from
+   PostgreSQL;
+9. select **Export case** and retain the local redaction summary and digest;
+10. select **Import & verify case** for that file and confirm schema
+    `webchess-case-bundle/1`, artifact digests, event-log replay, terminal
+    position, and provenance verification all pass; and
+11. use **Start another game on this field** only when you intend a new game
+    trajectory. That is not the same operation as verifying an imported replay.
 
-## Documentation and downloads
+The case bundle is a redaction-aware research artifact, not a database backup,
+not an OpenAI subject-access export, and not proof that its answer is correct.
 
-Repository documents:
+## Research-search disclosure and opt-out
 
-- [Installation](INSTALL.md)
+Search is separate from model generation and local storage. It is **off until
+the player gives case-scoped, versioned consent**. Leaving it off must not block
+the non-search lifecycle or silently select another hosted service.
+
+When it is on and the bounded materiality policy triggers:
+
+1. the original question and a bounded query go through the configured
+   OpenClaw Codex Search path;
+2. configured search/provider services receive that material under the
+   researcher's own account and policies;
+3. the local broker may directly request at most three public HTTPS pages;
+   those page hosts see an ordinary network request, while redirects, private
+   addresses, credentials, oversized bodies, and unsupported content fail
+   closed; and
+4. retained excerpts, retrieval failures, URLs, timestamps, and content
+   digests become provenance and may be included in later Portia, Answer, and
+   Charlotte prompts sent to the selected model provider.
+
+Search results and fetched text are untrusted evidence candidates. Prompt
+injection filtering and provenance do not make a source true. The interface
+must show unavailable, filtered, rejected, redirected, and omitted sources
+rather than quietly pretending they were read.
+
+The OpenClaw model/auth status and `models status --probe` checks above do
+**not** prove that Codex Hosted Search is ready. The pinned integration has no
+separate no-data search probe, and WebChess must not transmit a question merely
+to test one. Search is verified only by the first consented, material lifecycle
+invocation. Its durable research record must identify capability `web.search`,
+provider `codex`, local transport, zero fallback attempts, and either retained
+search activity or a visible failure/refusal. The optional direct-page requests
+are a later WebChess-local step, not part of the hosted search call.
+
+## Model-call, time, context, and allowance implications
+
+For `S` terminal survivors (`1 <= S <= 32`), the nominal accepted lifecycle
+uses **`S + 4` model generations**:
+
+- one Division call;
+- `S` Portia candidate calls plus one Portia summary call;
+- one Answer call; and
+- one Charlotte call.
+
+That is 5 to 36 model generations, plus at most one separately disclosed
+research-search invocation when consented and material. Portia's 13 attacks are
+evaluated within each candidate call; they are not 13 separate calls per
+candidate.
+
+If the first Answer turn returns content that violates the strict structured
+contract, WebChess may issue exactly one bounded corrective Answer turn using
+the same approved evidence. A successful corrected path therefore uses
+`S + 5` generations (6 to 37). Provider failures, transport failures, and
+cancellation do not earn a corrective turn, and invalid provider output is not
+copied into the corrective prompt.
+
+Failures and Gate decisions can amplify that cost:
+
+- Portia and Charlotte each have a three-attempt technical budget;
+- completed Portia candidates are persisted so a recoverable retry resumes,
+  but a late failure can repeat the summary;
+- Gate may authorize two additional games on the same field and one fresh field,
+  so chess, Portia, and later stages can run again; and
+- a fresh field requires another Division call.
+
+Large valid prompts can approach the selected model's context budget. The
+structured OpenClaw transport preserves the complete prompt; it must refuse a provider or
+context limit visibly rather than truncate evidence. Runtime therefore varies
+with survivor count, model speed, search latency, retries, and game length and
+can be substantial. Check OpenClaw's allowance/quota display before starting.
+WebChess cannot promise a duration or convert a ChatGPT subscription into
+unmetered use.
+
+## What verification does and does not prove
+
+The repository separates four evidence levels:
+
+- **source/unit/contract tests** check pure rules, schemas, boundaries, and
+  deterministic fixtures;
+- **database integration tests** check real PostgreSQL transactions and
+  migrations in a disposable database;
+- **browser tests** check real HTTP and UI behavior, normally with deterministic
+  provider stubs; and
+- a separately gated **credentialed smoke** checks the packed plugin, real
+  OpenClaw runtime, the researcher's authenticated OpenAI account, connected
+  Chrome, a complete game, lifecycle persistence, reload, and export/import
+  verification.
+
+A green automated suite is not evidence that the credentialed smoke happened,
+that a public deployment matches the source, or that the Arachne Method is
+effective. Test reports must name the subset and exact pass/skip/fail counts;
+reruns must not be added together as if they were new tests.
+
+## Immutable version map
+
+| Artifact | Identity | Status |
+| --- | --- | --- |
+| Released software baseline | `v2.1.0` / `9980328581ba3e6fed6f2c4fc99b555fec4773bc` | Historical released baseline |
+| Audited Linux 2.2 candidate | `7a3749cf7f2c4e4c5ebfeb9b9aa870a11843f3a2` | Historical audit input, not this final RC |
+| Historical V3 manuscript/software snapshot | paper 3.0 / `0384978b2ba709da4c9824f2821c8623d3f84364` | Preserved audit evidence |
+| Integrated candidate | WebChess `2.2.0-rc.1` / full SHA in generated release identity | Unresolved until code freeze |
+| Public paper mapped to integrated candidate | Arachne paper edition 3.1 / SHA-256 in generated release identity | Unresolved until the artifact exists |
+| Provider harness | OpenClaw `2026.7.1-2` / `0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c` | Pinned external dependency |
+
+No DOI or archive identifier is claimed for an artifact that does not exist.
+Historical papers remain historical; they are not rewritten to create a false
+contemporaneous code mapping.
+
+### Code-freeze identity gate
+
+The tracked template at
+`docs/releases/webchess-release-identity.template.json` intentionally contains
+nulls for the as-yet nonexistent code-freeze and paper artifacts. A release
+operator must first commit edition 3.1, freeze the exact source, obtain the
+SHA-256 digests of the immutable GitHub source ZIP and the exact published PDF,
+and then run from an otherwise clean checkout:
+
+```bash
+export WEBCHESS_RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
+export WEBCHESS_RELEASE_SOURCE_ARCHIVE_SHA256='<64 lowercase hex characters>'
+export WEBCHESS_RELEASE_PAPER_PATH='docs/<committed-edition-3.1-paper>.md'
+export WEBCHESS_RELEASE_PAPER_PDF_SHA256='<64 lowercase hex characters>'
+test -f public/downloads/webchess-white-paper.pdf
+npm run release:identity:generate
+npm run release:identity:check
+```
+
+The generated `public/downloads/webchess-release-identity.json` is deliberately
+ignored because its values cannot exist truthfully before code freeze. The
+publication build must generate and retain it from reviewed build inputs, then
+verify that its two digests match the exact bytes served at the declared
+download paths. Missing inputs, a dirty or different HEAD, the historical 3.0
+paper path, an edition mismatch, a placeholder, or an unresolved generated
+artifact exits nonzero. Until that gate and the public byte-for-byte checks
+pass, the site must continue to display “source identity pending” and the
+source ZIP route must return 503.
+
+`npm run downloads:generate` preserves paper 3.0 only at filenames containing
+`v3-historical`; it never writes the edition 3.1 path. The exact candidate PDF
+must already exist at `public/downloads/webchess-white-paper.pdf`, and the
+identity generator/checker verifies those local PDF bytes against the injected
+SHA-256. This prevents a historical PDF from silently occupying the candidate
+paper URL.
+
+## Documentation
+
+- [Installation, PostgreSQL, backup, and teardown](INSTALL.md)
 - [Architecture](docs/ARCHITECTURE.md)
-- [Security policy](SECURITY.md)
-- [Privacy notice](docs/PRIVACY.md)
-- [Terms](docs/TERMS.md)
-- [Acceptable use](docs/ACCEPTABLE_USE.md)
+- [Security](SECURITY.md)
+- [Privacy and data flow](docs/PRIVACY.md)
 - [Research and evaluation](docs/RESEARCH.md)
 - [Case export and offline replay verification](docs/CASE_BUNDLES.md)
-- [The First Answer Is Not Enough — current white paper](docs/WEBCHESS_WHITE_PAPER_V3.md)
+- [Historical V3 white paper](docs/WEBCHESS_WHITE_PAPER_V3.md)
 - [Archived WebChess 2.0 white paper](docs/WEBCHESS_WHITE_PAPER_V2.md)
 - [Archived WebChess 1.3 white paper](docs/archive/WEBCHESS_WHITE_PAPER_V1.3.md)
 - [WebChess 2.0 operator guide](docs/WEBCHESS_2_0_OPERATIONS.md)
 - [Contributing](CONTRIBUTING.md)
 - [Support](SUPPORT.md)
-- [Apache-2.0 license](LICENSE)
+- [Apache License 2.0](LICENSE)
 
-The deployed site reserves these stable download paths:
-
-- `/downloads/webchess-white-paper.md`
-- `/downloads/webchess-white-paper.html`
-- `/downloads/webchess-white-paper.pdf`
-- `/downloads/webchess-installation.md`
-- `/downloads/LICENSE`
-- `/downloads/webchess-source.zip`
-
-`npm run downloads:generate` creates the document artifacts from their
-repository sources. It runs automatically before `npm run dev` and
-`npm run build`, so the copies served from `public/downloads` cannot become a
-second canonical document set. The generated directory is intentionally not
-tracked.
-
-Before a manual deployment, `npm run release:verify-source` refuses tracked or
-untracked changes and proves that local `HEAD` exactly matches its live
-configured remote branch. Record the verified commit. The source-archive URL
-then redirects to GitHub's ZIP for that exact published commit through
-`WEBCHESS_RELEASE_SHA` or `VERCEL_GIT_COMMIT_SHA`; when both variables exist,
-the prebuild requires them to match. Outside Vercel the route falls back to the
-public `main` branch. WebChess never writes or tracks a source ZIP inside its
-own source tree.
-
-## Support and community
-
-Use [GitHub Discussions](https://github.com/jr4488/webchess/discussions) for
-installation help, usage questions, design proposals, and research criticism.
-Use [GitHub Issues](https://github.com/jr4488/webchess/issues) for bounded,
-reproducible defects.
-
-Do not post private questions, personal data, credentials, or authentication
-artifacts. Report only security vulnerabilities through
-[GitHub's private vulnerability-reporting flow](https://github.com/jr4488/webchess/security/advisories/new).
-
-## License
-
-WebChess source and documentation are licensed under
-[Apache License 2.0](LICENSE).
+Use GitHub Discussions for non-sensitive installation and research questions
+only after the repository is actually public. Do not post private questions,
+case bundles containing personal data, credentials, OAuth artifacts, database
+dumps, or security reports in public channels.
