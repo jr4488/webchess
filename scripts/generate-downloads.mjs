@@ -62,6 +62,15 @@ const outputPaths = {
 const repositoryUrl = 'https://github.com/jr4488/webchess'
 const canonicalPublicUrl = 'https://webchess.anansiportia.com'
 const releaseHandoffMarker = '<!-- WEBCHESS_RELEASE_HANDOFF -->'
+const candidateWhitePaperTitle = 'The Arachne Method and WebChess'
+const historicalWhitePaperTitle = 'The First Answer Is Not Enough'
+
+function htmlText(value) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+}
 
 function exactSourceCommit(sourceCommit) {
   const normalized = sourceCommit?.trim().toLowerCase() ?? null
@@ -390,6 +399,7 @@ function renderWhitePaperHtml(
   markdown,
   images,
   {
+    documentTitle = historicalWhitePaperTitle,
     sourceCommit = historicalWhitePaperSourceCommit,
     sourcePath = historicalWhitePaperRepositoryPath,
   } = {},
@@ -447,7 +457,7 @@ function renderWhitePaperHtml(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
-  <title>The First Answer Is Not Enough — WebChess white paper</title>
+  <title>${htmlText(documentTitle)} — WebChess white paper</title>
   <meta name="description" content="The repository-backed WebChess paper on the Arachne Method and AI-assisted deliberation before decision.">
   <style>
     :root {
@@ -1102,7 +1112,10 @@ function createPdf(
   markdown,
   softwareVersion,
   images,
-  { linkAnnotations = false } = {},
+  {
+    documentTitle = historicalWhitePaperTitle,
+    linkAnnotations = false,
+  } = {},
 ) {
   const { pageHeight, pageWidth, pages } = paginateWhitePaper(
     markdown,
@@ -1212,7 +1225,7 @@ function createPdf(
 
   objects.set(
     infoObjectId,
-    '<< /Title (The First Answer Is Not Enough) /Author (WebChess contributors) /Subject (The Arachne Method for AI-assisted deliberation before decision) /Creator (WebChess deterministic download generator) >>',
+    `<< /Title (${pdfString(documentTitle)}) /Author (WebChess contributors) /Subject (The Arachne Method for AI-assisted deliberation before decision) /Creator (WebChess deterministic download generator) >>`,
   )
   objects.set(
     2,
@@ -1306,6 +1319,7 @@ async function main() {
     releaseCandidateWhitePaper,
     candidateImages,
     {
+      documentTitle: candidateWhitePaperTitle,
       sourceCommit: configuredSourceCommit,
       sourcePath: candidateWhitePaperRepositoryPath,
     },
@@ -1314,7 +1328,10 @@ async function main() {
     downloadablePdfMarkdown(releaseCandidateWhitePaper),
     softwareVersion,
     candidateImages,
-    { linkAnnotations: true },
+    {
+      documentTitle: candidateWhitePaperTitle,
+      linkAnnotations: true,
+    },
   )
   const historicalWhitePaperHtml = renderWhitePaperHtml(
     historicalWhitePaper,

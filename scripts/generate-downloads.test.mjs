@@ -135,6 +135,21 @@ describe('downloadable white-paper formulas', () => {
     expect(historicalPathPdf).not.toContain('/Annots')
   })
 
+  it('labels candidate HTML and PDF metadata with the candidate paper title', () => {
+    const title = 'The Arachne Method and WebChess'
+    const markdown = `# ${title}`
+    const html = renderWhitePaperHtml(markdown, new Map(), {
+      documentTitle: title,
+    })
+    const pdf = createPdf(markdown, '2.2.0-rc.1', new Map(), {
+      documentTitle: title,
+    }).toString('latin1')
+
+    expect(html).toContain(`<title>${title} — WebChess white paper</title>`)
+    expect(pdf).toContain(`/Title (${title})`)
+    expect(pdf).not.toContain('/Title (The First Answer Is Not Enough)')
+  })
+
   it('removes CommonMark hard-break markers from PDF text', () => {
     const portable = downloadablePdfMarkdown(
       ['**Paper version:** 3.0\\', '**Date:** August 15, 2026'].join('\n'),
