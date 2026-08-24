@@ -1,10 +1,12 @@
 import type { GameView } from './game-contract'
 import {
   isWebChessCaseProfile,
+  WEBCHESS_CASE_BUNDLE_MAX_BYTES,
 } from './case-bundle-contract'
 import type {
   WebChessCaseDownload,
   WebChessCaseProfile,
+  WebChessCaseVerificationResult,
 } from './case-bundle-contract'
 import {
   ASSUMPTION_RESULTS,
@@ -245,6 +247,52 @@ function nonnegativeInteger(value: unknown, label: string): number {
     throw invalidResponse(`${label} must be a non-negative integer.`)
   }
   return Number(value)
+}
+
+function boundedStringList(value: unknown, label: string): readonly string[] {
+  if (!Array.isArray(value) || value.length > 64) {
+    throw invalidResponse(`${label} must be a bounded string array.`)
+  }
+  return value.map((item, index) =>
+    boundedString(item, `${label}[${index}]`, 1, 2_000))
+}
+
+function parseCaseVerificationEnvelope(
+  value: unknown,
+): WebChessCaseVerificationResult {
+  const envelope = recordOf(value, 'Case verification response')
+  const result = recordOf(envelope.verification, 'Case verification result')
+  const replay = recordOf(result.replay, 'Case replay verification')
+  if (
+    typeof result.ok !== 'boolean' ||
+    typeof replay.checked !== 'boolean' ||
+    typeof replay.exactProblemMapping !== 'boolean' ||
+    !(
+      replay.completedPlies === null ||
+      (Number.isInteger(replay.completedPlies) && Number(replay.completedPlies) >= 0)
+    ) ||
+    !(replay.terminal === null || typeof replay.terminal === 'boolean')
+  ) {
+    throw invalidResponse('Case verification result shape is invalid.')
+  }
+  return {
+    ok: result.ok,
+    errors: boundedStringList(result.errors, 'Case verification errors'),
+    warnings: boundedStringList(result.warnings, 'Case verification warnings'),
+    verified: boundedStringList(result.verified, 'Case verification checks'),
+    notVerified: boundedStringList(
+      result.notVerified,
+      'Case verification boundaries',
+    ),
+    replay: {
+      checked: replay.checked,
+      exactProblemMapping: replay.exactProblemMapping,
+      completedPlies: replay.completedPlies === null
+        ? null
+        : Number(replay.completedPlies),
+      terminal: replay.terminal as boolean | null,
+    },
+  }
 }
 
 function uuidString(value: unknown, label: string): string {
@@ -1960,6 +2008,37 @@ export async function downloadGameCase(
     blob: await response.blob(),
     fileName,
   }
+}
+
+export function verifyLocalCaseBundle(
+  bundle: Blob,
+  options: RequestOptions = {},
+): Promise<WebChessCaseVerificationResult> {
+  if (!(bundle instanceof Blob)) {
+    throw new TypeError('Choose one JSON case bundle to verify.')
+  }
+  if (bundle.size < 2) {
+    throw new TypeError('The selected case bundle is empty.')
+  }
+  if (bundle.size > WEBCHESS_CASE_BUNDLE_MAX_BYTES) {
+    throw new TypeError(
+      `The selected case bundle exceeds ${WEBCHESS_CASE_BUNDLE_MAX_BYTES.toLocaleString('en-US')} bytes.`,
+    )
+  }
+  return requestJson(
+    '/api/openclaw/case-verify',
+    {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Cache-Control': 'no-store',
+        'Content-Type': 'application/json',
+      },
+      body: bundle,
+      signal: options.signal,
+    },
+    parseCaseVerificationEnvelope,
+  )
 }
 
 export function createWilburAction(

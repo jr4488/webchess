@@ -8,7 +8,10 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { CURRENT_GAME_VERSIONS, type GameView } from '../../lib/game-contract'
-import type { WebChessCaseProfile } from '../../lib/case-bundle-contract'
+import type {
+  WebChessCaseProfile,
+  WebChessCaseVerificationResult,
+} from '../../lib/case-bundle-contract'
 import type {
   GateRecommendation,
   LifecycleAggregate,
@@ -485,6 +488,7 @@ function renderStage(
     caseExportError?: string
     caseExportNotice?: string
     caseExportPending?: boolean
+    localCaseVerificationEnabled?: boolean
     boardAnswer?: GeneratedAnswer | null
     answerFailurePrompt?: string
     game?: DurableGame | null
@@ -496,6 +500,7 @@ function renderStage(
       observation: AppendWilburObservationCommand,
     ) => Promise<boolean>
     onExportCase?: (profile: WebChessCaseProfile) => Promise<void>
+    onVerifyCase?: (bundle: Blob) => Promise<WebChessCaseVerificationResult>
   } = {},
 ) {
   const onRetry = vi.fn()
@@ -504,6 +509,19 @@ function renderStage(
   const onUpdateAction = options.onUpdateAction ?? vi.fn()
   const onObserve = options.onObserve ?? vi.fn(async () => true)
   const onExportCase = options.onExportCase ?? vi.fn(async () => undefined)
+  const onVerifyCase = options.onVerifyCase ?? vi.fn(async () => ({
+    ok: true,
+    errors: [],
+    warnings: [],
+    verified: [],
+    notVerified: [],
+    replay: {
+      checked: true,
+      exactProblemMapping: true,
+      completedPlies: 12,
+      terminal: true,
+    },
+  }))
 
   render(
     <LifecycleStage
@@ -525,6 +543,7 @@ function renderStage(
       caseExportPending={options.caseExportPending ?? false}
       caseExportError={options.caseExportError ?? ''}
       caseExportNotice={options.caseExportNotice ?? ''}
+      localCaseVerificationEnabled={options.localCaseVerificationEnabled ?? false}
       onRefresh={vi.fn()}
       onRetry={onRetry}
       onRetryAnswer={onRetryAnswer}
@@ -532,6 +551,7 @@ function renderStage(
       onUpdateAction={onUpdateAction}
       onObserve={onObserve}
       onExportCase={onExportCase}
+      onVerifyCase={onVerifyCase}
     />,
   )
 
@@ -539,6 +559,7 @@ function renderStage(
     onCreateAction,
     onObserve,
     onExportCase,
+    onVerifyCase,
     onRetry,
     onRetryAnswer,
     onUpdateAction,
@@ -575,6 +596,66 @@ describe('LifecycleStage terminal Gate experience', () => {
     expect(screen.getByText(
       /downloaded the research-redacted-v1 point-in-time case bundle/i,
     )).toHaveAttribute('role', 'status')
+  })
+
+  it('verifies one local case read-only and reports replay boundaries', async () => {
+    const result: WebChessCaseVerificationResult = {
+      ok: true,
+      errors: [],
+      warnings: [
+        'No local source context was supplied; package, commit, and migration-source compatibility were not checked.',
+      ],
+      verified: [
+        'canonical section digests and integrity root',
+        'event-by-event canonical board reconstruction and terminal summary',
+      ],
+      notVerified: [
+        'Arachne or WebChess efficacy, validity, truthfulness, or research conclusions',
+      ],
+      replay: {
+        checked: true,
+        exactProblemMapping: false,
+        completedPlies: 113,
+        terminal: true,
+      },
+    }
+    const onVerifyCase = vi.fn(async () => result)
+    renderStage(aggregate('charlotte_complete', 'answer'), {
+      localCaseVerificationEnabled: true,
+      onVerifyCase,
+    })
+
+    const file = new File(['{"format":"webchess-case-bundle/1"}'], 'case.json', {
+      type: 'application/json',
+    })
+    fireEvent.change(screen.getByLabelText(/case bundle json/i), {
+      target: { files: [file] },
+    })
+    fireEvent.click(screen.getByRole('button', {
+      name: /import & verify case bundle/i,
+    }))
+
+    await waitFor(() => expect(onVerifyCase).toHaveBeenCalledWith(file))
+    expect(screen.getByRole('heading', {
+      name: /case structure and replay checks passed/i,
+    })).toBeInTheDocument()
+    expect(screen.getByText(/113 plies reconstructed/i)).toBeInTheDocument()
+    expect(screen.getByText(/redaction-safe neutral mapping/i)).toBeInTheDocument()
+    expect(screen.getByText(/does not persist the file, call OpenClaw/i))
+      .toBeInTheDocument()
+    expect(screen.getByText(/does not receive local source, artifact, or migration context/i))
+      .toBeInTheDocument()
+    expect(screen.getByText(/establish that Arachne is effective/i))
+      .toBeInTheDocument()
+  })
+
+  it('does not offer local case import in the hosted lifecycle', () => {
+    renderStage(aggregate('charlotte_complete', 'answer'))
+
+    expect(screen.queryByLabelText(/case bundle json/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', {
+      name: /import & verify case bundle/i,
+    })).not.toBeInTheDocument()
   })
 
   it('settles a failed Answer and offers one explicit fresh attempt', () => {

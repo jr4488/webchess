@@ -6,3 +6,4 @@ export {
   handleOpenClawStatusRequest,
 } from './handlers'
 export type { OpenClawHandlerDependencies } from './handlers'
+export { handleOpenClawCaseVerificationRequest } from './case-verification'

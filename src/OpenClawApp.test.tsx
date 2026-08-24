@@ -8,7 +8,10 @@ const localApi = vi.hoisted(() => ({
   createIdempotencyKey: vi.fn(() => '018f47b2-4b0c-7b9e-8f24-123456789000'),
   divideProblem: vi.fn(),
   getCurrentGame: vi.fn(),
+  getGameLifecycle: vi.fn(),
+  getWebMemory: vi.fn(),
   recoverDivisionIntent: vi.fn(),
+  verifyLocalCaseBundle: vi.fn(),
 }))
 
 vi.mock('./lib/webchess-api', async (importOriginal) => {
@@ -18,9 +21,34 @@ vi.mock('./lib/webchess-api', async (importOriginal) => {
     createIdempotencyKey: localApi.createIdempotencyKey,
     divideProblem: localApi.divideProblem,
     getCurrentGame: localApi.getCurrentGame,
+    getGameLifecycle: localApi.getGameLifecycle,
+    getWebMemory: localApi.getWebMemory,
     recoverDivisionIntent: localApi.recoverDivisionIntent,
+    verifyLocalCaseBundle: localApi.verifyLocalCaseBundle,
   }
 })
+
+vi.mock('./components/stages/LifecycleStage', () => ({
+  LifecycleStage: ({
+    localCaseVerificationEnabled,
+    onVerifyCase,
+  }: {
+    localCaseVerificationEnabled: boolean
+    onVerifyCase: (bundle: Blob) => Promise<unknown>
+  }) => (
+    <section aria-label="Lifecycle import wiring">
+      <p>{localCaseVerificationEnabled ? 'Local verification enabled' : 'Local verification disabled'}</p>
+      <button
+        type="button"
+        onClick={() => void onVerifyCase(new Blob(['{}'], {
+          type: 'application/json',
+        }))}
+      >
+        Verify wired case
+      </button>
+    </section>
+  ),
+}))
 
 describe('local OpenClaw WebChess experience', () => {
   beforeEach(() => {
@@ -29,6 +57,24 @@ describe('local OpenClaw WebChess experience', () => {
       '018f47b2-4b0c-7b9e-8f24-123456789000',
     )
     localApi.getCurrentGame.mockResolvedValue(null)
+    localApi.getWebMemory.mockResolvedValue({
+      version: 'webchess-web-memory-index-v1',
+      consentVersion: 'webchess-web-memory-consent-v1',
+      cases: [],
+    })
+    localApi.verifyLocalCaseBundle.mockResolvedValue({
+      ok: true,
+      errors: [],
+      warnings: [],
+      verified: [],
+      notVerified: [],
+      replay: {
+        checked: true,
+        exactProblemMapping: false,
+        completedPlies: 1,
+        terminal: false,
+      },
+    })
   })
 
   it('restores durable local state and explains the OpenClaw v2 boundary', async () => {
@@ -99,5 +145,70 @@ describe('local OpenClaw WebChess experience', () => {
     expect(
       await screen.findByLabelText(/what are you trying to understand/i),
     ).toBeInTheDocument()
+  })
+
+  it('wires terminal local case verification only through the OpenClaw runtime API', async () => {
+    localApi.getCurrentGame.mockResolvedValue({
+      id: '73000000-0000-4000-8000-000000000001',
+      sourceGameId: null,
+      revision: 8,
+      status: 'answered',
+      problem: 'How should this bounded local case be inspected?',
+      researchConsent: {
+        version: 'webchess-research-consent-v1',
+        decision: 'no_external_research',
+        recordedAt: '2026-08-24T01:00:00.000Z',
+      },
+      division: {
+        seed: 'division-seed',
+        facets: [],
+        parts: [],
+        model: 'configured-default',
+      },
+      state: {
+        versions: {
+          event: 1,
+          rules: 'circular-chess-v1',
+          engine: 'engine-v2',
+          cast: 'cast-v1',
+        },
+        pieces: [],
+        events: [],
+        captures: [],
+        turn: 'white',
+        completedPlies: 113,
+        quietPlies: 0,
+        lastMove: null,
+        outcome: {
+          winner: null,
+          reason: 'move-limit',
+          completedTurn: 113,
+        },
+      },
+      answer: {
+        answer: 'A bounded answer.',
+        model: 'configured-default',
+        prompt: 'Approved prompt.',
+      },
+    })
+    localApi.getGameLifecycle.mockResolvedValue({
+      id: '72000000-0000-4000-8000-000000000001',
+      state: 'charlotte_complete',
+      wilburActions: [],
+      wilburObservations: [],
+      charlotteRenderedAnswer: 'A bounded answer.',
+    })
+
+    render(<OpenClawApp />)
+    const verifyButton = await screen.findByRole('button', {
+      name: /verify wired case/i,
+    })
+    expect(screen.getByText('Local verification enabled')).toBeInTheDocument()
+    fireEvent.click(verifyButton)
+
+    await waitFor(() => {
+      expect(localApi.verifyLocalCaseBundle).toHaveBeenCalledOnce()
+    })
+    expect(localApi.verifyLocalCaseBundle.mock.calls[0]?.[0]).toBeInstanceOf(Blob)
   })
 })

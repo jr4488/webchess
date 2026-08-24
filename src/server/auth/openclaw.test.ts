@@ -43,6 +43,7 @@ describe('resolveLocalOpenClawUser', () => {
 
   it.each([
     '/api/divide',
+    '/api/openclaw/case-verify',
     '/api/web-memory',
     '/api/division-intents/intent-1',
     '/api/games/current',
@@ -58,6 +59,7 @@ describe('resolveLocalOpenClawUser', () => {
   it.each([
     '/api/account',
     '/api/account/usage',
+    '/api/openclaw/case-verify/extra',
     '/api/openclaw/status',
     '/api/webhooks/clerk',
   ])('does not grant the local principal access to %s', (pathname) => {

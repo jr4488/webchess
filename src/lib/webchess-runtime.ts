@@ -26,6 +26,7 @@ type WebChessApiClient = Pick<
   | 'startGame'
   | 'submitMove'
   | 'updateWilburAction'
+  | 'verifyLocalCaseBundle'
 >
 
 export interface WebChessRuntime {

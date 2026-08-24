@@ -53,6 +53,7 @@ export function resolveLocalOpenClawUser(
       !LOCAL_OWNER_PATTERN.test(ownerId) ||
       !(
         requestUrl.pathname === '/api/divide' ||
+        requestUrl.pathname === '/api/openclaw/case-verify' ||
         requestUrl.pathname === '/api/web-memory' ||
         requestUrl.pathname.startsWith('/api/division-intents/') ||
         requestUrl.pathname.startsWith('/api/games/')

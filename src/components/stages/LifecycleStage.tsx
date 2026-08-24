@@ -23,7 +23,10 @@ import type {
   AppendWilburObservationCommand,
   DurableGame,
 } from '../../lib/webchess-api'
-import type { WebChessCaseProfile } from '../../lib/case-bundle-contract'
+import type {
+  WebChessCaseProfile,
+  WebChessCaseVerificationResult,
+} from '../../lib/case-bundle-contract'
 import { buildPortableAnswerPrompt } from '../../lib/portable-answer-prompt'
 import { resolveFullAnswerModelPrompt } from '../../lib/full-answer-model-prompt'
 import type {
@@ -76,6 +79,7 @@ interface LifecycleStageProps {
   caseExportPending: boolean
   caseExportError: string
   caseExportNotice: string
+  localCaseVerificationEnabled: boolean
   onRefresh: () => void
   onRetry: () => void
   onRetryAnswer: () => void
@@ -90,6 +94,7 @@ interface LifecycleStageProps {
     observation: AppendWilburObservationCommand,
   ) => Promise<boolean>
   onExportCase: (profile: WebChessCaseProfile) => Promise<void>
+  onVerifyCase: (bundle: Blob) => Promise<WebChessCaseVerificationResult>
 }
 
 const EMPTY_SET = new Set<string>()
@@ -396,6 +401,7 @@ export function LifecycleStage({
   caseExportPending,
   caseExportError,
   caseExportNotice,
+  localCaseVerificationEnabled,
   onRefresh,
   onRetry,
   onRetryAnswer,
@@ -403,10 +409,16 @@ export function LifecycleStage({
   onUpdateAction,
   onObserve,
   onExportCase,
+  onVerifyCase,
 }: LifecycleStageProps) {
   const [caseProfile, setCaseProfile] = useState<WebChessCaseProfile>(
     'research-redacted-v1',
   )
+  const [caseFile, setCaseFile] = useState<File | null>(null)
+  const [caseVerificationPending, setCaseVerificationPending] = useState(false)
+  const [caseVerificationError, setCaseVerificationError] = useState('')
+  const [caseVerificationResult, setCaseVerificationResult] =
+    useState<WebChessCaseVerificationResult | null>(null)
   const [portableCopyFeedback, setPortableCopyFeedback] = useState<{
     key: string
     status: 'copying' | 'success' | 'error'
@@ -438,6 +450,25 @@ export function LifecycleStage({
     ),
     [lifecycle?.wilburActions],
   )
+
+  const verifySelectedCase = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!caseFile || caseVerificationPending) return
+    setCaseVerificationPending(true)
+    setCaseVerificationError('')
+    setCaseVerificationResult(null)
+    try {
+      setCaseVerificationResult(await onVerifyCase(caseFile))
+    } catch (verificationError) {
+      setCaseVerificationError(
+        verificationError instanceof Error
+          ? verificationError.message
+          : 'Local WebChess could not verify this case bundle.',
+      )
+    } finally {
+      setCaseVerificationPending(false)
+    }
+  }
   const observationsByAction = useMemo(() => {
     const grouped = new Map<string, NonNullable<typeof lifecycle>['wilburObservations']>()
     for (const observation of lifecycle?.wilburObservations ?? []) {
@@ -1460,6 +1491,111 @@ export function LifecycleStage({
               ) : null}
               {caseExportNotice ? (
                 <p role="status" aria-live="polite">{caseExportNotice}</p>
+              ) : null}
+              {localCaseVerificationEnabled ? (
+                <form
+                  className="wilbur-observation-form"
+                  onSubmit={(event) => void verifySelectedCase(event)}
+                >
+                  <fieldset disabled={caseVerificationPending}>
+                    <legend>Import &amp; verify a saved case</legend>
+                    <p>
+                      The selected JSON is checked in memory by this authenticated,
+                      loopback-only WebChess process. Verification is read-only: it
+                      does not persist the file, call OpenClaw or another provider,
+                      or establish that Arachne is effective.
+                    </p>
+                    <label htmlFor={`case-import-${lifecycle.id}`}>
+                      Case bundle JSON
+                    </label>
+                    <input
+                      id={`case-import-${lifecycle.id}`}
+                      type="file"
+                      accept="application/json,.json"
+                      onChange={(event) => {
+                        setCaseFile(event.target.files?.[0] ?? null)
+                        setCaseVerificationError('')
+                        setCaseVerificationResult(null)
+                      }}
+                    />
+                    <button
+                      className="secondary-button"
+                      type="submit"
+                      disabled={!caseFile || caseVerificationPending}
+                      aria-busy={caseVerificationPending}
+                    >
+                      <ShieldCheck size={14} aria-hidden="true" />
+                      {caseVerificationPending
+                        ? 'Verifying case bundle…'
+                        : 'Import & verify case bundle'}
+                    </button>
+                  </fieldset>
+                  <p>
+                    This browser check does not receive local source, artifact, or
+                    migration context. Use <code>npm run case:verify -- &lt;file&gt;</code>{' '}
+                    in the cloned checkout for those equality checks.
+                  </p>
+                  {caseVerificationError ? (
+                    <p role="alert">{caseVerificationError}</p>
+                  ) : null}
+                  {caseVerificationResult ? (
+                    <section
+                      aria-label="Case bundle verification result"
+                      aria-live="polite"
+                    >
+                      <h3>
+                        {caseVerificationResult.ok
+                          ? 'Case structure and replay checks passed'
+                          : 'Case verification found errors'}
+                      </h3>
+                      <p>
+                        {caseVerificationResult.replay.checked
+                          ? `${caseVerificationResult.replay.completedPlies ?? 0} plies reconstructed · ${caseVerificationResult.replay.terminal ? 'terminal outcome present' : 'no terminal outcome'} · ${caseVerificationResult.replay.exactProblemMapping ? 'exact stored problem mapping' : 'redaction-safe neutral mapping'}`
+                          : 'Board replay was not checked because the bundle structure was not usable.'}
+                      </p>
+                      {caseVerificationResult.errors.length > 0 ? (
+                        <div role="alert">
+                          <strong>Errors</strong>
+                          <ul>
+                            {caseVerificationResult.errors.map((message, index) => (
+                              <li key={`${index}-${message}`}>{message}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                      {caseVerificationResult.warnings.length > 0 ? (
+                        <details>
+                          <summary>Warnings ({caseVerificationResult.warnings.length})</summary>
+                          <ul>
+                            {caseVerificationResult.warnings.map((message, index) => (
+                              <li key={`${index}-${message}`}>{message}</li>
+                            ))}
+                          </ul>
+                        </details>
+                      ) : null}
+                      <details>
+                        <summary>
+                          Verified checks ({caseVerificationResult.verified.length})
+                        </summary>
+                        <ul>
+                          {caseVerificationResult.verified.map((message, index) => (
+                            <li key={`${index}-${message}`}>{message}</li>
+                          ))}
+                        </ul>
+                      </details>
+                      <details>
+                        <summary>
+                          Not verified ({caseVerificationResult.notVerified.length})
+                        </summary>
+                        <ul>
+                          {caseVerificationResult.notVerified.map((message, index) => (
+                            <li key={`${index}-${message}`}>{message}</li>
+                          ))}
+                        </ul>
+                      </details>
+                    </section>
+                  ) : null}
+                </form>
               ) : null}
             </section>
           ) : null}

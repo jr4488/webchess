@@ -15,6 +15,7 @@ import {
   requestGameAnswer,
   startGame,
   submitMove,
+  verifyLocalCaseBundle,
   WebChessApiError,
 } from './webchess-api'
 import type { DurableGame } from './webchess-api'
@@ -505,6 +506,62 @@ describe('durable WebChess browser API', () => {
       GAME_ID,
       'unsafe-profile' as 'research-redacted-v1',
     )).rejects.toThrow(/supported case redaction profile/u)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('verifies one case through the authenticated same-origin OpenClaw route', async () => {
+    const verification = {
+      ok: true,
+      errors: [],
+      warnings: [
+        'No local source context was supplied; package, commit, and migration-source compatibility were not checked.',
+      ],
+      verified: ['canonical section digests and integrity root'],
+      notVerified: ['Arachne or WebChess efficacy'],
+      replay: {
+        checked: true,
+        exactProblemMapping: false,
+        completedPlies: 113,
+        terminal: true,
+      },
+    }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ verification }))
+    vi.stubGlobal('fetch', fetchMock)
+    window.history.replaceState(null, '', '/openclaw')
+    const bundle = new Blob(['{"format":"webchess-case-bundle/1"}'], {
+      type: 'application/json',
+    })
+
+    try {
+      await expect(verifyLocalCaseBundle(bundle)).resolves.toEqual(verification)
+    } finally {
+      window.history.replaceState(null, '', '/')
+    }
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/openclaw/case-verify',
+      expect.objectContaining({
+        method: 'POST',
+        body: bundle,
+        credentials: 'same-origin',
+        cache: 'no-store',
+      }),
+    )
+    const headers = new Headers(requestInit(fetchMock, 0).headers)
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.get('X-WebChess-OpenClaw-Runtime')).toBe('webchess-2')
+    expect(headers.get('Idempotency-Key')).toBeNull()
+  })
+
+  it('rejects an oversized case before sending it to the loopback route', () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const bundle = new Blob(['{}'])
+    Object.defineProperty(bundle, 'size', { value: 3_000_001 })
+
+    expect(() => verifyLocalCaseBundle(bundle)).toThrow(
+      /exceeds 3,000,000 bytes/u,
+    )
     expect(fetchMock).not.toHaveBeenCalled()
   })
 

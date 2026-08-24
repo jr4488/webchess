@@ -150,6 +150,18 @@ describe('auth proxy', () => {
     ))
     expect(bound.status).toBe(200)
     expect(bound.headers.get('x-middleware-next')).toBe('1')
+
+    const caseVerify = await runProxy(new NextRequest(
+      'http://127.0.0.1:3210/api/openclaw/case-verify',
+      {
+        headers: {
+          host: '127.0.0.1:3210',
+          [LOCAL_OPENCLAW_AUTH_HEADER]: LOCAL_OPENCLAW_AUTH_VALUE,
+        },
+      },
+    ))
+    expect(caseVerify.status).toBe(200)
+    expect(caseVerify.headers.get('x-middleware-next')).toBe('1')
   })
 
   it('emits Clerk strict CSP without unsafe-inline script execution', async () => {

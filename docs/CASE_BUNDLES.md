@@ -44,6 +44,13 @@ non-sensitive in a particular case.
 
 ## Offline, read-only verification
 
+The local OpenClaw interface also offers **Import & verify case** for files up
+to the default 3,000,000-byte local export ceiling. The browser sends the file
+only to the authenticated loopback WebChess process, which verifies it in
+memory without persistence or provider calls. That convenience check does not
+receive checkout, runtime-payload, or migration context. Use the CLI below for
+those local equality checks and for a larger deliberately configured export.
+
 From a WebChess checkout with `npm ci` completed, run:
 
 ```bash

@@ -2316,6 +2316,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
             caseExportPending={caseExportPending}
             caseExportError={caseExportError}
             caseExportNotice={caseExportNotice}
+            localCaseVerificationEnabled={runtime.kind === 'openclaw'}
             onRefresh={() => void refreshLifecycle()}
             onRetry={() => void retryLifecyclePath()}
             onRetryAnswer={() => void retryBoardAnswer()}
@@ -2323,6 +2324,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
             onUpdateAction={(action, status, followUpAt) => void setWilburActionStatus(action, status, followUpAt)}
             onObserve={observeWilburAction}
             onExportCase={exportLifecycleCase}
+            onVerifyCase={runtime.api.verifyLocalCaseBundle}
           />
         )}
 
