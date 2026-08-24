@@ -98,8 +98,43 @@ interface FileSeal {
 
 type JsonRecord = Record<string, unknown>
 
+const OPENAI_CODEX_AUTH_CLAIM = 'https://api.openai.com/auth'
+
 function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Extract the account selected by the pinned OpenAI account transport using a
+ * compatible fail-closed subset of its JWT decoder.
+ *
+ * The reviewed @openclaw/ai 2026.7.1-2 transport decodes (without locally
+ * verifying) this claim from the OAuth access JWT and uses it as the
+ * `chatgpt-account-id` request header. OpenAI still authenticates the signed
+ * token; this local parser binds WebChess to the same account-routing value
+ * before and after each provider boundary.
+ */
+export function resolveOpenAiCodexAccessTokenAccountId(
+  accessToken: unknown,
+): string | null {
+  if (typeof accessToken !== 'string') return null
+  const token = accessToken.trim()
+  const parts = token.split('.')
+  if (parts.length !== 3) return null
+  try {
+    const decoded = Buffer.from(parts[1] ?? '', 'base64url').toString('utf8')
+    const payload = JSON.parse(decoded) as unknown
+    if (!isRecord(payload)) return null
+    const auth = payload[OPENAI_CODEX_AUTH_CLAIM]
+    if (!isRecord(auth)) return null
+    const accountId = auth.chatgpt_account_id
+    return typeof accountId === 'string' && accountId.length > 0 &&
+      accountId === accountId.trim()
+      ? accountId
+      : null
+  } catch {
+    return null
+  }
 }
 
 async function readJsonRecord(filename: string): Promise<JsonRecord | null> {
@@ -332,6 +367,14 @@ export function snapshotOAuthCredentialIdentity(
   if (!isSingletonOAuthStore(store, profileId)) return null
   const profiles = store.profiles as JsonRecord
   const credential = profiles[profileId] as JsonRecord
+  const tokenAccountId = resolveOpenAiCodexAccessTokenAccountId(
+    credential.access,
+  )
+  if (!tokenAccountId) return null
+  const storedAccountId = credential.accountId
+  if (typeof storedAccountId !== 'string' || !storedAccountId ||
+    storedAccountId !== storedAccountId.trim() ||
+    storedAccountId !== tokenAccountId) return null
   const mutableTokenFields = new Set([
     'access',
     'accessToken',
@@ -342,10 +385,89 @@ export function snapshotOAuthCredentialIdentity(
     'refreshToken',
   ])
   try {
-    return structuredClone(Object.fromEntries(
-      Object.entries(credential).filter(([key]) =>
-        !mutableTokenFields.has(key)),
-    )) as JsonRecord
+    return structuredClone({
+      ...Object.fromEntries(
+        Object.entries(credential).filter(([key]) =>
+          !mutableTokenFields.has(key)),
+      ),
+      accountId: tokenAccountId,
+    }) as JsonRecord
+  } catch {
+    return null
+  }
+}
+
+export interface GuardedOAuthProfileStore {
+  isIntact(): boolean
+  store: Record<string, unknown>
+}
+
+/**
+ * Own a singleton OAuth store whose credential may be replaced only by a
+ * same-account token rotation. Credentials are frozen so refresh code must use
+ * the reviewed whole-record assignment path, which the profiles proxy checks
+ * synchronously before the new access token becomes observable.
+ */
+export function guardOAuthProfileStoreAccountBinding(
+  sourceStore: Record<string, unknown>,
+  profileId: string,
+  expectedIdentity: Readonly<JsonRecord>,
+): GuardedOAuthProfileStore | null {
+  if (!isDeepStrictEqual(
+    snapshotOAuthCredentialIdentity(sourceStore, profileId),
+    expectedIdentity,
+  )) return null
+
+  try {
+    const sourceProfiles = sourceStore.profiles as JsonRecord
+    const initialCredential = sourceProfiles[profileId]
+    if (!isRecord(initialCredential)) return null
+    const baseStore = structuredClone(sourceStore) as JsonRecord
+    const frozenCredential = Object.freeze(
+      structuredClone(initialCredential) as JsonRecord,
+    )
+    const profileTarget: JsonRecord = { [profileId]: frozenCredential }
+    let bindingViolation = false
+
+    const rejectMutation = (): never => {
+      bindingViolation = true
+      throw new Error('Official Codex OAuth binding changed in flight.')
+    }
+    const profiles = new Proxy(profileTarget, {
+      defineProperty: rejectMutation,
+      deleteProperty: rejectMutation,
+      set(target, property, value) {
+        if (property !== profileId || !isRecord(value)) rejectMutation()
+        const candidateStore = {
+          ...baseStore,
+          profiles: { [profileId]: value },
+        }
+        if (!isDeepStrictEqual(
+          snapshotOAuthCredentialIdentity(candidateStore, profileId),
+          expectedIdentity,
+        )) rejectMutation()
+        let nextCredential: Readonly<JsonRecord>
+        try {
+          nextCredential = Object.freeze(structuredClone(value) as JsonRecord)
+        } catch {
+          return rejectMutation()
+        }
+        return Reflect.set(target, property, nextCredential, target)
+      },
+      setPrototypeOf: rejectMutation,
+    })
+    const guardedStore = Object.freeze({
+      ...baseStore,
+      profiles,
+    })
+
+    return {
+      isIntact: () => !bindingViolation && isDeepStrictEqual(
+        snapshotOAuthCredentialIdentity(guardedStore, profileId),
+        expectedIdentity,
+      ),
+      store: guardedStore,
+    }
   } catch {
     return null
   }
@@ -580,6 +702,14 @@ export async function attestOfficialCodexPackage(
         if (!initialOAuthIdentity) {
           throw new Error('Official Codex OAuth identity is unavailable.')
         }
+        const guardedOAuthStore = guardOAuthProfileStoreAccountBinding(
+          params.authProfileStore,
+          params.authProfileId,
+          initialOAuthIdentity,
+        )
+        if (!guardedOAuthStore) {
+          throw new Error('Official Codex OAuth binding is unavailable.')
+        }
         const clearEnv = expectedPrivateStartClearEnv(params.config)
         const pluginConfig = codexPluginConfig(params.config)
         if (!clearEnv || !pluginConfig) {
@@ -674,7 +804,7 @@ export async function attestOfficialCodexPackage(
                     ...rawOptions,
                     agentDir: params.agentDir,
                     authProfileId: params.authProfileId,
-                    authProfileStore: params.authProfileStore,
+                    authProfileStore: guardedOAuthStore.store,
                     config: params.config,
                     onStartedClient: (startedClient: unknown) => {
                       if (isRecord(startedClient) &&
@@ -701,6 +831,12 @@ export async function attestOfficialCodexPackage(
                   throw new Error('Official Codex client startup failed.')
                 }
                 ownedClient.current = client as { close(): unknown }
+                if (!guardedOAuthStore.isIntact()) {
+                  closeOwnedClient()
+                  throw new Error(
+                    'Official Codex OAuth binding changed during client startup.',
+                  )
+                }
                 return client
               },
             },
@@ -711,16 +847,9 @@ export async function attestOfficialCodexPackage(
           params.signal.removeEventListener('abort', closeOwnedClient)
           closeOwnedClient()
         }
-        if (!isSingletonOAuthStore(
-          params.authProfileStore,
-          params.authProfileId,
-        ) || !isDeepStrictEqual(
-          snapshotOAuthCredentialIdentity(
-            params.authProfileStore,
-            params.authProfileId,
-          ),
-          initialOAuthIdentity,
-        )) throw new Error('Official Codex OAuth binding changed in flight.')
+        if (!guardedOAuthStore.isIntact()) {
+          throw new Error('Official Codex OAuth binding changed in flight.')
+        }
         if (executionFailure !== noFailure) throw executionFailure
         return result
       },

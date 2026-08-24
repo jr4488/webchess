@@ -30,8 +30,44 @@ const PLATFORM_EXECUTABLES = {
         sha256: '37e6f5953f191b04f7b62cb07dae90f51d0947ad89f0355665b421fbde28700b',
     },
 };
+const OPENAI_CODEX_AUTH_CLAIM = 'https://api.openai.com/auth';
 function isRecord(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+/**
+ * Extract the account selected by the pinned OpenAI account transport using a
+ * compatible fail-closed subset of its JWT decoder.
+ *
+ * The reviewed @openclaw/ai 2026.7.1-2 transport decodes (without locally
+ * verifying) this claim from the OAuth access JWT and uses it as the
+ * `chatgpt-account-id` request header. OpenAI still authenticates the signed
+ * token; this local parser binds WebChess to the same account-routing value
+ * before and after each provider boundary.
+ */
+export function resolveOpenAiCodexAccessTokenAccountId(accessToken) {
+    if (typeof accessToken !== 'string')
+        return null;
+    const token = accessToken.trim();
+    const parts = token.split('.');
+    if (parts.length !== 3)
+        return null;
+    try {
+        const decoded = Buffer.from(parts[1] ?? '', 'base64url').toString('utf8');
+        const payload = JSON.parse(decoded);
+        if (!isRecord(payload))
+            return null;
+        const auth = payload[OPENAI_CODEX_AUTH_CLAIM];
+        if (!isRecord(auth))
+            return null;
+        const accountId = auth.chatgpt_account_id;
+        return typeof accountId === 'string' && accountId.length > 0 &&
+            accountId === accountId.trim()
+            ? accountId
+            : null;
+    }
+    catch {
+        return null;
+    }
 }
 async function readJsonRecord(filename) {
     try {
@@ -230,6 +266,14 @@ export function snapshotOAuthCredentialIdentity(store, profileId) {
         return null;
     const profiles = store.profiles;
     const credential = profiles[profileId];
+    const tokenAccountId = resolveOpenAiCodexAccessTokenAccountId(credential.access);
+    if (!tokenAccountId)
+        return null;
+    const storedAccountId = credential.accountId;
+    if (typeof storedAccountId !== 'string' || !storedAccountId ||
+        storedAccountId !== storedAccountId.trim() ||
+        storedAccountId !== tokenAccountId)
+        return null;
     const mutableTokenFields = new Set([
         'access',
         'accessToken',
@@ -240,7 +284,68 @@ export function snapshotOAuthCredentialIdentity(store, profileId) {
         'refreshToken',
     ]);
     try {
-        return structuredClone(Object.fromEntries(Object.entries(credential).filter(([key]) => !mutableTokenFields.has(key))));
+        return structuredClone({
+            ...Object.fromEntries(Object.entries(credential).filter(([key]) => !mutableTokenFields.has(key))),
+            accountId: tokenAccountId,
+        });
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Own a singleton OAuth store whose credential may be replaced only by a
+ * same-account token rotation. Credentials are frozen so refresh code must use
+ * the reviewed whole-record assignment path, which the profiles proxy checks
+ * synchronously before the new access token becomes observable.
+ */
+export function guardOAuthProfileStoreAccountBinding(sourceStore, profileId, expectedIdentity) {
+    if (!isDeepStrictEqual(snapshotOAuthCredentialIdentity(sourceStore, profileId), expectedIdentity))
+        return null;
+    try {
+        const sourceProfiles = sourceStore.profiles;
+        const initialCredential = sourceProfiles[profileId];
+        if (!isRecord(initialCredential))
+            return null;
+        const baseStore = structuredClone(sourceStore);
+        const frozenCredential = Object.freeze(structuredClone(initialCredential));
+        const profileTarget = { [profileId]: frozenCredential };
+        let bindingViolation = false;
+        const rejectMutation = () => {
+            bindingViolation = true;
+            throw new Error('Official Codex OAuth binding changed in flight.');
+        };
+        const profiles = new Proxy(profileTarget, {
+            defineProperty: rejectMutation,
+            deleteProperty: rejectMutation,
+            set(target, property, value) {
+                if (property !== profileId || !isRecord(value))
+                    rejectMutation();
+                const candidateStore = {
+                    ...baseStore,
+                    profiles: { [profileId]: value },
+                };
+                if (!isDeepStrictEqual(snapshotOAuthCredentialIdentity(candidateStore, profileId), expectedIdentity))
+                    rejectMutation();
+                let nextCredential;
+                try {
+                    nextCredential = Object.freeze(structuredClone(value));
+                }
+                catch {
+                    return rejectMutation();
+                }
+                return Reflect.set(target, property, nextCredential, target);
+            },
+            setPrototypeOf: rejectMutation,
+        });
+        const guardedStore = Object.freeze({
+            ...baseStore,
+            profiles,
+        });
+        return {
+            isIntact: () => !bindingViolation && isDeepStrictEqual(snapshotOAuthCredentialIdentity(guardedStore, profileId), expectedIdentity),
+            store: guardedStore,
+        };
     }
     catch {
         return null;
@@ -401,6 +506,10 @@ export async function attestOfficialCodexPackage(record, platform = process.plat
                 if (!initialOAuthIdentity) {
                     throw new Error('Official Codex OAuth identity is unavailable.');
                 }
+                const guardedOAuthStore = guardOAuthProfileStoreAccountBinding(params.authProfileStore, params.authProfileId, initialOAuthIdentity);
+                if (!guardedOAuthStore) {
+                    throw new Error('Official Codex OAuth binding is unavailable.');
+                }
                 const clearEnv = expectedPrivateStartClearEnv(params.config);
                 const pluginConfig = codexPluginConfig(params.config);
                 if (!clearEnv || !pluginConfig) {
@@ -485,7 +594,7 @@ export async function attestOfficialCodexPackage(record, platform = process.plat
                                     ...rawOptions,
                                     agentDir: params.agentDir,
                                     authProfileId: params.authProfileId,
-                                    authProfileStore: params.authProfileStore,
+                                    authProfileStore: guardedOAuthStore.store,
                                     config: params.config,
                                     onStartedClient: (startedClient) => {
                                         if (isRecord(startedClient) &&
@@ -514,6 +623,10 @@ export async function attestOfficialCodexPackage(record, platform = process.plat
                                 throw new Error('Official Codex client startup failed.');
                             }
                             ownedClient.current = client;
+                            if (!guardedOAuthStore.isIntact()) {
+                                closeOwnedClient();
+                                throw new Error('Official Codex OAuth binding changed during client startup.');
+                            }
                             return client;
                         },
                     });
@@ -525,8 +638,9 @@ export async function attestOfficialCodexPackage(record, platform = process.plat
                     params.signal.removeEventListener('abort', closeOwnedClient);
                     closeOwnedClient();
                 }
-                if (!isSingletonOAuthStore(params.authProfileStore, params.authProfileId) || !isDeepStrictEqual(snapshotOAuthCredentialIdentity(params.authProfileStore, params.authProfileId), initialOAuthIdentity))
+                if (!guardedOAuthStore.isIntact()) {
                     throw new Error('Official Codex OAuth binding changed in flight.');
+                }
                 if (executionFailure !== noFailure)
                     throw executionFailure;
                 return result;

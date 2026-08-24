@@ -15,6 +15,7 @@ import { isDeepStrictEqual } from 'node:util'
 import {
   attestOfficialCodexPackage,
   isOfficialCodexPluginRecord,
+  resolveOpenAiCodexAccessTokenAccountId,
   snapshotOAuthCredentialIdentity,
   type CodexPackageAttestation,
   type CodexPluginRecordForAttestation,
@@ -262,6 +263,7 @@ type OpenClawStopReason =
   | 'aborted'
 
 interface OpenClawResolvedProviderAuth {
+  apiKey?: string
   mode: 'api-key' | 'oauth' | 'token' | 'aws-sdk'
   profileId?: string
   source: string
@@ -721,9 +723,18 @@ function loadBoundOpenAiOAuthStore(
 function hasStableOAuthAccountIdentifier(
   identity: Readonly<Record<string, unknown>>,
 ): boolean {
-  return (typeof identity.accountId === 'string' &&
-      Boolean(identity.accountId.trim())) ||
-    (typeof identity.email === 'string' && Boolean(identity.email.trim()))
+  return typeof identity.accountId === 'string' &&
+    Boolean(identity.accountId.trim()) &&
+    identity.accountId === identity.accountId.trim()
+}
+
+function hasBoundPreparedOpenAiAccount(
+  prepared: PreparedSimpleCompletionModel,
+  expectedOAuthIdentity: Readonly<Record<string, unknown>>,
+): boolean {
+  if (!hasStableOAuthAccountIdentifier(expectedOAuthIdentity)) return false
+  return resolveOpenAiCodexAccessTokenAccountId(prepared.auth.apiKey) ===
+    expectedOAuthIdentity.accountId
 }
 
 function isOpenAiAccountModel(
@@ -1598,6 +1609,12 @@ async function prepareOpenAiAccountModel(
   if (!hasCanonicalOpenAiAccountModelTransport(prepared)) {
     return { message: OPENAI_ACCOUNT_TRANSPORT_ERROR, ok: false }
   }
+  if (!expectedOAuthIdentity || !hasBoundPreparedOpenAiAccount(
+    prepared,
+    expectedOAuthIdentity,
+  )) {
+    return { message: OPENAI_ACCOUNT_AUTH_ERROR, ok: false }
+  }
   const profileId = prepared.auth.profileId?.trim()
   if (!profileId || !hasExactOpenAiAccountAuthState(
     authRuntime,
@@ -2051,6 +2068,7 @@ export async function startWebChessBridge(
     currentStartupConfig,
     accountProfileId,
   ) || !hasCanonicalOpenAiAccountModelTransport(preflight) ||
+    !hasBoundPreparedOpenAiAccount(preflight, accountOAuthIdentity) ||
     !hasExactOpenAiAccountAuthState(
       agentAuthRuntime,
       currentStartupConfig,
@@ -2109,6 +2127,7 @@ export async function startWebChessBridge(
     searchProbeConfig,
     accountProfileId,
   ) || !hasCanonicalOpenAiAccountModelTransport(preflight) ||
+    !hasBoundPreparedOpenAiAccount(preflight, accountOAuthIdentity) ||
     !hasExactOpenAiAccountAuthState(
       agentAuthRuntime,
       searchProbeConfig,
@@ -2187,6 +2206,7 @@ export async function startWebChessBridge(
     finalStartupConfig,
     accountProfileId,
   ) || !hasCanonicalOpenAiAccountModelTransport(preflight) ||
+    !hasBoundPreparedOpenAiAccount(preflight, accountOAuthIdentity) ||
     !hasExactOpenAiAccountAuthState(
       agentAuthRuntime,
       finalStartupConfig,
@@ -2317,6 +2337,9 @@ export async function startWebChessBridge(
           statusPrepared,
           postStatusConfig,
           accountProfileId,
+        ) || !hasBoundPreparedOpenAiAccount(
+          statusPrepared,
+          accountOAuthIdentity,
         ) || !hasExactOpenAiAccountAuthState(
           agentAuthRuntime,
           postStatusConfig,
@@ -2478,6 +2501,9 @@ export async function startWebChessBridge(
             prepared,
             postPrepareConfig,
             accountProfileId,
+          ) || !hasBoundPreparedOpenAiAccount(
+            prepared,
+            accountOAuthIdentity,
           ) || !hasExactOpenAiAccountAuthState(
             agentAuthRuntime,
             postPrepareConfig,
@@ -2579,6 +2605,9 @@ export async function startWebChessBridge(
             prepared,
             postCompletionConfig,
             accountProfileId,
+          ) || !hasBoundPreparedOpenAiAccount(
+            prepared,
+            accountOAuthIdentity,
           ) || !hasExactOpenAiAccountAuthState(
             agentAuthRuntime,
             postCompletionConfig,
@@ -2816,6 +2845,19 @@ export async function startWebChessBridge(
             agentDir,
             agentWorkspaceDir,
             accountProfileId,
+            accountOAuthIdentity,
+          )) {
+            throw new BridgeRequestError(
+              503,
+              'OPENCLAW_SEARCH_NOT_READY',
+              OPENAI_ACCOUNT_AUTH_ERROR,
+            )
+          }
+          if (!isDeepStrictEqual(
+            snapshotOAuthCredentialIdentity(
+              boundAuthStore,
+              accountProfileId,
+            ),
             accountOAuthIdentity,
           )) {
             throw new BridgeRequestError(

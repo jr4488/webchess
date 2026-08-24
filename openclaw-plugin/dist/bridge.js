@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual, } from 'node:crypto';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { createServer, } from 'node:http';
 import { isDeepStrictEqual } from 'node:util';
-import { attestOfficialCodexPackage, isOfficialCodexPluginRecord, snapshotOAuthCredentialIdentity, } from './codex-attestation.js';
+import { attestOfficialCodexPackage, isOfficialCodexPluginRecord, resolveOpenAiCodexAccessTokenAccountId, snapshotOAuthCredentialIdentity, } from './codex-attestation.js';
 export const BRIDGE_PROTOCOL_VERSION = 1;
 export const MAX_BRIDGE_REQUEST_BYTES = 16 * 1024 * 1024;
 export const MAX_BRIDGE_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -328,9 +328,15 @@ function loadBoundOpenAiOAuthStore(runtime, config, agentDir, profileId, expecte
     }
 }
 function hasStableOAuthAccountIdentifier(identity) {
-    return (typeof identity.accountId === 'string' &&
-        Boolean(identity.accountId.trim())) ||
-        (typeof identity.email === 'string' && Boolean(identity.email.trim()));
+    return typeof identity.accountId === 'string' &&
+        Boolean(identity.accountId.trim()) &&
+        identity.accountId === identity.accountId.trim();
+}
+function hasBoundPreparedOpenAiAccount(prepared, expectedOAuthIdentity) {
+    if (!hasStableOAuthAccountIdentifier(expectedOAuthIdentity))
+        return false;
+    return resolveOpenAiCodexAccessTokenAccountId(prepared.auth.apiKey) ===
+        expectedOAuthIdentity.accountId;
 }
 function isOpenAiAccountModel(prepared, config, expectedProfileId) {
     const profileId = prepared.auth.profileId?.trim();
@@ -1080,6 +1086,9 @@ async function prepareOpenAiAccountModel(simpleCompletion, authRuntime, config, 
     if (!hasCanonicalOpenAiAccountModelTransport(prepared)) {
         return { message: OPENAI_ACCOUNT_TRANSPORT_ERROR, ok: false };
     }
+    if (!expectedOAuthIdentity || !hasBoundPreparedOpenAiAccount(prepared, expectedOAuthIdentity)) {
+        return { message: OPENAI_ACCOUNT_AUTH_ERROR, ok: false };
+    }
     const profileId = prepared.auth.profileId?.trim();
     if (!profileId || !hasExactOpenAiAccountAuthState(authRuntime, config, agentDir, profileId, expectedOAuthIdentity)) {
         return { message: OPENAI_ACCOUNT_AUTH_ERROR, ok: false };
@@ -1371,6 +1380,7 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
         if (postPreflightFailure)
             throw new Error(postPreflightFailure);
         if (!isOpenAiAccountModel(preflight, currentStartupConfig, accountProfileId) || !hasCanonicalOpenAiAccountModelTransport(preflight) ||
+            !hasBoundPreparedOpenAiAccount(preflight, accountOAuthIdentity) ||
             !hasExactOpenAiAccountAuthState(agentAuthRuntime, currentStartupConfig, agentDir, accountProfileId, accountOAuthIdentity)) {
             throw new Error(OPENAI_ACCOUNT_AUTH_ERROR);
         }
@@ -1395,6 +1405,7 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
         if (searchProbeFailure)
             throw new Error(searchProbeFailure);
         if (!isOpenAiAccountModel(preflight, searchProbeConfig, accountProfileId) || !hasCanonicalOpenAiAccountModelTransport(preflight) ||
+            !hasBoundPreparedOpenAiAccount(preflight, accountOAuthIdentity) ||
             !hasExactOpenAiAccountAuthState(agentAuthRuntime, searchProbeConfig, agentDir, accountProfileId, accountOAuthIdentity)) {
             throw new Error(OPENAI_ACCOUNT_AUTH_ERROR);
         }
@@ -1426,6 +1437,7 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
         if (!await revalidateBoundCodexSearchProvider(api, finalStartupConfig, boundCodexProvider))
             throw new Error(CODEX_SEARCH_ATTESTATION_ERROR);
         if (!isOpenAiAccountModel(preflight, finalStartupConfig, accountProfileId) || !hasCanonicalOpenAiAccountModelTransport(preflight) ||
+            !hasBoundPreparedOpenAiAccount(preflight, accountOAuthIdentity) ||
             !hasExactOpenAiAccountAuthState(agentAuthRuntime, finalStartupConfig, agentDir, accountProfileId, accountOAuthIdentity)) {
             throw new Error(OPENAI_ACCOUNT_AUTH_ERROR);
         }
@@ -1475,7 +1487,7 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                         throw new BridgeRequestError(503, 'OPENCLAW_NOT_READY', CODEX_SEARCH_ATTESTATION_ERROR);
                     }
                     const statusPrepared = statusModelResult.prepared;
-                    if (!isOpenAiAccountModel(statusPrepared, postStatusConfig, accountProfileId) || !hasExactOpenAiAccountAuthState(agentAuthRuntime, postStatusConfig, agentDir, accountProfileId, accountOAuthIdentity)) {
+                    if (!isOpenAiAccountModel(statusPrepared, postStatusConfig, accountProfileId) || !hasBoundPreparedOpenAiAccount(statusPrepared, accountOAuthIdentity) || !hasExactOpenAiAccountAuthState(agentAuthRuntime, postStatusConfig, agentDir, accountProfileId, accountOAuthIdentity)) {
                         throw new BridgeRequestError(503, 'OPENCLAW_NOT_READY', OPENAI_ACCOUNT_AUTH_ERROR);
                     }
                     if (!hasCanonicalOpenAiAccountModelTransport(statusPrepared)) {
@@ -1561,7 +1573,7 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                         if (!await revalidateBoundCodexSearchProvider(api, postPrepareConfig, boundCodexProvider)) {
                             throw new BridgeRequestError(503, 'OPENCLAW_MODEL_NOT_READY', CODEX_SEARCH_ATTESTATION_ERROR);
                         }
-                        if (!isOpenAiAccountModel(prepared, postPrepareConfig, accountProfileId) || !hasExactOpenAiAccountAuthState(agentAuthRuntime, postPrepareConfig, agentDir, accountProfileId, accountOAuthIdentity)) {
+                        if (!isOpenAiAccountModel(prepared, postPrepareConfig, accountProfileId) || !hasBoundPreparedOpenAiAccount(prepared, accountOAuthIdentity) || !hasExactOpenAiAccountAuthState(agentAuthRuntime, postPrepareConfig, agentDir, accountProfileId, accountOAuthIdentity)) {
                             throw new BridgeRequestError(503, 'OPENCLAW_MODEL_NOT_READY', OPENAI_ACCOUNT_AUTH_ERROR);
                         }
                         if (!hasCanonicalOpenAiAccountModelTransport(prepared)) {
@@ -1621,7 +1633,7 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                         if (!await revalidateBoundCodexSearchProvider(api, postCompletionConfig, boundCodexProvider)) {
                             throw new BridgeRequestError(503, 'OPENCLAW_MODEL_NOT_READY', CODEX_SEARCH_ATTESTATION_ERROR);
                         }
-                        if (!isOpenAiAccountModel(prepared, postCompletionConfig, accountProfileId) || !hasExactOpenAiAccountAuthState(agentAuthRuntime, postCompletionConfig, agentDir, accountProfileId, accountOAuthIdentity)) {
+                        if (!isOpenAiAccountModel(prepared, postCompletionConfig, accountProfileId) || !hasBoundPreparedOpenAiAccount(prepared, accountOAuthIdentity) || !hasExactOpenAiAccountAuthState(agentAuthRuntime, postCompletionConfig, agentDir, accountProfileId, accountOAuthIdentity)) {
                             throw new BridgeRequestError(503, 'OPENCLAW_MODEL_NOT_READY', OPENAI_ACCOUNT_AUTH_ERROR);
                         }
                         if (!hasCanonicalOpenAiAccountModelTransport(prepared)) {
@@ -1734,6 +1746,9 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                             throw new BridgeRequestError(503, 'OPENCLAW_SEARCH_NOT_READY', CODEX_SEARCH_ATTESTATION_ERROR);
                         }
                         if (!await hasOpenAiAccountSearchAuth(api, agentAuthRuntime, postSearchConfig, agentDir, agentWorkspaceDir, accountProfileId, accountOAuthIdentity)) {
+                            throw new BridgeRequestError(503, 'OPENCLAW_SEARCH_NOT_READY', OPENAI_ACCOUNT_AUTH_ERROR);
+                        }
+                        if (!isDeepStrictEqual(snapshotOAuthCredentialIdentity(boundAuthStore, accountProfileId), accountOAuthIdentity)) {
                             throw new BridgeRequestError(503, 'OPENCLAW_SEARCH_NOT_READY', OPENAI_ACCOUNT_AUTH_ERROR);
                         }
                         if (timedOut) {

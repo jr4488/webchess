@@ -30,6 +30,7 @@ const AGENT_DIR = '/openclaw/agents/researcher/agent'
 const AGENT_WORKSPACE_DIR = '/openclaw/workspaces/researcher'
 const OPENAI_ACCOUNT_MODEL_BASE_URL =
   'https://chatgpt.com/backend-api/codex'
+const OPENAI_CODEX_AUTH_CLAIM = 'https://api.openai.com/auth'
 const TEST_ENVIRONMENT: NodeJS.ProcessEnv = { NODE_ENV: 'test' }
 const ADDITIONAL_CODEX_PROXY_CA_ENVIRONMENT_NAMES = [
   'ALL_PROXY',
@@ -118,6 +119,24 @@ const ADDITIONAL_CODEX_PROXY_CA_ENVIRONMENT_NAMES = [
 
 function digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+function oauthAccessJwt(
+  accountId = 'account-fixture',
+  rotation = 'fixture',
+): string {
+  const encode = (value: unknown) =>
+    Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+  return [
+    encode({ alg: 'RS256', typ: 'JWT' }),
+    encode({
+      [OPENAI_CODEX_AUTH_CLAIM]: { chatgpt_account_id: accountId },
+      jti: rotation,
+    }),
+    // Synthetic signature bytes exercise local claim extraction only; OpenAI
+    // validates signatures on real OAuth tokens.
+    Buffer.from(`signature-${rotation}`, 'utf8').toString('base64url'),
+  ].join('.')
 }
 
 async function runtimeRoot(): Promise<string> {
@@ -224,6 +243,7 @@ function simpleRuntime(
     }),
     prepareSimpleCompletionModelForAgent: vi.fn(async () => ({
       auth: {
+        apiKey: oauthAccessJwt(),
         mode: 'oauth' as const,
         profileId: 'openai:account',
         source: 'profile:openai:account',
@@ -248,6 +268,7 @@ function agentAuthRuntime(
       order: { openai: effectiveOrder },
       profiles: {
         'openai:account': {
+          access: oauthAccessJwt(),
           accountId: 'account-fixture',
           email: 'researcher@example.invalid',
           provider: 'openai',
@@ -1685,6 +1706,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const runtime = simpleRuntime()
     runtime.prepareSimpleCompletionModelForAgent = vi.fn(async () => ({
       auth: {
+        apiKey: oauthAccessJwt(),
         mode: 'oauth' as const,
         profileId: 'openai:account',
         source: 'profile:openai:account',
@@ -1752,6 +1774,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const runtime = simpleRuntime(complete)
     runtime.prepareSimpleCompletionModelForAgent = vi.fn(async () => ({
       auth: {
+        apiKey: oauthAccessJwt(),
         mode: 'oauth' as const,
         profileId: 'openai:account',
         source: 'profile:openai:account',
@@ -2022,6 +2045,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     runtime.prepareSimpleCompletionModelForAgent = vi.fn()
       .mockResolvedValueOnce({
         auth: {
+          apiKey: oauthAccessJwt(),
           mode: 'oauth',
           profileId: 'openai:account',
           source: 'profile:openai:account',
@@ -2117,10 +2141,66 @@ describe('OpenClaw plugin runtime bridge', () => {
     }
   })
 
+  it('rejects email-only OAuth metadata without a routable access JWT', async () => {
+    const source = {
+      credential: {
+        email: 'researcher@example.invalid',
+        provider: 'openai',
+        type: 'oauth',
+      } as Record<string, unknown>,
+    }
+
+    const failure = await captureStartFailure(fakeApi(), {
+      agentAuthRuntime: mutableAgentAuthRuntime(source),
+    })
+
+    expect(failure.message).toMatch(/OpenAI account OAuth profile/u)
+  })
+
+  it('rejects an access JWT when stored account metadata is absent', async () => {
+    const source = {
+      credential: {
+        access: oauthAccessJwt('account-fixture', 'derived-at-launch'),
+        email: 'researcher@example.invalid',
+        provider: 'openai',
+        type: 'oauth',
+      } as Record<string, unknown>,
+    }
+    const failure = await captureStartFailure(fakeApi(), {
+      agentAuthRuntime: mutableAgentAuthRuntime(source),
+    })
+
+    expect(failure.message).toMatch(/OpenAI account OAuth profile/u)
+  })
+
+  it('rejects a prepared model token routed to a different account', async () => {
+    const runtime = simpleRuntime()
+    const prepare = runtime.prepareSimpleCompletionModelForAgent
+    runtime.prepareSimpleCompletionModelForAgent = vi.fn(async (params) => {
+      const prepared = await prepare(params)
+      if ('error' in prepared) return prepared
+      return {
+        ...prepared,
+        auth: {
+          ...prepared.auth,
+          apiKey: oauthAccessJwt('different-account', 'prepared-mismatch'),
+        },
+      }
+    })
+
+    const failure = await captureStartFailure(fakeApi(), {
+      simpleCompletionRuntime: runtime,
+    })
+
+    expect(failure.message).toMatch(/OpenAI account OAuth profile/u)
+    expect(runtime.completeWithPreparedSimpleCompletionModel)
+      .not.toHaveBeenCalled()
+  })
+
   it('allows OAuth token refresh while preserving the bound account identity', async () => {
     const source = {
       credential: {
-        access: 'oauth-access-initial',
+        access: oauthAccessJwt('account-fixture', 'initial'),
         accountId: 'account-fixture',
         email: 'researcher@example.invalid',
         expires: 1,
@@ -2132,7 +2212,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const complete = vi.fn(async () => {
       source.credential = {
         ...source.credential,
-        access: 'oauth-access-after-model',
+        access: oauthAccessJwt('account-fixture', 'after-model'),
         expires: 3,
         refresh: 'oauth-refresh-after-model',
       }
@@ -2147,7 +2227,7 @@ describe('OpenClaw plugin runtime bridge', () => {
       if (params.query !== CODEX_SEARCH_READINESS_QUERY) {
         source.credential = {
           ...source.credential,
-          access: 'oauth-access-after-search',
+          access: oauthAccessJwt('account-fixture', 'after-search'),
           expires: 4,
           refresh: 'oauth-refresh-after-search',
         }
@@ -2171,15 +2251,28 @@ describe('OpenClaw plugin runtime bridge', () => {
       executeSearch,
       revalidate: vi.fn(async () => true),
     }))
+    const runtime = simpleRuntime(complete)
+    const prepare = runtime.prepareSimpleCompletionModelForAgent
+    runtime.prepareSimpleCompletionModelForAgent = vi.fn(async (params) => {
+      const prepared = await prepare(params)
+      if ('error' in prepared) return prepared
+      return {
+        ...prepared,
+        auth: {
+          ...prepared.auth,
+          apiKey: source.credential.access as string,
+        },
+      }
+    })
     const bridge = await start(fakeApi(), {
       agentAuthRuntime: mutableAgentAuthRuntime(source),
       codexPackageAttestor: attestor,
-      simpleCompletionRuntime: simpleRuntime(complete),
+      simpleCompletionRuntime: runtime,
     })
     try {
       source.credential = {
         ...source.credential,
-        access: 'oauth-access-after-launch',
+        access: oauthAccessJwt('account-fixture', 'after-launch'),
         expires: 2,
         refresh: 'oauth-refresh-after-launch',
       }
@@ -2210,9 +2303,77 @@ describe('OpenClaw plugin runtime bridge', () => {
     }
   })
 
+  it('rejects access-token account drift at the status boundary', async () => {
+    const source = {
+      credential: {
+        access: oauthAccessJwt('account-fixture', 'status-initial'),
+        accountId: 'account-fixture',
+        email: 'researcher@example.invalid',
+        provider: 'openai',
+        type: 'oauth',
+      } as Record<string, unknown>,
+    }
+    const bridge = await start(fakeApi(), {
+      agentAuthRuntime: mutableAgentAuthRuntime(source),
+    })
+    try {
+      source.credential = {
+        ...source.credential,
+        access: oauthAccessJwt('different-account', 'status-rebind'),
+      }
+      const response = await fetch(`${bridge.url}/v1/status`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      })
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: 'OPENCLAW_NOT_READY',
+          message: expect.stringMatching(/OAuth profile/u),
+        },
+      })
+    } finally {
+      await bridge.close()
+    }
+  })
+
+  it('withholds a result if the prepared access token changes in flight', async () => {
+    const complete = vi.fn(async (params) => {
+      (params.auth as { apiKey?: string }).apiKey = oauthAccessJwt(
+        'different-account',
+        'prepared-in-flight',
+      )
+      return {
+        content: [{ type: 'text' as const, text: 'must be withheld' }],
+        stopReason: 'stop' as const,
+      }
+    })
+    const bridge = await start(fakeApi(), {
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    try {
+      const response = await modelRequest(
+        bridge,
+        'detect prepared access-token drift',
+      )
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: 'OPENCLAW_MODEL_NOT_READY',
+          message: expect.stringMatching(/OAuth profile/u),
+        },
+      })
+      expect(complete).toHaveBeenCalledTimes(1)
+    } finally {
+      await bridge.close()
+    }
+  })
+
   it('rejects a same-profile account rebind before model execution', async () => {
     const source = {
       credential: {
+        access: oauthAccessJwt('account-fixture', 'before-model-rebind'),
         accountId: 'account-fixture',
         email: 'researcher@example.invalid',
         provider: 'openai',
@@ -2230,7 +2391,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     try {
       source.credential = {
         ...source.credential,
-        accountId: 'different-account',
+        access: oauthAccessJwt('different-account', 'before-model-request'),
       }
       const response = await modelRequest(bridge, 'must fail before inference')
 
@@ -2250,6 +2411,7 @@ describe('OpenClaw plugin runtime bridge', () => {
   it('withholds a model result if the same profile is rebound during execution', async () => {
     const source = {
       credential: {
+        access: oauthAccessJwt('account-fixture', 'during-model-rebind'),
         accountId: 'account-fixture',
         email: 'researcher@example.invalid',
         provider: 'openai',
@@ -2259,7 +2421,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const complete = vi.fn(async () => {
       source.credential = {
         ...source.credential,
-        email: 'different-account@example.invalid',
+        access: oauthAccessJwt('different-account', 'during-model-request'),
       }
       return {
         content: [{ type: 'text' as const, text: 'must be withheld' }],
@@ -2289,6 +2451,7 @@ describe('OpenClaw plugin runtime bridge', () => {
   it('rejects a same-profile account rebind before Hosted Search execution', async () => {
     const source = {
       credential: {
+        access: oauthAccessJwt('account-fixture', 'before-search-rebind'),
         accountId: 'account-fixture',
         email: 'researcher@example.invalid',
         provider: 'openai',
@@ -2302,7 +2465,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     try {
       source.credential = {
         ...source.credential,
-        accountId: 'different-account',
+        access: oauthAccessJwt('different-account', 'before-search-request'),
       }
       const response = await fetch(`${bridge.url}/v1/web/search`, {
         body: JSON.stringify({
@@ -2331,7 +2494,7 @@ describe('OpenClaw plugin runtime bridge', () => {
   it('binds the official search call to a cloned singleton OAuth store', async () => {
     const api = fakeApi()
     let sourceCredential: Record<string, unknown> = {
-      access: 'oauth-access-fixture',
+      access: oauthAccessJwt('account-fixture', 'search-fixture'),
       accountId: 'account-fixture',
       email: 'researcher@example.invalid',
       provider: 'openai',
@@ -2355,11 +2518,8 @@ describe('OpenClaw plugin runtime bridge', () => {
       })
       if (params.query !== CODEX_SEARCH_READINESS_QUERY) {
         sourceCredential = {
-          access: 'oauth-access-different-account',
-          accountId: 'different-account',
-          email: 'different-account@example.invalid',
-          provider: 'openai',
-          type: 'oauth',
+          ...sourceCredential,
+          access: oauthAccessJwt('different-account', 'search-rebind'),
         }
       }
       return {
@@ -2390,6 +2550,65 @@ describe('OpenClaw plugin runtime bridge', () => {
         body: JSON.stringify({
           limit: 4,
           query: 'prove OAuth binding remains exact',
+          timeoutMs: 45_000,
+          version: 1,
+        }),
+        headers: headers(),
+        method: 'POST',
+      })
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: 'OPENCLAW_SEARCH_NOT_READY',
+          message: expect.stringMatching(/OAuth profile/u),
+        },
+      })
+      expect(executeSearch).toHaveBeenCalledTimes(2)
+    } finally {
+      await bridge.close()
+    }
+  })
+
+  it('withholds search output if the cloned OAuth token changes account', async () => {
+    const executeSearch = vi.fn(async (
+      params: Parameters<CodexPackageAttestation['executeSearch']>[0],
+    ) => {
+      if (params.query !== CODEX_SEARCH_READINESS_QUERY) {
+        const profiles = params.authProfileStore.profiles as
+          Record<string, Record<string, unknown>>
+        profiles['openai:account'] = {
+          ...profiles['openai:account'],
+          access: oauthAccessJwt('different-account', 'cloned-search-race'),
+        }
+      }
+      return {
+        content: 'must be withheld',
+        externalContent: {
+          provider: 'codex',
+          source: 'web_search',
+          untrusted: true,
+          wrapped: true,
+        },
+        model: 'gpt-5.6-sol',
+        provider: 'codex',
+        query: params.query,
+        searches: [{ query: params.query }],
+        tookMs: 1,
+      }
+    })
+    const attestor: CodexPackageAttestor = vi.fn(async () => ({
+      executeSearch,
+      revalidate: vi.fn(async () => true),
+    }))
+    const bridge = await start(fakeApi(), {
+      codexPackageAttestor: attestor,
+    })
+    try {
+      const response = await fetch(`${bridge.url}/v1/web/search`, {
+        body: JSON.stringify({
+          limit: 4,
+          query: 'detect cloned search-token drift',
           timeoutMs: 45_000,
           version: 1,
         }),

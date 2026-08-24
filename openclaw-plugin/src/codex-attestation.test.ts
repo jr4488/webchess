@@ -5,16 +5,34 @@ import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   attestRegularExecutable,
   digestOwnedPackageTree,
+  guardOAuthProfileStoreAccountBinding,
   isOfficialCodexPluginRecord,
+  resolveOpenAiCodexAccessTokenAccountId,
   snapshotOAuthCredentialIdentity,
 } from './codex-attestation.js'
 
 const roots: string[] = []
+const OPENAI_CODEX_AUTH_CLAIM = 'https://api.openai.com/auth'
+
+function oauthAccessJwt(accountId: string, rotation: string): string {
+  const encode = (value: unknown) =>
+    Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+  return [
+    encode({ alg: 'RS256', typ: 'JWT' }),
+    encode({
+      [OPENAI_CODEX_AUTH_CLAIM]: { chatgpt_account_id: accountId },
+      jti: rotation,
+    }),
+    // Synthetic signature bytes are sufficient because the reviewed local
+    // decoder extracts routing metadata; OpenAI validates real token signatures.
+    Buffer.from(`signature-${rotation}`, 'utf8').toString('base64url'),
+  ].join('.')
+}
 
 async function temporaryRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), 'webchess-codex-attestation-'))
@@ -77,13 +95,23 @@ describe('official Codex package attestation primitives', () => {
     })).toBe(false)
   })
 
-  it('permits token refresh but detects OAuth account identity drift', () => {
+  it('matches the pinned account-id claim and fails closed more strictly', () => {
+    expect(resolveOpenAiCodexAccessTokenAccountId(
+      oauthAccessJwt('account-one', 'initial'),
+    )).toBe('account-one')
+    expect(resolveOpenAiCodexAccessTokenAccountId('not-a-jwt')).toBeNull()
+    expect(resolveOpenAiCodexAccessTokenAccountId(
+      oauthAccessJwt('', 'missing-account'),
+    )).toBeNull()
+  })
+
+  it('permits same-account token refresh but detects token account drift', () => {
     const profileId = 'openai:account'
     const store = {
       order: { openai: [profileId] },
       profiles: {
         [profileId]: {
-          access: 'initial-access',
+          access: oauthAccessJwt('account-one', 'initial'),
           accountId: 'account-one',
           email: 'researcher@example.invalid',
           expires: 1,
@@ -95,15 +123,116 @@ describe('official Codex package attestation primitives', () => {
       version: 1,
     }
     const initial = snapshotOAuthCredentialIdentity(store, profileId)
-    store.profiles[profileId].access = 'refreshed-access'
+    store.profiles[profileId].access = oauthAccessJwt(
+      'account-one',
+      'refreshed',
+    )
     store.profiles[profileId].expires = 2
     store.profiles[profileId].refresh = 'refreshed-refresh'
 
     expect(snapshotOAuthCredentialIdentity(store, profileId)).toEqual(initial)
 
-    store.profiles[profileId].accountId = 'account-two'
-    expect(snapshotOAuthCredentialIdentity(store, profileId)).not.toEqual(
-      initial,
+    store.profiles[profileId].access = oauthAccessJwt(
+      'account-two',
+      'different-account',
     )
+    expect(snapshotOAuthCredentialIdentity(store, profileId)).toBeNull()
+  })
+
+  it('rejects missing, blank, or claim-mismatched stored account metadata', () => {
+    const profileId = 'openai:account'
+    const store = {
+      order: { openai: [profileId] },
+      profiles: {
+        [profileId]: {
+          access: oauthAccessJwt('derived-account', 'initial'),
+          email: 'researcher@example.invalid',
+          provider: 'openai',
+          type: 'oauth',
+        },
+      },
+      version: 1,
+    }
+    expect(snapshotOAuthCredentialIdentity(store, profileId)).toBeNull()
+
+    store.profiles[profileId].accountId = ' '
+    expect(snapshotOAuthCredentialIdentity(store, profileId)).toBeNull()
+
+    store.profiles[profileId].accountId = 'different-account'
+    expect(snapshotOAuthCredentialIdentity(store, profileId)).toBeNull()
+  })
+
+  it('allows guarded same-account token rotation during a search', () => {
+    const profileId = 'openai:account'
+    const source = {
+      order: { openai: [profileId] },
+      profiles: {
+        [profileId]: {
+          access: oauthAccessJwt('account-one', 'initial'),
+          accountId: 'account-one',
+          provider: 'openai',
+          type: 'oauth',
+        },
+      },
+      version: 1,
+    }
+    const identity = snapshotOAuthCredentialIdentity(source, profileId)!
+    const guarded = guardOAuthProfileStoreAccountBinding(
+      source,
+      profileId,
+      identity,
+    )!
+    const profiles = guarded.store.profiles as
+      Record<string, Record<string, unknown>>
+    const providerQuery = vi.fn(() => 'grounded result')
+
+    const refreshThenQuery = () => {
+      profiles[profileId] = {
+        ...profiles[profileId],
+        access: oauthAccessJwt('account-one', 'refreshed'),
+        expires: 2,
+      }
+      return providerQuery()
+    }
+
+    expect(refreshThenQuery()).toBe('grounded result')
+    expect(providerQuery).toHaveBeenCalledTimes(1)
+    expect(guarded.isIntact()).toBe(true)
+  })
+
+  it('blocks a client token rebind synchronously before query dispatch', () => {
+    const profileId = 'openai:account'
+    const source = {
+      order: { openai: [profileId] },
+      profiles: {
+        [profileId]: {
+          access: oauthAccessJwt('account-one', 'initial'),
+          accountId: 'account-one',
+          provider: 'openai',
+          type: 'oauth',
+        },
+      },
+      version: 1,
+    }
+    const identity = snapshotOAuthCredentialIdentity(source, profileId)!
+    const guarded = guardOAuthProfileStoreAccountBinding(
+      source,
+      profileId,
+      identity,
+    )!
+    const profiles = guarded.store.profiles as
+      Record<string, Record<string, unknown>>
+    const providerQuery = vi.fn()
+    const startClientThenQuery = () => {
+      profiles[profileId] = {
+        ...profiles[profileId],
+        access: oauthAccessJwt('account-two', 'client-startup-rebind'),
+      }
+      providerQuery()
+    }
+
+    expect(startClientThenQuery).toThrow(/OAuth binding changed/u)
+    expect(providerQuery).not.toHaveBeenCalled()
+    expect(guarded.isIntact()).toBe(false)
   })
 })
