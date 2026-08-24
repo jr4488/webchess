@@ -129,6 +129,26 @@ function releaseIdentityShape({
         authPolicy: 'same-openai-account-oauth',
         transport: 'managed-private-stdio-agent-scoped',
         apiKeyFallback: false,
+        runtimeAttestation: {
+          platform: 'linux',
+          architecture: 'x64',
+          wrapper: {
+            package: '@openai/codex',
+            version: '0.144.3',
+            target: 'bin/codex.js',
+            sha256:
+              '134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477',
+          },
+          nativeExecutable: {
+            package: '@openai/codex-linux-x64',
+            version: '0.144.3-linux-x64',
+            target: 'x86_64-unknown-linux-musl',
+            relativePath:
+              'vendor/x86_64-unknown-linux-musl/bin/codex',
+            sha256:
+              '37e6f5953f191b04f7b62cb07dae90f51d0947ad89f0355665b421fbde28700b',
+          },
+        },
       },
     },
     toolchains: {

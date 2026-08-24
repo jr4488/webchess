@@ -28,6 +28,25 @@ const COMMIT = '0384978b2ba709da4c9824f2821c8623d3f84364'
 const CANDIDATE_PAPER_PATH = 'docs/WEBCHESS_WHITE_PAPER_V3_1.md'
 const HISTORICAL_PAPER_PATH = 'docs/WEBCHESS_WHITE_PAPER_V3.md'
 const PAPER_PDF = Buffer.from('%PDF-1.4\nexact paper PDF bytes')
+const CODEX_RUNTIME_ATTESTATION = Object.freeze({
+  platform: 'linux',
+  architecture: 'x64',
+  wrapper: {
+    package: '@openai/codex',
+    version: '0.144.3',
+    target: 'bin/codex.js',
+    sha256:
+      '134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477',
+  },
+  nativeExecutable: {
+    package: '@openai/codex-linux-x64',
+    version: '0.144.3-linux-x64',
+    target: 'x86_64-unknown-linux-musl',
+    relativePath: 'vendor/x86_64-unknown-linux-musl/bin/codex',
+    sha256:
+      '37e6f5953f191b04f7b62cb07dae90f51d0947ad89f0355665b421fbde28700b',
+  },
+})
 const CODEX_SEARCH_DEPENDENCY = Object.freeze({
   package: '@openclaw/codex',
   version: '2026.7.1-1',
@@ -37,6 +56,7 @@ const CODEX_SEARCH_DEPENDENCY = Object.freeze({
   authPolicy: 'same-openai-account-oauth',
   transport: 'managed-private-stdio-agent-scoped',
   apiKeyFallback: false,
+  runtimeAttestation: CODEX_RUNTIME_ATTESTATION,
 })
 
 function fixtureSourceArchive(commit) {
@@ -226,6 +246,51 @@ describe('release identity provenance', () => {
 
     const identity = structuredClone(resolveReleaseIdentity(releaseInputs()))
     identity.dependencies.codexSearch[field] = driftedValue
+    expect(() => validateResolvedReleaseIdentity(identity)).toThrow(
+      'does not match the canonical',
+    )
+  })
+
+  it.each([
+    ['platform', (runtime) => { runtime.platform = 'darwin' }],
+    ['architecture', (runtime) => { runtime.architecture = 'arm64' }],
+    ['wrapper package', (runtime) => {
+      runtime.wrapper.package = '@openai/codex-next'
+    }],
+    ['wrapper version', (runtime) => {
+      runtime.wrapper.version = '0.145.0'
+    }],
+    ['wrapper target', (runtime) => {
+      runtime.wrapper.target = 'bin/alternate.js'
+    }],
+    ['wrapper SHA-256', (runtime) => {
+      runtime.wrapper.sha256 = 'a'.repeat(64)
+    }],
+    ['native package', (runtime) => {
+      runtime.nativeExecutable.package = '@openai/codex-linux-arm64'
+    }],
+    ['native version', (runtime) => {
+      runtime.nativeExecutable.version = '0.144.3-linux-arm64'
+    }],
+    ['native target', (runtime) => {
+      runtime.nativeExecutable.target = 'aarch64-unknown-linux-musl'
+    }],
+    ['native relative path', (runtime) => {
+      runtime.nativeExecutable.relativePath =
+        'vendor/aarch64-unknown-linux-musl/bin/codex'
+    }],
+    ['native SHA-256', (runtime) => {
+      runtime.nativeExecutable.sha256 = 'b'.repeat(64)
+    }],
+  ])('rejects attested Codex runtime drift in %s', (_field, drift) => {
+    const template = structuredClone(unresolvedReleaseIdentityTemplate())
+    drift(template.dependencies.codexSearch.runtimeAttestation)
+    expect(() => validateReleaseIdentityTemplate(template)).toThrow(
+      'must retain the exact unresolved',
+    )
+
+    const identity = structuredClone(resolveReleaseIdentity(releaseInputs()))
+    drift(identity.dependencies.codexSearch.runtimeAttestation)
     expect(() => validateResolvedReleaseIdentity(identity)).toThrow(
       'does not match the canonical',
     )
