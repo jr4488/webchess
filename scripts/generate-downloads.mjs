@@ -757,22 +757,34 @@ function pdfAscii(value) {
 }
 
 function plainInlineMarkdown(value) {
-  return pdfAscii(
-    value
-      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1')
-      .replace(/\[([^\]]+)\]\((#[^)]+)\)/g, '$1')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
-      .replace(/\[([^\]]+)\]\[[^\]]+\]/g, '$1')
-      .replace(/<\/?[^>]+>/g, ' ')
-      .replace(/\\operatorname\{([^}]+)\}/g, '$1')
-      .replace(/\\text\{([^}]+)\}/g, '$1')
-      .replace(/\\(?:qquad|quad|left|right|mathrm|mathbf|mathbb)/g, '')
-      .replace(/\\([{}[\]()])/g, '$1')
-      .replace(/[*_~`$]/g, '')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>'),
+  const inlineCode = []
+  const protectedValue = value.replace(
+    /(`+)(.*?)\1/gu,
+    (_match, _fence, content) => {
+      const index = inlineCode.push(content) - 1
+      return `\uE000${index}\uE001`
+    },
   )
+  const plain = protectedValue
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1')
+    .replace(/\[([^\]]+)\]\((#[^)]+)\)/g, '$1')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
+    .replace(/\[([^\]]+)\]\[[^\]]+\]/g, '$1')
+    .replace(/<\/?[^>]+>/g, ' ')
+    .replace(/\\operatorname\{([^}]+)\}/g, '$1')
+    .replace(/\\text\{([^}]+)\}/g, '$1')
+    .replace(/\\(?:qquad|quad|left|right|mathrm|mathbf|mathbb)/g, '')
+    .replace(/\\([{}[\]()])/g, '$1')
+    .replace(/[*_~`$]/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(
+      /\uE000(\d+)\uE001/gu,
+      (_match, index) => inlineCode[Number(index)] ?? '',
+    )
+
+  return pdfAscii(plain)
 }
 
 function singleHttpsUri(value) {
