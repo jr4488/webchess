@@ -129,7 +129,7 @@ describe('auth page return destinations', () => {
     )
   })
 
-  it('describes only the authentication methods Clerk actually renders', async () => {
+  it('limits Clerk authentication copy to retained account-data controls', async () => {
     render(
       await SignInPage({
         searchParams: Promise.resolve({}),
@@ -137,9 +137,9 @@ describe('auth page return destinations', () => {
     )
 
     expect(
-      screen.getByText(/option shown by clerk/i),
-    ).toHaveTextContent(/google, verified-email, or enrolled-passkey/i)
-    expect(screen.queryByText(/are configured in clerk/i)).not.toBeInTheDocument()
+      screen.getByText(/google, verified-email, or enrolled-passkey option/i),
+    ).toHaveTextContent(/inspect, export, or delete retained account data/i)
+    expect(screen.getByText(/hosted gameplay is retired/i)).toBeInTheDocument()
 
     render(
       await SignUpPage({
@@ -148,8 +148,8 @@ describe('auth page return destinations', () => {
     )
 
     expect(
-      screen.getByText(/methods clerk shows/i),
-    ).toHaveTextContent(/manage passkeys from your account/i)
+      screen.getByText(/create your account with one of the verified methods/i),
+    ).toHaveTextContent(/does not enable hosted gameplay/i)
   })
 
   it('renders the signed local-session action when Clerk is absent on loopback', async () => {
@@ -163,7 +163,7 @@ describe('auth page return destinations', () => {
 
     expect(nextMocks.headers).toHaveBeenCalledOnce()
     expect(
-      screen.getByRole('button', { name: 'Continue on this machine' }),
+      screen.getByRole('button', { name: 'Open local data controls' }),
     ).toBeInTheDocument()
     expect(screen.getByDisplayValue('/account')).toHaveAttribute(
       'name',
@@ -177,7 +177,7 @@ describe('auth page return destinations', () => {
       }),
     )
     expect(
-      screen.getByRole('button', { name: 'Continue on this machine' }),
+      screen.getByRole('button', { name: 'Open local data controls' }),
     ).toBeInTheDocument()
   })
 
@@ -196,7 +196,7 @@ describe('auth page return destinations', () => {
       name: 'Sign-in is not available here yet.',
     })).toBeInTheDocument()
     expect(screen.queryByRole('button', {
-      name: 'Continue on this machine',
+      name: 'Open local data controls',
     })).not.toBeInTheDocument()
     unmount()
 
@@ -206,7 +206,7 @@ describe('auth page return destinations', () => {
       name: 'Account creation is not available here yet.',
     })).toBeInTheDocument()
     expect(screen.queryByRole('button', {
-      name: 'Continue on this machine',
+      name: 'Open local data controls',
     })).not.toBeInTheDocument()
   })
 })

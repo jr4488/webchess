@@ -21,7 +21,7 @@ export default async function AccountPage() {
         <nav className={styles.breadcrumbs} aria-label="Account navigation">
           <Link href="/">WebChess</Link>
           <span aria-hidden="true">/</span>
-          <Link href="/play">Play</Link>
+          <Link href="/install">Install</Link>
           <span aria-hidden="true">/</span>
           <span aria-current="page">Account</span>
         </nav>

@@ -92,7 +92,7 @@ describe('local OpenClaw WebChess experience', () => {
     expect(screen.getByText(/Answer generation runs only after permission/i)).toBeInTheDocument()
     expect(screen.getByText(/Charlotte reviews and qualifies it/i)).toBeInTheDocument()
     expect(screen.getByText(/sends model turns through your local OpenClaw/i)).toBeInTheDocument()
-    expect(screen.getByText(/credentials never enter the browser or a WebChess-operated service/i)).toBeInTheDocument()
+    expect(screen.getByText(/credentials never enter the browser, Next\.js child, PostgreSQL records, or a WebChess-operated service/i)).toBeInTheDocument()
     expect(screen.getByText(/runs locally through your OpenClaw configuration/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/WebChess version 2.2/i)).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: /account and usage/i })).not.toBeInTheDocument()

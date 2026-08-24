@@ -3,13 +3,11 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { QuestionStage } from './QuestionStage'
 
-const API_PROVIDER = {
-  id: 'openai-api',
+const RETIRED_HOSTED_PROVIDER = {
+  kind: 'hosted',
   label: 'OpenAI API',
-  billing: 'platform-api',
   dataControlsUrl: 'https://developers.openai.com/api/docs/guides/your-data',
   model: 'gpt-5.6-sol',
-  webSearch: 'disabled',
 } as const
 
 const OPENCLAW_PROVIDER = {
@@ -17,7 +15,7 @@ const OPENCLAW_PROVIDER = {
   label: 'your local OpenClaw',
   dataControlsLabel: 'How OpenClaw runs model requests',
   dataControlsUrl: 'https://docs.openclaw.ai/cli/infer',
-  model: 'your configured default model',
+  model: 'your selected OpenAI account model',
 } as const
 
 describe('QuestionStage', () => {
@@ -26,7 +24,7 @@ describe('QuestionStage', () => {
     render(
       <QuestionStage
         problem=""
-        provider={API_PROVIDER}
+        provider={OPENCLAW_PROVIDER}
         researchConsentDecision={null}
         setProblem={setProblem}
         setResearchConsentDecision={vi.fn()}
@@ -44,11 +42,11 @@ describe('QuestionStage', () => {
     expect(setProblem).toHaveBeenCalledWith(tooLong)
   })
 
-  it('discloses durable storage, server replay, and the provider boundary before play', () => {
+  it('retires the hosted gameplay surface without disclosing a key-backed path', () => {
     render(
       <QuestionStage
         problem="A concrete question"
-        provider={API_PROVIDER}
+        provider={RETIRED_HOSTED_PROVIDER}
         researchConsentDecision="no_external_research"
         setProblem={vi.fn()}
         setResearchConsentDecision={vi.fn()}
@@ -56,14 +54,12 @@ describe('QuestionStage', () => {
       />,
     )
 
-    expect(screen.getByText(/saved to your WebChess account/i)).toBeInTheDocument()
-    expect(screen.getByText(/sent from the server through OpenAI API using gpt-5.6-sol/i)).toBeInTheDocument()
-    expect(screen.getByText(/server replays the saved move log/i)).toBeInTheDocument()
-    expect(screen.getByText(/browser never sends an API key/i)).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /OpenAI Platform data controls/i })).toHaveAttribute(
-      'href',
-      'https://developers.openai.com/api/docs/guides/your-data',
+    expect(screen.getByText(/hosted gameplay is retired and cannot begin here/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /divide the problem/i })).toBeDisabled()
+    expect(screen.getByRole('link', { name: /open the installation guide/i })).toHaveAttribute(
+      'href', '/install',
     )
+    expect(screen.queryByText(/supplies the provider credential/i)).not.toBeInTheDocument()
   })
 
   it('explains durable local storage and user-owned OpenClaw authentication', () => {
@@ -80,13 +76,14 @@ describe('QuestionStage', () => {
 
     expect(screen.getByText(/seven-stage visible WebChess 2.2 lifecycle stay in a dedicated PostgreSQL database/i)).toBeInTheDocument()
     expect(screen.getByText(/sends model turns through your local OpenClaw/i)).toBeInTheDocument()
-    expect(screen.getByText(/configured provider and provider authentication/i)).toBeInTheDocument()
+    expect(screen.getByText(/sole selected OpenAI account\/OAuth profile/i)).toBeInTheDocument()
+    expect(screen.getByText(/no provider API key or token fallback is accepted/i)).toBeInTheDocument()
     expect(screen.getByText(/Portia validates the board-derived answer prompt/i)).toBeInTheDocument()
     expect(screen.getByText(/internal Gate checks sufficiency/i)).toBeInTheDocument()
     expect(screen.getByText(/Answer generation runs only after permission/i)).toBeInTheDocument()
     expect(screen.getByText(/Charlotte reviews and qualifies it/i)).toBeInTheDocument()
-    expect(screen.getByText(/may contact a remote model/i)).toBeInTheDocument()
-    expect(screen.getByText(/credentials never enter the browser or a WebChess-operated service/i)).toBeInTheDocument()
+    expect(screen.getByText(/contacts OpenAI/i)).toBeInTheDocument()
+    expect(screen.getByText(/credentials never enter the browser, Next.js child, PostgreSQL records, or a WebChess-operated service/i)).toBeInTheDocument()
     expect(
       screen.getByRole('link', { name: /How OpenClaw runs model requests/i }),
     ).toHaveAttribute('href', 'https://docs.openclaw.ai/cli/infer')

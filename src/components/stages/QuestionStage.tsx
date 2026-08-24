@@ -34,7 +34,9 @@ export function QuestionStage({
   onOpenMemory,
 }: QuestionStageProps) {
   const normalizedLength = normalizeProblemInput(problem).length
+  const isOpenClaw = provider.kind === 'openclaw'
   const canBegin =
+    isOpenClaw &&
     normalizedLength >= 12 &&
     normalizedLength <= 240 &&
     researchConsentDecision !== null
@@ -45,9 +47,9 @@ export function QuestionStage({
       <div className="question-copy">
         <p className="eyebrow">
           <span />
-          {provider.kind === 'openclaw'
+          {isOpenClaw
             ? 'WebChess 2.2 · OpenClaw local web'
-            : 'A circular game of perspective'}
+            : 'Hosted gameplay retired · install locally'}
         </p>
         <h1><span>Bring a problem.</span><br /><em>Play toward clarity.</em></h1>
         <p className="lede">
@@ -131,34 +133,29 @@ export function QuestionStage({
             </button>
           ) : null}
           <p className="form-data-note" id="problem-data-note">
-            {provider.kind === 'openclaw' ? (
+            {isOpenClaw ? (
               <>
                 Your game, verified move log, and seven-stage visible WebChess 2.2 lifecycle stay
                 in a dedicated PostgreSQL database on this machine. A loopback-only WebChess
                 process sends model turns through {provider.label} using {provider.model}.
-                OpenClaw uses your configured provider and provider authentication—which may
-                contact a remote model—but those credentials never enter the browser or a
-                WebChess-operated service. After play, Portia validates the board-derived answer
+                OpenClaw uses your sole selected OpenAI account/OAuth profile and contacts OpenAI;
+                no provider API key or token fallback is accepted. Credentials never enter the
+                browser, Next.js child, PostgreSQL records, or a WebChess-operated service. After
+                play, Portia validates the board-derived answer
                 prompt, the internal Gate checks sufficiency, Answer generation runs only after
                 permission, Charlotte reviews and qualifies it, and Wilbur carries the result into
                 action.{' '}
+                <a href={provider.dataControlsUrl} target="_blank" rel="noreferrer">
+                  {provider.dataControlsLabel ?? 'How OpenClaw runs model requests'}
+                </a>
               </>
             ) : (
               <>
-                Your question is saved to your WebChess account and sent from the server through{' '}
-                {provider.label} using {provider.model} to build the 64-part map. After play, the
-                server replays the saved move log and sends only the original question, verified
-                ending, and capture-derived record for the answer. WebChess supplies the provider
-                credential; your browser never sends an API key.{' '}
+                Hosted gameplay is retired and cannot begin here. Use the packed,
+                loopback-only OpenClaw runtime with OpenAI account/OAuth authentication.{' '}
+                <a href="/install">Open the installation guide</a>
               </>
             )}
-            <a href={provider.dataControlsUrl} target="_blank" rel="noreferrer">
-              {provider.dataControlsLabel ?? (
-                provider.kind === 'openclaw'
-                  ? 'How OpenClaw runs model requests'
-                  : 'OpenAI Platform data controls'
-              )}
-            </a>
           </p>
           <p className="form-data-note" id="research-consent-disclosure">
             This versioned choice is saved with this game and inherited by a

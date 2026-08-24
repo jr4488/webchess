@@ -472,7 +472,8 @@ export function EpisodePlayer() {
           <span className="wc-ep-seed">{seedLabel}</span>
         </div>
         <p className="wc-ep-disclosure">
-          Illustrative sequence, not the live engine. <Link href="/play">Run the working system.</Link>
+          Illustrative sequence, not the live engine.{' '}
+          <Link href="/install">Install and run the candidate system.</Link>
         </p>
       </div>
       <div className="wc-ep-side">

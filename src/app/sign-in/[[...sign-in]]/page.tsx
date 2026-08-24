@@ -48,11 +48,13 @@ export default async function SignInPage({
         {configured ? (
           <>
             <section className={styles.copy} aria-labelledby="sign-in-heading">
-              <p className={styles.eyebrow}>Private workspace</p>
-              <h1 id="sign-in-heading">Sign in to play.</h1>
+              <p className={styles.eyebrow}>Retained account data</p>
+              <h1 id="sign-in-heading">Sign in for account controls.</h1>
               <p>
                 Use the Google, verified-email, or enrolled-passkey option
-                shown by Clerk. WebChess never asks you for an OpenAI API key.
+                shown by Clerk to inspect, export, or delete retained account
+                data. Hosted gameplay is retired; run WebChess through the
+                local OpenClaw installation instead.
               </p>
             </section>
             <div className={styles.clerk}>
@@ -70,11 +72,12 @@ export default async function SignInPage({
             aria-labelledby="sign-in-heading"
           >
             <p className={styles.eyebrow}>This machine</p>
-            <h1 id="sign-in-heading">Continue on this computer.</h1>
+            <h1 id="sign-in-heading">Open local data controls.</h1>
             <p>
               Clerk is not configured here. This loopback WebChess uses a
-              signed local session and stores games in the PostgreSQL database
-              on this machine. It does not use OpenClaw.
+              signed local session only for retained account-data controls.
+              It cannot start gameplay; use the packed OpenClaw installation
+              for a game.
             </p>
             <form
               className={styles.localForm}
@@ -83,7 +86,7 @@ export default async function SignInPage({
             >
               <input type="hidden" name="return_url" value={returnUrl} />
               <button className={styles.localAction} type="submit">
-                Continue on this machine
+                Open local data controls
               </button>
             </form>
           </section>
@@ -97,11 +100,11 @@ export default async function SignInPage({
               Sign-in is not available here yet.
             </h1>
             <p>
-              This environment has not been connected to Clerk. No game or
-              model request can start until the site owner completes that
-              private setup.
+              This environment has not been connected to Clerk, so retained
+              account-data controls are unavailable here. Gameplay is never
+              enabled by Clerk; use the local OpenClaw installation.
             </p>
-            <Link href="/">Return to the public site</Link>
+            <Link href="/install">Open the installation guide</Link>
           </section>
         )}
       </main>

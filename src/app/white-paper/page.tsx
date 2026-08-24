@@ -49,7 +49,7 @@ export default async function WhitePaperPage() {
             source,
           ].join('\n')
         : [
-            '> **Historical audit edition 3.0.** This preserved manuscript maps to [immutable WebChess source `0384978b2ba709da4c9824f2821c8623d3f84364`](https://github.com/jr4488/webchess/tree/0384978b2ba709da4c9824f2821c8623d3f84364). It is not the unresolved edition 3.1/code-freeze release mapping and does not claim validated efficacy.',
+            '> **HISTORICAL AND RETIRED — not installation or runtime instructions.** This byte-preserved edition 3.0 manuscript maps to [immutable WebChess source `0384978b2ba709da4c9824f2821c8623d3f84364`](https://github.com/jr4488/webchess/tree/0384978b2ba709da4c9824f2821c8623d3f84364). Its runtime, migration, research, and status claims apply only to that snapshot. Use the current `INSTALL.md` account-authenticated OpenClaw path; provider keys/tokens and non-OpenClaw principals fail closed. Edition 3.1 remains unpublished until the code-freeze release identity resolves. Neither paper claims validated efficacy.',
             '',
             source,
           ].join('\n')}

@@ -29,14 +29,14 @@ describe('isClerkConfigured', () => {
 })
 
 describe('isProtectedPagePath', () => {
-  it.each(['/play', '/play/resume', '/account', '/account/usage'])(
+  it.each(['/account', '/account/usage'])(
     'protects %s',
     (pathname) => {
       expect(isProtectedPagePath(pathname)).toBe(true)
     },
   )
 
-  it.each(['/', '/white-paper', '/playbook', '/api/games'])(
+  it.each(['/', '/white-paper', '/play', '/play/resume', '/playbook', '/api/games'])(
     'does not classify %s as a protected page',
     (pathname) => {
       expect(isProtectedPagePath(pathname)).toBe(false)

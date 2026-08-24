@@ -1,14 +1,6 @@
-import type { Metadata } from 'next'
+import { permanentRedirect } from 'next/navigation'
 
-import { App } from '@/App'
-import { requirePageUser } from '@/server/auth'
-
-export const metadata: Metadata = {
-  title: 'Play',
-}
-
-export default async function PlayPage() {
-  await requirePageUser('/play')
-
-  return <App />
+/** Hosted gameplay is retired; the packed OpenClaw install is the sole runtime. */
+export default function PlayPage(): never {
+  permanentRedirect('/install')
 }

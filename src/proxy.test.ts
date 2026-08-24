@@ -62,12 +62,12 @@ describe('auth proxy', () => {
   it('redirects an unconfigured protected page to the local sign-in route', async () => {
     clearAuthEnvironment()
     const response = await runProxy(
-      new NextRequest('http://localhost:3000/play?resume=game_42'),
+      new NextRequest('http://localhost:3000/account?resume=game_42'),
     )
 
     expect(response.status).toBe(307)
     expect(response.headers.get('location')).toBe(
-      'http://localhost:3000/sign-in?return_url=%2Fplay%3Fresume%3Dgame_42',
+      'http://localhost:3000/sign-in?return_url=%2Faccount%3Fresume%3Dgame_42',
     )
   })
 
@@ -195,12 +195,12 @@ describe('auth proxy', () => {
     expect(forwardedPolicy).toBe(policy)
   })
 
-  it('allows the fixed local E2E principal through a protected page', async () => {
+  it('allows the fixed local E2E principal through the protected account page', async () => {
     clearAuthEnvironment()
     process.env.WEBCHESS_E2E_AUTH = 'playwright'
     process.env.WEBCHESS_E2E_USER_ID = 'e2e_proxy_user'
     const response = await runProxy(
-      new NextRequest('http://localhost:3000/play', {
+      new NextRequest('http://localhost:3000/account', {
         headers: {
           [LOCAL_E2E_AUTH_HEADER]: 'playwright',
         },
@@ -217,7 +217,7 @@ describe('auth proxy', () => {
     process.env.WEBCHESS_E2E_USER_ID = 'e2e_proxy_user'
     process.env.VERCEL_ENV = 'preview'
     const response = await runProxy(
-      new NextRequest('http://localhost:3000/play', {
+      new NextRequest('http://localhost:3000/account', {
         headers: {
           [LOCAL_E2E_AUTH_HEADER]: 'playwright',
         },
@@ -233,12 +233,12 @@ describe('auth proxy', () => {
     process.env[LOCAL_HOSTED_AUTH_FLAG] = 'true'
     process.env[LOCAL_SESSION_SECRET_NAME] =
       'local-session-secret-material-that-is-stable-32b'
-    const unsigned = new NextRequest('http://127.0.0.1:3005/play', {
+    const unsigned = new NextRequest('http://127.0.0.1:3005/account', {
       headers: { host: '127.0.0.1:3005' },
     })
     const cookie = createLocalHostedSessionCookie(unsigned)
     const response = await runProxy(
-      new NextRequest('http://127.0.0.1:3005/play', {
+      new NextRequest('http://127.0.0.1:3005/account', {
         headers: {
           host: '127.0.0.1:3005',
           cookie: `${cookie?.name}=${cookie?.value}`,

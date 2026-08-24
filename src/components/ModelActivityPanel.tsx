@@ -37,7 +37,7 @@ function requestDetail(
   }
   if (runtimeKind === 'openclaw') {
     return activity.operation === 'division'
-      ? 'Waiting for the loopback-only WebChess process to ask your configured OpenClaw model for exactly 64 facets and validate the completed structure.'
+      ? 'Waiting for the loopback-only WebChess process to ask your selected OpenAI account model for exactly 64 facets and validate the completed structure.'
       : 'Waiting for the loopback-only WebChess process to replay the completed game, derive the captured record, and validate the completed answer.'
   }
   return activity.operation === 'division'

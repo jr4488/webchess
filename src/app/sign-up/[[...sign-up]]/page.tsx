@@ -48,12 +48,12 @@ export default async function SignUpPage({
         {configured ? (
           <>
             <section className={styles.copy} aria-labelledby="sign-up-heading">
-              <p className={styles.eyebrow}>Create a workspace</p>
-              <h1 id="sign-up-heading">Keep your games.</h1>
+              <p className={styles.eyebrow}>Retained account data</p>
+              <h1 id="sign-up-heading">Create an account for data controls.</h1>
               <p>
                 Create your account with one of the verified methods Clerk
-                shows. After verification, manage passkeys from your account.
-                WebChess never accepts visitor API keys.
+                shows. This does not enable hosted gameplay; run WebChess
+                through the local OpenClaw installation instead.
               </p>
             </section>
             <div className={styles.clerk}>
@@ -71,10 +71,11 @@ export default async function SignUpPage({
             aria-labelledby="sign-up-heading"
           >
             <p className={styles.eyebrow}>This machine</p>
-            <h1 id="sign-up-heading">Continue on this computer.</h1>
+            <h1 id="sign-up-heading">Open local data controls.</h1>
             <p>
               A separate hosted account is not used on this loopback
-              installation. Continue with the signed local session to play.
+              installation. The signed local session exposes retained
+              account-data controls only and cannot start gameplay.
             </p>
             <form
               className={styles.localForm}
@@ -83,7 +84,7 @@ export default async function SignUpPage({
             >
               <input type="hidden" name="return_url" value={returnUrl} />
               <button className={styles.localAction} type="submit">
-                Continue on this machine
+                Open local data controls
               </button>
             </form>
           </section>
@@ -97,11 +98,11 @@ export default async function SignUpPage({
               Account creation is not available here yet.
             </h1>
             <p>
-              This environment has not been connected to Clerk. No account,
-              game, or model request can be created until the site owner
-              completes that private setup.
+              This environment has not been connected to Clerk, so retained
+              account-data controls are unavailable here. Gameplay is never
+              enabled by Clerk; use the local OpenClaw installation.
             </p>
-            <Link href="/">Return to the public site</Link>
+            <Link href="/install">Open the installation guide</Link>
           </section>
         )}
       </main>

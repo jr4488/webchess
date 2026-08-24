@@ -18,8 +18,6 @@ export function isClerkConfigured(
 
 export function isProtectedPagePath(pathname: string): boolean {
   return (
-    pathname === '/play' ||
-    pathname.startsWith('/play/') ||
     pathname === '/account' ||
     pathname.startsWith('/account/')
   )

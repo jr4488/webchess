@@ -26,14 +26,13 @@ export const HOSTED_WEBCHESS_PROVIDER: Readonly<HostedProvider> = Object.freeze(
 })
 
 /**
- * Local mode deliberately does not name or select a model. OpenClaw resolves
- * the machine owner's configured default and returns the actual attribution
- * after each successful request.
+ * The launcher requires an OpenAI account/OAuth model selected in OpenClaw and
+ * returns the exact model attribution after each successful request.
  */
 export const OPENCLAW_WEBCHESS_PROVIDER: Readonly<HostedProvider> = Object.freeze({
   kind: 'openclaw',
   label: 'your local OpenClaw',
   dataControlsUrl: 'https://docs.openclaw.ai/cli/infer',
   dataControlsLabel: 'How OpenClaw runs model requests',
-  model: 'your configured default model',
+  model: 'your selected OpenAI account model',
 })

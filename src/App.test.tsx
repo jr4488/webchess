@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { App } from './App'
+import { OpenClawApp } from './App'
 import type { AutoPlayEngine, EngineResult } from './lib/auto-play'
 import { CURRENT_GAME_VERSIONS } from './lib/game-contract'
 import type { ReplayState } from './lib/game-contract'
@@ -582,7 +582,7 @@ async function flushAsyncWork(): Promise<void> {
 async function renderRestoredApp(): Promise<ReturnType<typeof render>> {
   const previousRestoreCalls = apiHarness.getCurrentGame.mock.calls.length
   const previousLifecycleCalls = apiHarness.getGameLifecycle.mock.calls.length
-  const result = render(<App />)
+  const result = render(<OpenClawApp />)
   await waitFor(() => {
     expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(previousRestoreCalls + 1)
   })
@@ -597,6 +597,12 @@ async function renderRestoredApp(): Promise<ReturnType<typeof render>> {
       )
     })
     await flushAsyncWork()
+  } else if (!serverGame) {
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText(/what are you trying to understand/i),
+      ).toBeInTheDocument()
+    })
   }
   return result
 }
@@ -729,12 +735,12 @@ describe('durable WebChess client flow', () => {
       new Error('The saved game store is temporarily unavailable.'),
     )
 
-    render(<App />)
+    render(<OpenClawApp />)
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       /saved game store is temporarily unavailable/i,
     )
-    fireEvent.click(screen.getByRole('button', { name: /restore again/i }))
+    fireEvent.click(screen.getByRole('button', { name: /check local setup again/i }))
 
     await waitFor(() => {
       expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
@@ -805,7 +811,7 @@ describe('durable WebChess client flow', () => {
       .mockRejectedValueOnce(new Error('The saved game store briefly disconnected.'))
       .mockResolvedValue(mapped)
 
-    render(<App />)
+    render(<OpenClawApp />)
     await act(() => vi.advanceTimersByTimeAsync(0))
     await flushAsyncWork()
 
@@ -846,7 +852,7 @@ describe('durable WebChess client flow', () => {
       .mockRejectedValueOnce(new Error('The saved game store briefly disconnected.'))
       .mockResolvedValue(answered)
 
-    render(<App />)
+    render(<OpenClawApp />)
     await act(() => vi.advanceTimersByTimeAsync(0))
     await flushAsyncWork()
     await act(() => vi.advanceTimersByTimeAsync(0))
@@ -897,7 +903,7 @@ describe('durable WebChess client flow', () => {
       .mockImplementationOnce(() => foregroundRestore.promise)
       .mockResolvedValue(answered)
 
-    render(<App />)
+    render(<OpenClawApp />)
     await act(() => vi.advanceTimersByTimeAsync(0))
     await flushAsyncWork()
     await act(() => vi.advanceTimersByTimeAsync(0))
@@ -907,7 +913,7 @@ describe('durable WebChess client flow', () => {
     await flushAsyncWork()
     expect(screen.getByRole('alert')).toHaveTextContent(/briefly disconnected/i)
 
-    fireEvent.click(screen.getByRole('button', { name: /restore again/i }))
+    fireEvent.click(screen.getByRole('button', { name: /check local setup again/i }))
     await flushAsyncWork()
     expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(3)
     const foregroundSignal = (
@@ -916,7 +922,7 @@ describe('durable WebChess client flow', () => {
       }
     ).signal
     expect(
-      screen.getByText(/replaying the durable move log/i),
+      screen.getByText(/replaying the durable local move log/i),
     ).toBeInTheDocument()
 
     await act(() => vi.advanceTimersByTimeAsync(1_500))
@@ -950,7 +956,7 @@ describe('durable WebChess client flow', () => {
       }),
     )
     expect(screen.getAllByText(/64 model facets received/i).length).toBeGreaterThan(0)
-    expect(screen.getByText(/gpt-5\.6-sol · OpenAI API · semantic division/i)).toBeInTheDocument()
+    expect(screen.getByText(/gpt-5\.6-sol · your local OpenClaw · semantic division/i)).toBeInTheDocument()
 
     await finishMapping()
 
@@ -1033,7 +1039,7 @@ describe('durable WebChess client flow', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
-  it('retries an ambiguous division with the same idempotency key', async () => {
+  it('treats an absent local recovery as definitive after an ambiguous division', async () => {
     await renderRestoredApp()
     apiHarness.divideProblem.mockRejectedValueOnce(
       new WebChessApiError('The connection ended before the division was confirmed.', {
@@ -1048,19 +1054,12 @@ describe('durable WebChess client flow', () => {
       '018f47b2-4b0c-7b9e-8f24-123456789000',
       { signal: expect.any(AbortSignal) },
     )
-    expect(screen.getByRole('button', { name: /new question/i })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: /try the division again/i }))
-    await flushAsyncWork()
-
-    expect(apiHarness.divideProblem).toHaveBeenCalledTimes(2)
-    const firstOptions = apiHarness.divideProblem.mock.calls[0]?.[1] as {
-      idempotencyKey: string
-    }
-    const retryOptions = apiHarness.divideProblem.mock.calls[1]?.[1] as {
-      idempotencyKey: string
-    }
-    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
-    expect(screen.getAllByText(/64 model facets received/i).length).toBeGreaterThan(0)
+    const reset = screen.getByRole('button', { name: /new question/i })
+    expect(reset).toBeEnabled()
+    fireEvent.click(reset)
+    expect(
+      screen.queryByText(/connection ended before the division was confirmed/i),
+    ).not.toBeInTheDocument()
   })
 
   it('recovers and durably abandons an original failed division before refresh', async () => {
@@ -1225,7 +1224,7 @@ describe('durable WebChess client flow', () => {
       .mockResolvedValueOnce(dividing)
       .mockImplementationOnce(() => pendingPoll.promise)
 
-    render(<App />)
+    render(<OpenClawApp />)
     await act(() => vi.advanceTimersByTimeAsync(0))
     await flushAsyncWork()
     await act(() => vi.advanceTimersByTimeAsync(1_500))
@@ -1621,7 +1620,7 @@ describe('durable WebChess client flow', () => {
       .mockResolvedValue(polled)
     apiHarness.runPortia.mockReturnValue(foregroundPortia.promise)
 
-    render(<App />)
+    render(<OpenClawApp />)
     await act(() => vi.advanceTimersByTimeAsync(0))
     await flushAsyncWork()
     await act(() => vi.advanceTimersByTimeAsync(0))
