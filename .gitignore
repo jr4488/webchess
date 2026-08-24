@@ -12,6 +12,7 @@ test-results
 tsconfig.tsbuildinfo
 .vite
 public/downloads
+webchess-build-identity.json
 .env
 .env.*
 !.env.example

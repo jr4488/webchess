@@ -4,6 +4,7 @@ import {
   abandonGame,
   createIdempotencyKey,
   divideProblem,
+  downloadGameCase,
   getCurrentGame,
   getGameLifecycle,
   getOwnedGame,
@@ -461,6 +462,50 @@ describe('durable WebChess browser API', () => {
         new Headers(requestInit(fetchMock, call).headers).get('Idempotency-Key'),
       ),
     ).toEqual(IDEMPOTENCY_KEYS.slice(0, 4))
+  })
+
+  it('downloads a case bundle through the profile-bound POST endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('{"format":"webchess-case-bundle/1"}\n', {
+        status: 200,
+        headers: {
+          'Content-Disposition': `attachment; filename="webchess-case-${GAME_ID}-research-redacted-v1-2026-08-24.json"`,
+          'Content-Type': 'application/json',
+        },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const downloaded = await downloadGameCase(
+      GAME_ID,
+      'research-redacted-v1',
+    )
+
+    expect(downloaded.fileName).toBe(
+      `webchess-case-${GAME_ID}-research-redacted-v1-2026-08-24.json`,
+    )
+    expect(await downloaded.blob.text()).toContain('webchess-case-bundle/1')
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/games/${GAME_ID}/case-export`,
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        body: JSON.stringify({ profile: 'research-redacted-v1' }),
+      }),
+    )
+    expect(new Headers(requestInit(fetchMock, 0).headers).get('Idempotency-Key')).toBeNull()
+  })
+
+  it('rejects an unsupported case profile before making a request', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(downloadGameCase(
+      GAME_ID,
+      'unsafe-profile' as 'research-redacted-v1',
+    )).rejects.toThrow(/supported case redaction profile/u)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('sends only a piece, destination, and expected revision for a move', async () => {

@@ -448,6 +448,7 @@ Repository documents:
 - [Terms](docs/TERMS.md)
 - [Acceptable use](docs/ACCEPTABLE_USE.md)
 - [Research and evaluation](docs/RESEARCH.md)
+- [Case export and offline replay verification](docs/CASE_BUNDLES.md)
 - [The First Answer Is Not Enough — current white paper](docs/WEBCHESS_WHITE_PAPER_V3.md)
 - [Archived WebChess 2.0 white paper](docs/WEBCHESS_WHITE_PAPER_V2.md)
 - [Archived WebChess 1.3 white paper](docs/archive/WEBCHESS_WHITE_PAPER_V1.3.md)

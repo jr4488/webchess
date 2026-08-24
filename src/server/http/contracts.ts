@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { WEBCHESS_CASE_PROFILES } from '../../lib/case-bundle-contract'
 
 import { RESEARCH_CONSENT_VERSION } from '../../lib/research'
 
@@ -51,6 +52,10 @@ export const deleteAccountBodySchema = z
     confirmation: z.literal('DELETE MY WEBCHESS DATA'),
   })
   .strict()
+
+export const caseExportBodySchema = z.strictObject({
+  profile: z.enum(WEBCHESS_CASE_PROFILES),
+})
 
 const lifecycleText = (minimum: number, maximum: number) =>
   z.string().transform((value) => value.replace(/\s+/gu, ' ').trim())

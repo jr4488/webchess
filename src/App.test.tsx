@@ -74,6 +74,7 @@ const apiHarness = vi.hoisted(() => ({
   createWilburAction: vi.fn(),
   createIdempotencyKey: vi.fn(() => '018f47b2-4b0c-7b9e-8f24-123456789000'),
   divideProblem: vi.fn(),
+  downloadGameCase: vi.fn(),
   getCurrentGame: vi.fn(),
   getGameLifecycle: vi.fn(),
   getOwnedGame: vi.fn(),
@@ -126,6 +127,7 @@ vi.mock('./lib/webchess-api', async (importOriginal) => {
     createWilburAction: apiHarness.createWilburAction,
     createIdempotencyKey: apiHarness.createIdempotencyKey,
     divideProblem: apiHarness.divideProblem,
+    downloadGameCase: apiHarness.downloadGameCase,
     getCurrentGame: apiHarness.getCurrentGame,
     getGameLifecycle: apiHarness.getGameLifecycle,
     getOwnedGame: apiHarness.getOwnedGame,
@@ -626,6 +628,12 @@ beforeEach(() => {
   for (const mock of Object.values(apiHarness)) mock.mockClear()
 
   apiHarness.getCurrentGame.mockImplementation(async () => serverGame)
+  apiHarness.downloadGameCase.mockResolvedValue({
+    blob: new Blob(['{"format":"webchess-case-bundle/1"}\n'], {
+      type: 'application/json',
+    }),
+    fileName: `webchess-case-${GAME_ID}-research-redacted-v1.json`,
+  })
   apiHarness.getGameLifecycle.mockRejectedValue(
     new WebChessApiError('This saved game predates the v2 lifecycle.', {
       kind: 'not-found',
@@ -851,7 +859,9 @@ describe('durable WebChess client flow', () => {
       ),
     ).toBe(true)
     expect(screen.getByRole('button', { name: /new question/i })).toBeDisabled()
-    expect(screen.getByRole('button', { name: /replay this board/i })).toBeDisabled()
+    expect(screen.getByRole('button', {
+      name: /start another game on this field/i,
+    })).toBeDisabled()
     expect(screen.getByRole('button', { name: /bring another problem/i })).toBeDisabled()
 
     await act(() => vi.advanceTimersByTimeAsync(1_500))
@@ -1520,6 +1530,40 @@ describe('durable WebChess client flow', () => {
       '98000000-0000-4000-8000-000000000001',
     )
     expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+  })
+
+  it('downloads a lifecycle case through a temporary browser object URL', async () => {
+    serverGame = makeAnsweredGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('charlotte_complete', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
+    )
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL')
+      .mockReturnValue('blob:webchess-case-test')
+    const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL')
+      .mockImplementation(() => undefined)
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => undefined)
+
+    await renderRestoredApp()
+    fireEvent.click(screen.getByRole('button', { name: /download case bundle/i }))
+
+    await waitFor(() => {
+      expect(apiHarness.downloadGameCase).toHaveBeenCalledWith(
+        GAME_ID,
+        'research-redacted-v1',
+      )
+      expect(click).toHaveBeenCalledOnce()
+    })
+    expect(createObjectUrl).toHaveBeenCalledWith(expect.any(Blob))
+    expect(document.querySelector('a[download^="webchess-case-"]')).toBeNull()
+    expect(screen.getByText(
+      /downloaded the research-redacted-v1 point-in-time case bundle/i,
+    )).toHaveAttribute('role', 'status')
+    expect(revokeObjectUrl).not.toHaveBeenCalled()
   })
 
   it('reveals research-only Portia poll progress without changing lifecycle revision or its seven stages', async () => {
@@ -2394,7 +2438,9 @@ describe('durable WebChess client flow', () => {
     apiHarness.replayGame.mockImplementationOnce(() => pendingReplay.promise)
     await renderRestoredApp()
 
-    const replayButton = screen.getByRole('button', { name: /replay this board/i })
+    const replayButton = screen.getByRole('button', {
+      name: /start another game on this field/i,
+    })
     fireEvent.click(replayButton)
     fireEvent.click(replayButton)
 
@@ -2447,7 +2493,9 @@ describe('durable WebChess client flow', () => {
       }),
     )
 
-    fireEvent.click(screen.getByRole('button', { name: /replay this board/i }))
+    fireEvent.click(screen.getByRole('button', {
+      name: /start another game on this field/i,
+    }))
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent(
         /replay response was lost in transit/i,
@@ -2456,7 +2504,9 @@ describe('durable WebChess client flow', () => {
 
     const headerReset = screen.getByRole('button', { name: /new question/i })
     const readingReset = screen.getByRole('button', { name: /bring another problem/i })
-    const replayButton = screen.getByRole('button', { name: /replay this board/i })
+    const replayButton = screen.getByRole('button', {
+      name: /start another game on this field/i,
+    })
     expect(headerReset).toBeDisabled()
     expect(readingReset).toBeDisabled()
     expect(replayButton).toBeEnabled()
@@ -2505,7 +2555,9 @@ describe('durable WebChess client flow', () => {
     serverGame = makeAnsweredGame()
     await renderRestoredApp()
 
-    fireEvent.click(screen.getByRole('button', { name: /replay this board/i }))
+    fireEvent.click(screen.getByRole('button', {
+      name: /start another game on this field/i,
+    }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
     })

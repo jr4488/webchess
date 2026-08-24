@@ -400,7 +400,9 @@ describe('ReadingStage final answer', () => {
     })
 
     fireEvent.click(screen.getByRole('button', { name: /try the answer again/i }))
-    fireEvent.click(screen.getByRole('button', { name: /replay this board/i }))
+    fireEvent.click(screen.getByRole('button', {
+      name: /start another game on this field/i,
+    }))
     fireEvent.click(screen.getByRole('button', { name: /bring another problem/i }))
 
     expect(onRetryAnswer).toHaveBeenCalledOnce()
@@ -425,7 +427,9 @@ describe('ReadingStage final answer', () => {
   it('disables the new-problem action while reset is pending', () => {
     renderReading({ replayDisabled: true, resetDisabled: true })
 
-    expect(screen.getByRole('button', { name: /replay this board/i })).toBeDisabled()
+    expect(screen.getByRole('button', {
+      name: /start another game on this field/i,
+    })).toBeDisabled()
     expect(screen.getByRole('button', { name: /bring another problem/i })).toBeDisabled()
   })
 
@@ -439,7 +443,9 @@ describe('ReadingStage final answer', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(
       /replay response was lost in transit/i,
     )
-    expect(screen.getByRole('button', { name: /replay this board/i })).toBeEnabled()
+    expect(screen.getByRole('button', {
+      name: /start another game on this field/i,
+    })).toBeEnabled()
     expect(screen.getByRole('button', { name: /bring another problem/i })).toBeDisabled()
   })
 })

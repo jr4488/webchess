@@ -8,8 +8,9 @@ import type {
   WilburObservation,
   WebMemoryIndex,
 } from '../../lib/lifecycle'
-import type { GeneratedAnswer } from '../../types'
 import type { ResearchConsent } from '../../lib/research'
+import type { WebChessCaseProfile } from '../../lib/case-bundle-contract'
+import type { GeneratedAnswer } from '../../types'
 
 export type JsonPrimitive = boolean | number | string | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
@@ -173,6 +174,13 @@ export interface WebChessApiServices {
   exportAccount(input: OwnerContext & {
     /** Request-local only. The usage service HMACs this before persistence. */
     ipAddress: string
+  }): Promise<unknown>
+
+  exportCase(input: OwnerContext & {
+    readonly gameId: string
+    readonly profile: WebChessCaseProfile
+    /** Request-local only. The usage service HMACs this before persistence. */
+    readonly ipAddress: string
   }): Promise<unknown>
 
   deleteAccountData(input: OwnerContext & ApiOperationContext): Promise<void>

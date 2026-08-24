@@ -47,6 +47,7 @@ describe('resolveLocalOpenClawUser', () => {
     '/api/division-intents/intent-1',
     '/api/games/current',
     '/api/games/game-1/lifecycle',
+    '/api/games/game-1/case-export',
   ])('establishes the installation-owned identity for %s', (pathname) => {
     expect(resolveLocalOpenClawUser(request(pathname), environment)).toEqual({
       userId: 'openclaw_worktree_2',

@@ -463,7 +463,7 @@ export function ReadingStage({
             disabled={replayDisabled}
             onClick={onReplay}
           >
-            <RotateCcw size={16} /> Replay this board
+            <RotateCcw size={16} /> Start another game on this field
           </button>
           <button
             className="primary-button"

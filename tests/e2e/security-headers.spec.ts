@@ -6,6 +6,7 @@ const DIVISION_INTENT_KEY = '00000000-0000-4000-8000-000000000002'
 const protectedApiRequests = [
   { method: 'DELETE', path: '/api/account' },
   { method: 'POST', path: '/api/account/export' },
+  { method: 'POST', path: `/api/games/${GAME_ID}/case-export` },
   { method: 'GET', path: '/api/account/usage' },
   { method: 'POST', path: '/api/divide' },
   {

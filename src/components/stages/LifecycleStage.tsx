@@ -7,6 +7,7 @@ import {
   ChevronDown,
   CircleAlert,
   Copy,
+  Download,
   GitBranch,
   Eye,
   FlaskConical,
@@ -22,6 +23,7 @@ import type {
   AppendWilburObservationCommand,
   DurableGame,
 } from '../../lib/webchess-api'
+import type { WebChessCaseProfile } from '../../lib/case-bundle-contract'
 import { buildPortableAnswerPrompt } from '../../lib/portable-answer-prompt'
 import { resolveFullAnswerModelPrompt } from '../../lib/full-answer-model-prompt'
 import type {
@@ -71,6 +73,9 @@ interface LifecycleStageProps {
   error: string
   actionPendingIndex: number | null
   wilburPending: boolean
+  caseExportPending: boolean
+  caseExportError: string
+  caseExportNotice: string
   onRefresh: () => void
   onRetry: () => void
   onRetryAnswer: () => void
@@ -84,6 +89,7 @@ interface LifecycleStageProps {
     action: WilburAction,
     observation: AppendWilburObservationCommand,
   ) => Promise<boolean>
+  onExportCase: (profile: WebChessCaseProfile) => Promise<void>
 }
 
 const EMPTY_SET = new Set<string>()
@@ -387,13 +393,20 @@ export function LifecycleStage({
   error,
   actionPendingIndex,
   wilburPending,
+  caseExportPending,
+  caseExportError,
+  caseExportNotice,
   onRefresh,
   onRetry,
   onRetryAnswer,
   onCreateAction,
   onUpdateAction,
   onObserve,
+  onExportCase,
 }: LifecycleStageProps) {
+  const [caseProfile, setCaseProfile] = useState<WebChessCaseProfile>(
+    'research-redacted-v1',
+  )
   const [portableCopyFeedback, setPortableCopyFeedback] = useState<{
     key: string
     status: 'copying' | 'success' | 'error'
@@ -1386,6 +1399,69 @@ export function LifecycleStage({
                 {' · '}Event schema {lifecycle.versions.event}
               </p>
             </details>
+          ) : null}
+
+          {lifecycle ? (
+            <section
+              className="lifecycle-card"
+              aria-labelledby={`case-export-heading-${lifecycle.id}`}
+            >
+              <div className="lifecycle-card__title">
+                <span><Download size={17} aria-hidden="true" /></span>
+                <div>
+                  <small>Local case bundle · read-only verification</small>
+                  <h2 id={`case-export-heading-${lifecycle.id}`}>
+                    Export this lifecycle for inspection
+                  </h2>
+                </div>
+              </div>
+              <p>
+                This point-in-time bundle carries canonical digests, a redaction
+                omission ledger, persisted version and provider metadata, and the
+                move events needed for offline board reconstruction. It does not
+                validate the method’s efficacy or call a provider during verification.
+                Redacted bundles remain pseudonymous: inspect them before sharing.
+              </p>
+              <label className="wilbur-status-control">
+                Export profile
+                <select
+                  aria-label="Case bundle export profile"
+                  value={caseProfile}
+                  disabled={caseExportPending}
+                  onChange={(event) => setCaseProfile(
+                    event.target.value as WebChessCaseProfile,
+                  )}
+                >
+                  <option value="research-redacted-v1">
+                    Research redacted — review before sharing
+                  </option>
+                  <option value="private-full-v1">
+                    Private full — contains case text
+                  </option>
+                  <option value="metadata-only-v1">
+                    Metadata only — omits case text
+                  </option>
+                </select>
+              </label>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={caseExportPending}
+                aria-busy={caseExportPending}
+                onClick={() => void onExportCase(caseProfile)}
+              >
+                <Download size={14} aria-hidden="true" />
+                {caseExportPending
+                  ? 'Preparing case bundle…'
+                  : 'Download case bundle'}
+              </button>
+              {caseExportError ? (
+                <p role="alert">{caseExportError}</p>
+              ) : null}
+              {caseExportNotice ? (
+                <p role="status" aria-live="polite">{caseExportNotice}</p>
+              ) : null}
+            </section>
           ) : null}
         </article>
       </div>

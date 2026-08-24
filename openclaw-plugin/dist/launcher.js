@@ -1,7 +1,7 @@
-import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { execFileSync, spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { access, cp, lstat, mkdir, mkdtemp, open, rm, symlink, } from 'node:fs/promises';
+import { access, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, symlink, } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -34,6 +34,96 @@ const RUNTIME_ENTRIES = [
     'SUPPORT.md',
     'tsconfig.json',
 ];
+async function collectRuntimeFiles(root, relativePath, files) {
+    const absolutePath = path.join(root, relativePath);
+    const metadata = await lstat(absolutePath);
+    if (metadata.isSymbolicLink()) {
+        throw new Error(`Runtime payload must not contain a symbolic link: ${relativePath}`);
+    }
+    if (metadata.isDirectory()) {
+        const children = (await readdir(absolutePath)).sort();
+        for (const child of children) {
+            await collectRuntimeFiles(root, path.posix.join(relativePath, child), files);
+        }
+        return;
+    }
+    if (!metadata.isFile()) {
+        throw new Error(`Runtime payload contains an unsupported file type: ${relativePath}`);
+    }
+    const bytes = await readFile(absolutePath);
+    files.push({
+        path: relativePath,
+        bytes: bytes.byteLength,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+    });
+}
+async function runtimePayloadIdentity(root) {
+    const files = [];
+    for (const entry of RUNTIME_ENTRIES) {
+        await collectRuntimeFiles(root, entry, files);
+    }
+    files.sort((left, right) => left.path.localeCompare(right.path, 'en'));
+    const manifest = { format: 'webchess-runtime-payload/1', files };
+    return {
+        sha256: createHash('sha256')
+            .update(JSON.stringify(manifest))
+            .digest('hex'),
+        fileCount: files.length,
+        byteCount: files.reduce((total, file) => total + file.bytes, 0),
+    };
+}
+function gitSourceCommit(root) {
+    try {
+        const commit = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
+            cwd: root,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim().toLowerCase();
+        const status = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+            cwd: root,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        return /^[0-9a-f]{40}$/u.test(commit) && status.length === 0
+            ? commit
+            : null;
+    }
+    catch {
+        return null;
+    }
+}
+export async function resolveWebChessBuildIdentity(sourceRoot) {
+    const computed = await runtimePayloadIdentity(sourceRoot);
+    const identityPath = path.join(sourceRoot, 'webchess-build-identity.json');
+    try {
+        const parsed = JSON.parse(await readFile(identityPath, 'utf8'));
+        if (parsed.format !== 'webchess-build-identity/1' ||
+            typeof parsed.sourceCommit !== 'string' ||
+            !/^[0-9a-f]{40}$/u.test(parsed.sourceCommit) ||
+            parsed.runtimePayload?.format !== 'webchess-runtime-payload/1' ||
+            parsed.runtimePayload.sha256 !== computed.sha256 ||
+            parsed.runtimePayload.fileCount !== computed.fileCount ||
+            parsed.runtimePayload.byteCount !== computed.byteCount) {
+            throw new Error('The packaged WebChess build identity does not match its runtime payload.');
+        }
+        return {
+            sourceCommit: parsed.sourceCommit,
+            runtimeArtifactSha256: computed.sha256,
+        };
+    }
+    catch (error) {
+        if (!error ||
+            typeof error !== 'object' ||
+            !('code' in error) ||
+            error.code !== 'ENOENT') {
+            throw error;
+        }
+    }
+    return {
+        sourceCommit: gitSourceCommit(sourceRoot),
+        runtimeArtifactSha256: computed.sha256,
+    };
+}
 function optionString(value) {
     return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -285,7 +375,7 @@ async function stageWebChessRuntime(sourceRoot, nextBinary) {
         throw error;
     }
 }
-export function buildNextLaunchSpec(root, options, environment = process.env, nextBinary = resolveNextBinary(), identity, bridge) {
+export function buildNextLaunchSpec(root, options, environment = process.env, nextBinary = resolveNextBinary(), identity, bridge, buildIdentity) {
     if (!bridge) {
         throw new Error('The authenticated OpenClaw runtime bridge is required.');
     }
@@ -339,6 +429,14 @@ export function buildNextLaunchSpec(root, options, environment = process.env, ne
         WEBCHESS_OPENCLAW_OWNER_ID: runtimeIdentity.ownerId,
         WEBCHESS_OPENCLAW_TIMEOUT_MS: environment.WEBCHESS_OPENCLAW_TIMEOUT_MS ?? '150000',
         WEBCHESS_OPENCLAW_TRANSPORT: 'local',
+        ...(buildIdentity?.sourceCommit
+            ? { WEBCHESS_RELEASE_SHA: buildIdentity.sourceCommit }
+            : {}),
+        ...(buildIdentity
+            ? {
+                WEBCHESS_RUNTIME_ARTIFACT_SHA256: buildIdentity.runtimeArtifactSha256,
+            }
+            : {}),
     });
     return {
         args: [
@@ -383,6 +481,7 @@ const defaultDependencies = {
     fetch: globalThis.fetch,
     openBrowser: defaultOpenBrowser,
     removeRuntime: (root) => rm(root, { force: true, recursive: true }),
+    resolveBuildIdentity: resolveWebChessBuildIdentity,
     shutdownTimeoutMs: SHUTDOWN_TIMEOUT_MS,
     spawnServer: (command, args, options) => spawn(command, [...args], {
         ...options,
@@ -486,12 +585,22 @@ export async function launchWebChess(options, dependencies = defaultDependencies
     const nextBinary = resolveNextBinary();
     await access(nextBinary);
     const identity = await loadOrCreateRuntimeIdentity(dependencies.environment);
+    const sourceBuildIdentity = await dependencies.resolveBuildIdentity(sourceRoot);
     const runtimeRoot = await dependencies.stageRuntime(sourceRoot, nextBinary);
     let server = null;
     let bridge = null;
     try {
+        const stagedBuildIdentity = await dependencies.resolveBuildIdentity(runtimeRoot);
+        if (stagedBuildIdentity.runtimeArtifactSha256 !==
+            sourceBuildIdentity.runtimeArtifactSha256) {
+            throw new Error('The staged WebChess runtime does not match the verified source payload.');
+        }
+        const buildIdentity = {
+            sourceCommit: sourceBuildIdentity.sourceCommit,
+            runtimeArtifactSha256: stagedBuildIdentity.runtimeArtifactSha256,
+        };
         bridge = await dependencies.startBridge(api, runtimeRoot);
-        const spec = buildNextLaunchSpec(runtimeRoot, options, dependencies.environment, nextBinary, identity, bridge);
+        const spec = buildNextLaunchSpec(runtimeRoot, options, dependencies.environment, nextBinary, identity, bridge, buildIdentity);
         const spawnedServer = dependencies.spawnServer(spec.command, spec.args, {
             cwd: spec.cwd,
             detached: spec.detached,

@@ -6,6 +6,7 @@ export {
   handleAccountUsageRequest,
   handleAnswerRequest,
   handleAppendWilburObservationRequest,
+  handleCaseExportRequest,
   handleCharlotteRequest,
   handleClerkWebhookRequest,
   handleCurrentGameRequest,

@@ -31,6 +31,7 @@ import type {
   DurableGame,
   UpdateWilburActionCommand,
 } from './lib/webchess-api'
+import type { WebChessCaseProfile } from './lib/case-bundle-contract'
 import type {
   LifecycleAggregate,
   WebMemoryIndex,
@@ -219,6 +220,9 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   const [webMemoryBusy, setWebMemoryBusy] = useState(false)
   const [webMemoryError, setWebMemoryError] = useState('')
   const [selectedMemoryObservationIds, setSelectedMemoryObservationIds] = useState<string[]>([])
+  const [caseExportPending, setCaseExportPending] = useState(false)
+  const [caseExportError, setCaseExportError] = useState('')
+  const [caseExportNotice, setCaseExportNotice] = useState('')
   const restoreRequestRef = useRef<ActiveRestoreRequest | null>(null)
   const restoreRequestGenerationRef = useRef(0)
   const divisionRequestRef = useRef<AbortController | null>(null)
@@ -345,7 +349,10 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     setLifecycleError('')
     setActionPendingIndex(null)
     setWilburPending(false)
-    setSelectedMemoryObservationIds([])
+  setSelectedMemoryObservationIds([])
+  setCaseExportPending(false)
+  setCaseExportError('')
+  setCaseExportNotice('')
     setNotice('Choose a white piece. Its possible paths will appear.')
   }, [invalidateEngineRequest])
 
@@ -1926,6 +1933,43 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     window.requestAnimationFrame(() => document.getElementById('problem')?.focus())
   }
 
+  const exportLifecycleCase = async (
+    profile: WebChessCaseProfile,
+  ): Promise<void> => {
+    const current = game
+    if (!current || !lifecycle || caseExportPending) return
+
+    setCaseExportPending(true)
+    setCaseExportError('')
+    setCaseExportNotice('')
+    try {
+      const exported = await runtime.api.downloadGameCase(current.id, profile)
+      const objectUrl = URL.createObjectURL(exported.blob)
+      const downloadLink = document.createElement('a')
+      downloadLink.href = objectUrl
+      downloadLink.download = exported.fileName
+      downloadLink.hidden = true
+      document.body.append(downloadLink)
+      try {
+        downloadLink.click()
+      } finally {
+        downloadLink.remove()
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
+      }
+      setCaseExportNotice(
+        `Downloaded the ${profile} point-in-time case bundle.`,
+      )
+    } catch (error) {
+      setCaseExportError(
+        error instanceof Error
+          ? error.message
+          : 'WebChess could not prepare this case bundle.',
+      )
+    } finally {
+      setCaseExportPending(false)
+    }
+  }
+
   const replayProblem = async () => {
     const current = game
     if (
@@ -2269,12 +2313,16 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
             error={lifecycleError}
             actionPendingIndex={actionPendingIndex}
             wilburPending={wilburPending}
+            caseExportPending={caseExportPending}
+            caseExportError={caseExportError}
+            caseExportNotice={caseExportNotice}
             onRefresh={() => void refreshLifecycle()}
             onRetry={() => void retryLifecyclePath()}
             onRetryAnswer={() => void retryBoardAnswer()}
             onCreateAction={(index, followUpAt) => void trackCharlotteAction(index, followUpAt)}
             onUpdateAction={(action, status, followUpAt) => void setWilburActionStatus(action, status, followUpAt)}
             onObserve={observeWilburAction}
+            onExportCase={exportLifecycleCase}
           />
         )}
 

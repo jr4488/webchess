@@ -12,6 +12,7 @@ type WebChessApiClient = Pick<
   | 'createWilburAction'
   | 'createIdempotencyKey'
   | 'divideProblem'
+  | 'downloadGameCase'
   | 'getCurrentGame'
   | 'getGameLifecycle'
   | 'getWebMemory'

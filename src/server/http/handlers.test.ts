@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   handleAccountExportRequest,
+  handleCaseExportRequest,
   handleAbandonRequest,
   handleAnswerRequest,
   handleClerkWebhookRequest,
@@ -125,6 +126,10 @@ function createServices(): WebChessApiServices {
     })),
     exportAccount: vi.fn(async () => ({
       games: [GAME],
+    })),
+    exportCase: vi.fn(async () => ({
+      format: 'webchess-case-bundle/1',
+      profile: 'research-redacted-v1',
     })),
     deleteAccountData: vi.fn(async () => undefined),
     handleClerkUserDeleted: vi.fn(async () => undefined),
@@ -570,6 +575,51 @@ describe('authenticated API handlers', () => {
       }),
     )
     expect(dependencies.verifySameOrigin).toHaveBeenCalledWith(exportRequest)
+  })
+
+  it('exports one lifecycle case with an explicit redaction profile', async () => {
+    const caseRequest = request(`/api/games/${GAME_ID}/case-export`, {
+      body: { profile: 'research-redacted-v1' },
+    })
+    caseRequest.headers.set('x-forwarded-for', '203.0.113.23')
+    const response = await handleCaseExportRequest(
+      caseRequest,
+      GAME_ID,
+      dependencies,
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-disposition')).toMatch(
+      new RegExp(
+        `^attachment; filename="webchess-case-${GAME_ID}-research-redacted-v1-\\d{4}-\\d{2}-\\d{2}\\.json"$`,
+      ),
+    )
+    expect(JSON.parse(await response.text())).toEqual({
+      format: 'webchess-case-bundle/1',
+      profile: 'research-redacted-v1',
+    })
+    expect(dependencies.services.exportCase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ownerId: 'user_test',
+        gameId: GAME_ID,
+        profile: 'research-redacted-v1',
+        ipAddress: '203.0.113.23',
+      }),
+    )
+    expect(dependencies.verifySameOrigin).toHaveBeenCalledWith(caseRequest)
+  })
+
+  it('rejects an unknown case redaction profile before querying the case', async () => {
+    const response = await handleCaseExportRequest(
+      request(`/api/games/${GAME_ID}/case-export`, {
+        body: { profile: 'publish-everything' },
+      }),
+      GAME_ID,
+      dependencies,
+    )
+
+    expect(response.status).toBe(400)
+    expect(dependencies.services.exportCase).not.toHaveBeenCalled()
   })
 
   it('requires an explicit phrase before deleting WebChess account data', async () => {

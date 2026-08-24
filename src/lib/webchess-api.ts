@@ -1,5 +1,12 @@
 import type { GameView } from './game-contract'
 import {
+  isWebChessCaseProfile,
+} from './case-bundle-contract'
+import type {
+  WebChessCaseDownload,
+  WebChessCaseProfile,
+} from './case-bundle-contract'
+import {
   ASSUMPTION_RESULTS,
   CURRENT_WEB_MEMORY_CONSENT_VERSION,
   CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
@@ -1899,6 +1906,60 @@ export function getGameProvenance(
     { method: 'GET', headers: getHeaders(), signal: options.signal },
     parseProvenanceEnvelope,
   )
+}
+
+export async function downloadGameCase(
+  gameId: string,
+  profile: WebChessCaseProfile = 'research-redacted-v1',
+  options: RequestOptions = {},
+): Promise<WebChessCaseDownload> {
+  if (!isWebChessCaseProfile(profile)) {
+    throw new TypeError('A supported case redaction profile is required.')
+  }
+
+  let response: Response
+  try {
+    response = await fetch(gamePath(gameId, 'case-export'), {
+      method: 'POST',
+      headers: runtimeHeaders({
+        Accept: 'application/json',
+        'Cache-Control': 'no-store',
+        'Content-Type': 'application/json',
+      }),
+      body: JSON.stringify({ profile }),
+      signal: options.signal,
+      credentials: 'same-origin',
+      cache: 'no-store',
+    })
+  } catch (error) {
+    if (isAbortError(error, options.signal)) throw error
+    throw new WebChessApiError('WebChess could not reach the server.', {
+      kind: 'transport',
+      cause: error,
+    })
+  }
+
+  if (!response.ok) {
+    const payload = await readJson(response)
+    const details = errorDetails(payload)
+    throw new WebChessApiError(
+      details.message ?? defaultErrorMessage(response.status),
+      {
+        kind: apiErrorKind(response.status),
+        status: response.status,
+        serverCode: details.code ?? null,
+        retryAfterSeconds: parseRetryAfter(response.headers.get('Retry-After')),
+      },
+    )
+  }
+
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const candidate = disposition.match(/filename="([A-Za-z0-9._-]+)"/u)?.[1]
+  const fileName = candidate ?? `webchess-case-${gameId}-${profile}.json`
+  return {
+    blob: await response.blob(),
+    fileName,
+  }
 }
 
 export function createWilburAction(

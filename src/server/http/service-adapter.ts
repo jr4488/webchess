@@ -27,6 +27,7 @@ import {
 } from '../../lib/lifecycle'
 import type { DurableGame } from '../../lib/webchess-api'
 import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../../types'
+import type { WebChessCaseProfile } from '../../lib/case-bundle-contract'
 import {
   getDatabase,
   hashCanonicalJson,
@@ -110,6 +111,14 @@ import {
   OpenClawAnswerContractError,
   OpenClawProviderError,
 } from '../openclaw/errors'
+import {
+  caseBundleRows,
+  caseBundleStatements,
+  configuredCaseRuntimeArtifactSha256,
+  configuredCaseSourceCommit,
+  createCaseBundle,
+  verifyCaseBundle,
+} from '../case-bundle'
 import type {
   GetModelRequestResultResult,
   ModelOperation,
@@ -254,6 +263,10 @@ export interface ApiServiceAdapterDependencies {
   /** Local OpenClaw injects the durable Codex Search broker. */
   readonly researchBroker?: ResearchBrokerPort
   readonly softwareVersion: string
+  /** Exact reviewed commit when the launcher/deployment can provide it. */
+  readonly sourceCommit?: string | null
+  /** SHA-256 of the staged runtime payload when independently verified. */
+  readonly runtimeArtifactSha256?: string | null
   readonly usage: UsageController
   readonly wilburStorageRowLimit: number
   readonly wilburStorageTextBytesLimit: number
@@ -370,6 +383,8 @@ function productionDependencies(
       process.env.WEBCHESS_SOFTWARE_VERSION ||
         process.env.VERCEL_GIT_COMMIT_SHA,
     ),
+    sourceCommit: configuredCaseSourceCommit(),
+    runtimeArtifactSha256: configuredCaseRuntimeArtifactSha256(),
     usage: createUsageController({
       db: database,
       config: usageConfig,
@@ -4795,6 +4810,77 @@ export function createApiServicesWithDependencies(
         const summary = await dependencies.usage.getUsageSummary(input.ownerId)
         if ('ok' in summary) throw usageError(summary)
         return summary
+      })
+    },
+
+    exportCase(input: {
+      ownerId: string
+      gameId: string
+      profile: WebChessCaseProfile
+      ipAddress: string
+      requestId: string
+      signal: AbortSignal
+    }) {
+      return apiOperation(async () => {
+        const allowed = await dependencies.usage.consumeAccountExportRate({
+          userId: input.ownerId,
+          ipAddress: input.ipAddress,
+        })
+        if (!allowed.ok) throw usageError(allowed)
+
+        const results = await dependencies.database.transaction(
+          caseBundleStatements(input.ownerId, input.gameId),
+          {
+            isolationLevel: 'RepeatableRead',
+            readOnly: true,
+          },
+        )
+        let sourceRows
+        try {
+          sourceRows = caseBundleRows(results)
+        } catch (error) {
+          if (error instanceof Error && error.message === 'CASE_GAME_NOT_FOUND') {
+            throw new ApiError('GAME_NOT_FOUND', 404, 'Game not found.')
+          }
+          if (
+            error instanceof Error &&
+            error.message === 'CASE_LIFECYCLE_NOT_FOUND'
+          ) {
+            throw new ApiError(
+              'LIFECYCLE_NOT_FOUND',
+              409,
+              'This game does not have a lifecycle record to export.',
+            )
+          }
+          throw error
+        }
+        const bundle = createCaseBundle({
+          ...sourceRows,
+          profile: input.profile,
+          exportedAt: new Date().toISOString(),
+          packageName: 'webchess',
+          packageVersion: WEBCHESS_SOFTWARE_VERSION,
+          sourceCommit: dependencies.sourceCommit ?? null,
+          runtimeArtifactSha256: dependencies.runtimeArtifactSha256 ?? null,
+        })
+        if (!verifyCaseBundle(bundle).ok) {
+          throw new ApiError(
+            'INTERNAL_ERROR',
+            500,
+            'The saved case could not be exported with verifiable integrity.',
+          )
+        }
+        if (
+          new TextEncoder().encode(`${JSON.stringify(bundle, null, 2)}\n`)
+            .byteLength > dependencies.accountExportMaxBytes
+        ) {
+          throw new ApiError(
+            'PAYLOAD_TOO_LARGE',
+            413,
+            'This WebChess case bundle is too large for the selected profile. Try a more restrictive profile.',
+          )
+        }
+        return bundle
       })
     },
 

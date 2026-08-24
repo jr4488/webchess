@@ -5,6 +5,7 @@ import { verifyWebhook } from '@clerk/nextjs/webhooks'
 import { requireApiUser, verifySameOriginMutation } from '@/server/auth'
 import {
   appendWilburObservationBodySchema,
+  caseExportBodySchema,
   createWilburActionBodySchema,
   deleteAccountBodySchema,
   divideBodySchema,
@@ -512,6 +513,38 @@ export function handleAccountExportRequest(
       const fileName = `webchess-export-${new Date().toISOString().slice(0, 10)}.json`
 
       return new Response(`${JSON.stringify(exported, null, 2)}\n`, {
+        status: 200,
+        headers: noStoreHeaders({
+          'Content-Disposition': `attachment; filename="${fileName}"`,
+          'Content-Type': 'application/json; charset=utf-8',
+        }),
+      })
+    },
+    dependencies,
+  )
+}
+
+export function handleCaseExportRequest(
+  request: Request,
+  rawGameId: string,
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runAuthenticated(
+    request,
+    true,
+    async (scope) => {
+      const gameId = requireGameId(rawGameId)
+      const body = await parseStrictJson(request, caseExportBodySchema)
+      const bundle = await scope.services.exportCase({
+        ...ownerContext(scope, request),
+        gameId,
+        profile: body.profile,
+        ipAddress: getClientIpAddress(request),
+      })
+      const date = new Date().toISOString().slice(0, 10)
+      const fileName = `webchess-case-${gameId}-${body.profile}-${date}.json`
+
+      return new Response(`${JSON.stringify(bundle, null, 2)}\n`, {
         status: 200,
         headers: noStoreHeaders({
           'Content-Disposition': `attachment; filename="${fileName}"`,

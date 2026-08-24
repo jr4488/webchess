@@ -8,6 +8,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { CURRENT_GAME_VERSIONS, type GameView } from '../../lib/game-contract'
+import type { WebChessCaseProfile } from '../../lib/case-bundle-contract'
 import type {
   GateRecommendation,
   LifecycleAggregate,
@@ -481,6 +482,9 @@ function renderStage(
   lifecycle: LifecycleAggregate,
   options: {
     busy?: boolean
+    caseExportError?: string
+    caseExportNotice?: string
+    caseExportPending?: boolean
     boardAnswer?: GeneratedAnswer | null
     answerFailurePrompt?: string
     game?: DurableGame | null
@@ -491,6 +495,7 @@ function renderStage(
       action: WilburAction,
       observation: AppendWilburObservationCommand,
     ) => Promise<boolean>
+    onExportCase?: (profile: WebChessCaseProfile) => Promise<void>
   } = {},
 ) {
   const onRetry = vi.fn()
@@ -498,6 +503,7 @@ function renderStage(
   const onCreateAction = options.onCreateAction ?? vi.fn()
   const onUpdateAction = options.onUpdateAction ?? vi.fn()
   const onObserve = options.onObserve ?? vi.fn(async () => true)
+  const onExportCase = options.onExportCase ?? vi.fn(async () => undefined)
 
   render(
     <LifecycleStage
@@ -516,18 +522,23 @@ function renderStage(
       error=""
       actionPendingIndex={null}
       wilburPending={false}
+      caseExportPending={options.caseExportPending ?? false}
+      caseExportError={options.caseExportError ?? ''}
+      caseExportNotice={options.caseExportNotice ?? ''}
       onRefresh={vi.fn()}
       onRetry={onRetry}
       onRetryAnswer={onRetryAnswer}
       onCreateAction={onCreateAction}
       onUpdateAction={onUpdateAction}
       onObserve={onObserve}
+      onExportCase={onExportCase}
     />,
   )
 
   return {
     onCreateAction,
     onObserve,
+    onExportCase,
     onRetry,
     onRetryAnswer,
     onUpdateAction,
@@ -535,6 +546,37 @@ function renderStage(
 }
 
 describe('LifecycleStage terminal Gate experience', () => {
+  it('exports the selected case profile without calling a provider', async () => {
+    const onExportCase = vi.fn(async () => undefined)
+    renderStage(aggregate('charlotte_complete', 'answer'), { onExportCase })
+
+    const profile = screen.getByRole('combobox', {
+      name: /case bundle export profile/i,
+    })
+    expect(profile).toHaveValue('research-redacted-v1')
+    fireEvent.change(profile, { target: { value: 'private-full-v1' } })
+    fireEvent.click(screen.getByRole('button', { name: /download case bundle/i }))
+
+    await waitFor(() => {
+      expect(onExportCase).toHaveBeenCalledWith('private-full-v1')
+    })
+    expect(screen.getByText(/does not validate the method’s efficacy/i))
+      .toBeInTheDocument()
+    expect(screen.getByText(/redacted bundles remain pseudonymous/i))
+      .toBeInTheDocument()
+  })
+
+  it('announces a completed browser download', () => {
+    renderStage(aggregate('charlotte_complete', 'answer'), {
+      caseExportNotice:
+        'Downloaded the research-redacted-v1 point-in-time case bundle.',
+    })
+
+    expect(screen.getByText(
+      /downloaded the research-redacted-v1 point-in-time case bundle/i,
+    )).toHaveAttribute('role', 'status')
+  })
+
   it('settles a failed Answer and offers one explicit fresh attempt', () => {
     const lifecycle = aggregate('gate_passed', 'answer')
     const { onRetryAnswer } = renderStage(

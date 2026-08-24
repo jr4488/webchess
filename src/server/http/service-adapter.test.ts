@@ -25,6 +25,7 @@ import { makeProblemFacets } from '../../test/fixtures'
 import type { CaptureRecord, GeneratedAnswer } from '../../types'
 import { hashCanonicalJson } from '../db'
 import type { CanonicalJson, SqlAdapter, SqlResult, SqlRow } from '../db'
+import * as caseBundleModule from '../case-bundle'
 import {
   GameRepositoryError,
   type DurableGameSnapshot,
@@ -2382,6 +2383,51 @@ describe('durable HTTP service adapter', () => {
     expect(exportedMutationRequests[0]).not.toHaveProperty(
       'reservedTextBytes',
     )
+  })
+
+  it('refuses a case download when the assembled evidence fails offline verification', async () => {
+    vi.mocked(dependencies.database.transaction).mockResolvedValue([
+      sqlResult([{ id: GAME_ID }]),
+      sqlResult(),
+      sqlResult([{ id: '55555555-5555-4555-8555-555555555555' }]),
+    ])
+    const fakeBundle = {
+      format: 'webchess-case-bundle/1',
+      profile: 'metadata-only-v1',
+      manifest: {},
+      data: {},
+    } as unknown as ReturnType<typeof caseBundleModule.createCaseBundle>
+    const createSpy = vi.spyOn(caseBundleModule, 'createCaseBundle')
+      .mockReturnValue(fakeBundle)
+    const verifySpy = vi.spyOn(caseBundleModule, 'verifyCaseBundle')
+      .mockReturnValue({
+        ok: false,
+        errors: ['fixture integrity failure'],
+        warnings: [],
+        verified: [],
+        notVerified: [],
+        replay: {
+          checked: false,
+          exactProblemMapping: false,
+          completedPlies: null,
+          terminal: null,
+        },
+      })
+
+    try {
+      await expect(createApiServicesWithDependencies(dependencies).exportCase({
+        ownerId: OWNER_ID,
+        gameId: GAME_ID,
+        profile: 'metadata-only-v1',
+        ipAddress: '203.0.113.17',
+        requestId: REQUEST_ID,
+        signal: new AbortController().signal,
+      })).rejects.toMatchObject({ code: 'INTERNAL_ERROR', status: 500 })
+      expect(verifySpy).toHaveBeenCalledWith(fakeBundle)
+    } finally {
+      createSpy.mockRestore()
+      verifySpy.mockRestore()
+    }
   })
 
   it('does not read export rows when the durable export rate limit denies', async () => {

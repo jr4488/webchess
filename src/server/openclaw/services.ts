@@ -21,6 +21,10 @@ import {
 import { createUsageController, loadUsageConfig } from '@/server/usage'
 import { WEBCHESS_SOFTWARE_VERSION } from '@/lib/lifecycle/versions'
 import type { SqlAdapter } from '@/server/db'
+import {
+  configuredCaseRuntimeArtifactSha256,
+  configuredCaseSourceCommit,
+} from '@/server/case-bundle'
 
 import { isLoopbackHostname } from './request-guard'
 import {
@@ -185,6 +189,8 @@ async function createServices(): Promise<OpenClawServiceState> {
       repository: new DurableGameRepository(database),
       requiresModelApiKey: false,
       softwareVersion: `webchess@${WEBCHESS_SOFTWARE_VERSION}-openclaw`,
+      sourceCommit: configuredCaseSourceCommit(),
+      runtimeArtifactSha256: configuredCaseRuntimeArtifactSha256(),
       usage: createUsageController({ db: database, config: usageConfig }),
       wilburStorageRowLimit: 500,
       wilburStorageTextBytesLimit: 250_000,

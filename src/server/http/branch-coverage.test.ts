@@ -107,6 +107,10 @@ function createServices(): WebChessApiServices {
       activeModelRequests: 0,
     })),
     exportAccount: vi.fn(async () => ({})),
+    exportCase: vi.fn(async () => ({
+      format: 'webchess-case-bundle/1',
+      profile: 'research-redacted-v1',
+    })),
     deleteAccountData: vi.fn(async () => undefined),
     handleClerkUserDeleted: vi.fn(async () => undefined),
   }

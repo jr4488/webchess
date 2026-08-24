@@ -21,6 +21,7 @@ import {
   parseLaunchOptions,
   resolveNextBinary,
   resolveRuntimeIdentityPath,
+  resolveWebChessBuildIdentity,
   resolveWebChessRoot,
   type LauncherDependencies,
   type SpawnedServer,
@@ -108,6 +109,10 @@ describe('OpenClaw WebChess launcher', () => {
       '/managed/node_modules/next/dist/bin/next',
       IDENTITY,
       BRIDGE,
+      {
+        sourceCommit: 'a'.repeat(40),
+        runtimeArtifactSha256: 'b'.repeat(64),
+      },
     )
     expect(spec.cwd).toBe('/plugin/webchess')
     expect(spec.url).toBe('http://127.0.0.1:3210/openclaw')
@@ -138,6 +143,8 @@ describe('OpenClaw WebChess launcher', () => {
       WEBCHESS_OPENCLAW_OWNER_ID: 'openclaw_test_installation',
       WEBCHESS_OPENCLAW_TIMEOUT_MS: '150000',
       WEBCHESS_OPENCLAW_TRANSPORT: 'local',
+      WEBCHESS_RELEASE_SHA: 'a'.repeat(40),
+      WEBCHESS_RUNTIME_ARTIFACT_SHA256: 'b'.repeat(64),
     })
     expect(spec.env).not.toHaveProperty('VERCEL')
     expect(spec.env).not.toHaveProperty('VERCEL_ENV')
@@ -299,6 +306,15 @@ describe('OpenClaw WebChess launcher', () => {
     ).toBe('/managed/project/node_modules')
   })
 
+  it('derives a staged-runtime digest without inventing a dirty source commit', async () => {
+    const identity = await resolveWebChessBuildIdentity(resolveWebChessRoot())
+
+    expect(identity.runtimeArtifactSha256).toMatch(/^[0-9a-f]{64}$/u)
+    expect(
+      identity.sourceCommit === null || /^[0-9a-f]{40}$/u.test(identity.sourceCommit),
+    ).toBe(true)
+  })
+
   it('waits for a failed-startup child to stop before removing staging', async () => {
     const server = new FakeServer()
     const sequence: string[] = []
@@ -320,6 +336,10 @@ describe('OpenClaw WebChess launcher', () => {
         expect(server.signalCode).toBe('SIGTERM')
         sequence.push('remove')
       }),
+      resolveBuildIdentity: vi.fn(async () => ({
+        sourceCommit: 'a'.repeat(40),
+        runtimeArtifactSha256: 'b'.repeat(64),
+      })),
       shutdownTimeoutMs: 25,
       spawnServer: vi.fn(() => server),
       startBridge: vi.fn(async () => ({
