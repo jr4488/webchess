@@ -84,6 +84,12 @@ describe('OpenClaw WebChess launcher', () => {
     expect(WEBCHESS_LOCAL_DATA_NOTICE).toContain(
       'webchess-2.0 lifecycle schema',
     )
+    expect(WEBCHESS_LOCAL_DATA_NOTICE).toContain(
+      'selected OpenAI account/OAuth profile',
+    )
+    expect(WEBCHESS_LOCAL_DATA_NOTICE).toContain(
+      'provider key/token fallbacks are rejected',
+    )
   })
 
   it('defaults to a foreground loopback launch using local inference', () => {
@@ -99,13 +105,26 @@ describe('OpenClaw WebChess launcher', () => {
         AWS_ACCESS_KEY_ID: 'must-not-reach-next',
         AWS_SECRET_ACCESS_KEY: 'must-not-reach-next',
         CLERK_WEBHOOK_SIGNING_SECRET: 'must-not-reach-next',
+        CODEX_ACCESS_TOKEN: 'must-not-reach-next',
+        CODEX_API_KEY: 'must-not-reach-next',
+        CODEX_API_TOKEN: 'must-not-reach-next',
+        CODEX_OAUTH_TOKEN: 'must-not-reach-next',
+        CODEX_TOKEN: 'must-not-reach-next',
         DATABASE_URL: 'postgresql://hosted.example/production',
         GITHUB_TOKEN: 'must-not-reach-next',
         MIGRATION_DATABASE_URL: 'postgresql://owner.example/production',
         NODE_ENV: 'test',
+        OPENAI_ACCESS_TOKEN: 'must-not-reach-next',
         OPENAI_API_KEY: 'user-owned-provider-key',
+        OPENAI_API_TOKEN: 'must-not-reach-next',
+        OPENAI_OAUTH_TOKEN: 'must-not-reach-next',
+        OPENAI_TOKEN: 'must-not-reach-next',
         OPENCLAW_GATEWAY_TOKEN: 'must-stay-in-openclaw',
         PATH: '/usr/bin',
+        THIRD_PARTY_API_KEY: 'must-not-reach-next',
+        THIRD_PARTY_API_TOKEN: 'must-not-reach-next',
+        THIRD_PARTY_ACCESS_TOKEN: 'must-not-reach-next',
+        THIRD_PARTY_OAUTH_TOKEN: 'must-not-reach-next',
         VERCEL: '1',
         VERCEL_ENV: 'preview',
         VERCEL_TARGET_ENV: 'preview',
@@ -165,12 +184,25 @@ describe('OpenClaw WebChess launcher', () => {
       'AWS_SECRET_ACCESS_KEY',
       'CLERK_SECRET_KEY',
       'CLERK_WEBHOOK_SIGNING_SECRET',
+      'CODEX_ACCESS_TOKEN',
+      'CODEX_API_KEY',
+      'CODEX_API_TOKEN',
+      'CODEX_OAUTH_TOKEN',
+      'CODEX_TOKEN',
       'DATABASE_URL',
       'GITHUB_TOKEN',
       'MIGRATION_DATABASE_URL',
       'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY',
+      'OPENAI_ACCESS_TOKEN',
       'OPENAI_API_KEY',
+      'OPENAI_API_TOKEN',
+      'OPENAI_OAUTH_TOKEN',
+      'OPENAI_TOKEN',
       'OPENCLAW_GATEWAY_TOKEN',
+      'THIRD_PARTY_API_KEY',
+      'THIRD_PARTY_API_TOKEN',
+      'THIRD_PARTY_ACCESS_TOKEN',
+      'THIRD_PARTY_OAUTH_TOKEN',
     ]) {
       expect(spec.env).not.toHaveProperty(forbidden)
     }

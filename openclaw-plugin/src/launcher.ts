@@ -36,7 +36,7 @@ const RUNTIME_IDENTITY_FILENAME = 'runtime-identity.json'
 const MAX_RUNTIME_IDENTITY_BYTES = 4_096
 const LOCAL_OWNER_PATTERN = /^openclaw_[a-z0-9_-]{8,80}$/u
 export const WEBCHESS_LOCAL_DATA_NOTICE =
-  'WebChess software 2.2.0-rc.1 stores game history and the webchess-2.0 lifecycle schema in the dedicated local PostgreSQL database. Model requests use your configured OpenClaw provider, which may be remote.'
+  'WebChess software 2.2.0-rc.1 stores game history and the webchess-2.0 lifecycle schema in the dedicated local PostgreSQL database. Inference and official Codex Hosted Search use your selected OpenAI account/OAuth profile and contact OpenAI; provider key/token fallbacks are rejected.'
 const RUNTIME_ENTRIES = [
   'CODE_OF_CONDUCT.md',
   'CONTRIBUTING.md',
@@ -45,6 +45,10 @@ const RUNTIME_ENTRIES = [
   'INSTALL.md',
   'LICENSE',
   'next.config.ts',
+  'openclaw-plugin/dist',
+  'openclaw-plugin/src',
+  'openclaw-plugin/tsconfig.json',
+  'openclaw.plugin.json',
   'package.json',
   'public',
   'README.md',
@@ -133,6 +137,7 @@ type RuntimeEnvironment = Readonly<Record<string, string | undefined>>
 interface RuntimePayloadFile {
   readonly path: string
   readonly bytes: number
+  readonly mode: number
   readonly sha256: string
 }
 
@@ -165,6 +170,7 @@ async function collectRuntimeFiles(
   files.push({
     path: relativePath,
     bytes: bytes.byteLength,
+    mode: metadata.mode & 0o777,
     sha256: createHash('sha256').update(bytes).digest('hex'),
   })
 }

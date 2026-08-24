@@ -50,3 +50,29 @@ declare module 'openclaw/plugin-sdk/simple-completion-runtime' {
     params: unknown,
   ): Promise<unknown>
 }
+
+declare module 'openclaw/plugin-sdk/agent-runtime' {
+  export function loadAuthProfileStoreForSecretsRuntime(
+    agentDir?: string,
+    options?: {
+      config?: unknown
+      externalCliProviderIds?: string[]
+    },
+  ): unknown
+  export function resolveAuthProfileOrder(params: unknown): string[]
+  export function resolveAgentDir(
+    config: unknown,
+    agentId: string,
+    environment?: NodeJS.ProcessEnv,
+  ): string
+  export function resolveAgentWorkspaceDir(
+    config: unknown,
+    agentId: string,
+    environment?: NodeJS.ProcessEnv,
+  ): string
+  export function resolveDefaultAgentId(config: unknown): string
+}
+
+declare module 'openclaw/plugin-sdk/plugin-runtime' {
+  export function getGlobalPluginRegistry(): unknown
+}

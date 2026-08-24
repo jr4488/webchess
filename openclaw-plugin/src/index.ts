@@ -6,14 +6,14 @@ export default definePluginEntry({
   id: 'webchess',
   name: 'WebChess',
   description:
-    'Launches the visual local WebChess experience with your configured OpenClaw model.',
+    'Launches visual local WebChess through your selected OpenAI account/OAuth model and official Codex Hosted Search.',
   register(api) {
     api.registerCli(
       ({ program }) => {
         program
           .command('webchess')
           .description(
-            'Play visual WebChess locally with your configured OpenClaw model',
+            'Play visual WebChess locally through your OpenAI account/OAuth profile',
           )
           .option(
             '--port <port>',
@@ -30,7 +30,7 @@ export default definePluginEntry({
           {
             name: 'webchess',
             description:
-              'Play visual WebChess locally with your configured OpenClaw model',
+              'Play visual WebChess locally through your OpenAI account/OAuth profile',
             hasSubcommands: false,
           },
         ],

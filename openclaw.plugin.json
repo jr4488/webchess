@@ -1,7 +1,10 @@
 {
   "id": "webchess",
   "name": "WebChess",
-  "description": "Launches the visual local WebChess experience with your configured OpenClaw model.",
+  "description": "Launches visual local WebChess through your selected OpenAI account/OAuth model and official Codex Hosted Search.",
+  "requiresPlugins": [
+    "codex"
+  ],
   "activation": {
     "onStartup": false,
     "onCommands": [
