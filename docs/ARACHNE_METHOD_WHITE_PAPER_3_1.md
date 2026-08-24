@@ -8,6 +8,8 @@
 **Status:** implementation and replication companion; no efficacy claim\
 **License:** Apache License 2.0
 
+<!-- WEBCHESS_RELEASE_HANDOFF -->
+
 ## Abstract
 
 The Arachne Method is an experimental deliberation architecture for resisting
@@ -303,9 +305,13 @@ The tracked template intentionally remains unresolved at
 [`docs/releases/webchess-release-identity.template.json`](releases/webchess-release-identity.template.json).
 Only after this paper is committed and code is frozen can
 [`scripts/release-identity.mjs`](../scripts/release-identity.mjs) bind the final
-commit, retained source-archive digest, paper path, and PDF digest. Until then,
-the public source route must fail closed. The document does not contain an
-invented future SHA or DOI.
+commit, retained source-archive digest, paper path, and PDF digest. Publication
+status is therefore manifest-dependent: the candidate is resolved only when
+the canonical public manifest reports `resolved`, names the same full commit,
+and verifies the named archive and PDF digests. Otherwise the public source
+route must fail closed. The tracked document does not contain an invented
+future SHA or DOI; the configured download generator adds an exact release
+handoff to the published Markdown, HTML, and PDF only after the commit exists.
 
 ### 5.2 Use the reviewed local runtime
 
@@ -432,8 +438,8 @@ The following historical identities remain distinct from the candidate:
 | Last released baseline | WebChess `v2.1.0` at `9980328581ba3e6fed6f2c4fc99b555fec4773bc` | Historical public release baseline |
 | Audited Linux 2.2 input | `7a3749cf7f2c4e4c5ebfeb9b9aa870a11843f3a2` | Historical candidate input, not the integrated RC |
 | Historical paper edition 3.0 snapshot | `0384978b2ba709da4c9824f2821c8623d3f84364` | Preserved manuscript and audit evidence |
-| This integrated candidate | WebChess `2.2.0-rc.1`, full commit in the resolved release identity | Unresolved until final code freeze |
-| This paper | Edition 3.1 repository path and PDF SHA-256 in the same release identity | Unresolved until final PDF bytes exist |
+| This integrated candidate | WebChess `2.2.0-rc.1`, full commit in the canonical release identity | Resolved only when that manifest reports `resolved` and its source evidence verifies; otherwise unresolved |
+| This paper | Edition 3.1 repository path and PDF SHA-256 in the same release identity | Resolved only when that manifest reports `resolved` and its paper evidence verifies; otherwise unresolved |
 | Provider harness | OpenClaw `2026.7.1-2` at `0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c` | Pinned external runtime dependency |
 
 The exact citation is therefore a tuple, not a product name alone: paper

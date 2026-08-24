@@ -60,6 +60,81 @@ const outputPaths = {
 }
 
 const repositoryUrl = 'https://github.com/jr4488/webchess'
+const canonicalPublicUrl = 'https://webchess.anansiportia.com'
+const releaseHandoffMarker = '<!-- WEBCHESS_RELEASE_HANDOFF -->'
+
+function exactSourceCommit(sourceCommit) {
+  const normalized = sourceCommit?.trim().toLowerCase() ?? null
+  if (normalized !== null && !/^[0-9a-f]{40}$/u.test(normalized)) {
+    throw new Error(
+      'WEBCHESS_RELEASE_SOURCE_SHA must be an exact 40-character hexadecimal commit.',
+    )
+  }
+  return normalized
+}
+
+function candidateReleaseUrls(sourceCommit) {
+  const commit = exactSourceCommit(sourceCommit)
+  if (commit === null) {
+    throw new Error('The candidate paper release handoff requires an exact source commit.')
+  }
+
+  return Object.freeze({
+    install: `${repositoryUrl}/blob/${commit}/INSTALL.md`,
+    publicInstall: `${canonicalPublicUrl}/downloads/webchess-installation.md`,
+    releaseManifest: `${canonicalPublicUrl}/downloads/webchess-release-identity.json`,
+    sourceArchive: `${canonicalPublicUrl}/downloads/webchess-source-${commit}.zip`,
+    sourceTree: `${repositoryUrl}/tree/${commit}`,
+  })
+}
+
+function candidateWhitePaperWithReleaseHandoff(markdown, sourceCommit) {
+  const commit = exactSourceCommit(sourceCommit)
+  if (commit === null) {
+    return markdown
+  }
+  if (!markdown.includes(releaseHandoffMarker)) {
+    throw new Error(
+      `Candidate paper is missing the required ${releaseHandoffMarker} marker.`,
+    )
+  }
+
+  const urls = candidateReleaseUrls(commit)
+  const handoff = [
+    '## Immutable release handoff',
+    '',
+    `**Exact WebChess source commit:** \`${commit}\``,
+    '',
+    'Immutable GitHub source tree:',
+    '',
+    urls.sourceTree,
+    '',
+    'Canonical release manifest:',
+    '',
+    urls.releaseManifest,
+    '',
+    'Exact retained source archive:',
+    '',
+    urls.sourceArchive,
+    '',
+    'Immutable installation guide:',
+    '',
+    urls.install,
+    '',
+    'Public installation download:',
+    '',
+    urls.publicInstall,
+    '',
+    'Publication status follows the canonical manifest. Readers should accept',
+    'this handoff as resolved only when that manifest reports `resolved`, names',
+    'the exact commit above, and its source-archive and paper-PDF digests verify.',
+    'Otherwise the candidate remains unresolved and the public route must fail',
+    'closed. This release binding establishes artifact identity and operational',
+    'inspectability, not efficacy. Edition 3.1 claims no DOI.',
+  ].join('\n')
+
+  return markdown.replace(releaseHandoffMarker, handoff)
+}
 
 function assertDocument(name, source) {
   if (!source.trim()) {
@@ -690,15 +765,30 @@ function plainInlineMarkdown(value) {
   )
 }
 
-function markdownBlocks(markdown) {
+function singleHttpsUri(value) {
+  const trimmed = value.trim()
+  const raw = /^https:\/\/[^\s<>()`]+$/u.exec(trimmed)
+  if (raw) {
+    return raw[0]
+  }
+  const markdown = /^\[(https:\/\/[^\s<>()`]+)\]\(\1\)$/u.exec(trimmed)
+  return markdown?.[1] ?? null
+}
+
+function markdownBlocks(markdown, { linkAnnotations = false } = {}) {
   const blocks = []
   let paragraph = []
   let inFence = false
 
   const flushParagraph = () => {
-    const text = plainInlineMarkdown(paragraph.join(' '))
+    const source = paragraph.join(' ')
+    const text = plainInlineMarkdown(source)
     if (text) {
-      blocks.push({ kind: 'paragraph', text })
+      blocks.push({
+        kind: 'paragraph',
+        text,
+        uri: linkAnnotations ? singleHttpsUri(source) : null,
+      })
     }
     paragraph = []
   }
@@ -779,6 +869,7 @@ function markdownBlocks(markdown) {
         kind: 'list',
         marker: listItem[2].endsWith('.') ? listItem[2] : '*',
         text: plainInlineMarkdown(listItem[3]),
+        uri: linkAnnotations ? singleHttpsUri(listItem[3]) : null,
       })
       continue
     }
@@ -794,6 +885,7 @@ function markdownBlocks(markdown) {
       blocks.push({
         kind: 'quote',
         text: plainInlineMarkdown(trimmed.replace(/^>\s?/, '')),
+        uri: linkAnnotations ? singleHttpsUri(trimmed) : null,
       })
       continue
     }
@@ -850,7 +942,12 @@ function textCommand({ color = 0, font, size, text, x, y }) {
   return `${color} g BT /${font} ${size} Tf 1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm (${pdfString(text)}) Tj ET`
 }
 
-function paginateWhitePaper(markdown, softwareVersion, images) {
+function paginateWhitePaper(
+  markdown,
+  softwareVersion,
+  images,
+  { linkAnnotations = false } = {},
+) {
   const pageWidth = 595.28
   const pageHeight = 841.89
   const marginX = 54
@@ -881,7 +978,7 @@ function paginateWhitePaper(markdown, softwareVersion, images) {
     y -= leading
   }
 
-  for (const block of markdownBlocks(markdown)) {
+  for (const block of markdownBlocks(markdown, { linkAnnotations })) {
     if (block.kind === 'space') {
       y -= 4
       continue
@@ -944,7 +1041,16 @@ function paginateWhitePaper(markdown, softwareVersion, images) {
       continue
     }
 
-    const blockStyle = {
+    const standaloneUrl =
+      block.kind === 'paragraph' && block.uri && block.text === block.uri
+    const blockStyle = standaloneUrl ? {
+      color: 0.12,
+      font: 'F3',
+      leading: 10.2,
+      limit: 108,
+      size: 7.4,
+      x: marginX + 4,
+    } : {
       code: { color: 0.12, font: 'F3', size: 7.8, leading: 10.5, limit: 104, x: marginX + 10 },
       list: { color: 0.08, font: 'F1', size: 9.4, leading: 13.2, limit: 91, x: marginX + 16 },
       paragraph: { color: 0.08, font: 'F1', size: 9.4, leading: 13.2, limit: 96, x: marginX },
@@ -957,7 +1063,12 @@ function paginateWhitePaper(markdown, softwareVersion, images) {
     const lines = wrapText(`${prefix}${block.text}`, blockStyle.limit)
     ensureRoom(lines.length * blockStyle.leading + 5)
     for (const line of lines) {
-      addLine(line, blockStyle.x, blockStyle, blockStyle.leading)
+      addLine(
+        line,
+        blockStyle.x,
+        { ...blockStyle, uri: block.uri ?? null },
+        blockStyle.leading,
+      )
     }
     y -= block.kind === 'code' || block.kind === 'table' ? 2 : 5
   }
@@ -987,11 +1098,17 @@ function paginateWhitePaper(markdown, softwareVersion, images) {
   return { pageHeight, pageWidth, pages }
 }
 
-function createPdf(markdown, softwareVersion, images) {
+function createPdf(
+  markdown,
+  softwareVersion,
+  images,
+  { linkAnnotations = false } = {},
+) {
   const { pageHeight, pageWidth, pages } = paginateWhitePaper(
     markdown,
     softwareVersion,
     images,
+    { linkAnnotations },
   )
   const objects = new Map()
   const pageObjectIds = []
@@ -1002,6 +1119,27 @@ function createPdf(markdown, softwareVersion, images) {
   for (const image of images.values()) {
     imageObjectIds.set(image.name, nextObjectId)
     nextObjectId += 1
+  }
+  const annotationObjectIds = pages.map(() => [])
+  if (linkAnnotations) {
+    for (const [pageIndex, lines] of pages.entries()) {
+      for (const line of lines) {
+        if (!line.uri) {
+          continue
+        }
+        const annotationObjectId = nextObjectId
+        nextObjectId += 1
+        annotationObjectIds[pageIndex].push(annotationObjectId)
+        const estimatedWidth = Math.min(
+          pageWidth - line.x,
+          Math.max(12, line.size * 0.54 * line.text.length),
+        )
+        objects.set(
+          annotationObjectId,
+          `<< /Type /Annot /Subtype /Link /Rect [${line.x.toFixed(2)} ${(line.y - 2).toFixed(2)} ${(line.x + estimatedWidth).toFixed(2)} ${(line.y + line.size + 2).toFixed(2)}] /Border [0 0 0] /A << /S /URI /URI (${pdfString(line.uri)}) >> >>`,
+        )
+      }
+    }
   }
   const infoObjectId = nextObjectId
   const imageResources = [...imageObjectIds.entries()]
@@ -1045,11 +1183,14 @@ function createPdf(markdown, softwareVersion, images) {
     const xObjectResources = imageResources
       ? ` /XObject << ${imageResources} >>`
       : ''
+    const annotations = annotationObjectIds[index].length
+      ? ` /Annots [${annotationObjectIds[index].map((id) => `${id} 0 R`).join(' ')}]`
+      : ''
 
     pageObjectIds.push(pageObjectId)
     objects.set(
       pageObjectId,
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth.toFixed(2)} ${pageHeight.toFixed(2)}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 ${italicFontObjectId} 0 R >>${xObjectResources} >> /Contents ${contentObjectId} 0 R >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth.toFixed(2)} ${pageHeight.toFixed(2)}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 ${italicFontObjectId} 0 R >>${xObjectResources} >> /Contents ${contentObjectId} 0 R${annotations} >>`,
     )
     objects.set(
       contentObjectId,
@@ -1143,17 +1284,13 @@ async function main() {
     throw new Error('package.json must provide a semantic software version')
   }
 
-  const configuredSourceCommit = process.env.WEBCHESS_RELEASE_SOURCE_SHA
-    ?.trim()
-    .toLowerCase() ?? null
-  if (
-    configuredSourceCommit !== null &&
-    !/^[0-9a-f]{40}$/u.test(configuredSourceCommit)
-  ) {
-    throw new Error(
-      'WEBCHESS_RELEASE_SOURCE_SHA must be an exact 40-character hexadecimal commit.',
-    )
-  }
+  const configuredSourceCommit = exactSourceCommit(
+    process.env.WEBCHESS_RELEASE_SOURCE_SHA,
+  )
+  const releaseCandidateWhitePaper = candidateWhitePaperWithReleaseHandoff(
+    candidateWhitePaper,
+    configuredSourceCommit,
+  )
 
   const [candidateImages, historicalImages] = await Promise.all([
     loadWhitePaperImages(
@@ -1166,7 +1303,7 @@ async function main() {
     ),
   ])
   const candidateWhitePaperHtml = renderWhitePaperHtml(
-    candidateWhitePaper,
+    releaseCandidateWhitePaper,
     candidateImages,
     {
       sourceCommit: configuredSourceCommit,
@@ -1174,9 +1311,10 @@ async function main() {
     },
   )
   const candidateWhitePaperPdf = createPdf(
-    downloadablePdfMarkdown(candidateWhitePaper),
+    downloadablePdfMarkdown(releaseCandidateWhitePaper),
     softwareVersion,
     candidateImages,
+    { linkAnnotations: true },
   )
   const historicalWhitePaperHtml = renderWhitePaperHtml(
     historicalWhitePaper,
@@ -1222,7 +1360,7 @@ async function main() {
       ),
       writeFile(
         outputPaths.candidateWhitePaperMarkdown,
-        candidateWhitePaper,
+        releaseCandidateWhitePaper,
         'utf8',
       ),
       writeFile(
@@ -1239,6 +1377,9 @@ async function main() {
 }
 
 export {
+  candidateReleaseUrls,
+  candidateWhitePaperWithReleaseHandoff,
+  createPdf,
   downloadableMarkdown,
   downloadablePdfMarkdown,
   pdfAscii,

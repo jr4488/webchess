@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  candidateReleaseUrls,
+  candidateWhitePaperWithReleaseHandoff,
+  createPdf,
   downloadableMarkdown,
   downloadablePdfMarkdown,
   pdfAscii,
   renderWhitePaperHtml,
 } from './generate-downloads.mjs'
+
+const releaseCommit = '0123456789abcdef0123456789abcdef01234567'
 
 describe('downloadable white-paper formulas', () => {
   it('preserves logical, set, and boundary operators in PDF-safe text', () => {
@@ -52,7 +57,7 @@ describe('downloadable white-paper formulas', () => {
   })
 
   it('pins candidate paper links only when an exact release commit is supplied', () => {
-    const commit = '0123456789abcdef0123456789abcdef01234567'
+    const commit = releaseCommit
     const sourcePath = 'docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md'
     const markdown = '[Install](../INSTALL.md#requirements)'
 
@@ -66,6 +71,68 @@ describe('downloadable white-paper formulas', () => {
       sourceCommit: null,
       sourcePath,
     })).toContain('href="../INSTALL.md#requirements"')
+  })
+
+  it('binds every public-reader handoff URL to the exact release commit', () => {
+    const source = [
+      '# Candidate',
+      '',
+      '<!-- WEBCHESS_RELEASE_HANDOFF -->',
+      '',
+      'No DOI and no efficacy claim.',
+    ].join('\n')
+    const urls = candidateReleaseUrls(releaseCommit)
+    const released = candidateWhitePaperWithReleaseHandoff(
+      source,
+      releaseCommit,
+    )
+
+    expect(released).toContain(releaseCommit)
+    expect(urls).toEqual({
+      install: `https://github.com/jr4488/webchess/blob/${releaseCommit}/INSTALL.md`,
+      publicInstall:
+        'https://webchess.anansiportia.com/downloads/webchess-installation.md',
+      releaseManifest:
+        'https://webchess.anansiportia.com/downloads/webchess-release-identity.json',
+      sourceArchive:
+        `https://webchess.anansiportia.com/downloads/webchess-source-${releaseCommit}.zip`,
+      sourceTree:
+        `https://github.com/jr4488/webchess/tree/${releaseCommit}`,
+    })
+    for (const url of Object.values(urls)) {
+      expect(released).toContain(`\n${url}\n`)
+    }
+    expect(released).toContain('not efficacy')
+    expect(released).toContain('claims no DOI')
+    expect(released).not.toContain('WEBCHESS_RELEASE_HANDOFF')
+  })
+
+  it('adds usable URI annotations to the release-bound candidate PDF only', () => {
+    const source = [
+      '# Candidate',
+      '',
+      '<!-- WEBCHESS_RELEASE_HANDOFF -->',
+    ].join('\n')
+    const released = candidateWhitePaperWithReleaseHandoff(
+      source,
+      releaseCommit,
+    )
+    const urls = candidateReleaseUrls(releaseCommit)
+    const linkedPdf = createPdf(released, '2.2.0-rc.1', new Map(), {
+      linkAnnotations: true,
+    }).toString('latin1')
+    const historicalPathPdf = createPdf(
+      released,
+      '2.2.0-rc.1',
+      new Map(),
+    ).toString('latin1')
+
+    expect(linkedPdf).toContain('/Subtype /Link')
+    for (const url of Object.values(urls)) {
+      expect(linkedPdf).toContain(`/S /URI /URI (${url})`)
+    }
+    expect(historicalPathPdf).not.toContain('/Subtype /Link')
+    expect(historicalPathPdf).not.toContain('/Annots')
   })
 
   it('removes CommonMark hard-break markers from PDF text', () => {
