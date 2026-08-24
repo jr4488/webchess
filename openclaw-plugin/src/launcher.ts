@@ -170,7 +170,7 @@ async function collectRuntimeFiles(
   files.push({
     path: relativePath,
     bytes: bytes.byteLength,
-    mode: metadata.mode & 0o777,
+    mode: (metadata.mode & 0o111) === 0 ? 0o644 : 0o755,
     sha256: createHash('sha256').update(bytes).digest('hex'),
   })
 }
