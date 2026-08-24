@@ -1,0 +1,42 @@
+{
+  "schema": "webchess-release-identity/1",
+  "release": {
+    "product": "WebChess",
+    "version": "2.2.0-rc.1",
+    "method": "Arachne Method",
+    "caseBundleSchema": "webchess-case-bundle/1"
+  },
+  "source": {
+    "repository": "https://github.com/jr4488/webchess",
+    "commit": null,
+    "archive": {
+      "downloadPath": "/downloads/webchess-source.zip",
+      "sha256": null
+    }
+  },
+  "paper": {
+    "candidate": {
+      "edition": "3.1",
+      "repositoryPath": null,
+      "pdf": {
+        "downloadPath": "/downloads/webchess-white-paper.pdf",
+        "sha256": null
+      }
+    },
+    "historical": {
+      "edition": "3.0",
+      "repositoryPath": "docs/WEBCHESS_WHITE_PAPER_V3.md"
+    }
+  },
+  "dependencies": {
+    "openclaw": {
+      "version": "2026.7.1-2",
+      "commit": "0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c"
+    }
+  },
+  "toolchains": {
+    "node": "24.19.0",
+    "npm": "11.14.1",
+    "postgresql": "17"
+  }
+}

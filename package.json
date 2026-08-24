@@ -62,6 +62,8 @@
   },
   "scripts": {
     "downloads:generate": "node scripts/generate-downloads.mjs",
+    "release:identity:generate": "node scripts/release-identity.mjs generate",
+    "release:identity:check": "node scripts/release-identity.mjs check",
     "plugin:build": "tsc -p openclaw-plugin/tsconfig.json",
     "db:migrate": "node scripts/deployment-migrate.mjs",
     "db:schema:check": "node scripts/deployment-schema-check.mjs",
