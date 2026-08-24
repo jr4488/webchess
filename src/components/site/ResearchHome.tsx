@@ -1,6 +1,9 @@
 import Link from 'next/link'
 
-import { immutableReleaseSourceUrl } from '@/lib/release-source'
+import {
+  configuredReleaseCommit,
+  immutableReleaseSourceUrl,
+} from '@/lib/release-source'
 
 import { PublicShell } from './PublicShell'
 
@@ -34,6 +37,7 @@ const LINEAGE = [
 
 export function ResearchHome() {
   const immutableSourceUrl = immutableReleaseSourceUrl()
+  const releaseCommit = immutableSourceUrl ? configuredReleaseCommit() : null
 
   return (
     <PublicShell>
@@ -55,23 +59,37 @@ export function ResearchHome() {
           </h2>
           <div className="wc-research-documents" data-wc-reveal>
             <article className="wc-research-document">
-              <small>Candidate paper · edition 3.1</small>
-              <h2>Code-freeze release mapping</h2>
-              <p>
-                The integrated candidate paper must name the same immutable source commit and
-                artifact digests as the release identity. Until those values resolve, edition
-                3.1 is not presented as a public artifact.
-              </p>
               {immutableSourceUrl ? (
                 <>
-                  <Link href="/white-paper">Read mapped edition 3.1</Link>
+                  <small>Mapped candidate paper · edition 3.1</small>
+                  <h2>The Arachne Method and WebChess</h2>
+                  <p>
+                    The implementation and replication companion is bound to exact immutable
+                    source <a href={immutableSourceUrl}><code>{releaseCommit}</code></a> and the
+                    reviewed release identity. It documents reproducibility boundaries and makes
+                    no validated efficacy claim.
+                  </p>
+                  <Link href="/white-paper">Read mapped candidate edition 3.1</Link>
                   {' · '}
                   <a href="/downloads/webchess-white-paper.pdf" download>
-                    Download PDF
+                    Download mapped PDF
+                  </a>
+                  {' · '}
+                  <a href="/downloads/webchess-release-identity.json">
+                    Verify release identity
                   </a>
                 </>
               ) : (
-                <span role="status">Edition 3.1 publication pending code freeze</span>
+                <>
+                  <small>Candidate paper · edition 3.1</small>
+                  <h2>Code-freeze release mapping</h2>
+                  <p>
+                    Edition 3.1 must name the same immutable source commit and artifact digests as
+                    the release identity. It is not presented as a public artifact until those
+                    values resolve.
+                  </p>
+                  <span role="status">Edition 3.1 publication pending code freeze</span>
+                </>
               )}
             </article>
             <article className="wc-research-document">
@@ -85,10 +103,16 @@ export function ResearchHome() {
                 <a href="https://github.com/jr4488/webchess/tree/0384978b2ba709da4c9824f2821c8623d3f84364">
                   exact source <code>0384978b2ba709da4c9824f2821c8623d3f84364</code>
                 </a>
-                ; edition 3.1 remains unresolved
-                until the integrated code and artifacts are frozen.
+                . It remains a historical audit artifact and is not silently relabeled as the
+                candidate edition 3.1 release paper.
               </p>
-              <Link href="/white-paper">Read historical edition 3.0</Link>
+              {immutableSourceUrl ? (
+                <a href="/downloads/webchess-white-paper-v3-historical.html">
+                  Read preserved historical edition 3.0
+                </a>
+              ) : (
+                <Link href="/white-paper">Read historical edition 3.0</Link>
+              )}
             </article>
             <article className="wc-research-document">
               <small>Canonical implementation</small>
@@ -99,7 +123,9 @@ export function ResearchHome() {
               </p>
               {immutableSourceUrl ? (
                 <>
-                  <a href={immutableSourceUrl}>Inspect immutable GitHub source</a>{' '}
+                  <a href={immutableSourceUrl}>
+                    Inspect exact source <code>{releaseCommit}</code>
+                  </a>{' · '}
                   <a href="/downloads/webchess-release-identity.json">
                     Verify release identity
                   </a>
@@ -193,7 +219,17 @@ export function ResearchHome() {
                 the lifecycle, and challenge the assumptions in public.
               </p>
               <div className="wc-paper-actions">
-                <Link className="wc-btn" href="/white-paper">Read historical paper 3.0</Link>
+                <Link className="wc-btn" href="/white-paper">
+                  {immutableSourceUrl ? 'Read mapped paper 3.1' : 'Read historical paper 3.0'}
+                </Link>
+                {immutableSourceUrl ? (
+                  <a
+                    className="wc-btn wc-btn-plain"
+                    href="/downloads/webchess-white-paper-v3-historical.html"
+                  >
+                    Read historical paper 3.0
+                  </a>
+                ) : null}
                 <Link className="wc-btn wc-btn-plain" href="/install">Run the candidate locally</Link>
                 <a className="wc-btn wc-btn-plain" href="https://github.com/jr4488/webchess/discussions">
                   Join the discussion

@@ -24,6 +24,23 @@ test.describe('canonical WebChess public site', () => {
       'href',
       '#episode',
     )
+    await expect(page.getByRole('link', { name: 'Paper', exact: true })).toHaveAttribute(
+      'href',
+      '/white-paper',
+    )
+    await expect(
+      page.getByRole('heading', {
+        name: 'Eight formal authorities, one generated Answer artifact.',
+      }),
+    ).toBeVisible()
+    await expect(page.locator('#lifecycle').getByRole('heading', { name: 'Gate' })).toBeVisible()
+    await expect(page.locator('#lifecycle').getByRole('heading', { name: 'Retry' })).toBeVisible()
+    await expect(
+      page.locator('#lifecycle').getByRole('heading', {
+        name: 'Answer artifact',
+        exact: true,
+      }),
+    ).toBeVisible()
     await expect(page.getByRole('link', { name: 'Download historical PDF' })).toHaveAttribute(
       'href',
       '/downloads/webchess-white-paper-v3-historical.pdf',

@@ -6,7 +6,7 @@ import { loadInstall } from '@/content/documents/install'
 export const metadata: Metadata = {
   title: 'Install',
   description:
-    'Install WebChess locally or prepare a dedicated Clerk, Neon, OpenAI, and Vercel deployment.',
+    'Run WebChess locally through OpenClaw with OpenAI account OAuth and PostgreSQL 17; no WebChess-side OPENAI_API_KEY is required.',
 }
 
 export default async function InstallPage() {

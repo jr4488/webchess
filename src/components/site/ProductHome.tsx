@@ -13,10 +13,10 @@ const HEXAGRAMS = Array.from({ length: 64 }, (_, index) =>
   String.fromCharCode(0x4dc0 + index),
 ).join(' ')
 
-const LIFECYCLE = [
+const LIFECYCLE_PANELS = [
   {
     glyph: '䷀',
-    authority: 'Model-mediated',
+    authority: 'Model-mediated authority',
     authorityClass: 'wc-authority-model',
     title: 'Anansi',
     body: 'Generates a plural field of exactly 64 facets, crossing eight practical dimensions with eight movements of change.',
@@ -24,7 +24,7 @@ const LIFECYCLE = [
   },
   {
     glyph: '䷄',
-    authority: 'Deterministic',
+    authority: 'Deterministic authority',
     authorityClass: 'wc-authority-det',
     title: 'Chess',
     body: 'A semantically blind engine plays a complete game on the circular board—a bounded, replayable trajectory.',
@@ -32,7 +32,7 @@ const LIFECYCLE = [
   },
   {
     glyph: '䷅',
-    authority: 'Model-mediated',
+    authority: 'Model-mediated authority',
     authorityClass: 'wc-authority-model',
     title: 'Portia',
     body: 'Attacks every surviving candidate with thirteen examinations before any answer exists.',
@@ -40,23 +40,31 @@ const LIFECYCLE = [
   },
   {
     glyph: '䷐',
-    authority: 'Deterministic',
+    authority: 'Deterministic authority',
     authorityClass: 'wc-authority-det',
-    title: 'Gate & Retry',
-    body: 'Code decides whether the surviving basis is sufficient—with bounded retry and principled refusal.',
-    prohibition: 'invent material or waive requirements.',
+    title: 'Gate',
+    body: 'Code decides whether the reviewed surviving basis and exact prospective Answer prompt satisfy the persisted sufficiency rules.',
+    prohibition: 'invent material, waive requirements, or certify truth.',
+  },
+  {
+    glyph: '䷏',
+    authority: 'Deterministic authority',
+    authorityClass: 'wc-authority-det',
+    title: 'Retry',
+    body: 'Code permits at most two additional same-field games and one regenerated field after a failed Gate.',
+    prohibition: 'erase ancestry, exceed the budget, or force an Answer after exhaustion.',
   },
   {
     glyph: '䷊',
-    authority: 'Model-mediated',
+    authority: 'Generated artifact · not an authority',
     authorityClass: 'wc-authority-model',
-    title: 'Answer',
-    body: 'Synthesizes only the exact permitted prompt: reviewed evidence, usable candidates, and required qualifications.',
+    title: 'Answer artifact',
+    body: 'After a passed Gate, the model synthesizes only the exact permitted prompt: reviewed evidence, usable candidates, and required qualifications.',
     prohibition: 'cite consumed or unresolved candidates.',
   },
   {
     glyph: '䷗',
-    authority: 'Model-mediated',
+    authority: 'Model-mediated authority',
     authorityClass: 'wc-authority-model',
     title: 'Charlotte',
     body: 'Qualifies the stored answer—truth boundaries, stakeholders, audience—and returns exactly three reversible actions.',
@@ -64,7 +72,7 @@ const LIFECYCLE = [
   },
   {
     glyph: '䷒',
-    authority: 'Human-owned',
+    authority: 'Human-owned authority',
     authorityClass: 'wc-authority-human',
     title: 'Wilbur',
     body: 'The person plans, runs, abandons, or completes an action—and records what reality did.',
@@ -72,7 +80,7 @@ const LIFECYCLE = [
   },
   {
     glyph: '䷾',
-    authority: 'Persistence',
+    authority: 'Persistence authority',
     authorityClass: 'wc-authority-store',
     title: 'The Web',
     body: 'Preserves the full genealogy—field, seeds, moves, dispositions, digests, actions, and observations.',
@@ -132,8 +140,8 @@ const PHASES = [
 ] as const
 
 export function ProductHome() {
-  const releaseCommit = configuredReleaseCommit()
   const immutableSourceUrl = immutableReleaseSourceUrl()
+  const releaseCommit = immutableSourceUrl ? configuredReleaseCommit() : null
 
   return (
     <PublicShell>
@@ -235,15 +243,18 @@ export function ProductHome() {
         <div className="wc-wrap">
           <div className="wc-kicker" data-wc-reveal>The Arachne lifecycle</div>
           <h2 className="wc-sec" data-wc-reveal>
-            Eight authorities. None may adjudicate its own proposal.
+            Eight formal authorities, one generated Answer artifact.
           </h2>
           <p className="wc-sec-lede" data-wc-reveal>
             The Arachne Method names the whole deliberative architecture, and WebChess is its
             software instrument. ANANSI names only Anansi&apos;s initial Division and field
-            construction. Each lifecycle stage holds a narrow power and an explicit prohibition.
+            construction. Its eight authorities are Anansi, Chess, Portia, Gate, Retry,
+            Charlotte, Wilbur, and the Web. Answer sits between a passed Gate and Charlotte as a
+            generated artifact—not a ninth authority. Every panel states its narrow power and an
+            explicit prohibition.
           </p>
           <div className="wc-stages">
-            {LIFECYCLE.map((stage) => (
+            {LIFECYCLE_PANELS.map((stage) => (
               <article className="wc-stage" data-wc-reveal key={stage.title}>
                 <span className="wc-stage-glyph" aria-hidden="true">{stage.glyph}</span>
                 <span className={`wc-authority ${stage.authorityClass}`}>{stage.authority}</span>
@@ -324,28 +335,57 @@ export function ProductHome() {
         <div className="wc-wrap">
           <div className="wc-paper-card" data-wc-reveal>
             <div className="wc-paper-left">
-              <div className="wc-kicker">Historical technical paper · edition 3.0</div>
-              <h3>The First Answer Is Not Enough</h3>
-              <p>
-                Deliberation before decision. An engaging, repository-audited account of the Arachne
-                Method: circular chess, Portia's thirteen attacks, the deterministic Gate, bounded
-                Retry, qualified action, provenance, measured evidence, repaired release boundaries,
-                and a falsifiable research program. It records the audited pre-integration
-                <a href="https://github.com/jr4488/webchess/tree/0384978b2ba709da4c9824f2821c8623d3f84364">
-                  <code>0384978b2ba709da4c9824f2821c8623d3f84364</code>
-                </a>{' '}
-                snapshot; candidate paper 3.1 remains
-                publication-blocked until code freeze and artifact verification.
-              </p>
+              {immutableSourceUrl ? (
+                <>
+                  <div className="wc-kicker">Mapped candidate paper · edition 3.1</div>
+                  <h3>The Arachne Method and WebChess</h3>
+                  <p>
+                    The replication companion maps the Arachne Method to WebChess 2.2.0-rc.1,
+                    this exact immutable source commit, and the reviewed release identity. It
+                    documents the public reader-to-running-game path and makes no validated
+                    efficacy claim. Historical edition 3.0 remains available as a preserved audit
+                    artifact; it is not the candidate release paper.
+                  </p>
+                  <p>
+                    Exact candidate source:{' '}
+                    <a href={immutableSourceUrl}>
+                      <code>{releaseCommit}</code>
+                    </a>
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="wc-kicker">Historical technical paper · edition 3.0</div>
+                  <h3>The First Answer Is Not Enough</h3>
+                  <p>
+                    Deliberation before decision. This repository-audited account preserves the
+                    Arachne Method before integration and maps to audited source{' '}
+                    <a href="https://github.com/jr4488/webchess/tree/0384978b2ba709da4c9824f2821c8623d3f84364">
+                      <code>0384978b2ba709da4c9824f2821c8623d3f84364</code>
+                    </a>
+                    . Candidate paper 3.1 remains publication-blocked until the immutable release
+                    source and artifacts resolve.
+                  </p>
+                </>
+              )}
               <div className="wc-paper-actions">
-                <Link className="wc-btn" href="/white-paper">Read historical paper</Link>
+                <Link className="wc-btn" href="/white-paper">
+                  {immutableSourceUrl
+                    ? 'Open mapped candidate paper 3.1'
+                    : 'Open historical paper 3.0'}
+                </Link>
+                {immutableSourceUrl ? (
+                  <a className="wc-btn wc-btn-plain" href="/downloads/webchess-white-paper.pdf" download>
+                    Download mapped PDF
+                  </a>
+                ) : null}
                 <a className="wc-btn wc-btn-plain" href="/downloads/webchess-white-paper-v3-historical.pdf" download>
                   Download historical PDF
                 </a>
                 {immutableSourceUrl ? (
                   <>
-                    <a className="wc-btn wc-btn-plain" href="/downloads/webchess-source.zip" download>
-                      Download immutable source
+                    <a className="wc-btn wc-btn-plain" href={immutableSourceUrl}>
+                      Inspect exact source
                     </a>
                     <a className="wc-btn wc-btn-plain" href="/downloads/webchess-release-identity.json" download>
                       Verify release identity

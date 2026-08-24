@@ -5,7 +5,7 @@ const NAVIGATION = [
   { href: '/#episode', label: 'Episode' },
   { href: '/#lifecycle', label: 'Lifecycle' },
   { href: '/research', label: 'Research' },
-  { href: '/white-paper', label: 'Historical paper' },
+  { href: '/white-paper', label: 'Paper' },
   { href: '/install', label: 'Install' },
 ] as const
 
