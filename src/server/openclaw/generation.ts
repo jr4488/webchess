@@ -99,7 +99,7 @@ export function parseStructuredModelOutput(value: string): unknown {
     throw new OpenClawPublicError(
       'INVALID_MODEL_RESPONSE',
       502,
-      'The configured OpenClaw model did not return valid structured JSON.',
+      'The selected OpenAI account model did not return valid structured JSON.',
     )
   }
 }
@@ -108,7 +108,7 @@ function modelResponseError(): OpenClawPublicError {
   return new OpenClawPublicError(
     'INVALID_MODEL_RESPONSE',
     502,
-    'The configured OpenClaw model did not satisfy the WebChess response contract.',
+    'The selected OpenAI account model did not satisfy the WebChess response contract.',
   )
 }
 

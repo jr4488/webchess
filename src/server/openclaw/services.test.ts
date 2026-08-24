@@ -292,7 +292,6 @@ describe('OpenClaw durable service bootstrap', () => {
     expect(harness.createApiServices).toHaveBeenCalledWith(
       expect.objectContaining({
         modelProvider: 'openclaw',
-        requiresModelApiKey: false,
         softwareVersion: 'webchess@2.2.0-rc.1-openclaw',
       }),
     )

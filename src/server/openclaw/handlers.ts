@@ -178,28 +178,26 @@ export async function handleOpenClawStatusRequest(
     ])
     const database = databaseResult.database ??
       unavailableDatabaseStatus(databaseResult.error)
-    const available = modelStatus.available && database.available
+    const available = modelStatus.available &&
+      modelStatus.search.available &&
+      database.available
     return jsonResponse({
       available,
       database,
       lifecycle: 'webchess-2.0',
       model: {
-        checked: 'configuration',
+        checked: 'live-readiness-probe',
         configurationReady: modelStatus.available,
         ...(modelStatus.message ? { message: modelStatus.message } : {}),
         ...(modelStatus.model
           ? { configuredModel: modelStatus.model }
           : {}),
         ...(modelStatus.reason ? { reason: modelStatus.reason } : {}),
+        probeExecuted: modelStatus.available,
         transport: modelStatus.transport,
         ...(modelStatus.version ? { version: modelStatus.version } : {}),
       },
-      search: {
-        available: null,
-        checked: false,
-        reason: 'not-probed',
-        requiredForLaunch: false,
-      },
+      search: modelStatus.search,
     }, available ? 200 : 503)
   } catch (error) {
     return errorResponse(error)

@@ -105,7 +105,7 @@ function expectInvalidOutput(run: () => unknown): void {
 describe('Codex Hosted Search CLI adapter', () => {
   it('invokes the explicit local Codex capability with bounded caller config', async () => {
     const signal = new AbortController().signal
-    const researchConfig = config({ transport: 'gateway' })
+    const researchConfig = config()
     const request = vi.fn<OpenClawBridgeRequester>(async () => webSearchEnvelope())
 
     const result = await runOpenClawWebSearch(QUERY, researchConfig, {
@@ -124,10 +124,7 @@ describe('Codex Hosted Search CLI adapter', () => {
       timeoutMs: 45_000,
       version: 1,
     })
-    expect(request.mock.calls[0]?.[2]).toEqual({
-      ...researchConfig,
-      transport: 'local',
-    })
+    expect(request.mock.calls[0]?.[2]).toEqual(researchConfig)
     expect(request.mock.calls[0]?.[3]).toEqual({ signal })
     expect(result).toMatchObject({
       query: QUERY,

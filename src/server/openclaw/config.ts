@@ -1,4 +1,4 @@
-export type OpenClawTransport = 'local' | 'gateway'
+export type OpenClawTransport = 'local'
 
 export type OpenClawEnvironment = Readonly<
   Record<string, string | undefined>
@@ -56,9 +56,9 @@ function resolveTimeout(value: string | undefined): number {
 
 function resolveTransport(value: string | undefined): OpenClawTransport {
   if (value === undefined || value.trim() === '') return 'local'
-  if (value === 'local' || value === 'gateway') return value
+  if (value === 'local') return value
   throw new OpenClawConfigurationError(
-    'WEBCHESS_OPENCLAW_TRANSPORT must be local or gateway.',
+    'WEBCHESS_OPENCLAW_TRANSPORT must be local.',
   )
 }
 

@@ -45,7 +45,7 @@ export class OpenClawAnswerPublicError extends OpenClawPublicError {
     super(
       'INVALID_MODEL_RESPONSE',
       502,
-      'The configured OpenClaw model did not satisfy the WebChess response contract after one corrective turn.',
+      'The selected OpenAI account model did not satisfy the WebChess response contract after one corrective turn.',
     )
   }
 }
@@ -61,7 +61,7 @@ export class OpenClawAnswerContractError extends ModelContractError {
 
   constructor(readonly publicPrompt: string) {
     super(
-      'The configured OpenClaw model did not satisfy the WebChess Answer contract after one corrective turn.',
+      'The selected OpenAI account model did not satisfy the WebChess Answer contract after one corrective turn.',
     )
   }
 }

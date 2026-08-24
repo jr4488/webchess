@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 
 import { z } from 'zod'
 
-import type { OpenClawConfig, OpenClawTransport } from './config'
+import type { OpenClawConfig } from './config'
 
 export type OpenClawCliFailureKind =
   | 'aborted'
@@ -161,7 +161,7 @@ const ModelOutputSchema = z.object({
 const ModelRunEnvelopeSchema = z.object({
   ok: z.literal(true),
   capability: z.literal('model.run'),
-  transport: z.enum(['local', 'gateway']),
+  transport: z.literal('local'),
   provider: z.string().min(1).max(200),
   model: z.string().min(1).max(200),
   inputBytes: z.number().int().nonnegative(),
@@ -173,7 +173,7 @@ interface ModelRunResult {
   model: string
   outputText: string
   provider: string
-  transport: OpenClawTransport
+  transport: 'local'
 }
 
 const DEFAULT_OPENCLAW_WEB_SEARCH_LIMIT = 5
@@ -416,7 +416,7 @@ export function modelAttribution(
 ): string {
   const provider = cleanDisplayValue(providerValue)
   const model = cleanDisplayValue(modelValue)
-  if (!model) return 'configured OpenClaw model'
+  if (!model) return 'selected OpenAI account model'
   if (!provider || model.toLowerCase().startsWith(`${provider.toLowerCase()}/`)) {
     return model
   }
@@ -425,11 +425,10 @@ export function modelAttribution(
 
 export function parseModelRunEnvelope(
   stdout: string,
-  expectedTransport: OpenClawTransport,
   expectedInput?: string,
 ): ModelRunResult {
   const parsed = ModelRunEnvelopeSchema.safeParse(parseJson(stdout))
-  if (!parsed.success || parsed.data.transport !== expectedTransport) {
+  if (!parsed.success) {
     throw new OpenClawCliError(
       'invalid-output',
       'OpenClaw returned an unexpected model response envelope.',
@@ -493,14 +492,10 @@ export async function runOpenClawModel(
       signal: options.signal,
     },
   )
-  return parseModelRunEnvelope(stdout, config.transport, prompt)
+  return parseModelRunEnvelope(stdout, prompt)
 }
 
-/**
- * Run the explicitly selected Codex Hosted Search capability. Research remains
- * local even when model inference is configured to use the OpenClaw gateway.
- * The supplied config still owns the executable, timeout, and stdout ceiling.
- */
+/** Run the selected local Codex Hosted Search capability through OpenClaw. */
 export async function runOpenClawWebSearch(
   queryValue: string,
   config: OpenClawConfig,
@@ -525,26 +520,22 @@ export async function runOpenClawWebSearch(
     MAX_OPENCLAW_WEB_SEARCH_ACTIVITIES,
     'maxSearchActivities',
   )
-  const localConfig: OpenClawConfig = {
-    ...config,
-    transport: 'local',
-  }
   const stdout = await (options.request ?? requestOpenClawBridge)(
     '/v1/web/search',
     {
       limit,
       query,
-      timeoutMs: localConfig.timeoutMs,
+      timeoutMs: config.timeoutMs,
       version: 1,
     },
-    localConfig,
+    config,
     { signal: options.signal },
   )
   return parseOpenClawWebSearchEnvelope(stdout, query, {
     maxContentChars,
-    maxOutputBytes: localConfig.maxOutputBytes,
+    maxOutputBytes: config.maxOutputBytes,
     maxSearchActivities,
-    maxTookMs: localConfig.timeoutMs,
+    maxTookMs: config.timeoutMs,
   })
 }
 
@@ -553,8 +544,31 @@ export interface OpenClawStatus {
   message?: string
   model?: string
   reason?: 'cli-not-found' | 'not-configured' | 'unavailable'
-  transport: OpenClawTransport
+  search: {
+    available: boolean
+    checked: 'live-readiness-probe'
+    configurationReady: boolean
+    oauthReady: boolean
+    provider: 'codex'
+    providerReady: boolean
+    queryExecuted: boolean
+    requiredForLaunch: true
+  }
+  transport: 'local'
   version?: string
+}
+
+function unavailableSearchStatus(): OpenClawStatus['search'] {
+  return {
+    available: false,
+    checked: 'live-readiness-probe',
+    configurationReady: false,
+    oauthReady: false,
+    provider: 'codex',
+    providerReady: false,
+    queryExecuted: false,
+    requiredForLaunch: true,
+  }
 }
 
 export async function getOpenClawStatus(
@@ -575,7 +589,17 @@ export async function getOpenClawStatus(
       available: z.boolean(),
       model: z.string().min(1).max(200).nullable(),
       protocolVersion: z.literal(1),
-      transport: z.enum(['local', 'gateway']),
+      search: z.strictObject({
+        available: z.boolean(),
+        checked: z.literal('live-readiness-probe'),
+        configurationReady: z.boolean(),
+        oauthReady: z.boolean(),
+        provider: z.literal('codex'),
+        providerReady: z.boolean(),
+        queryExecuted: z.literal(true),
+        requiredForLaunch: z.literal(true),
+      }),
+      transport: z.literal('local'),
       version: z.string().min(1).max(200),
     }).safeParse(parseJson(stdout))
     if (!parsed.success) {
@@ -587,12 +611,16 @@ export async function getOpenClawStatus(
     const model = parsed.data.model
       ? cleanDisplayValue(parsed.data.model)
       : null
-    if (!parsed.data.available || !model) {
+    if (!parsed.data.available || !model || !parsed.data.search.available ||
+      !parsed.data.search.configurationReady ||
+      !parsed.data.search.oauthReady ||
+      !parsed.data.search.providerReady) {
       return {
         available: false,
         message: 'Configure a usable default model and authentication in OpenClaw, then try again.',
         ...(model ? { model } : {}),
         reason: 'not-configured',
+        search: parsed.data.search,
         transport: parsed.data.transport,
         version: parsed.data.version,
       }
@@ -601,6 +629,7 @@ export async function getOpenClawStatus(
     return {
       available: true,
       model,
+      search: parsed.data.search,
       transport: parsed.data.transport,
       version: parsed.data.version,
     }
@@ -610,14 +639,16 @@ export async function getOpenClawStatus(
         available: false,
         message: 'Launch WebChess through the installed OpenClaw plugin.',
         reason: 'cli-not-found',
-        transport: config.transport,
+        search: unavailableSearchStatus(),
+        transport: 'local',
       }
     }
     return {
       available: false,
       message: 'The authenticated OpenClaw plugin bridge is not ready.',
       reason: 'unavailable',
-      transport: config.transport,
+      search: unavailableSearchStatus(),
+      transport: 'local',
     }
   }
 }

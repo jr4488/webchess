@@ -51,6 +51,19 @@ const DEV_ENVIRONMENT = {
   WEBCHESS_OPENCLAW_ENABLED: 'true',
 } as const
 
+function configuredSearchReadiness(available = true) {
+  return {
+    available,
+    checked: 'live-readiness-probe' as const,
+    configurationReady: available,
+    oauthReady: available,
+    provider: 'codex' as const,
+    providerReady: available,
+    queryExecuted: available,
+    requiredForLaunch: true as const,
+  }
+}
+
 function alphabeticCode(value: number): string {
   const first = String.fromCharCode(97 + Math.floor((value - 1) / 26))
   const second = String.fromCharCode(97 + ((value - 1) % 26))
@@ -91,7 +104,7 @@ function validAnswerSections() {
 
 function modelEnvelope(
   output: unknown,
-  transport: 'local' | 'gateway' = 'local',
+  transport = 'local',
   input = '',
 ) {
   return JSON.stringify({
@@ -112,12 +125,11 @@ function modelEnvelope(
 
 function modelRequester(
   output: unknown,
-  transport: 'local' | 'gateway' = 'local',
 ) {
   return vi.fn<OpenClawBridgeRequester>(async (path, body) => {
     expect(path).toBe('/v1/model/run')
     const prompt = typeof body?.prompt === 'string' ? body.prompt : ''
-    return modelEnvelope(output, transport, prompt)
+    return modelEnvelope(output, 'local', prompt)
   })
 }
 
@@ -233,7 +245,7 @@ describe('OpenClaw local configuration and request boundary', () => {
     expect(isOpenClawLocalModeEnabled({ NODE_ENV: 'production' })).toBe(false)
   })
 
-  it('defaults to local transport and rejects unsafe configuration values', () => {
+  it('defaults to local transport and rejects every alternate label', () => {
     expect(resolveOpenClawConfig({})).toMatchObject({
       binary: 'openclaw',
       timeoutMs: 130_000,
@@ -241,16 +253,18 @@ describe('OpenClaw local configuration and request boundary', () => {
     })
     expect(resolveOpenClawConfig({
       WEBCHESS_OPENCLAW_BIN: '/opt/openclaw/bin/openclaw',
-      WEBCHESS_OPENCLAW_TRANSPORT: 'gateway',
+      WEBCHESS_OPENCLAW_TRANSPORT: 'local',
       WEBCHESS_OPENCLAW_TIMEOUT_MS: '90000',
     })).toMatchObject({
       binary: '/opt/openclaw/bin/openclaw',
       timeoutMs: 90_000,
-      transport: 'gateway',
+      transport: 'local',
     })
-    expect(() => resolveOpenClawConfig({
-      WEBCHESS_OPENCLAW_TRANSPORT: 'remote',
-    })).toThrow(/local or gateway/u)
+    for (const transport of ['gateway', 'remote']) {
+      expect(() => resolveOpenClawConfig({
+        WEBCHESS_OPENCLAW_TRANSPORT: transport,
+      })).toThrow(/must be local/u)
+    }
     expect(() => resolveOpenClawConfig({
       WEBCHESS_OPENCLAW_TIMEOUT_MS: '0',
     })).toThrow(/must be an integer/u)
@@ -411,19 +425,17 @@ describe('OpenClaw process and response boundary', () => {
     )).rejects.toMatchObject({ kind: 'invalid-output' })
   })
 
-  it('supports an explicitly configured gateway-labelled bridge envelope', async () => {
-    const request = modelRequester({ answer: 'gateway fixture' }, 'gateway')
+  it('rejects a non-local model envelope from a loopback bridge', async () => {
+    const request = vi.fn<OpenClawBridgeRequester>(async (path, body) => {
+      expect(path).toBe('/v1/model/run')
+      const prompt = typeof body?.prompt === 'string' ? body.prompt : ''
+      return modelEnvelope({ answer: 'fixture' }, 'gateway', prompt)
+    })
     await expect(runOpenClawModel(
-      'gateway prompt',
-      config({ transport: 'gateway' }),
+      'local prompt',
+      config(),
       { request },
-    )).resolves.toMatchObject({ transport: 'gateway' })
-    expect(request).toHaveBeenCalledWith(
-      '/v1/model/run',
-      expect.objectContaining({ prompt: 'gateway prompt' }),
-      expect.any(Object),
-      expect.any(Object),
-    )
+    )).rejects.toMatchObject({ kind: 'invalid-output' })
   })
 
   it('inherits configured model/auth without browser model selection and requests canonical medium reasoning', async () => {
@@ -455,18 +467,15 @@ describe('OpenClaw process and response boundary', () => {
   it('strictly parses the envelope and creates safe provider/model attribution', () => {
     expect(parseModelRunEnvelope(
       modelEnvelope('```json\n{}\n```'),
-      'local',
     )).toMatchObject({
       outputText: '```json\n{}\n```',
       provider: 'test-provider',
     })
     expect(() => parseModelRunEnvelope(
       modelEnvelope({}, 'gateway'),
-      'local',
     )).toThrow(/unexpected model response/u)
     expect(() => parseModelRunEnvelope(
       modelEnvelope('ok', 'local', 'different prompt'),
-      'local',
       'expected prompt',
     )).toThrow(/exact prompt transport/u)
     expect(modelAttribution('anthropic', 'claude-test')).toBe(
@@ -476,7 +485,7 @@ describe('OpenClaw process and response boundary', () => {
       'anthropic/claude-test',
     )
     expect(modelAttribution('provider', '\u202Ehidden')).toBe(
-      'configured OpenClaw model',
+      'selected OpenAI account model',
     )
   })
 
@@ -485,6 +494,7 @@ describe('OpenClaw process and response boundary', () => {
       available: true,
       model: 'provider/configured-model',
       protocolVersion: 1,
+      search: configuredSearchReadiness(),
       transport: 'local',
       version: '2026.7.1-2',
     }))
@@ -493,6 +503,7 @@ describe('OpenClaw process and response boundary', () => {
     expect(status).toEqual({
       available: true,
       model: 'provider/configured-model',
+      search: configuredSearchReadiness(),
       transport: 'local',
       version: '2026.7.1-2',
     })
@@ -501,12 +512,32 @@ describe('OpenClaw process and response boundary', () => {
     )
   })
 
+  it('rejects a non-local readiness label from a loopback bridge', async () => {
+    const request = vi.fn<OpenClawBridgeRequester>(async () => JSON.stringify({
+      available: true,
+      model: 'provider/configured-model',
+      protocolVersion: 1,
+      search: configuredSearchReadiness(),
+      transport: 'gateway',
+      version: '2026.7.1-2',
+    }))
+
+    await expect(getOpenClawStatus(config(), { request })).resolves.toEqual({
+      available: false,
+      message: 'The authenticated OpenClaw plugin bridge is not ready.',
+      reason: 'unavailable',
+      search: configuredSearchReadiness(false),
+      transport: 'local',
+    })
+  })
+
   it('reports unconfigured and unavailable bridge states without returning details', async () => {
     const notConfigured = vi.fn<OpenClawBridgeRequester>(async () =>
       JSON.stringify({
         available: true,
         model: null,
         protocolVersion: 1,
+        search: configuredSearchReadiness(),
         transport: 'local',
         version: 'OpenClaw fixture',
       }))
@@ -516,6 +547,7 @@ describe('OpenClaw process and response boundary', () => {
       available: false,
       message: 'Configure a usable default model and authentication in OpenClaw, then try again.',
       reason: 'not-configured',
+      search: configuredSearchReadiness(),
       transport: 'local',
       version: 'OpenClaw fixture',
     })
@@ -577,17 +609,15 @@ describe('OpenClaw route handlers', () => {
       },
       lifecycle: 'webchess-2.0',
       model: {
-        checked: 'configuration',
+        checked: 'live-readiness-probe',
         configurationReady: false,
         message: 'Launch WebChess through the installed OpenClaw plugin.',
         reason: 'cli-not-found',
+        probeExecuted: false,
         transport: 'local',
       },
       search: {
-        available: null,
-        checked: false,
-        reason: 'not-probed',
-        requiredForLaunch: false,
+        ...configuredSearchReadiness(false),
       },
     })
     expect(response.headers.get('cache-control')).toContain('no-store')
@@ -598,6 +628,7 @@ describe('OpenClaw route handlers', () => {
       available: true,
       model: 'fixture-provider/fixture-model',
       protocolVersion: 1,
+      search: configuredSearchReadiness(),
       transport: 'local',
       version: 'OpenClaw fixture',
     }))
@@ -628,17 +659,15 @@ describe('OpenClaw route handlers', () => {
       },
       lifecycle: 'webchess-2.0',
       model: {
-        checked: 'configuration',
+        checked: 'live-readiness-probe',
         configurationReady: true,
         configuredModel: 'fixture-provider/fixture-model',
+        probeExecuted: true,
         transport: 'local',
         version: 'OpenClaw fixture',
       },
       search: {
-        available: null,
-        checked: false,
-        reason: 'not-probed',
-        requiredForLaunch: false,
+        ...configuredSearchReadiness(),
       },
     })
   })
@@ -648,6 +677,7 @@ describe('OpenClaw route handlers', () => {
       available: true,
       model: 'fixture-provider/fixture-model',
       protocolVersion: 1,
+      search: configuredSearchReadiness(),
       transport: 'local',
       version: 'OpenClaw fixture',
     }))
@@ -682,8 +712,7 @@ describe('OpenClaw route handlers', () => {
         configurationReady: true,
       },
       search: {
-        available: null,
-        checked: false,
+        ...configuredSearchReadiness(),
       },
     })
   })

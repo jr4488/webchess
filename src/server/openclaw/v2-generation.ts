@@ -97,7 +97,7 @@ function abortedAnswerError(): OpenClawProviderError {
   return new OpenClawProviderError(
     'request_aborted',
     true,
-    'The configured OpenClaw model ended before a result was confirmed.',
+    'The selected OpenAI account model ended before a result was confirmed.',
   )
 }
 
@@ -141,13 +141,13 @@ function translateCliError(error: unknown): never {
   if (error instanceof OpenClawCliError) {
     if (error.kind === 'not-found') {
       throw new ModelConfigurationError(
-        'The configured OpenClaw model is unavailable.',
+        'The selected OpenAI account model is unavailable.',
         { cause: error },
       )
     }
     if (error.kind === 'invalid-output') {
       throw new ModelContractError(
-        'The configured OpenClaw model returned an invalid response envelope.',
+        'The selected OpenAI account model returned an invalid response envelope.',
         { cause: error },
       )
     }
@@ -159,8 +159,8 @@ function translateCliError(error: unknown): never {
           : 'provider_connection_lost',
       true,
       error.kind === 'timeout'
-        ? 'The configured OpenClaw model timed out before a result was confirmed.'
-        : 'The configured OpenClaw model ended before a result was confirmed.',
+        ? 'The selected OpenAI account model timed out before a result was confirmed.'
+        : 'The selected OpenAI account model ended before a result was confirmed.',
       { cause: error },
     )
   }
@@ -194,7 +194,7 @@ async function generateStructured<T>(
       }
     } catch (error) {
       throw new ModelContractError(
-        `The configured OpenClaw model did not satisfy the ${operation} contract.`,
+        `The selected OpenAI account model did not satisfy the ${operation} contract.`,
         { cause: error },
       )
     }
@@ -315,7 +315,7 @@ export async function generateOpenClawPortiaV2(
       void redundancyClusterId
       return draft
     })
-  let attribution = 'configured OpenClaw model'
+  let attribution = 'selected OpenAI account model'
 
   for (let index = drafts.length; index < ordered.length; index += 1) {
     const candidate = ordered[index]!

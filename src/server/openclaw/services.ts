@@ -187,7 +187,6 @@ async function createServices(): Promise<OpenClawServiceState> {
       portiaGenerator: generateOpenClawPortiaV2,
       researchBroker: new DurableResearchBroker(researchRepository),
       repository: new DurableGameRepository(database),
-      requiresModelApiKey: false,
       softwareVersion: `webchess@${WEBCHESS_SOFTWARE_VERSION}-openclaw`,
       sourceCommit: configuredCaseSourceCommit(),
       runtimeArtifactSha256: configuredCaseRuntimeArtifactSha256(),
