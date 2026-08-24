@@ -22,6 +22,7 @@ import {
 import { cellKey } from '../../lib/board'
 import type { CellCoord, Piece, PieceKind, Stage } from '../../types'
 import type { RadialBoardProps } from '../RadialBoard'
+import { BOARD_3D_CAMERA_FOV, boardCameraLookAt, boardCameraPosition } from './camera'
 import {
   BOARD_3D_OUTER_RADIUS,
   boardCellIndex,
@@ -633,18 +634,11 @@ function SceneDirector({
   reducedMotion: boolean
 }) {
   const { camera } = useThree()
-  const targetCamera = useMemo(() => {
-    switch (stage) {
-      case 'question': return new Vector3(0, 17.4, 5.2)
-      case 'mapping': return new Vector3(0, 18, 4.5)
-      case 'playing': return new Vector3(0, 17.5, 5)
-      case 'reading': return new Vector3(0, 17.8, 4.8)
-    }
-  }, [stage])
+  const targetCamera = useMemo(() => new Vector3(...boardCameraPosition(stage)), [stage])
   const targetLookAt = useMemo(() => {
-    const focus = focusCell ? boardCellPosition(focusCell) : [0, 0, 0] as const
-    return new Vector3(focus[0] * 0.12, 0.1, focus[2] * 0.12)
-  }, [focusCell])
+    const focus = focusCell ? boardCellPosition(focusCell) : null
+    return new Vector3(...boardCameraLookAt(focus, reducedMotion))
+  }, [focusCell, reducedMotion])
   const lookAt = useRef(new Vector3())
 
   useFrame((_, delta) => {
@@ -881,7 +875,12 @@ export function WebChessBoard3D(props: Board3DProps) {
         <Canvas
           aria-hidden="true"
           dpr={props.stage === 'mapping' ? 1 : [1, 1.5]}
-          camera={{ fov: 44, near: 0.1, far: 48, position: [0, 17.5, 5] }}
+          camera={{
+            fov: BOARD_3D_CAMERA_FOV,
+            near: 0.1,
+            far: 48,
+            position: boardCameraPosition(props.stage ?? 'playing'),
+          }}
           shadows={props.stage === 'mapping' ? false : 'basic'}
           gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
           onCreated={({ gl }) => {
