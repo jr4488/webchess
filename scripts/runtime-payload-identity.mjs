@@ -23,6 +23,12 @@ export const RUNTIME_PAYLOAD_ENTRIES = [
   'tsconfig.json',
 ]
 
+// npm uses nested .npmignore files to decide what enters a packed artifact,
+// but it does not include those control files in the artifact itself. Keep the
+// source-side identity aligned with the bytes that the installed launcher can
+// actually inspect.
+const NPM_PACK_CONTROL_FILES = new Set(['.npmignore'])
+
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -36,6 +42,7 @@ async function collectFiles(root, relativePath, files) {
   if (metadata.isDirectory()) {
     const children = (await readdir(absolutePath)).sort()
     for (const child of children) {
+      if (NPM_PACK_CONTROL_FILES.has(child)) continue
       await collectFiles(root, path.posix.join(relativePath, child), files)
     }
     return

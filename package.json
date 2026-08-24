@@ -71,6 +71,7 @@
     "case:verify": "node scripts/verify-case-bundle.mjs",
     "prepack": "npm run plugin:build && node scripts/generate-build-identity.mjs && node scripts/packed-shrinkwrap.mjs",
     "postpack": "node scripts/generate-build-identity.mjs --clean && node scripts/packed-shrinkwrap.mjs --clean",
+    "pack:verify": "node scripts/verify-packed-artifact.mjs",
     "plugin:build": "tsc -p openclaw-plugin/tsconfig.json",
     "db:migrate": "node scripts/deployment-migrate.mjs",
     "db:schema:check": "node scripts/deployment-schema-check.mjs",

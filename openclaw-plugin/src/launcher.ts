@@ -51,6 +51,7 @@ const RUNTIME_ENTRIES = [
   'SUPPORT.md',
   'tsconfig.json',
 ] as const
+const NPM_PACK_CONTROL_FILES = new Set(['.npmignore'])
 
 export interface WebChessLaunchOptions {
   openBrowser: boolean
@@ -146,6 +147,7 @@ async function collectRuntimeFiles(
   if (metadata.isDirectory()) {
     const children = (await readdir(absolutePath)).sort()
     for (const child of children) {
+      if (NPM_PACK_CONTROL_FILES.has(child)) continue
       await collectRuntimeFiles(
         root,
         path.posix.join(relativePath, child),

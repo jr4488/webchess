@@ -34,6 +34,7 @@ const RUNTIME_ENTRIES = [
     'SUPPORT.md',
     'tsconfig.json',
 ];
+const NPM_PACK_CONTROL_FILES = new Set(['.npmignore']);
 async function collectRuntimeFiles(root, relativePath, files) {
     const absolutePath = path.join(root, relativePath);
     const metadata = await lstat(absolutePath);
@@ -43,6 +44,8 @@ async function collectRuntimeFiles(root, relativePath, files) {
     if (metadata.isDirectory()) {
         const children = (await readdir(absolutePath)).sort();
         for (const child of children) {
+            if (NPM_PACK_CONTROL_FILES.has(child))
+                continue;
             await collectRuntimeFiles(root, path.posix.join(relativePath, child), files);
         }
         return;
