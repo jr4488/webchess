@@ -90,7 +90,7 @@ the only supported authentication path: there is no WebChess-side, Codex,
 OpenAI, alternate-provider API-key, API-token, service-account, or equivalent
 fallback.
 
-The exact environment used for this candidate's final gate is intended to be:
+The candidate's reproducibility and acceptance environment is pinned to:
 
 - Linux on `x86_64`; this is the only platform whose official Codex plugin,
   wrapper, and native executable bytes are attested by this candidate;

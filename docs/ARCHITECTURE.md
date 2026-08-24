@@ -5,7 +5,7 @@ access separate so that each has an inspectable provenance and failure mode.
 
 ## Product pipeline
 
-1. **Question** — preserve the authenticated user's normalized 12–240
+1. **Question** — preserve the runtime-authoritative owner's normalized 12–240
    character problem as the governing reference.
 2. **Division** — a structured model request proposes 64 bounded perspective
    facets. Deterministic checks reject known structural and lexical failure
