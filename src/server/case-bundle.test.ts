@@ -421,13 +421,53 @@ describe('webchess-case-bundle/1', () => {
       '/data/lifecycle/run/retryReason',
       '/data/lifecycle/run/survivors',
       '/data/lifecycle/run/portiaAssessmentDrafts',
-      '/data/lifecycle/researchRequests/*/(reason|query|synthesisCharacterLimit|executedQueries|searchSynthesis|directPageTextFetched|retrievedFacts|injectionSignals)',
-      '/data/lifecycle/wilburActions/*/(actor|action|testedAssumption|expectedObservation|decisionThreshold|reviewHorizon)',
-      '/data/lifecycle/wilburObservations/*/(observation|evidenceClassification|expectedEffect|unexpectedEffect|stakeholderResponse|nextDecision)',
-      '/data/providerInvocations/modelRequests/*/(idempotencyKey|providerResponseId|resultPayload)',
+      '/data/lifecycle/researchRequests/*/reason',
+      '/data/lifecycle/wilburActions/*/action',
+      '/data/lifecycle/wilburObservations/*/observation',
+      '/data/providerInvocations/modelRequests/*/idempotencyKey',
+      '/data/providerInvocations/modelRequests/*/providerResponseId',
+      '/data/providerInvocations/modelRequests/*/resultPayload',
     ]) {
       expect(JSON.stringify(redacted.data.redaction)).toContain(omittedPath)
     }
+  })
+
+  it('records field-level counts for omitted lifecycle, outcome, and provider identifiers', () => {
+    const rows = sourceRows()
+    const redacted = bundle('research-redacted-v1', {
+      lifecycleRun: {
+        ...rows.lifecycleRun,
+        retryReason: `${PRIVATE_SENTINEL} retry reason`,
+        survivors: [{ private: PRIVATE_SENTINEL }, { private: PRIVATE_SENTINEL }],
+        portiaAssessmentDrafts: [{ private: PRIVATE_SENTINEL }],
+      },
+    })
+    const redaction = redacted.data.redaction as Record<string, CanonicalJson>
+    const omissions = redaction.omissions as Record<string, CanonicalJson>[]
+    const byPath = new Map(omissions.map((row) => [row.path, row.omittedCount]))
+
+    expect(omissions).toHaveLength(43)
+    expect(Object.fromEntries(byPath)).toMatchObject({
+      '/data/game/record/outcome': 1,
+      '/data/lifecycle/run/retryReason': 1,
+      '/data/lifecycle/run/survivors': 2,
+      '/data/lifecycle/run/portiaAssessmentDrafts': 1,
+      '/data/providerInvocations/modelRequests/*/idempotencyKey': 3,
+      '/data/providerInvocations/modelRequests/*/providerResponseId': 3,
+      '/data/providerInvocations/modelRequests/*/resultPayload': 3,
+    })
+    expect([...byPath.keys()].some((path) => String(path).includes('('))).toBe(false)
+    expect(JSON.stringify(redacted)).not.toContain(PRIVATE_SENTINEL)
+  })
+
+  it('refuses to report zero when an omitted source field was not queried', () => {
+    const rows = sourceRows()
+    const game = { ...rows.game }
+    delete game.outcome
+
+    expect(() => bundle('research-redacted-v1', { game })).toThrow(
+      'The omission source is missing /data/game/record/outcome.',
+    )
   })
 
   it.each([
@@ -465,6 +505,30 @@ describe('webchess-case-bundle/1', () => {
     )
   })
 
+  it.each([
+    ['portiaFailedAttemptCount', null],
+    ['portiaFailedAttemptCount', -1],
+    ['portiaFailureLimit', null],
+    ['portiaFailureLimit', 0],
+    ['charlotteFailedAttemptCount', 4],
+    ['charlotteFailureLimit', 11],
+  ])('rejects a rehashed invalid %s budget value', (field, value) => {
+    const created = structuredClone(bundle('metadata-only-v1')) as unknown as MutableBundle
+    const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+    const run = lifecycle.run as Record<string, CanonicalJson>
+    run[field] = value
+    if (field === 'charlotteFailedAttemptCount') {
+      run.charlotteFailureLimit = 3
+    }
+    rebuildManifest(created)
+
+    const result = verifyCaseBundle(created)
+    expect(result.ok).toBe(false)
+    expect(result.errors.join(' ')).toMatch(
+      /failure budget must have a limit from 1 through 10/u,
+    )
+  })
+
   it('requires an unavailable lifecycle state to exactly exhaust its budget', () => {
     const rows = sourceRows()
     const created = bundle('metadata-only-v1', {
@@ -485,6 +549,22 @@ describe('webchess-case-bundle/1', () => {
     expect(result.ok).toBe(false)
     expect(result.errors).toContain(
       'Charlotte unavailable requires an exactly exhausted failure budget.',
+    )
+  })
+
+  it('also requires Portia unavailable to exactly exhaust its budget after rehashing', () => {
+    const created = structuredClone(bundle('metadata-only-v1')) as unknown as MutableBundle
+    const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+    const run = lifecycle.run as Record<string, CanonicalJson>
+    run.state = 'portia_unavailable'
+    run.portiaFailedAttemptCount = 2
+    run.portiaFailureLimit = 3
+    rebuildManifest(created)
+
+    const result = verifyCaseBundle(created)
+    expect(result.ok).toBe(false)
+    expect(result.errors).toContain(
+      'Portia unavailable requires an exactly exhausted failure budget.',
     )
   })
 

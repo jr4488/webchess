@@ -20,9 +20,18 @@ its recorded lifecycle state may be in progress, failed, or complete:
   omits case narrative, move request digests, and move idempotency keys.
 
 Every profile is assembled with explicit field allowlists. The bundle records
-the selected policy and an omission ledger. Owner identifiers, credentials,
+the selected policy and a field-level omission ledger. For each redacted
+profile, the exporter checks that the ledger has exactly one canonical row for
+every field excluded from the private profile, plus the deterministic neutral
+replay-parts substitution. This includes the stored game outcome, lifecycle
+retry reason/survivors/Portia drafts, model-request idempotency and provider
+response identifiers, and provider result payloads. `omittedCount` is the
+number of non-null scalar/object values or array elements observed in that
+field at export time; export fails if a required omission source field was not
+queried rather than reporting a false zero. Owner identifiers, credentials,
 cookies, tokens, request headers, private model reasoning, and account-wide
-rate/usage controls are never part of a case bundle.
+rate/usage controls are never queried as case evidence, so their unavailable
+counts remain `null`.
 
 No case-bundle profile is anonymous. Stable case/entity IDs, exact timestamps,
 source hostnames, seeds, and unsalted content digests can link records across

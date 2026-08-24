@@ -862,58 +862,97 @@ const ALWAYS_OMISSION_DEFINITIONS = [{
     reason: 'Account-wide controls and rate ledgers are outside this single-case scope.',
   }] as const
 
+function omissionRows(
+  prefix: string,
+  fields: readonly string[],
+  reason: string,
+) {
+  return fields.map((field) => ({ path: `${prefix}/${field}`, reason }))
+}
+
 const REDACTED_OMISSION_DEFINITIONS = [{
-    path: '/data/game/record/problem',
-    reason: 'User-authored problem text is omitted by this profile.',
-  }, {
-    path: '/data/game/replay/parts',
-    reason: 'Mapped problem text is replaced by deterministic neutral replay parts; its digest is retained.',
-  }, {
-    path: '/data/game/record/divisionFacets',
-    reason: 'Generated facet text is omitted by this profile.',
-  }, {
-    path: '/data/game/record/outcome',
-    reason: 'The stored outcome payload is omitted; the replay-derived terminal summary remains.',
-  }, {
-    path: '/data/game/record/answer',
-    reason: 'Generated answer and full prompt content are omitted by this profile.',
-  }, {
-    path: '/data/lifecycle/run/retryReason',
-    reason: 'Free-text retry rationale is omitted; retry counters and ancestry identifiers remain.',
-  }, {
-    path: '/data/lifecycle/run/survivors',
-    reason: 'Portia survivor payloads are omitted; lifecycle state, counts, and artifact bindings remain.',
-  }, {
-    path: '/data/lifecycle/run/portiaAssessmentDrafts',
-    reason: 'Portia assessment drafts are omitted; completed artifact bindings remain.',
-  }, {
-    path: '/data/lifecycle/portiaReviews/*/review',
-    reason: 'Portia narrative content is omitted; its input/output digests and versions remain.',
-  }, {
-    path: '/data/lifecycle/gateDecisions/*/(result|answerUserPrompt)',
-    reason: 'Gate narrative and approved prompt text are omitted; decision and digests remain.',
-  }, {
-    path: '/data/lifecycle/charlotteResults/*/(result|renderedAnswer)',
-    reason: 'Charlotte narrative and rendered answer are omitted; digests and versions remain.',
-  }, {
-    path: '/data/lifecycle/researchRequests/*/(reason|query|synthesisCharacterLimit|executedQueries|searchSynthesis|directPageTextFetched|retrievedFacts|injectionSignals)',
-    reason: 'Research rationale, queries, synthesis, fetched-text indicators, facts, and injection excerpts are omitted.',
-  }, {
-    path: '/data/lifecycle/researchSources/*/(title|url)',
-    reason: 'Source titles and full URLs are omitted; hostname and trust metadata remain.',
-  }, {
-    path: '/data/lifecycle/wilburActions/*/(actor|action|testedAssumption|expectedObservation|decisionThreshold|reviewHorizon)',
-    reason: 'Wilbur action narrative fields are omitted; status, binding, and digests remain.',
-  }, {
-    path: '/data/lifecycle/wilburObservations/*/(observation|evidenceClassification|expectedEffect|unexpectedEffect|stakeholderResponse|nextDecision)',
-    reason: 'Wilbur observation narrative fields are omitted; classifications, bindings, and digests remain.',
-  }, {
-    path: '/data/providerInvocations/modelRequests/*/(idempotencyKey|providerResponseId|resultPayload)',
-    reason: 'Model-request idempotency keys, provider response identifiers, and result payloads are omitted; models, versions, request/response digests, status, and token metadata remain.',
-  }, {
-    path: '/data/game/replay/events/*/provenance/idempotencyKey',
-    reason: 'Move idempotency keys are omitted by share-oriented profiles; request digests remain in the research-redacted profile.',
-  }] as const
+  path: '/data/game/record/problem',
+  reason: 'User-authored problem text is omitted by this profile.',
+}, {
+  path: '/data/game/replay/parts',
+  reason: 'Mapped problem text is replaced by deterministic neutral replay parts; its digest is retained.',
+}, {
+  path: '/data/game/record/divisionFacets',
+  reason: 'Generated facet text is omitted by this profile.',
+}, {
+  path: '/data/game/record/outcome',
+  reason: 'The stored outcome payload is omitted; the replay-derived terminal summary remains.',
+}, {
+  path: '/data/game/record/answer',
+  reason: 'Generated answer and full prompt content are omitted by this profile.',
+}, {
+  path: '/data/lifecycle/run/retryReason',
+  reason: 'Free-text retry rationale is omitted; retry counters and ancestry identifiers remain.',
+}, {
+  path: '/data/lifecycle/run/survivors',
+  reason: 'Portia survivor payloads are omitted; lifecycle state, counts, and artifact bindings remain.',
+}, {
+  path: '/data/lifecycle/run/portiaAssessmentDrafts',
+  reason: 'Portia assessment drafts are omitted; completed artifact bindings remain.',
+}, ...omissionRows(
+  '/data/lifecycle/portiaReviews/*',
+  ['review'],
+  'Portia narrative content is omitted; its input/output digests and versions remain.',
+), ...omissionRows(
+  '/data/lifecycle/gateDecisions/*',
+  ['result', 'answerUserPrompt'],
+  'Gate narrative and approved prompt text are omitted; decision and digests remain.',
+), ...omissionRows(
+  '/data/lifecycle/charlotteResults/*',
+  ['result', 'renderedAnswer'],
+  'Charlotte narrative and rendered answer are omitted; digests and versions remain.',
+), ...omissionRows(
+  '/data/lifecycle/researchRequests/*',
+  [
+    'reason',
+    'query',
+    'synthesisCharacterLimit',
+    'executedQueries',
+    'searchSynthesis',
+    'directPageTextFetched',
+    'retrievedFacts',
+    'injectionSignals',
+  ],
+  'Research rationale, queries, synthesis, fetched-text indicators, facts, and injection excerpts are omitted.',
+), ...omissionRows(
+  '/data/lifecycle/researchSources/*',
+  ['title', 'url'],
+  'Source titles and full URLs are omitted; hostname and trust metadata remain.',
+), ...omissionRows(
+  '/data/lifecycle/wilburActions/*',
+  [
+    'actor',
+    'action',
+    'testedAssumption',
+    'expectedObservation',
+    'decisionThreshold',
+    'reviewHorizon',
+  ],
+  'Wilbur action narrative fields are omitted; status, binding, and digests remain.',
+), ...omissionRows(
+  '/data/lifecycle/wilburObservations/*',
+  [
+    'observation',
+    'evidenceClassification',
+    'expectedEffect',
+    'unexpectedEffect',
+    'stakeholderResponse',
+    'nextDecision',
+  ],
+  'Wilbur observation narrative fields are omitted; classifications, bindings, and digests remain.',
+), ...omissionRows(
+  '/data/providerInvocations/modelRequests/*',
+  ['idempotencyKey', 'providerResponseId', 'resultPayload'],
+  'Model-request idempotency keys, provider response identifiers, and result payloads are omitted; models, versions, request/response digests, status, and token metadata remain.',
+), {
+  path: '/data/game/replay/events/*/provenance/idempotencyKey',
+  reason: 'Move idempotency keys are omitted by share-oriented profiles; request digests remain in the research-redacted profile.',
+}] as const
 
 const METADATA_OMISSION_DEFINITIONS = [{
     path: '/data/game/record/divisionSeed',
@@ -926,16 +965,100 @@ const METADATA_OMISSION_DEFINITIONS = [{
     reason: 'The narrowest profile omits per-move request digests.',
   }] as const
 
-function omissionDefinitions(profile: WebChessCaseProfile) {
-  if (profile === 'private-full-v1') return ALWAYS_OMISSION_DEFINITIONS
-  if (profile === 'research-redacted-v1') {
-    return [...ALWAYS_OMISSION_DEFINITIONS, ...REDACTED_OMISSION_DEFINITIONS]
-  }
+function omittedPolicyPaths(profile: WebChessCaseProfile): readonly string[] {
+  if (profile === 'private-full-v1') return []
+  const retained = PROFILE_FIELD_POLICIES[profile]
   return [
+    ...GAME_PRIVATE_FIELDS
+      .filter((field) => !retained.gameRecord.includes(field))
+      .map((field) => `/data/game/record/${field}`),
+    '/data/game/replay/parts',
+    ...LIFECYCLE_PRIVATE_FIELDS
+      .filter((field) => !retained.lifecycleRun.includes(field))
+      .map((field) => `/data/lifecycle/run/${field}`),
+    ...RESEARCH_PRIVATE_FIELDS
+      .filter((field) => !retained.researchRequests.includes(field))
+      .map((field) => `/data/lifecycle/researchRequests/*/${field}`),
+    ...SOURCE_PRIVATE_FIELDS
+      .filter((field) => !retained.researchSources.includes(field))
+      .map((field) => `/data/lifecycle/researchSources/*/${field}`),
+    ...PORTIA_PRIVATE_FIELDS
+      .filter((field) => !retained.portiaReviews.includes(field))
+      .map((field) => `/data/lifecycle/portiaReviews/*/${field}`),
+    ...GATE_PRIVATE_FIELDS
+      .filter((field) => !retained.gateDecisions.includes(field))
+      .map((field) => `/data/lifecycle/gateDecisions/*/${field}`),
+    ...CHARLOTTE_PRIVATE_FIELDS
+      .filter((field) => !retained.charlotteResults.includes(field))
+      .map((field) => `/data/lifecycle/charlotteResults/*/${field}`),
+    ...WILBUR_ACTION_PRIVATE_FIELDS
+      .filter((field) => !retained.wilburActions.includes(field))
+      .map((field) => `/data/lifecycle/wilburActions/*/${field}`),
+    ...WILBUR_OBSERVATION_PRIVATE_FIELDS
+      .filter((field) => !retained.wilburObservations.includes(field))
+      .map((field) => `/data/lifecycle/wilburObservations/*/${field}`),
+    ...MODEL_PRIVATE_FIELDS
+      .filter((field) => !retained.modelRequests.includes(field))
+      .map((field) => `/data/providerInvocations/modelRequests/*/${field}`),
+    ...EVENT_PROVENANCE_PRIVATE_FIELDS
+      .filter((field) => !retained.eventProvenance.includes(field))
+      .map((field) => `/data/game/replay/events/*/provenance/${field}`),
+  ].sort()
+}
+
+function omissionDefinitions(profile: WebChessCaseProfile) {
+  const definitions = profile === 'private-full-v1'
+    ? [...ALWAYS_OMISSION_DEFINITIONS]
+    : profile === 'research-redacted-v1'
+      ? [...ALWAYS_OMISSION_DEFINITIONS, ...REDACTED_OMISSION_DEFINITIONS]
+      : [
     ...ALWAYS_OMISSION_DEFINITIONS,
     ...REDACTED_OMISSION_DEFINITIONS,
     ...METADATA_OMISSION_DEFINITIONS,
   ]
+  const declaredPolicyPaths = definitions
+    .slice(ALWAYS_OMISSION_DEFINITIONS.length)
+    .map(({ path }) => path)
+    .sort()
+  const expectedPolicyPaths = omittedPolicyPaths(profile)
+  if (
+    declaredPolicyPaths.length !== expectedPolicyPaths.length ||
+    declaredPolicyPaths.some(
+      (path, index) => path !== expectedPolicyPaths[index],
+    )
+  ) {
+    throw new TypeError(
+      `The ${profile} omission ledger is not exhaustive for its field allowlist.`,
+    )
+  }
+  return definitions
+}
+
+function omittedValueCount(value: unknown): number {
+  if (value === null) return 0
+  return Array.isArray(value) ? value.length : 1
+}
+
+function omittedRecordFieldCount(
+  record: SqlRow,
+  field: string,
+  path: string,
+): number {
+  if (!Object.hasOwn(record, field)) {
+    throw new TypeError(`The omission source is missing ${path}.`)
+  }
+  return omittedValueCount(record[field])
+}
+
+function omittedRowFieldCount(
+  rows: readonly SqlRow[],
+  field: string,
+  path: string,
+): number {
+  return rows.reduce(
+    (count, row) => count + omittedRecordFieldCount(row, field, path),
+    0,
+  )
 }
 
 function omissionCount(path: string, source: CaseBundleSourceRows): number | null {
@@ -944,45 +1067,52 @@ function omissionCount(path: string, source: CaseBundleSourceRows): number | nul
     case '/credentials':
     case '/privateModelReasoning':
     case '/accountUsageAndRateLedgers': return null
-    case '/data/game/record/problem': return source.game.problem === null ? 0 : 1
     case '/data/game/replay/parts':
       return Array.isArray(source.game.problemParts) ? source.game.problemParts.length : 0
-    case '/data/game/record/divisionFacets':
-      return Array.isArray(source.game.divisionFacets) ? source.game.divisionFacets.length : 0
-    case '/data/game/record/outcome': return source.game.outcome === null ? 0 : 1
-    case '/data/game/record/answer': return source.game.answer === null ? 0 : 1
-    case '/data/lifecycle/run/retryReason':
-      return source.lifecycleRun.retryReason === null ? 0 : 1
-    case '/data/lifecycle/run/survivors':
-      return Array.isArray(source.lifecycleRun.survivors)
-        ? source.lifecycleRun.survivors.length
-        : 0
-    case '/data/lifecycle/run/portiaAssessmentDrafts':
-      return Array.isArray(source.lifecycleRun.portiaAssessmentDrafts)
-        ? source.lifecycleRun.portiaAssessmentDrafts.length
-        : 0
-    case '/data/lifecycle/portiaReviews/*/review': return source.portiaReviews.length
-    case '/data/lifecycle/gateDecisions/*/(result|answerUserPrompt)':
-      return source.gateDecisions.length
-    case '/data/lifecycle/charlotteResults/*/(result|renderedAnswer)':
-      return source.charlotteResults.length
-    case '/data/lifecycle/researchRequests/*/(reason|query|synthesisCharacterLimit|executedQueries|searchSynthesis|directPageTextFetched|retrievedFacts|injectionSignals)':
-      return source.researchRequests.length
-    case '/data/lifecycle/researchSources/*/(title|url)': return source.researchSources.length
-    case '/data/lifecycle/wilburActions/*/(actor|action|testedAssumption|expectedObservation|decisionThreshold|reviewHorizon)':
-      return source.wilburActions.length
-    case '/data/lifecycle/wilburObservations/*/(observation|evidenceClassification|expectedEffect|unexpectedEffect|stakeholderResponse|nextDecision)':
-      return source.wilburObservations.length
-    case '/data/providerInvocations/modelRequests/*/(idempotencyKey|providerResponseId|resultPayload)':
-      return source.modelRequests.length
-    case '/data/game/replay/events/*/provenance/idempotencyKey':
-      return source.events.filter((event) => event.idempotencyKey !== null).length
-    case '/data/game/record/divisionSeed': return source.game.divisionSeed === null ? 0 : 1
-    case '/data/game/record/divisionModel': return source.game.divisionModel === null ? 0 : 1
-    case '/data/game/replay/events/*/provenance/requestSha256':
-      return source.events.filter((event) => event.requestSha256 !== null).length
-    default: throw new TypeError(`Unsupported omission ledger path: ${path}.`)
+    default: break
   }
+
+  const gameField = path.match(/^\/data\/game\/record\/([^/]+)$/u)?.[1]
+  if (gameField) {
+    return omittedRecordFieldCount(source.game, gameField, path)
+  }
+  const lifecycleRunField = path.match(
+    /^\/data\/lifecycle\/run\/([^/]+)$/u,
+  )?.[1]
+  if (lifecycleRunField) {
+    return omittedRecordFieldCount(source.lifecycleRun, lifecycleRunField, path)
+  }
+  const collectionMatch = path.match(
+    /^\/data\/lifecycle\/(researchRequests|researchSources|portiaReviews|gateDecisions|charlotteResults|wilburActions|wilburObservations)\/\*\/([^/]+)$/u,
+  )
+  if (collectionMatch) {
+    const [, collection, field] = collectionMatch
+    return omittedRowFieldCount(
+      source[collection as keyof Pick<
+        CaseBundleSourceRows,
+        | 'researchRequests'
+        | 'researchSources'
+        | 'portiaReviews'
+        | 'gateDecisions'
+        | 'charlotteResults'
+        | 'wilburActions'
+        | 'wilburObservations'
+      >],
+      field!,
+      path,
+    )
+  }
+  const modelField = path.match(
+    /^\/data\/providerInvocations\/modelRequests\/\*\/([^/]+)$/u,
+  )?.[1]
+  if (modelField) {
+    return omittedRowFieldCount(source.modelRequests, modelField, path)
+  }
+  const eventField = path.match(
+    /^\/data\/game\/replay\/events\/\*\/provenance\/([^/]+)$/u,
+  )?.[1]
+  if (eventField) return omittedRowFieldCount(source.events, eventField, path)
+  throw new TypeError(`Unsupported omission ledger path: ${path}.`)
 }
 
 function omissionLedger(
@@ -2446,13 +2576,15 @@ function checkLifecycleSemantics(
       'charlotte_unavailable',
     ],
   ] as const) {
-    const count = Number(run[countField])
-    const limit = Number(run[limitField])
+    const rawCount = run[countField]
+    const rawLimit = run[limitField]
+    const count = validIntegerValue(rawCount) ? Number(rawCount) : null
+    const limit = validIntegerValue(rawLimit) ? Number(rawLimit) : null
     if (
-      !Number.isSafeInteger(limit) ||
+      limit === null ||
       limit < 1 ||
       limit > 10 ||
-      !Number.isSafeInteger(count) ||
+      count === null ||
       count < 0 ||
       count > limit
     ) {
