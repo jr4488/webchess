@@ -482,7 +482,7 @@ function makePortableLifecycle(game: DurableGame): LifecycleAggregate {
 }
 
 function renderStage(
-  lifecycle: LifecycleAggregate,
+  lifecycle: LifecycleAggregate | null,
   options: {
     busy?: boolean
     caseExportError?: string
@@ -577,6 +577,57 @@ function renderStage(
 }
 
 describe('LifecycleStage terminal Gate experience', () => {
+  it('shows an honest loading state while the durable lifecycle is restored', () => {
+    renderStage(null, { busy: true })
+
+    expect(screen.getByText('Finding the lifecycle thread')).toBeInTheDocument()
+    expect(screen.getByText('Terminal survivors').closest('div'))
+      .toHaveTextContent('—')
+    expect(screen.queryByLabelText('WebChess 2.2 lifecycle progress'))
+      .not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['portia_pending', 'completed', 'Portia is testing every survivor'],
+    ['portia_running', 'completed', 'Portia is testing every survivor'],
+    ['portia_complete', 'completed', 'The Gate is checking sufficiency'],
+    ['gate_passed', 'completed', 'The board-derived answer is ready to generate'],
+    ['gate_passed', 'answering', 'The approved board prompt is generating the answer'],
+    ['gate_passed', 'answer_failed', 'The approved prompt is waiting for a fresh Answer attempt'],
+    ['gate_passed', 'answered', 'Charlotte is checking truthfulness and audience fit'],
+    ['charlotte_pending', 'answered', 'Charlotte is qualifying the generated answer'],
+    ['charlotte_running', 'answered', 'Charlotte is qualifying the generated answer'],
+    ['gate_failed', 'completed', 'The web needs another path'],
+    ['retry_ready', 'completed', 'Retry is changing one variable'],
+    ['retry_running', 'completed', 'Retry is changing one variable'],
+    ['chess_terminal', 'completed', 'The lifecycle record is ready'],
+  ] as const)(
+    'names the active %s lifecycle state without overstating completion',
+    (state, gameStatus, headline) => {
+      const lifecycle = aggregate(
+        state,
+        state === 'gate_failed' || state.startsWith('retry_')
+          ? 'retry_game'
+          : 'answer',
+      )
+      const passedGate = state === 'gate_passed' || state.startsWith('charlotte_')
+        ? {
+            ...lifecycle,
+            gate: {
+              ...lifecycle.gate!,
+              passed: true,
+              missingRequirements: [],
+              recommendedNextTransition: 'answer' as const,
+            },
+          }
+        : lifecycle
+
+      renderStage(passedGate, { busy: true, gameStatus })
+
+      expect(screen.getByTestId('process-graphic')).toHaveTextContent(headline)
+    },
+  )
+
   it('offers a counted same-field replay after the v2 lifecycle completes', () => {
     const onReplay = vi.fn()
     renderStage(aggregate('wilbur_observed', 'answer'), { onReplay })

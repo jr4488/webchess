@@ -9,7 +9,7 @@ import {
   WEBCHESS_ENGINE_VERSION,
   WEBCHESS_RULES_VERSION,
 } from './game-contract'
-import type { GameEvent, ReplayState } from './game-contract'
+import type { ReplayState } from './game-contract'
 import {
   acceptMoveCommand,
   createReplayState,
@@ -47,6 +47,7 @@ describe('game provenance contract', () => {
     expect(WEBCHESS_ENGINE_VERSION).toBe('engine-v2')
     expect(isCurrentGameVersions({ ...CURRENT_GAME_VERSIONS })).toBe(true)
     expect(isCurrentGameVersions({ ...CURRENT_GAME_VERSIONS, engine: 'future' })).toBe(false)
+    expect(isCurrentGameVersions(null)).toBe(false)
   })
 
   it('always starts replay from the canonical setup with White to move', () => {
@@ -103,6 +104,18 @@ describe('authoritative move acceptance', () => {
       {
         command: { expectedPly: 2, pieceId: 'white-pawn-1', to: { ring: 5, sector: 0 } },
         code: 'stale-ply',
+      },
+      {
+        command: { expectedPly: 0, pieceId: 'white-pawn-1', to: { ring: 5, sector: 0 } },
+        code: 'stale-ply',
+      },
+      {
+        command: { expectedPly: 1, pieceId: ' ', to: { ring: 5, sector: 0 } },
+        code: 'invalid-piece',
+      },
+      {
+        command: { expectedPly: 1, pieceId: 'missing', to: { ring: 5, sector: 0 } },
+        code: 'invalid-piece',
       },
       {
         command: { expectedPly: 1, pieceId: 'black-pawn-1', to: { ring: 2, sector: 0 } },
@@ -356,7 +369,7 @@ describe('event replay validation', () => {
     })
   })
 
-  it('rejects forged origins, capture metadata, versions, and voluntary passes', () => {
+  it('rejects malformed events, forged metadata, and voluntary passes', () => {
     const accepted = acceptMoveCommand(
       createReplayState(),
       { expectedPly: 1, pieceId: 'white-pawn-1', to: { ring: 5, sector: 0 } },
@@ -366,7 +379,38 @@ describe('event replay validation', () => {
     expect(event?.type).toBe('move')
     if (!event || event.type !== 'move') return
 
-    const forgedCases: GameEvent[][] = [
+    const forgedCases: unknown[][] = [
+      [null],
+      [{ ...event, ply: 0 }],
+      [{ ...event, side: 'red' }],
+      [{ ...event, from: { ring: -1, sector: 0 } }],
+      [{
+        version: 1,
+        type: 'forced-pass',
+        ply: 1,
+        side: 'white',
+        reason: 'manual',
+      }],
+      [{ ...event, type: 'castle' }],
+      [{ ...event, pieceId: ' ' }],
+      [{ ...event, capturedPieceId: '' }],
+      [{ ...event, promotedTo: 'rook' }],
+      [{ ...event, side: 'black' }],
+      [{ ...event, promotedTo: 'queen' }],
+      [{
+        version: 1,
+        type: 'forced-pass',
+        ply: 2,
+        side: 'white',
+        reason: 'no-legal-move',
+      }],
+      [{
+        version: 1,
+        type: 'forced-pass',
+        ply: 1,
+        side: 'black',
+        reason: 'no-legal-move',
+      }],
       [{ ...event, from: { ring: 5, sector: 0 } }],
       [{ ...event, capturedPieceId: 'black-queen-1' }],
       [{ ...event, version: 2 as 1 }],
