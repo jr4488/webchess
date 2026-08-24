@@ -164,13 +164,16 @@ describe('downloadable white-paper formulas', () => {
   it('preserves underscores inside inline-code paths and environment names', () => {
     const pdf = createPdf([
       'Use `OPENAI_API_KEY` only on the separately billed API-key path.',
-      'See `docs/CASE_BUNDLES.md` and `docs/WEBCHESS_WHITE_PAPER_V3.md`.',
+      'See [`docs/CASE_BUNDLES.md`](CASE_BUNDLES.md) and',
+      '[`docs/WEBCHESS_WHITE_PAPER_V3.md`](WEBCHESS_WHITE_PAPER_V3.md).',
       'Keep _emphasized prose_ free of Markdown delimiters.',
     ].join('\n\n'), '2.2.0-rc.1', new Map()).toString('latin1')
 
     expect(pdf).toContain('OPENAI_API_KEY')
     expect(pdf).toContain('docs/CASE_BUNDLES.md')
     expect(pdf).toContain('docs/WEBCHESS_WHITE_PAPER_V3.md')
+    expect(pdf.match(/CASE_BUNDLES\.md/g)).toHaveLength(2)
+    expect(pdf.match(/WEBCHESS_WHITE_PAPER_V3\.md/g)).toHaveLength(2)
     expect(pdf).toContain('Keep emphasized prose free of Markdown delimiters.')
     expect(pdf).not.toContain('_emphasized prose_')
   })
