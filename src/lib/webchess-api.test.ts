@@ -17,6 +17,7 @@ import {
   WebChessApiError,
 } from './webchess-api'
 import type { DurableGame } from './webchess-api'
+import { RESEARCH_CONSENT_VERSION } from './research/contracts'
 
 const GAME_ID = '123e4567-e89b-42d3-a456-426614174000'
 const IDEMPOTENCY_KEYS = [
@@ -27,12 +28,19 @@ const IDEMPOTENCY_KEYS = [
   '018f47b2-4b0c-7b9e-8f24-123456789005',
 ] as const
 
+const RESEARCH_CONSENT = {
+  version: RESEARCH_CONSENT_VERSION,
+  decision: 'allow_search_and_page_fetch',
+  recordedAt: '2026-08-02T18:00:00.000Z',
+} as const
+
 const GAME: DurableGame = {
   id: GAME_ID,
   sourceGameId: null,
   revision: 4,
   status: 'playing',
   problem: 'How should this project move forward?',
+  researchConsent: RESEARCH_CONSENT,
   division: null,
   state: null,
   answer: null,
@@ -179,6 +187,7 @@ const COMPLETED_CODEX_RESEARCH = {
   gameId: GAME_ID,
   stage: 'portia',
   requestedBy: 'research-policy',
+  consent: RESEARCH_CONSENT,
   policyVersion: 'webchess-visible-research-v1',
   materiality: 'required',
   reason: 'The candidate prompt depends on a current external benchmark.',
@@ -199,6 +208,7 @@ const COMPLETED_CODEX_RESEARCH = {
   searchSynthesis: 'Current sources distinguish prefill latency from decode throughput.',
   directPageTextFetched: false,
   retrievedFacts: [],
+  fetchFailures: [],
   sources: [{
     id: '82000000-0000-4000-8000-000000000001',
     citationId: 'source-1',
@@ -261,13 +271,16 @@ describe('durable WebChess browser API', () => {
     vi.useRealTimers()
   })
 
-  it('creates a browser UUID and sends only the problem when dividing', async () => {
+  it('creates a browser UUID and sends only the problem and explicit research choice when dividing', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ game: GAME }))
     vi.stubGlobal('fetch', fetchMock)
     const controller = new AbortController()
 
     await expect(
-      divideProblem('What deserves attention now?', { signal: controller.signal }),
+      divideProblem('What deserves attention now?', {
+        researchConsentDecision: 'allow_search_and_page_fetch',
+        signal: controller.signal,
+      }),
     ).resolves.toEqual(GAME)
 
     expect(fetchMock).toHaveBeenCalledOnce()
@@ -280,6 +293,10 @@ describe('durable WebChess browser API', () => {
     })
     expect(requestBody(fetchMock, 0)).toEqual({
       problem: 'What deserves attention now?',
+      researchConsent: {
+        version: RESEARCH_CONSENT_VERSION,
+        decision: 'allow_search_and_page_fetch',
+      },
     })
     const headers = new Headers(requestInit(fetchMock, 0).headers)
     expect(headers.get('Accept')).toBe('application/json')
@@ -297,11 +314,16 @@ describe('durable WebChess browser API', () => {
 
     await divideProblem('What deserves attention now?', {
       memoryObservationIds: [observationId],
+      researchConsentDecision: 'no_external_research',
     })
 
     expect(requestBody(fetchMock, 0)).toEqual({
       problem: 'What deserves attention now?',
       memoryObservationIds: [observationId],
+      researchConsent: {
+        version: RESEARCH_CONSENT_VERSION,
+        decision: 'no_external_research',
+      },
     })
   })
 
@@ -725,6 +747,144 @@ describe('durable WebChess browser API', () => {
       model: 'gpt-5.4-search',
       directPageTextFetched: false,
       retrievedFacts: [],
+      fetchFailures: [],
+    })
+  })
+
+  it('reconstructs separately attributed direct-page evidence without unknown fields', async () => {
+    const acceptedText = 'The retrieved page distinguishes prefill latency from throughput. 🕸️'
+    const acceptedTextDigest = '2b360d59b7ef78fe6933c1ec77e9441664b0420f39463aff7e6d2a35664ad466'
+    const secondSource = {
+      ...COMPLETED_CODEX_RESEARCH.sources[0],
+      id: '82000000-0000-4000-8000-000000000002',
+      citationId: 'source-2',
+      ordinal: 2,
+      title: 'NIST measurement appendix',
+      url: 'https://www.nist.gov/appendix',
+      unknownSourceField: 'must not survive',
+    }
+    const directResearch = {
+      ...COMPLETED_CODEX_RESEARCH,
+      unknownResearchField: 'must not survive',
+      consent: {
+        ...COMPLETED_CODEX_RESEARCH.consent,
+        unknownConsentField: 'must not survive',
+      },
+      bounds: {
+        ...COMPLETED_CODEX_RESEARCH.bounds,
+        unknownBoundsField: 'must not survive',
+      },
+      directPageTextFetched: true,
+      retrievedFacts: [{
+        citationId: 'source-1',
+        requestedUrl: 'https://www.nist.gov/example',
+        finalUrl: 'https://www.nist.gov/example',
+        title: 'NIST AI measurement guidance',
+        provider: 'webchess-direct-https',
+        fetchVersion: 'webchess-direct-page-fetch-v1',
+        retrievedAt: '2026-08-02T18:01:45.000Z',
+        httpStatus: 200,
+        contentType: 'text/html',
+        extractor: 'webchess-readable-text-v1',
+        rawByteLength: 900,
+        rawContentDigest: 'b'.repeat(64),
+        rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+        acceptedCharacterLength: acceptedText.length,
+        contentDigest: acceptedTextDigest,
+        digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+        redirectChain: ['https://www.nist.gov/example'],
+        text: acceptedText,
+        truncated: false,
+        untrusted: true,
+        contentKind: 'direct_page_text',
+        unknownFactField: 'must not survive',
+      }],
+      fetchFailures: [{
+        citationId: 'source-2',
+        requestedUrl: 'https://www.nist.gov/appendix',
+        finalUrl: null,
+        status: 'timed_out',
+        failureCode: 'page_timeout',
+        httpStatus: null,
+        fetchVersion: 'webchess-direct-page-fetch-v1',
+        extractor: 'webchess-readable-text-v1',
+        rawByteLength: 0,
+        rawContentDigest: null,
+        rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+        acceptedCharacterLength: 0,
+        truncated: false,
+        contentDigest: null,
+        digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+        redirectChain: ['https://www.nist.gov/appendix'],
+        injectionSignalsDetected: [],
+        retrievedAt: '2026-08-02T18:02:00.000Z',
+        unknownFailureField: 'must not survive',
+      }],
+      sources: [{
+        ...COMPLETED_CODEX_RESEARCH.sources[0],
+        unknownSourceField: 'must not survive',
+      }, secondSource],
+    }
+    const lifecycle = {
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      research: [directResearch],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ lifecycle })),
+    )
+
+    const parsed = await getGameLifecycle(GAME_ID)
+
+    expect(parsed.research[0]).toMatchObject({
+      directPageTextFetched: true,
+      retrievedFacts: [{
+        provider: 'webchess-direct-https',
+        text: acceptedText,
+        contentDigest: acceptedTextDigest,
+      }],
+      fetchFailures: [{
+        citationId: 'source-2',
+        status: 'timed_out',
+        failureCode: 'page_timeout',
+      }],
+    })
+    expect(parsed.research[0]).not.toHaveProperty('unknownResearchField')
+    expect(parsed.research[0].consent).not.toHaveProperty('unknownConsentField')
+    expect(parsed.research[0].bounds).not.toHaveProperty('unknownBoundsField')
+    expect(parsed.research[0].retrievedFacts[0]).not.toHaveProperty('unknownFactField')
+    expect(parsed.research[0].fetchFailures[0]).not.toHaveProperty('unknownFailureField')
+    expect(parsed.research[0].sources[0]).not.toHaveProperty('unknownSourceField')
+    expect(parsed.research[0].sources[1]).not.toHaveProperty('unknownSourceField')
+
+    const failure = await lifecycleFailure({
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      research: [{
+        ...directResearch,
+        retrievedFacts: [{
+          ...directResearch.retrievedFacts[0],
+          contentDigest: '0'.repeat(64),
+        }],
+      }],
+    })
+    expect(failure).toMatchObject({
+      kind: 'invalid-response',
+      message: 'Research direct-page fact is invalid.',
+    })
+
+    const missingFinalUrlFailure = await lifecycleFailure({
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      research: [{
+        ...directResearch,
+        retrievedFacts: [{
+          ...directResearch.retrievedFacts[0],
+          finalUrl: null,
+        }],
+      }],
+    })
+    expect(missingFinalUrlFailure).toMatchObject({
+      kind: 'invalid-response',
+      message: 'Research direct-page fact is invalid.',
     })
   })
 
@@ -1016,8 +1176,15 @@ describe('durable WebChess browser API', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     expect(() =>
-      divideProblem(42 as unknown as string),
+      divideProblem(42 as unknown as string, {
+        researchConsentDecision: 'no_external_research',
+      }),
     ).toThrow(/problem is required/i)
+    expect(() =>
+      divideProblem('A sufficiently detailed problem', {
+        researchConsentDecision: 'invalid' as 'no_external_research',
+      }),
+    ).toThrow(/choose whether/i)
     expect(() => getOwnedGame(' ')).toThrow(/game id is required/i)
     expect(() =>
       recoverDivisionIntent('not-a-uuid'),

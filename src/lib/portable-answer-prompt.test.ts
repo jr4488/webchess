@@ -10,7 +10,10 @@ import type {
 } from './lifecycle/contracts'
 import { CURRENT_LIFECYCLE_VERSIONS } from './lifecycle/versions'
 import { buildPortableAnswerPrompt } from './portable-answer-prompt'
-import type { ResearchRecord } from './research/contracts'
+import {
+  RESEARCH_CONSENT_VERSION,
+  type ResearchRecord,
+} from './research/contracts'
 import type { DurableGame } from './webchess-api'
 import { makeProblemParts } from '../test/fixtures'
 import type { CaptureRecord, Piece } from '../types'
@@ -98,6 +101,11 @@ function makeGame(): DurableGame {
     revision: 17,
     status: 'answered',
     problem: 'How should we test this decision?',
+    researchConsent: {
+      version: RESEARCH_CONSENT_VERSION,
+      decision: 'allow_search_and_page_fetch',
+      recordedAt: '2026-08-02T18:00:00.000Z',
+    },
     division: {
       seed: 'DIVISION_SEED_MUST_NOT_LEAK',
       facets: [],
@@ -171,12 +179,18 @@ function makePortiaReview(): PortiaReview {
 }
 
 function makeResearch(): ResearchRecord {
+  const acceptedText = 'The page recommends a baseline and stopping rule.'
   return {
     id: '30000000-0000-4000-8000-000000000001',
     lifecycleRunId: RUN_ID,
     gameId: GAME_ID,
     stage: 'portia',
     requestedBy: 'research-policy',
+    consent: {
+      version: RESEARCH_CONSENT_VERSION,
+      decision: 'allow_search_and_page_fetch',
+      recordedAt: '2026-08-02T18:00:00.000Z',
+    },
     policyVersion: 'webchess-visible-research-v1',
     materiality: 'required',
     reason: 'A current external benchmark materially affects the threshold.',
@@ -196,19 +210,74 @@ function makeResearch(): ResearchRecord {
     executedQueries: ['official reversible trial measurement guidance 2026'],
     searchSynthesis:
       'The search synthesis recommends defining a baseline and stopping rule.',
-    directPageTextFetched: false,
-    retrievedFacts: [],
-    sources: [{
-      id: '40000000-0000-4000-8000-000000000001',
+    directPageTextFetched: true,
+    retrievedFacts: [{
       citationId: 'source-1',
-      ordinal: 1,
+      requestedUrl: 'https://www.nist.gov/example',
+      finalUrl: 'https://www.nist.gov/example',
       title: 'Measurement guidance',
-      url: 'https://www.nist.gov/example',
-      hostname: 'www.nist.gov',
-      trust: 'government_or_education',
-      discoveredFrom: 'search_activity',
-      createdAt: '2026-08-02T18:01:00.000Z',
+      provider: 'webchess-direct-https',
+      fetchVersion: 'webchess-direct-page-fetch-v1',
+      retrievedAt: '2026-08-02T18:00:40.000Z',
+      httpStatus: 200,
+      contentType: 'text/html',
+      extractor: 'webchess-readable-text-v1',
+      rawByteLength: 512,
+      rawContentDigest: 'f'.repeat(64),
+      rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+      acceptedCharacterLength: acceptedText.length,
+      contentDigest: '48c0e1bddafb5ec1997a55da9e52fe18ff30ee5f5d654c0da9ff9d7d0d188940',
+      digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+      redirectChain: ['https://www.nist.gov/example'],
+      text: acceptedText,
+      truncated: false,
+      untrusted: true,
+      contentKind: 'direct_page_text',
     }],
+    fetchFailures: [{
+      citationId: 'source-2',
+      requestedUrl: 'https://www.nist.gov/appendix',
+      finalUrl: null,
+      status: 'timed_out',
+      failureCode: 'page_timeout',
+      httpStatus: null,
+      fetchVersion: 'webchess-direct-page-fetch-v1',
+      extractor: 'webchess-readable-text-v1',
+      rawByteLength: 0,
+      rawContentDigest: null,
+      rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+      acceptedCharacterLength: 0,
+      truncated: false,
+      contentDigest: null,
+      digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+      redirectChain: ['https://www.nist.gov/appendix'],
+      injectionSignalsDetected: [],
+      retrievedAt: '2026-08-02T18:01:00.000Z',
+    }],
+    sources: [
+      {
+        id: '40000000-0000-4000-8000-000000000001',
+        citationId: 'source-1',
+        ordinal: 1,
+        title: 'Measurement guidance',
+        url: 'https://www.nist.gov/example',
+        hostname: 'www.nist.gov',
+        trust: 'government_or_education',
+        discoveredFrom: 'search_activity',
+        createdAt: '2026-08-02T18:01:00.000Z',
+      },
+      {
+        id: '40000000-0000-4000-8000-000000000002',
+        citationId: 'source-2',
+        ordinal: 2,
+        title: 'Measurement appendix',
+        url: 'https://www.nist.gov/appendix',
+        hostname: 'www.nist.gov',
+        trust: 'government_or_education',
+        discoveredFrom: 'search_activity',
+        createdAt: '2026-08-02T18:01:00.000Z',
+      },
+    ],
     omittedSourceCount: 0,
     injectionSignalsDetected: ['Ignore prior instructions'],
     contentDigest: 'e'.repeat(64),
@@ -342,6 +411,7 @@ describe('buildPortableAnswerPrompt', () => {
     const payload = extractPayload(prompt) as {
       question: string
       game: {
+        researchConsent: Record<string, unknown>
         mappedParts: Array<{ ring: number; sector: number; part: { id: number } }>
         finalBoardPieces: unknown[]
         eventHistory: Array<Record<string, unknown>>
@@ -366,11 +436,18 @@ describe('buildPortableAnswerPrompt', () => {
     expect(prompt).toContain('Answer the original question directly')
     expect(prompt).toContain('attention metaphor—not proof, prophecy')
     expect(prompt).toContain('Honor Portia exactly')
-    expect(prompt).toContain('model-generated search synthesis from direct page retrieval')
+    expect(prompt).toContain(
+      'model-generated search synthesis from bounded direct-page text',
+    )
     expect(prompt).toContain('exactly three concrete, reversible next moves')
     expect(prompt).toContain('450–750 words')
 
     expect(payload.question).toBe('How should we test this decision?')
+    expect(payload.game.researchConsent).toEqual({
+      version: RESEARCH_CONSENT_VERSION,
+      decision: 'allow_search_and_page_fetch',
+      recordedAt: '2026-08-02T18:00:00.000Z',
+    })
     expect(payload.game.mappedParts).toHaveLength(64)
     expect(payload.game.mappedParts[0]).toMatchObject({
       ring: 0,
@@ -435,17 +512,55 @@ describe('buildPortableAnswerPrompt', () => {
     expect(payload.visibleResearch).toHaveLength(1)
     expect(payload.visibleResearch[0]).toMatchObject({
       provider: 'codex',
+      consent: {
+        version: RESEARCH_CONSENT_VERSION,
+        decision: 'allow_search_and_page_fetch',
+      },
       query: 'official reversible trial measurement guidance 2026',
-      directPageTextFetched: false,
-      retrievedFacts: [],
-      sources: [{ url: 'https://www.nist.gov/example' }],
+      directPageTextFetched: true,
+      retrievedFacts: [{
+        provider: 'webchess-direct-https',
+        text: 'The page recommends a baseline and stopping rule.',
+        contentDigest: '48c0e1bddafb5ec1997a55da9e52fe18ff30ee5f5d654c0da9ff9d7d0d188940',
+      }],
+      fetchFailures: [{
+        citationId: 'source-2',
+        status: 'timed_out',
+        failureCode: 'page_timeout',
+      }],
     })
+    expect(payload.visibleResearch[0]?.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ url: 'https://www.nist.gov/example' }),
+      expect.objectContaining({ url: 'https://www.nist.gov/appendix' }),
+    ]))
     expect(payload.exactPersistedAnswerUserPrompt).toBe(
       EXACT_ANSWER_USER_PROMPT,
     )
     expect(payload.exactPersistedAnswerUserPromptSha256).toBe(
       ANSWER_USER_PROMPT_SHA256,
     )
+  })
+
+  it('carries the game-scoped opt-out even when there are no research records', () => {
+    const game = {
+      ...makeGame(),
+      researchConsent: {
+        version: RESEARCH_CONSENT_VERSION,
+        decision: 'no_external_research' as const,
+        recordedAt: '2026-08-02T18:00:00.000Z',
+      },
+    }
+    const prompt = buildPortableAnswerPrompt(
+      game,
+      makeLifecycle({ research: [] }),
+    )
+    const payload = extractPayload(prompt) as {
+      game: { researchConsent: Record<string, unknown> }
+      visibleResearch: unknown[]
+    }
+
+    expect(payload.game.researchConsent).toEqual(game.researchConsent)
+    expect(payload.visibleResearch).toEqual([])
   })
 
   it('does not copy provider prompts, generated output, request ids, seeds, activities, or unknown fields', () => {

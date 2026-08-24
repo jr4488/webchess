@@ -17,6 +17,11 @@ import {
 } from '../../lib/game-replay'
 import { composeProblemParts } from '../../lib/division'
 import {
+  LEGACY_RESEARCH_CONSENT_VERSION,
+  RESEARCH_CONSENT_VERSION,
+  type ResearchConsent,
+} from '../../lib/research'
+import {
   MAX_PERSISTED_MODEL_PROMPT_CHARS,
   type GeneratedAnswer,
   type ProblemFacet,
@@ -113,6 +118,9 @@ const SELECT_GAME_COLUMNS = `
   status,
   problem,
   problem_sha256,
+  research_consent_version,
+  research_consent_decision,
+  research_consent_recorded_at,
   division_seed,
   division_facets,
   problem_parts,
@@ -274,6 +282,54 @@ function validatedAnswer(value: unknown): GeneratedAnswer | null {
     )
   }
   return result.data
+}
+
+function researchConsentFromRow(row: GameRow): ResearchConsent {
+  if (
+    row.research_consent_version === LEGACY_RESEARCH_CONSENT_VERSION &&
+    (
+      row.research_consent_decision !== 'no_external_research' ||
+      row.research_consent_recorded_at !== null
+    )
+  ) {
+    throw new GameRepositoryError(
+      'integrity-error',
+      `Game ${row.id} has invalid historical research consent.`,
+    )
+  }
+  if (
+    row.research_consent_version === RESEARCH_CONSENT_VERSION &&
+    row.research_consent_recorded_at === null
+  ) {
+    throw new GameRepositoryError(
+      'integrity-error',
+      `Game ${row.id} is missing its research consent timestamp.`,
+    )
+  }
+  return {
+    version: row.research_consent_version,
+    decision: row.research_consent_decision,
+    recordedAt: row.research_consent_recorded_at?.toISOString() ?? null,
+  }
+}
+
+function assertNewResearchConsent(
+  value: CreateDivisionInput['researchConsent'],
+): NonNullable<CreateDivisionInput['researchConsent']> {
+  if (
+    !value ||
+    value.version !== RESEARCH_CONSENT_VERSION ||
+    ![
+      'allow_search_and_page_fetch',
+      'no_external_research',
+    ].includes(value.decision)
+  ) {
+    throw new GameRepositoryError(
+      'invalid-input',
+      'A new game requires an explicit current research consent choice.',
+    )
+  }
+  return value
 }
 
 function sameJson(left: unknown, right: unknown): boolean {
@@ -504,6 +560,7 @@ function snapshotFrom(
       revision: revisionNumber(row.revision),
       status: row.status,
       problem: row.problem,
+      researchConsent: researchConsentFromRow(row),
       division: null,
       game: null,
       answer: validatedAnswer(row.answer_payload),
@@ -530,6 +587,7 @@ function snapshotFrom(
     revision: revisionNumber(row.revision),
     status: row.status,
     problem: row.problem,
+    researchConsent: researchConsentFromRow(row),
     division,
     game: toGameView(replay),
     answer: validatedAnswer(row.answer_payload),
@@ -766,8 +824,30 @@ export class DurableGameRepository {
     const sourceGameId = input.sourceGameId === undefined
       ? null
       : assertUuid(input.sourceGameId, 'Source game id')
+    let sourceRow: GameRow | null = null
     if (sourceGameId !== null) {
-      await this.ownedRow(ownerId, sourceGameId)
+      sourceRow = await this.ownedRow(ownerId, sourceGameId)
+    }
+    const inheritedConsent = sourceRow
+      ? {
+          version: sourceRow.research_consent_version,
+          decision: sourceRow.research_consent_decision,
+        }
+      : null
+    const researchConsent = inheritedConsent ??
+      assertNewResearchConsent(input.researchConsent)
+    if (
+      sourceRow &&
+      input.researchConsent &&
+      (
+        input.researchConsent.version !== inheritedConsent?.version ||
+        input.researchConsent.decision !== inheritedConsent.decision
+      )
+    ) {
+      throw new GameRepositoryError(
+        'invalid-input',
+        'A field retry must inherit the source game research consent.',
+      )
     }
 
     const statements: readonly SqlStatement[] = [
@@ -815,6 +895,9 @@ export class DurableGameRepository {
             status,
             problem,
             problem_sha256,
+            research_consent_version,
+            research_consent_decision,
+            research_consent_recorded_at,
             event_version,
             rules_version,
             engine_version,
@@ -830,6 +913,12 @@ export class DurableGameRepository {
             'dividing',
             $3,
             $4,
+            $11,
+            $12,
+            CASE
+              WHEN $11 = 'legacy-no-research-consent-v0' THEN NULL
+              ELSE coalesce($13::timestamptz, now())
+            END,
             $5,
             $6,
             $7,
@@ -854,6 +943,8 @@ export class DurableGameRepository {
           AND existing.cast_version = $8
           AND existing.software_version = $9
           AND existing.source_game_id IS NOT DISTINCT FROM $10::uuid
+          AND existing.research_consent_version = $11
+          AND existing.research_consent_decision = $12
       `,
         values: [
           ownerId,
@@ -866,6 +957,9 @@ export class DurableGameRepository {
           CURRENT_GAME_VERSIONS.cast,
           softwareVersion,
           sourceGameId,
+          researchConsent.version,
+          researchConsent.decision,
+          sourceRow?.research_consent_recorded_at?.toISOString() ?? null,
         ],
       },
     ]
@@ -922,7 +1016,9 @@ export class DurableGameRepository {
       raced.engine_version !== CURRENT_GAME_VERSIONS.engine ||
       raced.cast_version !== CURRENT_GAME_VERSIONS.cast ||
       raced.software_version !== softwareVersion ||
-      raced.source_game_id !== sourceGameId
+      raced.source_game_id !== sourceGameId ||
+      raced.research_consent_version !== researchConsent.version ||
+      raced.research_consent_decision !== researchConsent.decision
     ) {
       throw new GameRepositoryError(
         'idempotency-conflict',

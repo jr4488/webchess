@@ -1,7 +1,14 @@
+import { createHash } from 'node:crypto'
+
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { CURRENT_GAME_VERSIONS } from '../../src/lib/game-contract'
 import { CURRENT_LIFECYCLE_VERSIONS } from '../../src/lib/lifecycle'
+import {
+  RESEARCH_CONSENT_VERSION,
+  type ResearchFetchFailure,
+  type ResearchRetrievedFact,
+} from '../../src/lib/research'
 import { DurableLifecycleRepository } from '../../src/server/lifecycle'
 import {
   DurableResearchRepository,
@@ -16,6 +23,69 @@ const GAME_ID = '72000000-0000-4000-8000-000000000001'
 const RUN_ID = '73000000-0000-4000-8000-000000000001'
 const PROBLEM = 'What is the latest safe way to improve a current technical system?'
 const CONFIGURATION_DIGEST = 'd'.repeat(64)
+const CONSENT_RECORDED_AT = '2026-08-02T16:00:00.000Z'
+const RESEARCH_CONSENT = {
+  version: RESEARCH_CONSENT_VERSION,
+  decision: 'allow_search_and_page_fetch',
+  recordedAt: CONSENT_RECORDED_AT,
+} as const
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+function retrievedFact(): ResearchRetrievedFact {
+  const requestedUrl = 'https://example.gov/current-guidance'
+  const finalUrl = 'https://example.gov/current-guidance-v2'
+  const text = 'Deterministic directly retrieved official guidance.'
+  return {
+    citationId: 'R1',
+    requestedUrl,
+    finalUrl,
+    title: 'Official current guidance',
+    provider: 'webchess-direct-https',
+    fetchVersion: 'webchess-direct-page-fetch-v1',
+    retrievedAt: CONSENT_RECORDED_AT,
+    httpStatus: 200,
+    contentType: 'text/html',
+    extractor: 'webchess-readable-text-v1',
+    rawByteLength: Buffer.byteLength(text, 'utf8'),
+    rawContentDigest: sha256(text),
+    rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+    acceptedCharacterLength: text.length,
+    contentDigest: sha256(text),
+    digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+    redirectChain: [requestedUrl, finalUrl],
+    text,
+    truncated: false,
+    untrusted: true,
+    contentKind: 'direct_page_text',
+  }
+}
+
+function fetchFailure(): ResearchFetchFailure {
+  const requestedUrl = 'https://example.edu/evidence-review'
+  return {
+    citationId: 'R2',
+    requestedUrl,
+    finalUrl: requestedUrl,
+    status: 'failed',
+    failureCode: 'page_fetch_http_status',
+    httpStatus: 503,
+    fetchVersion: 'webchess-direct-page-fetch-v1',
+    extractor: 'webchess-readable-text-v1',
+    rawByteLength: 0,
+    rawContentDigest: null,
+    rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+    acceptedCharacterLength: 0,
+    truncated: false,
+    contentDigest: null,
+    digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+    redirectChain: [requestedUrl],
+    injectionSignalsDetected: [],
+    retrievedAt: CONSENT_RECORDED_AT,
+  }
+}
 
 let database: PostgresTestDatabase
 let research: DurableResearchRepository
@@ -45,14 +115,15 @@ beforeAll(async () => {
         problem_sha256, division_seed, division_facets, problem_parts,
         division_model, division_prompt_version, division_prompt_sha256,
         division_digest, rules_version, engine_version, cast_version,
-        event_version, software_version
+        event_version, software_version, research_consent_version,
+        research_consent_decision, research_consent_recorded_at
       )
       SELECT
         $1::uuid, $2::text, true, 3, 'mapped', $3::text,
         repeat('a', 64), 'research-field-seed', field.items, field.items,
         'configured OpenClaw model', 'webchess-division-v2', repeat('b', 64),
         repeat('c', 64), $4::text, $5::text, $6::text,
-        $7::smallint, '2.0.0'
+        $7::smallint, '2.0.0', $8::text, $9::text, $10::timestamptz
       FROM field
     `,
     values: [
@@ -63,6 +134,9 @@ beforeAll(async () => {
       CURRENT_GAME_VERSIONS.engine,
       CURRENT_GAME_VERSIONS.cast,
       CURRENT_GAME_VERSIONS.event,
+      RESEARCH_CONSENT.version,
+      RESEARCH_CONSENT.decision,
+      RESEARCH_CONSENT.recordedAt,
     ],
   })
   await database.adapter.query({
@@ -122,6 +196,7 @@ describe('durable visible research repository on PostgreSQL 17', () => {
       lifecycleState: 'portia_pending',
       stage: 'portia',
       problem: PROBLEM,
+      researchConsent: RESEARCH_CONSENT,
       policyVersion: RESEARCH_POLICY_VERSION,
       materiality: 'required',
       reason: 'Portia needs current external evidence before validating this time-sensitive answer prompt.',
@@ -138,6 +213,8 @@ describe('durable visible research repository on PostgreSQL 17', () => {
       attemptCount: 1,
       directPageTextFetched: false,
       retrievedFacts: [],
+      fetchFailures: [],
+      consent: RESEARCH_CONSENT,
       bounds: expect.objectContaining({ timeoutMs: 90_000 }),
     })
 
@@ -152,6 +229,9 @@ describe('durable visible research repository on PostgreSQL 17', () => {
       ],
       searchSynthesis:
         'Codex Search found a current official source and a university source. This remains a model-generated synthesis for Portia to assess.',
+      directPageTextFetched: true,
+      retrievedFacts: [retrievedFact()],
+      fetchFailures: [fetchFailure()],
       sources: [
         {
           citationId: 'R1',
@@ -183,7 +263,14 @@ describe('durable visible research repository on PostgreSQL 17', () => {
       status: 'completed',
       model: 'gpt-5.6-sol',
       contentDigest: 'e'.repeat(64),
+      consent: RESEARCH_CONSENT,
+      directPageTextFetched: true,
     })
+    expect(completed.retrievedFacts).toEqual([retrievedFact()])
+    expect(completed.fetchFailures).toEqual([fetchFailure()])
+    expect(sha256(completed.retrievedFacts[0]!.text)).toBe(
+      completed.retrievedFacts[0]!.contentDigest,
+    )
     expect(completed.sources.map((source) => source.citationId)).toEqual([
       'R1',
       'R2',
@@ -217,6 +304,7 @@ describe('durable visible research repository on PostgreSQL 17', () => {
       lifecycleState: 'portia_pending',
       stage: 'portia',
       problem: PROBLEM,
+      researchConsent: RESEARCH_CONSENT,
       policyVersion: RESEARCH_POLICY_VERSION,
       materiality: 'required',
       reason: completed.reason,
@@ -238,6 +326,7 @@ describe('durable visible research repository on PostgreSQL 17', () => {
       lifecycleState: 'portia_pending',
       stage: 'charlotte',
       problem: PROBLEM,
+      researchConsent: RESEARCH_CONSENT,
       policyVersion: RESEARCH_POLICY_VERSION,
       materiality: 'helpful',
       reason: 'Charlotte requested a bounded evidence check for a current audience qualification.',
@@ -268,6 +357,7 @@ describe('durable visible research repository on PostgreSQL 17', () => {
       lifecycleState: 'portia_pending',
       stage: 'wilbur',
       problem: PROBLEM,
+      researchConsent: RESEARCH_CONSENT,
       policyVersion: RESEARCH_POLICY_VERSION,
       reason: 'Wilbur has no material external fact gap for this saved observation step.',
       configurationDigest: CONFIGURATION_DIGEST,
@@ -294,8 +384,63 @@ describe('durable visible research repository on PostgreSQL 17', () => {
       text: `
         UPDATE research_requests
         SET retrieved_facts = '[{"claim":"not fetched"}]'::jsonb
-        WHERE id = (SELECT id FROM research_requests LIMIT 1)
+        WHERE clerk_user_id = $1::text AND status = 'not_needed'
       `,
+      values: [OWNER],
     })).rejects.toThrow()
+  })
+
+  it('enforces versioned consent and bounded page-evidence shapes in PostgreSQL', async () => {
+    await expect(database.adapter.query({
+      text: `
+        UPDATE games
+        SET research_consent_recorded_at = NULL
+        WHERE id = $1::uuid
+      `,
+      values: [GAME_ID],
+    })).rejects.toMatchObject({
+      constraint: 'games_research_consent_shape',
+    })
+
+    await expect(database.adapter.query({
+      text: `
+        UPDATE research_requests
+        SET research_consent_decision = 'no_external_research'
+        WHERE clerk_user_id = $1::text AND status = 'completed'
+      `,
+      values: [OWNER],
+    })).rejects.toMatchObject({ code: '23514' })
+
+    await expect(database.adapter.query({
+      text: `
+        UPDATE research_requests
+        SET fetch_failures = '[{},{},{},{}]'::jsonb
+        WHERE clerk_user_id = $1::text AND status = 'completed'
+      `,
+      values: [OWNER],
+    })).rejects.toMatchObject({
+      constraint: 'research_requests_json_shapes',
+    })
+  })
+
+  it('fails closed when persisted accepted text no longer matches its digest', async () => {
+    await database.adapter.query({
+      text: `
+        UPDATE research_requests
+        SET retrieved_facts = jsonb_set(
+          retrieved_facts,
+          '{0,contentDigest}',
+          to_jsonb(repeat('0', 64))
+        )
+        WHERE clerk_user_id = $1::text
+          AND game_id = $2::uuid
+          AND stage = 'portia'
+      `,
+      values: [OWNER, GAME_ID],
+    })
+
+    await expect(research.getForGame(OWNER, GAME_ID)).rejects.toThrow(
+      'The database returned malformed research provenance.',
+    )
   })
 })

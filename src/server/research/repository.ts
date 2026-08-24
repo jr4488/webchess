@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { z } from 'zod'
 
@@ -7,8 +7,20 @@ import {
   type LifecycleState,
 } from '../../lib/lifecycle'
 import {
+  DIRECT_PAGE_DIGEST_ALGORITHM,
+  DIRECT_PAGE_EXTRACTOR_VERSION,
+  DIRECT_PAGE_FETCH_VERSION,
+  DIRECT_PAGE_MAX_RAW_BYTES,
+  DIRECT_PAGE_RAW_DIGEST_ALGORITHM,
+} from './direct-page-fetch'
+import {
+  LEGACY_RESEARCH_CONSENT_VERSION,
+  RESEARCH_CONSENT_VERSION,
+  RESEARCH_PAGE_FETCH_CHARACTER_LIMIT,
+  RESEARCH_PAGE_FETCH_LIMIT,
   RESEARCH_STAGES,
   RESEARCH_STATUSES,
+  type ResearchConsent,
   type ResearchRecord,
   type ResearchSource,
 } from '../../lib/research'
@@ -33,6 +45,60 @@ const timestampSchema = z.preprocess(
   z.date(),
 )
 
+const storedTimestampSchema = z.string().datetime({ offset: true })
+const digestSchema = z.string().regex(SHA256_PATTERN)
+const publicUrlSchema = z.string().url().max(2048).refine((value) => {
+  const parsed = new URL(value)
+  return parsed.protocol === 'https:' && parsed.username === '' && parsed.password === ''
+})
+
+const retrievedFactSchema = z.strictObject({
+  citationId: z.string().regex(/^R[1-8]$/u),
+  requestedUrl: publicUrlSchema,
+  finalUrl: publicUrlSchema,
+  title: z.string().min(1).max(500),
+  provider: z.literal('webchess-direct-https'),
+  fetchVersion: z.literal(DIRECT_PAGE_FETCH_VERSION),
+  retrievedAt: storedTimestampSchema,
+  httpStatus: z.literal(200),
+  contentType: z.enum(['application/xhtml+xml', 'text/html', 'text/plain']),
+  extractor: z.literal(DIRECT_PAGE_EXTRACTOR_VERSION),
+  rawByteLength: z.number().int().min(1).max(DIRECT_PAGE_MAX_RAW_BYTES),
+  rawContentDigest: digestSchema,
+  rawDigestAlgorithm: z.literal(DIRECT_PAGE_RAW_DIGEST_ALGORITHM),
+  acceptedCharacterLength: z.number().int().min(1).max(
+    RESEARCH_PAGE_FETCH_CHARACTER_LIMIT,
+  ),
+  contentDigest: digestSchema,
+  digestAlgorithm: z.literal(DIRECT_PAGE_DIGEST_ALGORITHM),
+  redirectChain: z.array(publicUrlSchema).min(1).max(4),
+  text: z.string().min(1).max(RESEARCH_PAGE_FETCH_CHARACTER_LIMIT),
+  truncated: z.boolean(),
+  untrusted: z.literal(true),
+  contentKind: z.literal('direct_page_text'),
+})
+
+const fetchFailureSchema = z.strictObject({
+  citationId: z.string().regex(/^R[1-8]$/u),
+  requestedUrl: publicUrlSchema,
+  finalUrl: publicUrlSchema.nullable(),
+  status: z.enum(['failed', 'refused', 'timed_out']),
+  failureCode: z.string().regex(/^[a-z0-9_]{3,80}$/u),
+  httpStatus: z.number().int().min(100).max(599).nullable(),
+  fetchVersion: z.literal(DIRECT_PAGE_FETCH_VERSION),
+  extractor: z.literal(DIRECT_PAGE_EXTRACTOR_VERSION),
+  rawByteLength: z.number().int().min(0).max(DIRECT_PAGE_MAX_RAW_BYTES + 65_536),
+  rawContentDigest: digestSchema.nullable(),
+  rawDigestAlgorithm: z.literal(DIRECT_PAGE_RAW_DIGEST_ALGORITHM),
+  acceptedCharacterLength: z.literal(0),
+  truncated: z.boolean(),
+  contentDigest: z.null(),
+  digestAlgorithm: z.literal(DIRECT_PAGE_DIGEST_ALGORITHM),
+  redirectChain: z.array(publicUrlSchema).min(1).max(4),
+  injectionSignalsDetected: z.array(z.string().regex(/^[a-z0-9_]{3,120}$/u)).max(8),
+  retrievedAt: storedTimestampSchema,
+})
+
 export const researchRequestRowSchema = z.object({
   id: z.string().uuid(),
   clerk_user_id: z.string().min(3).max(255),
@@ -40,6 +106,15 @@ export const researchRequestRowSchema = z.object({
   lifecycle_run_id: z.string().uuid().nullable(),
   stage: z.enum(RESEARCH_STAGES),
   requested_by: z.literal('research-policy'),
+  research_consent_version: z.enum([
+    LEGACY_RESEARCH_CONSENT_VERSION,
+    RESEARCH_CONSENT_VERSION,
+  ]),
+  research_consent_decision: z.enum([
+    'allow_search_and_page_fetch',
+    'no_external_research',
+  ]),
+  research_consent_recorded_at: timestampSchema.nullable(),
   policy_version: z.string().min(1).max(80),
   materiality: z.enum(['helpful', 'required']).nullable(),
   reason: z.string().min(8).max(1000),
@@ -56,8 +131,9 @@ export const researchRequestRowSchema = z.object({
   attempt_count: z.number().int().min(0).max(1),
   executed_queries: z.array(z.unknown()),
   search_synthesis: z.string().nullable(),
-  direct_page_text_fetched: z.literal(false),
-  retrieved_facts: z.array(z.unknown()).length(0),
+  direct_page_text_fetched: z.boolean(),
+  retrieved_facts: z.array(retrievedFactSchema).max(RESEARCH_PAGE_FETCH_LIMIT),
+  fetch_failures: z.array(fetchFailureSchema).max(RESEARCH_PAGE_FETCH_LIMIT),
   omitted_source_count: z.number().int().min(0).max(100),
   injection_signals: z.array(z.unknown()),
   content_digest: z.string().regex(SHA256_PATTERN).nullable(),
@@ -66,6 +142,37 @@ export const researchRequestRowSchema = z.object({
   completed_at: timestampSchema.nullable(),
   created_at: timestampSchema,
   updated_at: timestampSchema,
+}).superRefine((row, context) => {
+  const currentConsent = row.research_consent_version === RESEARCH_CONSENT_VERSION
+  if (
+    (currentConsent && row.research_consent_recorded_at === null) ||
+    (!currentConsent && (
+      row.research_consent_decision !== 'no_external_research' ||
+      row.research_consent_recorded_at !== null
+    ))
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message: 'Stored research consent is internally inconsistent.',
+    })
+  }
+  if (
+    row.direct_page_text_fetched !== (row.retrieved_facts.length > 0) ||
+    row.retrieved_facts.length + row.fetch_failures.length > RESEARCH_PAGE_FETCH_LIMIT ||
+    row.retrieved_facts.some((fact) =>
+      fact.acceptedCharacterLength !== fact.text.length ||
+      acceptedTextDigest(fact.text) !== fact.contentDigest) ||
+    row.fetch_failures.some((failure) =>
+      failure.rawByteLength > 0 && failure.rawContentDigest === null) ||
+    (row.research_consent_decision === 'no_external_research' && (
+      row.retrieved_facts.length > 0 || row.fetch_failures.length > 0
+    ))
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message: 'Stored direct-page evidence is internally inconsistent.',
+    })
+  }
 })
 
 export const researchSourceRowSchema = z.object({
@@ -92,6 +199,9 @@ export const SELECT_RESEARCH_REQUEST_COLUMNS = `
   lifecycle_run_id,
   stage,
   requested_by,
+  research_consent_version,
+  research_consent_decision,
+  research_consent_recorded_at,
   policy_version,
   materiality,
   reason,
@@ -110,6 +220,7 @@ export const SELECT_RESEARCH_REQUEST_COLUMNS = `
   search_synthesis,
   direct_page_text_fetched,
   retrieved_facts,
+  fetch_failures,
   omitted_source_count,
   injection_signals,
   content_digest,
@@ -160,6 +271,28 @@ function assertDigest(value: string): string {
     )
   }
   return value
+}
+
+function assertConsent(value: ResearchConsent): ResearchConsent {
+  const recordedAt = value.recordedAt === null
+    ? null
+    : timestampSchema.safeParse(value.recordedAt)
+  if (
+    value.version === LEGACY_RESEARCH_CONSENT_VERSION
+      ? value.decision !== 'no_external_research' || value.recordedAt !== null
+      : value.version !== RESEARCH_CONSENT_VERSION ||
+        recordedAt === null || !recordedAt.success
+  ) {
+    throw new ResearchRepositoryError(
+      'invalid-input',
+      'Research requires a valid versioned game-scoped consent decision.',
+    )
+  }
+  return value
+}
+
+function acceptedTextDigest(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
 }
 
 function normalizeText(
@@ -253,6 +386,11 @@ export function researchRecordsFromRows(
       gameId: row.game_id,
       stage: row.stage,
       requestedBy: row.requested_by,
+      consent: {
+        version: row.research_consent_version,
+        decision: row.research_consent_decision,
+        recordedAt: row.research_consent_recorded_at?.toISOString() ?? null,
+      },
       policyVersion: row.policy_version,
       materiality: row.materiality,
       reason: row.reason,
@@ -272,7 +410,8 @@ export function researchRecordsFromRows(
       executedQueries,
       searchSynthesis: row.search_synthesis,
       directPageTextFetched: row.direct_page_text_fetched,
-      retrievedFacts: [],
+      retrievedFacts: row.retrieved_facts,
+      fetchFailures: row.fetch_failures,
       sources: (sourcesByRequest.get(row.id) ?? [])
         .sort((left, right) => left.ordinal - right.ordinal),
       omittedSourceCount: row.omitted_source_count,
@@ -359,6 +498,7 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
     const gameId = assertUuid(input.gameId, 'Game id')
     const lifecycleRunId = assertUuid(input.lifecycleRunId, 'Lifecycle run id')
     const state = assertLifecycleState(input.lifecycleState)
+    const consent = assertConsent(input.researchConsent)
     const reason = normalizeText(input.reason, 'Research reason', 8, 1000)
     const configurationDigest = assertDigest(input.configurationDigest)
     const result = await this.database.query({
@@ -372,14 +512,17 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
         ), inserted AS (
           INSERT INTO research_requests (
             id, clerk_user_id, game_id, lifecycle_run_id, stage,
-            policy_version, materiality, reason, query, status,
+            policy_version, research_consent_version,
+            research_consent_decision, research_consent_recorded_at,
+            materiality, reason, query, status,
             result_limit, source_limit, timeout_ms,
             synthesis_character_limit, completed_at
           )
           SELECT
             $1::uuid, $2::text, $3::uuid, target.id, $6::text,
-            $7::text, NULL, $8::text, NULL, 'not_needed',
-            $9::smallint, $10::smallint, $11::integer, $12::integer, now()
+            $7::text, $8::text, $9::text, $10::timestamptz,
+            NULL, $11::text, NULL, 'not_needed',
+            $12::smallint, $13::smallint, $14::integer, $15::integer, now()
           FROM target
           ON CONFLICT (game_id, stage, policy_version) DO NOTHING
           RETURNING id, lifecycle_run_id, stage
@@ -395,7 +538,7 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
             coalesce((SELECT max(sequence) + 1 FROM lifecycle_events WHERE lifecycle_run_id = inserted.lifecycle_run_id), 1),
             inserted.stage, 'research_not_needed', $5::text, $5::text,
             jsonb_build_array($3::text), jsonb_build_array(inserted.id::text),
-            jsonb_build_array('research-policy'), $13::char(64),
+            jsonb_build_array('research-policy'), $16::char(64),
             'completed', target.event_version
           FROM inserted CROSS JOIN target
         )
@@ -409,6 +552,9 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
         state,
         input.stage,
         input.policyVersion,
+        consent.version,
+        consent.decision,
+        consent.recordedAt,
         reason,
         RESEARCH_BOUNDS.resultLimit,
         RESEARCH_BOUNDS.sourceLimit,
@@ -438,6 +584,7 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
     const gameId = assertUuid(input.gameId, 'Game id')
     const lifecycleRunId = assertUuid(input.lifecycleRunId, 'Lifecycle run id')
     const state = assertLifecycleState(input.lifecycleState)
+    const consent = assertConsent(input.researchConsent)
     const reason = normalizeText(input.reason, 'Research reason', 8, 1000)
     const query = normalizeText(input.query, 'Research query', 3, 320)
     if (
@@ -462,15 +609,18 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
         ), inserted AS (
           INSERT INTO research_requests (
             id, clerk_user_id, game_id, lifecycle_run_id, stage,
-            policy_version, materiality, reason, query, status,
+            policy_version, research_consent_version,
+            research_consent_decision, research_consent_recorded_at,
+            materiality, reason, query, status,
             result_limit, source_limit, timeout_ms,
             synthesis_character_limit, attempt_count, started_at
           )
           SELECT
             $1::uuid, $2::text, $3::uuid, target.id, $6::text,
-            $7::text, $8::text, $9::text, $10::text, 'searching',
-            $11::smallint, $12::smallint, $13::integer,
-            $14::integer, 1, now()
+            $7::text, $8::text, $9::text, $10::timestamptz,
+            $11::text, $12::text, $13::text, 'searching',
+            $14::smallint, $15::smallint, $16::integer,
+            $17::integer, 1, now()
           FROM target
           ON CONFLICT (game_id, stage, policy_version) DO NOTHING
           RETURNING id, lifecycle_run_id, stage
@@ -487,7 +637,7 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
             inserted.stage, 'research_search_started', $5::text, $5::text,
             jsonb_build_array($3::text), jsonb_build_array(inserted.id::text),
             jsonb_build_array('research-broker', 'openclaw:codex'),
-            $15::char(64), 'started', target.event_version
+            $18::char(64), 'started', target.event_version
           FROM inserted CROSS JOIN target
         )
         SELECT id FROM inserted
@@ -500,6 +650,9 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
         state,
         input.stage,
         input.policyVersion,
+        consent.version,
+        consent.decision,
+        consent.recordedAt,
         input.materiality,
         reason,
         query,
@@ -558,9 +711,9 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
       input.executedQueries.some(
         (query) => query.trim() !== query || query.length < 1 || query.length > 500,
       ) ||
-      input.injectionSignalsDetected.length > 20 ||
+      input.injectionSignalsDetected.length > 40 ||
       input.injectionSignalsDetected.some(
-        (signal) => !/^[a-z0-9_]{3,80}$/u.test(signal),
+        (signal) => !/^[a-z0-9_]{3,120}$/u.test(signal),
       )
     ) {
       throw new ResearchRepositoryError(
@@ -601,6 +754,77 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
       citationIds.add(source.citationId)
       sourceUrls.add(parsedUrl.toString())
     })
+    const facts = z.array(retrievedFactSchema)
+      .max(RESEARCH_PAGE_FETCH_LIMIT)
+      .safeParse(input.retrievedFacts)
+    const failures = z.array(fetchFailureSchema)
+      .max(RESEARCH_PAGE_FETCH_LIMIT)
+      .safeParse(input.fetchFailures)
+    if (
+      !facts.success ||
+      !failures.success ||
+      facts.data.length + failures.data.length > RESEARCH_PAGE_FETCH_LIMIT ||
+      input.directPageTextFetched !== (facts.success && facts.data.length > 0)
+    ) {
+      throw new ResearchRepositoryError(
+        'invalid-input',
+        'The direct-page result violates its durable evidence bounds.',
+      )
+    }
+    const sourceByCitation = new Map(
+      input.sources.map((source) => [source.citationId, source] as const),
+    )
+    const fetchedCitations = new Set<string>()
+    const assertFetchRoute = (evidence: {
+      readonly citationId: string
+      readonly requestedUrl: string
+      readonly finalUrl: string | null
+      readonly redirectChain: readonly string[]
+    }) => {
+      const source = sourceByCitation.get(evidence.citationId)
+      if (
+        !source ||
+        evidence.requestedUrl !== source.url ||
+        evidence.redirectChain[0] !== evidence.requestedUrl ||
+        evidence.redirectChain.at(-1) !== (evidence.finalUrl ?? evidence.requestedUrl) ||
+        fetchedCitations.has(evidence.citationId)
+      ) {
+        throw new ResearchRepositoryError(
+          'invalid-input',
+          'Direct-page evidence does not match its disclosed search citation.',
+        )
+      }
+      const requestedHost = new URL(evidence.requestedUrl).hostname
+      if (evidence.redirectChain.some((url) => new URL(url).hostname !== requestedHost)) {
+        throw new ResearchRepositoryError(
+          'invalid-input',
+          'Direct-page evidence contains a cross-host redirect.',
+        )
+      }
+      fetchedCitations.add(evidence.citationId)
+    }
+    facts.data.forEach((fact) => {
+      assertFetchRoute(fact)
+      if (
+        fact.acceptedCharacterLength !== fact.text.length ||
+        acceptedTextDigest(fact.text) !== fact.contentDigest ||
+        fact.title.trim() !== fact.title
+      ) {
+        throw new ResearchRepositoryError(
+          'invalid-input',
+          'Direct-page accepted text or its recomputable digest is invalid.',
+        )
+      }
+    })
+    failures.data.forEach((failure) => {
+      assertFetchRoute(failure)
+      if (failure.rawByteLength > 0 && failure.rawContentDigest === null) {
+        throw new ResearchRepositoryError(
+          'invalid-input',
+          'A received direct-page response is missing its raw response digest.',
+        )
+      }
+    })
     const sources = input.sources.map((source) => ({
       id: randomUUID(),
       ...source,
@@ -613,16 +837,21 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
           FROM research_requests AS requests
           INNER JOIN lifecycle_runs AS runs ON runs.id = requests.lifecycle_run_id
           WHERE requests.id = $2::uuid AND requests.clerk_user_id = $1::text
-            AND requests.status = 'searching' AND runs.state = $3::text
+            AND requests.status = 'searching'
+            AND requests.research_consent_decision = 'allow_search_and_page_fetch'
+            AND runs.state = $3::text
           FOR UPDATE OF requests, runs
         ), updated AS (
           UPDATE research_requests AS requests
           SET status = 'completed', model = $4::text,
               executed_queries = $5::jsonb,
               search_synthesis = $6::text,
-              omitted_source_count = $7::smallint,
-              injection_signals = $8::jsonb,
-              content_digest = $9::char(64), failure_code = NULL,
+              direct_page_text_fetched = $7::boolean,
+              retrieved_facts = $8::jsonb,
+              fetch_failures = $9::jsonb,
+              omitted_source_count = $10::smallint,
+              injection_signals = $11::jsonb,
+              content_digest = $12::char(64), failure_code = NULL,
               completed_at = now(), updated_at = now()
           FROM target
           WHERE requests.id = target.id
@@ -638,7 +867,7 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
             source.title::text, source.url::text, source.hostname::text,
             source.trust::text, source.discovered_from::text
           FROM updated
-          CROSS JOIN jsonb_to_recordset($10::jsonb) AS source(
+          CROSS JOIN jsonb_to_recordset($13::jsonb) AS source(
             id text, ordinal integer, citation_id text, title text, url text,
             hostname text, trust text, discovered_from text
           )
@@ -658,7 +887,7 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
             jsonb_build_array(updated.id::text) ||
               coalesce((SELECT jsonb_agg(id::text) FROM inserted_sources), '[]'::jsonb),
             jsonb_build_array('research-broker', 'openclaw:codex'),
-            $11::char(64), 'completed', target.event_version
+            $14::char(64), 'completed', target.event_version
           FROM updated CROSS JOIN target
         )
         SELECT id FROM updated
@@ -670,6 +899,9 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
         model,
         JSON.stringify(input.executedQueries),
         synthesis,
+        input.directPageTextFetched,
+        JSON.stringify(facts.data),
+        JSON.stringify(failures.data),
         input.omittedSourceCount,
         JSON.stringify(input.injectionSignalsDetected),
         contentDigest,

@@ -10,6 +10,24 @@ import type { PostgresTestDatabase } from './postgres-test-database'
 
 let database: PostgresTestDatabase
 
+const EXPECTED_MIGRATION_IDS = [
+  '0001_durable_webchess',
+  '0002_webchess_2_lifecycle',
+  '0003_prompt_review_answer_stage',
+  '0004_detached_provider_recovery',
+  '0005_align_completed_portia_progress',
+  '0006_permitted_portia_amendments',
+  '0007_bounded_charlotte_attempts',
+  '0008_visible_research_broker',
+  '0009_expand_research_timeout_ceiling',
+  '0010_player_visible_answer_prompt',
+  '0011_extend_research_timeout_ceiling',
+  '0012_unique_wilbur_charlotte_actions',
+  '0013_wilbur_mutation_requests',
+  '0014_web_memory_feedback',
+  '0015_direct_page_research_evidence',
+] as const
+
 beforeAll(async () => {
   database = await createPostgresTestDatabase('migration')
 })
@@ -21,42 +39,12 @@ afterAll(async () => {
 describe('durable WebChess migration on PostgreSQL 17', () => {
   it('applies the canonical migration atomically and replays it idempotently', async () => {
     await expect(database.migrate()).resolves.toEqual({
-      applied: [
-        '0001_durable_webchess',
-        '0002_webchess_2_lifecycle',
-        '0003_prompt_review_answer_stage',
-        '0004_detached_provider_recovery',
-        '0005_align_completed_portia_progress',
-        '0006_permitted_portia_amendments',
-        '0007_bounded_charlotte_attempts',
-        '0008_visible_research_broker',
-        '0009_expand_research_timeout_ceiling',
-        '0010_player_visible_answer_prompt',
-        '0011_extend_research_timeout_ceiling',
-        '0012_unique_wilbur_charlotte_actions',
-        '0013_wilbur_mutation_requests',
-        '0014_web_memory_feedback',
-      ],
+      applied: EXPECTED_MIGRATION_IDS,
       alreadyApplied: [],
     })
     await expect(database.migrate()).resolves.toEqual({
       applied: [],
-      alreadyApplied: [
-        '0001_durable_webchess',
-        '0002_webchess_2_lifecycle',
-        '0003_prompt_review_answer_stage',
-        '0004_detached_provider_recovery',
-        '0005_align_completed_portia_progress',
-        '0006_permitted_portia_amendments',
-        '0007_bounded_charlotte_attempts',
-        '0008_visible_research_broker',
-        '0009_expand_research_timeout_ceiling',
-        '0010_player_visible_answer_prompt',
-        '0011_extend_research_timeout_ceiling',
-        '0012_unique_wilbur_charlotte_actions',
-        '0013_wilbur_mutation_requests',
-        '0014_web_memory_feedback',
-      ],
+      alreadyApplied: EXPECTED_MIGRATION_IDS,
     })
 
     const version = await database.adapter.query<SqlRow>({
@@ -294,6 +282,116 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
     }
   })
 
+  it('backfills legacy research as opted out and enforces the 0015 consent boundary', async () => {
+    const upgrade = await createPostgresTestDatabase(
+      'direct_page_research_upgrade',
+    )
+    try {
+      const directPageMigrationIndex = durableWebChessMigrations.findIndex(
+        (migration) => migration.id === '0015_direct_page_research_evidence',
+      )
+      const priorMigrations = durableWebChessMigrations.slice(
+        0,
+        directPageMigrationIndex,
+      )
+      await runMigrations(upgrade.adapter, priorMigrations)
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO user_controls (clerk_user_id)
+          VALUES ('user_direct_page_research_upgrade')
+        `,
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO games (
+            id, clerk_user_id, status, problem, problem_sha256,
+            event_version, rules_version, engine_version, cast_version,
+            software_version
+          )
+          VALUES (
+            '65500000-0000-4000-8000-000000000001',
+            'user_direct_page_research_upgrade', 'dividing',
+            'How should historical research remain fail closed?',
+            repeat('a', 64), 1, 'rules-test', 'engine-test',
+            'cast-test', 'software-test'
+          )
+        `,
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO research_requests (
+            id, clerk_user_id, game_id, stage, policy_version,
+            reason, status, result_limit, source_limit, timeout_ms,
+            synthesis_character_limit, completed_at
+          )
+          VALUES (
+            '65500000-0000-4000-8000-000000000002',
+            'user_direct_page_research_upgrade',
+            '65500000-0000-4000-8000-000000000001',
+            'portia', 'research-policy-direct-page-upgrade-test',
+            'No search was run for this historical fixture.',
+            'not_needed', 5, 5, 150000, 12000, now()
+          )
+        `,
+      })
+
+      await expect(
+        runMigrations(
+          upgrade.adapter,
+          durableWebChessMigrations.slice(0, directPageMigrationIndex + 1),
+        ),
+      ).resolves.toEqual({
+        applied: ['0015_direct_page_research_evidence'],
+        alreadyApplied: priorMigrations.map((migration) => migration.id),
+      })
+
+      const backfilled = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT research_consent_version, research_consent_decision,
+            research_consent_recorded_at, fetch_failures
+          FROM research_requests
+          WHERE id = '65500000-0000-4000-8000-000000000002'
+        `,
+      })
+      expect(backfilled.rows).toEqual([{
+        research_consent_version: 'legacy-no-research-consent-v0',
+        research_consent_decision: 'no_external_research',
+        research_consent_recorded_at: null,
+        fetch_failures: [],
+      }])
+
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE research_requests
+          SET research_consent_version = 'webchess-research-consent-v1',
+            research_consent_recorded_at = now()
+          WHERE id = '65500000-0000-4000-8000-000000000002'
+        `,
+      })).resolves.toMatchObject({ rowCount: 1 })
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE research_requests
+          SET status = 'searching', attempt_count = 1,
+            query = 'A query must not appear after an explicit opt-out.'
+          WHERE id = '65500000-0000-4000-8000-000000000002'
+        `,
+      })).rejects.toMatchObject({
+        constraint: 'research_requests_opt_out_shape',
+      })
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE research_requests
+          SET fetch_failures = '[{},{},{},{}]'::jsonb
+          WHERE id = '65500000-0000-4000-8000-000000000002'
+        `,
+      })).rejects.toMatchObject({
+        constraint: 'research_requests_json_shapes',
+      })
+    } finally {
+      await upgrade.dispose()
+    }
+  })
+
   it('refreshes only unfinished Charlotte-capable runs while preserving terminal histories and artifacts', async () => {
     const upgrade = await createPostgresTestDatabase('charlotte_upgrade')
     try {
@@ -424,6 +522,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
           '0012_unique_wilbur_charlotte_actions',
           '0013_wilbur_mutation_requests',
           '0014_web_memory_feedback',
+          '0015_direct_page_research_evidence',
         ],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })
@@ -578,6 +677,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
           '0012_unique_wilbur_charlotte_actions',
           '0013_wilbur_mutation_requests',
           '0014_web_memory_feedback',
+          '0015_direct_page_research_evidence',
         ],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })

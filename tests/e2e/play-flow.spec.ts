@@ -28,6 +28,10 @@ const problem =
 const gameId = '00000000-0000-4000-8000-000000000001'
 const parts = makeProblemParts('browser-play-flow')
 const facets = makeProblemFacets('Browser facet')
+const researchConsent = {
+  version: 'webchess-research-consent-v1',
+  decision: 'allow_search_and_page_fetch',
+} as const
 const answerTransportPrompt = [
     'You are the final problem-solving voice of WebChess.',
     '',
@@ -80,6 +84,10 @@ function game(
     revision,
     status,
     problem,
+    researchConsent: {
+      ...researchConsent,
+      recordedAt: '2026-08-01T20:00:00.000Z',
+    },
     division: {
       seed: 'browser-play-flow',
       facets,
@@ -549,7 +557,10 @@ test.describe('complete durable play flow', () => {
 
       if (pathname === '/api/divide') {
         expectServerMutationBoundary(route)
-        expect(requestBody<{ problem: string }>(route)).toEqual({ problem })
+        expect(requestBody<{
+          problem: string
+          researchConsent: typeof researchConsent
+        }>(route)).toEqual({ problem, researchConsent })
         currentGame = game('mapped', 1, null)
         await json(route, { game: currentGame })
         return
@@ -612,6 +623,12 @@ test.describe('complete durable play flow', () => {
     await tabTo(page, problemInput)
     await problemInput.fill(problem)
     await problemInput.press('Tab')
+    const consentRadio = page.getByRole('radio', {
+      name: /Allow bounded research/i,
+    })
+    await expect(consentRadio).toBeFocused()
+    await consentRadio.press('Space')
+    await consentRadio.press('Tab')
     const divideButton = page.getByRole('button', {
       name: /Divide the problem/i,
     })

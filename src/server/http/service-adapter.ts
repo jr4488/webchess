@@ -89,6 +89,7 @@ import {
   isLifecycleRepositoryError,
 } from '../lifecycle'
 import type {
+  ResearchConsent,
   ResearchPromptEvidence,
   ResearchRecord,
 } from '../../lib/research'
@@ -395,6 +396,7 @@ function publicGame(snapshot: DurableGameSnapshot): DurableGame {
     revision: snapshot.revision,
     status: snapshot.status,
     problem: snapshot.problem,
+    researchConsent: snapshot.researchConsent,
     division: snapshot.division
       ? {
           seed: snapshot.division.seed,
@@ -1028,7 +1030,11 @@ function serverEvidence(snapshot: TerminalGameSnapshot): ServerDerivedEvidence {
 function researchPromptEvidence(
   record: ResearchRecord,
 ): ResearchPromptEvidence | null {
-  if (record.status === 'not_needed') return null
+  if (
+    record.status === 'not_needed' ||
+    record.consent.version !== 'webchess-research-consent-v1' ||
+    record.consent.decision !== 'allow_search_and_page_fetch'
+  ) return null
   if (record.status === 'searching') {
     throw new ApiError(
       'CONFLICT',
@@ -1051,12 +1057,15 @@ function researchPromptEvidence(
     reason: record.reason,
     query: record.query,
     provider: record.provider,
+    consent: record.consent,
     status: record.status,
     model: record.model,
     untrusted: true,
     contentKind: 'model_generated_search_synthesis',
-    directPageTextFetched: false,
+    directPageTextFetched: record.directPageTextFetched,
     searchSynthesis: record.searchSynthesis,
+    retrievedFacts: record.retrievedFacts,
+    fetchFailures: record.fetchFailures,
     sourceLinks: record.sources.map((source) => ({
       citationId: source.citationId,
       title: source.title,
@@ -1997,6 +2006,9 @@ function accountExportStatements(
           status,
           problem,
           problem_sha256 AS "problemSha256",
+          research_consent_version AS "researchConsentVersion",
+          research_consent_decision AS "researchConsentDecision",
+          research_consent_recorded_at AS "researchConsentRecordedAt",
           division_seed AS "divisionSeed",
           division_facets AS "divisionFacets",
           problem_parts AS "problemParts",
@@ -2178,6 +2190,9 @@ function accountExportStatements(
         SELECT id::text, game_id::text AS "gameId",
           lifecycle_run_id::text AS "lifecycleRunId", stage,
           requested_by AS "requestedBy", policy_version AS "policyVersion",
+          research_consent_version AS "researchConsentVersion",
+          research_consent_decision AS "researchConsentDecision",
+          research_consent_recorded_at AS "researchConsentRecordedAt",
           materiality, reason, query, status, provider, transport, model,
           invocation_limit AS "invocationLimit",
           result_limit AS "resultLimit", source_limit AS "sourceLimit",
@@ -2188,6 +2203,7 @@ function accountExportStatements(
           search_synthesis AS "searchSynthesis",
           direct_page_text_fetched AS "directPageTextFetched",
           retrieved_facts AS "retrievedFacts",
+          fetch_failures AS "fetchFailures",
           omitted_source_count AS "omittedSourceCount",
           injection_signals AS "injectionSignals",
           content_digest AS "contentDigest", failure_code AS "failureCode",
@@ -2822,11 +2838,13 @@ export function createApiServicesWithDependencies(
   const divisionRequestHash = (
     problem: string,
     memoryObservationIds: readonly string[],
+    researchConsent: Omit<ResearchConsent, 'recordedAt'>,
   ) =>
     canonicalHash({
-      operation: 'division/v3-web-memory',
+      operation: 'division/v4-web-memory-research-consent',
       problem,
       memoryObservationIds,
+      researchConsent,
       model: modelName(dependencies),
       promptVersion: DIVISION_PROMPT_VERSION,
       softwareVersion: dependencies.softwareVersion,
@@ -2853,7 +2871,11 @@ export function createApiServicesWithDependencies(
           userId: input.ownerId,
           operation: 'division',
           idempotencyKey: input.idempotencyKey,
-          requestSha256: divisionRequestHash(problem, memoryObservationIds),
+          requestSha256: divisionRequestHash(
+            problem,
+            memoryObservationIds,
+            input.researchConsent,
+          ),
           provider: modelProvider(dependencies),
           model: modelName(dependencies),
           promptVersion: DIVISION_PROMPT_VERSION,
@@ -2873,6 +2895,7 @@ export function createApiServicesWithDependencies(
             problem,
             softwareVersion: dependencies.softwareVersion,
             gameId: reservation.requestId,
+            researchConsent: input.researchConsent,
           })
           shell = division.game
 
@@ -3624,6 +3647,7 @@ export function createApiServicesWithDependencies(
             lifecycleState: lifecycle.state,
             stage: 'portia',
             problem: terminal.problem,
+            researchConsent: terminal.researchConsent,
           })
           if (research.status === 'searching') {
             throw pendingConflict('portia')

@@ -4,7 +4,7 @@ import type {
 } from '../../lib/research'
 import type { ResearchPolicyDecision } from './types'
 
-export const RESEARCH_POLICY_VERSION = 'webchess-visible-research-v3' as const
+export const RESEARCH_POLICY_VERSION = 'webchess-visible-research-v4' as const
 
 export const RESEARCH_BOUNDS: ResearchBounds = Object.freeze({
   invocationLimit: 1,
@@ -45,8 +45,22 @@ function boundedQuery(problem: string, suffix: string): string {
 export function planResearchForStage(input: {
   readonly stage: ResearchStage
   readonly problem: string
+  readonly researchConsent: {
+    readonly decision: 'allow_search_and_page_fetch' | 'no_external_research'
+    readonly version: string
+  }
 }): ResearchPolicyDecision {
   const problem = normalizeProblem(input.problem)
+  if (input.researchConsent.decision !== 'allow_search_and_page_fetch') {
+    return {
+      needed: false,
+      materiality: null,
+      query: null,
+      reason: input.researchConsent.version === 'webchess-research-consent-v1'
+        ? 'External research was not run because this game records an explicit opt-out.'
+        : 'External research was not run because this historical game has no recorded research consent.',
+    }
+  }
   if (problem.length < 12 || problem.length > 240) {
     return {
       needed: false,

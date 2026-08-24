@@ -94,9 +94,9 @@ function modelLabel(record: ResearchRecord): string {
 function statusExplanation(record: ResearchRecord): string {
   switch (record.status) {
     case 'searching':
-      return 'Codex Search is executing the single bounded broker invocation.'
+      return 'Codex Search is executing the single bounded broker invocation. If it returns eligible links, the local broker will attempt up to three sequential, bounded HTTPS page fetches.'
     case 'completed':
-      return 'Search completed. Its model-generated synthesis remains untrusted until Portia reviews it.'
+      return `Search completed. Its model-generated synthesis and ${record.retrievedFacts.length} accepted direct-page excerpts remain untrusted until Portia reviews them.`
     case 'not_needed':
       return 'The research policy found no material current or external fact gap, so it issued no query.'
     case 'failed':
@@ -138,7 +138,7 @@ function packetStatus(record: ResearchRecord): string {
     case 'searching':
       return 'Waiting for Codex Search to return one bounded result packet.'
     case 'completed':
-      return `Packet received with ${record.executedQueries.length} executed queries and ${record.sources.length} citation links.`
+      return `Packet received with ${record.executedQueries.length} executed queries, ${record.sources.length} citation links, ${record.retrievedFacts.length} accepted page excerpts, and ${record.fetchFailures.length} visible page-fetch failures.`
     case 'not_needed':
       return 'No provider packet was needed for this stage.'
     case 'failed':
@@ -310,6 +310,15 @@ function ResearchRecordCard({
       <dl className="research-record__request">
         <div><dt>Stage</dt><dd>{stageLabel(record.stage)}</dd></div>
         <div><dt>Materiality</dt><dd>{record.materiality ?? 'not applicable'}</dd></div>
+        <div>
+          <dt>Game-scoped research choice</dt>
+          <dd>{record.consent.version === 'legacy-no-research-consent-v0'
+            ? 'Historical record: no consent was recorded; new research is fail-closed'
+            : record.consent.decision === 'allow_search_and_page_fetch'
+              ? 'Search and bounded direct-page retrieval allowed'
+              : 'External research declined'}</dd>
+        </div>
+        <div><dt>Consent contract</dt><dd><code>{record.consent.version}</code></dd></div>
         <div className="is-wide"><dt>Reason</dt><dd>{record.reason}</dd></div>
       </dl>
 
@@ -320,9 +329,10 @@ function ResearchRecordCard({
 
       <div className="research-provider">
         <dl>
-          <div><dt>Provider</dt><dd>Codex Search ({record.provider})</dd></div>
+          <div><dt>Search provider</dt><dd>OpenClaw Codex Hosted Search ({record.provider})</dd></div>
           <div><dt>Model</dt><dd>{modelLabel(record)}</dd></div>
-          <div><dt>Transport</dt><dd>{record.transport}</dd></div>
+          <div><dt>Search transport</dt><dd>{record.transport}</dd></div>
+          <div><dt>Page retrieval</dt><dd>WebChess local bounded HTTPS fetcher</dd></div>
         </dl>
       </div>
 
@@ -372,11 +382,48 @@ function ResearchRecordCard({
 
       <div className="research-evidence">
         <section className="research-evidence__direct">
-          <h3>Directly retrieved facts: none</h3>
+          <h3>Direct-page excerpts: {record.retrievedFacts.length}</h3>
           <p>
-            This broker did not fetch third-party page text. Citation links are candidates,
-            not proof that WebChess independently verified a page.
+            These are untrusted excerpts accepted by WebChess’s bounded local fetcher.
+            They show what page bytes yielded at retrieval time; they do not prove the
+            page’s claims are true or independently corroborated.
           </p>
+          {record.retrievedFacts.map((fact) => (
+            <details className="research-page-evidence" key={fact.citationId}>
+              <summary><code>{fact.citationId}</code> · {fact.title}</summary>
+              <dl>
+                <div><dt>Requested URL</dt><dd><code>{fact.requestedUrl}</code></dd></div>
+                <div><dt>Final URL</dt><dd><code>{fact.finalUrl}</code></dd></div>
+                <div><dt>HTTP / media type</dt><dd>{fact.httpStatus} · {fact.contentType}</dd></div>
+                <div><dt>Fetcher / extractor</dt><dd><code>{fact.fetchVersion}</code> · <code>{fact.extractor}</code></dd></div>
+                <div><dt>Raw response</dt><dd>{formatInteger(fact.rawByteLength)} bytes · <code>{fact.rawContentDigest}</code></dd></div>
+                <div><dt>Accepted text</dt><dd>{formatInteger(fact.acceptedCharacterLength)} characters{fact.truncated ? ' · truncated at policy limit' : ''}</dd></div>
+                <div><dt>Accepted-text digest</dt><dd><code>{fact.contentDigest}</code></dd></div>
+                <div><dt>Retrieved</dt><dd>{fact.retrievedAt}</dd></div>
+              </dl>
+              <p><strong>Redirect chain:</strong> {fact.redirectChain.join(' → ')}</p>
+              <pre>{fact.text}</pre>
+            </details>
+          ))}
+          {record.retrievedFacts.length === 0 ? (
+            <p>No third-party page text was accepted for this record.</p>
+          ) : null}
+          <h4>Visible page-fetch failures: {record.fetchFailures.length}</h4>
+          {record.fetchFailures.length > 0 ? (
+            <ul className="research-fetch-failures">
+              {record.fetchFailures.map((failure) => (
+                <li key={`${failure.citationId}-${failure.failureCode}`}>
+                  <strong><code>{failure.citationId}</code> · {failure.status}</strong>
+                  <code>{failure.failureCode}</code>
+                  <span>{failure.requestedUrl}</span>
+                  <span>Final URL: {failure.finalUrl ?? 'not reached'} · HTTP {failure.httpStatus ?? 'not received'}</span>
+                  <span>{formatInteger(failure.rawByteLength)} raw bytes · digest {failure.rawContentDigest ?? 'not available'}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>No page-fetch failure was recorded.</p>
+          )}
         </section>
         <section className="research-evidence__synthesis">
           <h3>Codex Search synthesis (model-generated, untrusted until Portia)</h3>

@@ -79,6 +79,15 @@ export const gameRowSchema = z
     status: gameStatusSchema,
     problem: z.string().min(12).max(240),
     problem_sha256: sha256Schema,
+    research_consent_version: z.enum([
+      'legacy-no-research-consent-v0',
+      'webchess-research-consent-v1',
+    ]),
+    research_consent_decision: z.enum([
+      'allow_search_and_page_fetch',
+      'no_external_research',
+    ]),
+    research_consent_recorded_at: timestampSchema.nullable(),
     division_seed: z.string().min(1).max(512).nullable(),
     division_facets: jsonArray64Schema.nullable(),
     problem_parts: jsonArray64Schema.nullable(),
@@ -99,6 +108,29 @@ export const gameRowSchema = z
     answered_at: timestampSchema.nullable(),
   })
   .superRefine((row, context) => {
+    if (
+      row.research_consent_version === 'legacy-no-research-consent-v0' &&
+      (
+        row.research_consent_decision !== 'no_external_research' ||
+        row.research_consent_recorded_at !== null
+      )
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Historical games must remain fail-closed for research.',
+        path: ['research_consent_version'],
+      })
+    }
+    if (
+      row.research_consent_version === 'webchess-research-consent-v1' &&
+      row.research_consent_recorded_at === null
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Current research consent requires a recording timestamp.',
+        path: ['research_consent_recorded_at'],
+      })
+    }
     if (row.status !== 'dividing' && row.status !== 'division_failed') {
       const divisionFields = [
         ['division_seed', row.division_seed],

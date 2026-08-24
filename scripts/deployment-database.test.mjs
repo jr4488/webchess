@@ -104,6 +104,7 @@ describe('deployment database migration tooling', () => {
       '0012_unique_wilbur_charlotte_actions',
       '0013_wilbur_mutation_requests',
       '0014_web_memory_feedback',
+      '0015_direct_page_research_evidence',
     ])
     expect(migrations[0].sql).toContain('CREATE TABLE IF NOT EXISTS games')
     const researchMigration = migrations.find(
@@ -126,6 +127,9 @@ describe('deployment database migration tooling', () => {
     )
     const webMemoryMigration = migrations.find(
       (migration) => migration.id === '0014_web_memory_feedback',
+    )
+    const directPageResearchMigration = migrations.find(
+      (migration) => migration.id === '0015_direct_page_research_evidence',
     )
     expect(researchMigration?.sql).toContain(
       'CREATE TABLE IF NOT EXISTS research_requests',
@@ -154,6 +158,10 @@ describe('deployment database migration tooling', () => {
     expect(wilburMutationRequestsMigration?.sql).toContain(
       'CREATE TABLE wilbur_mutation_requests',
     )
+    expect(directPageResearchMigration?.sql).toContain(
+      'research_consent_version',
+    )
+    expect(directPageResearchMigration?.sql).toContain('fetch_failures')
   })
 
   it('pins the visible research broker runtime schema and privileges', async () => {
@@ -176,7 +184,7 @@ describe('deployment database migration tooling', () => {
     const requestColumns = columns.filter(
       ({ table_name }) => table_name === 'research_requests',
     )
-    expect(requestColumns).toHaveLength(32)
+    expect(requestColumns).toHaveLength(36)
     expect(requestColumns).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -188,6 +196,16 @@ describe('deployment database migration tooling', () => {
           column_name: 'content_digest',
           data_type: 'character(64)',
           not_null: false,
+        }),
+        expect.objectContaining({
+          column_name: 'research_consent_version',
+          data_type: 'text',
+          not_null: true,
+        }),
+        expect.objectContaining({
+          column_name: 'fetch_failures',
+          data_type: 'jsonb',
+          not_null: true,
         }),
       ]),
     )
@@ -371,9 +389,35 @@ describe('deployment database migration tooling', () => {
       expect(triggers[index].function_source).not.toBe('BEGIN RETURN NEW; END')
     }
 
-    expect(constraints).toHaveLength(28)
+    expect(constraints).toHaveLength(35)
     expect(constraints).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          table_name: 'games',
+          constraint_name: 'games_research_consent_shape',
+          definition: expect.stringContaining(
+            'webchess-research-consent-v1',
+          ),
+        }),
+        expect.objectContaining({
+          table_name: 'research_requests',
+          constraint_name: 'research_requests_json_shapes',
+          definition: expect.stringContaining(
+            'jsonb_array_length(fetch_failures)',
+          ),
+        }),
+        expect.objectContaining({
+          table_name: 'research_requests',
+          constraint_name: 'research_requests_page_fetch_consistency',
+          definition: expect.stringContaining(
+            'allow_search_and_page_fetch',
+          ),
+        }),
+        expect.objectContaining({
+          table_name: 'research_requests',
+          constraint_name: 'research_requests_opt_out_shape',
+          definition: expect.stringContaining("status = 'not_needed'::text"),
+        }),
         expect.objectContaining({
           constraint_name: 'wilbur_actions_charlotte_binding_version_valid',
           definition: expect.stringContaining(
@@ -409,9 +453,19 @@ describe('deployment database migration tooling', () => {
         }),
       ]),
     )
-    expect(defaults).toHaveLength(6)
+    expect(defaults).toHaveLength(11)
     expect(defaults).toEqual(
       expect.arrayContaining([
+        {
+          table_name: 'games',
+          column_name: 'research_consent_version',
+          definition: "'legacy-no-research-consent-v0'::text",
+        },
+        {
+          table_name: 'research_requests',
+          column_name: 'fetch_failures',
+          definition: "'[]'::jsonb",
+        },
         {
           table_name: 'wilbur_mutation_requests',
           column_name: 'reserved_future_rows',

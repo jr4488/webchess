@@ -52,6 +52,9 @@ describe('database row validators', () => {
       status: 'dividing',
       problem: 'How should I approach this decision?',
       problem_sha256: HASH,
+      research_consent_version: 'webchess-research-consent-v1',
+      research_consent_decision: 'allow_search_and_page_fetch',
+      research_consent_recorded_at: NOW,
       division_seed: null,
       division_facets: null,
       problem_parts: null,
@@ -74,6 +77,17 @@ describe('database row validators', () => {
 
     expect(game.revision).toBe(12n)
     expect(game.created_at).toBeInstanceOf(Date)
+    expect(game.research_consent_recorded_at).toEqual(new Date(NOW))
+    expect(gameRowSchema.safeParse({
+      ...game,
+      research_consent_version: 'legacy-no-research-consent-v0',
+      research_consent_decision: 'allow_search_and_page_fetch',
+      research_consent_recorded_at: null,
+    }).success).toBe(false)
+    expect(gameRowSchema.safeParse({
+      ...game,
+      research_consent_recorded_at: null,
+    }).success).toBe(false)
   })
 
   it('enforces post-division and answered-game fields', () => {
@@ -86,6 +100,9 @@ describe('database row validators', () => {
       status: 'answered',
       problem: 'How should I approach this decision?',
       problem_sha256: HASH,
+      research_consent_version: 'webchess-research-consent-v1',
+      research_consent_decision: 'allow_search_and_page_fetch',
+      research_consent_recorded_at: NOW,
       division_seed: null,
       division_facets: null,
       problem_parts: null,
@@ -126,6 +143,9 @@ describe('database row validators', () => {
       status: 'abandoned',
       problem: 'How should I approach this decision?',
       problem_sha256: HASH,
+      research_consent_version: 'webchess-research-consent-v1',
+      research_consent_decision: 'allow_search_and_page_fetch',
+      research_consent_recorded_at: NOW,
       division_seed: null,
       division_facets: null,
       problem_parts: null,

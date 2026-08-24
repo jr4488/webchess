@@ -17,7 +17,10 @@ import type {
 } from '../../lib/lifecycle/contracts'
 import { PORTIA_ATTACK_TYPES } from '../../lib/lifecycle/contracts'
 import { CURRENT_LIFECYCLE_VERSIONS } from '../../lib/lifecycle/versions'
-import type { ResearchRecord } from '../../lib/research'
+import {
+  RESEARCH_CONSENT_VERSION,
+  type ResearchRecord,
+} from '../../lib/research'
 import {
   buildOpenClawAnswerModelPrompt,
   OPENCLAW_LOCAL_MODEL_RUN_SYSTEM_PROMPT,
@@ -265,6 +268,11 @@ function makePortableGame(): DurableGame {
     revision: 17,
     status: 'answered',
     problem: PORTABLE_QUESTION,
+    researchConsent: {
+      version: RESEARCH_CONSENT_VERSION,
+      decision: 'allow_search_and_page_fetch',
+      recordedAt: '2026-08-02T20:00:00.000Z',
+    },
     division: {
       seed: 'portable-seed',
       facets,
@@ -335,6 +343,11 @@ function makePortableResearch(): ResearchRecord {
     gameId: PORTABLE_GAME_ID,
     stage: 'portia',
     requestedBy: 'research-policy',
+    consent: {
+      version: RESEARCH_CONSENT_VERSION,
+      decision: 'allow_search_and_page_fetch',
+      recordedAt: '2026-08-02T20:00:00.000Z',
+    },
     policyVersion: 'research-policy/1',
     materiality: 'required',
     reason: 'The prompt depends on a current external benchmark.',
@@ -355,6 +368,7 @@ function makePortableResearch(): ResearchRecord {
     searchSynthesis: 'The source supports a baseline and a stopping rule.',
     directPageTextFetched: false,
     retrievedFacts: [],
+    fetchFailures: [],
     sources: [{
       id: '82000000-0000-4000-8000-000000000001',
       citationId: 'source-1',
@@ -1261,6 +1275,11 @@ describe('LifecycleStage terminal Gate experience', () => {
       gameId: '73000000-0000-4000-8000-000000000001',
       stage: 'portia',
       requestedBy: 'research-policy',
+      consent: {
+        version: RESEARCH_CONSENT_VERSION,
+        decision: 'allow_search_and_page_fetch',
+        recordedAt: '2026-08-02T20:00:00.000Z',
+      },
       policyVersion: 'research-policy/1',
       materiality: 'required',
       reason: 'The prompt depends on a current external benchmark.',
@@ -1281,6 +1300,7 @@ describe('LifecycleStage terminal Gate experience', () => {
       searchSynthesis: 'The available links separate latency from throughput.',
       directPageTextFetched: false,
       retrievedFacts: [],
+      fetchFailures: [],
       sources: [{
         id: '82000000-0000-4000-8000-000000000001',
         citationId: 'source-1',

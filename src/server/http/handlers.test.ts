@@ -31,6 +31,11 @@ const GAME: DurableGameDto = {
   revision: 3,
   status: 'playing',
   problem: 'Which project should I choose?',
+  researchConsent: {
+    version: 'webchess-research-consent-v1',
+    decision: 'allow_search_and_page_fetch',
+    recordedAt: '2026-07-26T20:00:00.000Z',
+  },
   division: null,
   state: null,
   answer: null,
@@ -150,9 +155,15 @@ describe('authenticated API handlers', () => {
     dependencies = createDependencies(services)
   })
 
-  it('creates a durable game from only a bounded problem and server context', async () => {
+  it('creates a durable game from a bounded problem and versioned research choice', async () => {
     const divideRequest = request('/api/divide', {
-      body: { problem: '  Which project should I choose?  ' },
+      body: {
+        problem: '  Which project should I choose?  ',
+        researchConsent: {
+          version: 'webchess-research-consent-v1',
+          decision: 'allow_search_and_page_fetch',
+        },
+      },
     })
     divideRequest.headers.set('x-forwarded-for', '203.0.113.17')
     const response = await handleDivideRequest(
@@ -166,6 +177,10 @@ describe('authenticated API handlers', () => {
       expect.objectContaining({
         ownerId: 'user_test',
         problem: 'Which project should I choose?',
+        researchConsent: {
+          version: 'webchess-research-consent-v1',
+          decision: 'allow_search_and_page_fetch',
+        },
         idempotencyKey: IDEMPOTENCY_KEY,
         ipAddress: '203.0.113.17',
         requestId: expect.any(String),
@@ -182,6 +197,10 @@ describe('authenticated API handlers', () => {
         body: {
           problem: 'Which prior observation is relevant to this new decision?',
           memoryObservationIds: [observationId],
+          researchConsent: {
+            version: 'webchess-research-consent-v1',
+            decision: 'no_external_research',
+          },
         },
       }),
       dependencies,
@@ -190,6 +209,10 @@ describe('authenticated API handlers', () => {
     expect(response.status).toBe(201)
     expect(services.divide).toHaveBeenCalledWith(expect.objectContaining({
       memoryObservationIds: [observationId],
+      researchConsent: {
+        version: 'webchess-research-consent-v1',
+        decision: 'no_external_research',
+      },
     }))
   })
 
@@ -235,6 +258,10 @@ describe('authenticated API handlers', () => {
       request('/api/divide', {
         body: {
           problem: 'Question',
+          researchConsent: {
+            version: 'webchess-research-consent-v1',
+            decision: 'allow_search_and_page_fetch',
+          },
           apiKey: 'visitor-key',
           model: 'visitor-model',
         },

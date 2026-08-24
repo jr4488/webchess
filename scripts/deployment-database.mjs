@@ -171,6 +171,9 @@ const RUNTIME_COLUMN_CONTRACT = {
     ['updated_at', 'timestamp with time zone', true],
     ['completed_at', 'timestamp with time zone', false],
     ['answered_at', 'timestamp with time zone', false],
+    ['research_consent_version', 'text', true],
+    ['research_consent_decision', 'text', true],
+    ['research_consent_recorded_at', 'timestamp with time zone', false],
   ],
   game_events: [
     ['game_id', 'uuid', true],
@@ -457,6 +460,10 @@ const RUNTIME_COLUMN_CONTRACT = {
     ['completed_at', 'timestamp with time zone', false],
     ['created_at', 'timestamp with time zone', true],
     ['updated_at', 'timestamp with time zone', true],
+    ['research_consent_version', 'text', true],
+    ['research_consent_decision', 'text', true],
+    ['research_consent_recorded_at', 'timestamp with time zone', false],
+    ['fetch_failures', 'jsonb', true],
   ],
   research_sources: [
     ['id', 'uuid', true],
@@ -751,6 +758,76 @@ const RUNTIME_TRIGGER_CONTRACT = [
 
 const RUNTIME_CONSTRAINT_CONTRACT = [
   {
+    table_name: 'games',
+    constraint_name: 'games_research_consent_decision_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (research_consent_decision = ANY (ARRAY['allow_search_and_page_fetch'::text, 'no_external_research'::text]))",
+  },
+  {
+    table_name: 'games',
+    constraint_name: 'games_research_consent_shape',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (research_consent_version = 'legacy-no-research-consent-v0'::text AND research_consent_decision = 'no_external_research'::text AND research_consent_recorded_at IS NULL OR research_consent_version = 'webchess-research-consent-v1'::text AND research_consent_recorded_at IS NOT NULL)",
+  },
+  {
+    table_name: 'games',
+    constraint_name: 'games_research_consent_version_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (research_consent_version = ANY (ARRAY['legacy-no-research-consent-v0'::text, 'webchess-research-consent-v1'::text]))",
+  },
+  {
+    table_name: 'research_requests',
+    constraint_name: 'research_requests_consent_shape',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (research_consent_version = 'legacy-no-research-consent-v0'::text AND research_consent_decision = 'no_external_research'::text AND research_consent_recorded_at IS NULL OR research_consent_version = 'webchess-research-consent-v1'::text AND (research_consent_decision = ANY (ARRAY['allow_search_and_page_fetch'::text, 'no_external_research'::text])) AND research_consent_recorded_at IS NOT NULL)",
+  },
+  {
+    table_name: 'research_requests',
+    constraint_name: 'research_requests_json_shapes',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (jsonb_typeof(executed_queries) = 'array'::text AND jsonb_typeof(retrieved_facts) = 'array'::text AND jsonb_array_length(retrieved_facts) >= 0 AND jsonb_array_length(retrieved_facts) <= 3 AND jsonb_typeof(fetch_failures) = 'array'::text AND jsonb_array_length(fetch_failures) >= 0 AND jsonb_array_length(fetch_failures) <= 3 AND (jsonb_array_length(retrieved_facts) + jsonb_array_length(fetch_failures)) <= 3 AND jsonb_typeof(injection_signals) = 'array'::text)",
+  },
+  {
+    table_name: 'research_requests',
+    constraint_name: 'research_requests_opt_out_shape',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (research_consent_version <> 'webchess-research-consent-v1'::text OR research_consent_decision <> 'no_external_research'::text OR status = 'not_needed'::text AND query IS NULL AND attempt_count = 0 AND jsonb_array_length(executed_queries) = 0 AND jsonb_array_length(retrieved_facts) = 0 AND jsonb_array_length(fetch_failures) = 0)",
+  },
+  {
+    table_name: 'research_requests',
+    constraint_name: 'research_requests_page_fetch_consistency',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (direct_page_text_fetched = (jsonb_array_length(retrieved_facts) > 0) AND (research_consent_decision = 'allow_search_and_page_fetch'::text OR NOT direct_page_text_fetched AND jsonb_array_length(fetch_failures) = 0))",
+  },
+  {
     table_name: 'wilbur_actions',
     constraint_name: 'wilbur_actions_charlotte_binding_version_valid',
     constraint_type: 'c',
@@ -1024,6 +1101,31 @@ const RUNTIME_CONSTRAINT_CONTRACT = [
 ]
 
 const RUNTIME_DEFAULT_CONTRACT = [
+  {
+    table_name: 'games',
+    column_name: 'research_consent_version',
+    definition: "'legacy-no-research-consent-v0'::text",
+  },
+  {
+    table_name: 'games',
+    column_name: 'research_consent_decision',
+    definition: "'no_external_research'::text",
+  },
+  {
+    table_name: 'research_requests',
+    column_name: 'research_consent_version',
+    definition: "'legacy-no-research-consent-v0'::text",
+  },
+  {
+    table_name: 'research_requests',
+    column_name: 'research_consent_decision',
+    definition: "'no_external_research'::text",
+  },
+  {
+    table_name: 'research_requests',
+    column_name: 'fetch_failures',
+    definition: "'[]'::jsonb",
+  },
   {
     table_name: 'wilbur_mutation_requests',
     column_name: 'reserved_future_rows',
@@ -1384,6 +1486,13 @@ const RUNTIME_COMPATIBILITY_SQL = `
     )
       OR constraint_catalog.conname IN (
         'games_id_clerk_user_id_key',
+        'games_research_consent_decision_valid',
+        'games_research_consent_shape',
+        'games_research_consent_version_valid',
+        'research_requests_consent_shape',
+        'research_requests_json_shapes',
+        'research_requests_opt_out_shape',
+        'research_requests_page_fetch_consistency',
         'wilbur_actions_charlotte_binding_version_valid',
         'wilbur_observations_id_clerk_user_id_key'
       )
@@ -1419,6 +1528,21 @@ const RUNTIME_COMPATIBILITY_SQL = `
       'wilbur_mutation_requests',
       'web_memory_links'
     )
+      OR (
+        table_relation.relname = 'games'
+        AND attribute.attname IN (
+          'research_consent_version',
+          'research_consent_decision'
+        )
+      )
+      OR (
+        table_relation.relname = 'research_requests'
+        AND attribute.attname IN (
+          'research_consent_version',
+          'research_consent_decision',
+          'fetch_failures'
+        )
+      )
   )
   SELECT
     active_schema.schema_name IS NOT NULL AS schema_resolved,

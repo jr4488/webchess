@@ -1,5 +1,7 @@
 // @vitest-environment node
 
+import { createHash } from 'node:crypto'
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const cliMocks = vi.hoisted(() => ({
@@ -15,9 +17,12 @@ vi.mock('../openclaw/cli', async (importOriginal) => {
 })
 
 import type {
+  ResearchFetchFailure,
   ResearchRecord,
+  ResearchRetrievedFact,
   ResearchSource,
 } from '../../lib/research'
+import { RESEARCH_CONSENT_VERSION } from '../../lib/research'
 import {
   OpenClawCliError,
   runOpenClawWebSearch,
@@ -47,6 +52,11 @@ const REQUEST_ID = '30000000-0000-4000-8000-000000000003'
 const CREATED_AT = '2026-08-02T16:00:00.000Z'
 const MARKER_ID = '0123456789abcdef'
 const PROBLEM = 'Give me a novel way to make LLMs faster.'
+const RESEARCH_CONSENT = {
+  version: RESEARCH_CONSENT_VERSION,
+  decision: 'allow_search_and_page_fetch',
+  recordedAt: CREATED_AT,
+} as const
 
 const requestContext = {
   ownerId: OWNER_ID,
@@ -55,6 +65,72 @@ const requestContext = {
   lifecycleState: 'portia_complete',
   stage: 'answer' as const,
   problem: PROBLEM,
+  researchConsent: RESEARCH_CONSENT,
+}
+
+type UnstoredResearchSource = Omit<ResearchSource, 'createdAt' | 'id'>
+
+function acceptedDigest(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+function directlyFetchedFact(source: UnstoredResearchSource): ResearchRetrievedFact {
+  const text = `Deterministic directly retrieved evidence for ${source.citationId}.`
+  return {
+    citationId: source.citationId,
+    requestedUrl: source.url,
+    finalUrl: source.url,
+    title: source.title,
+    provider: 'webchess-direct-https',
+    fetchVersion: 'webchess-direct-page-fetch-v1',
+    retrievedAt: CREATED_AT,
+    httpStatus: 200,
+    contentType: 'text/html',
+    extractor: 'webchess-readable-text-v1',
+    rawByteLength: Buffer.byteLength(text, 'utf8'),
+    rawContentDigest: acceptedDigest(text),
+    rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+    acceptedCharacterLength: text.length,
+    contentDigest: acceptedDigest(text),
+    digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+    redirectChain: [source.url],
+    text,
+    truncated: false,
+    untrusted: true,
+    contentKind: 'direct_page_text',
+  }
+}
+
+function directFetchFailure(source: UnstoredResearchSource): ResearchFetchFailure {
+  return {
+    citationId: source.citationId,
+    requestedUrl: source.url,
+    finalUrl: source.url,
+    status: 'refused',
+    failureCode: 'page_fetch_injection_refused',
+    httpStatus: 200,
+    fetchVersion: 'webchess-direct-page-fetch-v1',
+    extractor: 'webchess-readable-text-v1',
+    rawByteLength: 128,
+    rawContentDigest: 'b'.repeat(64),
+    rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+    acceptedCharacterLength: 0,
+    truncated: false,
+    contentDigest: null,
+    digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+    redirectChain: [source.url],
+    injectionSignalsDetected: ['fetch_r1_prompt_injection_language'],
+    retrievedAt: CREATED_AT,
+  }
+}
+
+const fetchPage = vi.fn(async (source: UnstoredResearchSource) => ({
+  fact: directlyFetchedFact(source),
+  injectionSignalsDetected: [] as readonly string[],
+}))
+
+function createBroker(repository: ResearchRepositoryPort): DurableResearchBroker {
+  return new DurableResearchBroker(repository, { fetch: fetchPage })
 }
 
 function wrappedContent(body: string): string {
@@ -111,6 +187,7 @@ function record(
     gameId: GAME_ID,
     stage: 'answer',
     requestedBy: 'research-policy',
+    consent: RESEARCH_CONSENT,
     policyVersion: RESEARCH_POLICY_VERSION,
     materiality: 'helpful',
     reason: 'Current external evidence can improve the answer.',
@@ -125,6 +202,7 @@ function record(
     searchSynthesis: 'A model-generated search synthesis.',
     directPageTextFetched: false,
     retrievedFacts: [],
+    fetchFailures: [],
     sources: [],
     omittedSourceCount: 0,
     injectionSignalsDetected: [],
@@ -163,6 +241,7 @@ class FakeResearchRepository implements ResearchRepositoryPort {
       lifecycleRunId: input.lifecycleRunId,
       gameId: input.gameId,
       stage: input.stage,
+      consent: input.researchConsent,
       policyVersion: input.policyVersion,
       materiality: null,
       reason: input.reason,
@@ -191,6 +270,7 @@ class FakeResearchRepository implements ResearchRepositoryPort {
           lifecycleRunId: input.lifecycleRunId,
           gameId: input.gameId,
           stage: input.stage,
+          consent: input.researchConsent,
           policyVersion: input.policyVersion,
           materiality: input.materiality,
           reason: input.reason,
@@ -221,8 +301,9 @@ class FakeResearchRepository implements ResearchRepositoryPort {
         model: input.model,
         executedQueries: [...input.executedQueries],
         searchSynthesis: input.searchSynthesis,
-        directPageTextFetched: false,
-        retrievedFacts: [],
+        directPageTextFetched: input.directPageTextFetched,
+        retrievedFacts: [...input.retrievedFacts],
+        fetchFailures: [...input.fetchFailures],
         sources: input.sources.map(sourceWithIds),
         omittedSourceCount: input.omittedSourceCount,
         injectionSignalsDetected: [...input.injectionSignalsDetected],
@@ -243,6 +324,9 @@ class FakeResearchRepository implements ResearchRepositoryPort {
         model: null,
         executedQueries: [],
         searchSynthesis: null,
+        directPageTextFetched: false,
+        retrievedFacts: [],
+        fetchFailures: [],
         sources: [],
         contentDigest: null,
         failureCode: input.failureCode,
@@ -259,6 +343,11 @@ beforeEach(() => {
   vi.stubEnv('WEBCHESS_OPENCLAW_TIMEOUT_MS', '150000')
   vi.stubEnv('WEBCHESS_OPENCLAW_TRANSPORT', 'gateway')
   searchExecutor.mockReset()
+  fetchPage.mockReset()
+  fetchPage.mockImplementation(async (source: UnstoredResearchSource) => ({
+    fact: directlyFetchedFact(source),
+    injectionSignalsDetected: [],
+  }))
 })
 
 afterEach(() => {
@@ -339,27 +428,27 @@ describe('Codex Search normalization', () => {
 
   it('excludes insecure, credentialed, private, and local source links', () => {
     const normalized = normalizeCodexSearch(searchResult([
-      '[Allowed](https://public.example/path).',
-      '[Plain HTTP](http://public.example/path).',
-      '[Credentials](https://user:password@public.example/path).',
+      '[Allowed](https://public.example.com/path).',
+      '[Plain HTTP](http://public.example.com/path).',
+      '[Credentials](https://user:password@public.example.com/path).',
       '[Loopback](https://127.0.0.1/private).',
       '[Private v4](https://10.0.0.8/private).',
       '[Private v6](https://[::1]/private).',
       '[Local host](https://localhost/private).',
       '[Internal host](https://service.internal/private).',
-      '[Nonstandard port](https://public.example:444/path).',
+      '[Nonstandard port](https://public.example.com:444/path).',
     ].join('\n')))
 
     expect(normalized.sources.map((source) => source.url)).toEqual([
-      'https://public.example/path',
+      'https://public.example.com/path',
     ])
   })
 })
 
 describe('durable research broker', () => {
-  it('performs one visible Codex invocation and completes without claiming fetched facts', async () => {
+  it('performs one visible Codex invocation and keeps direct-page evidence distinct', async () => {
     const repository = new FakeResearchRepository()
-    const broker = new DurableResearchBroker(repository)
+    const broker = createBroker(repository)
     const query = planResearchForStage(requestContext).query
     if (!query) throw new Error('test_policy_query_missing')
     searchExecutor.mockResolvedValue(searchResult(
@@ -396,17 +485,50 @@ describe('durable research broker', () => {
       status: 'completed',
       provider: 'codex',
       model: 'gpt-5.6-codex-search',
-      directPageTextFetched: false,
-      retrievedFacts: [],
+      directPageTextFetched: true,
+      retrievedFacts: [expect.objectContaining({
+        citationId: 'R1',
+        provider: 'webchess-direct-https',
+        untrusted: true,
+      })],
+      fetchFailures: [],
       searchSynthesis: expect.stringContaining('Grounded model synthesis'),
     })
+    expect(fetchPage).toHaveBeenCalledTimes(1)
     expect(result.sources).toHaveLength(1)
+  })
+
+  it('persists a visible page-fetch refusal without discarding the search synthesis', async () => {
+    const repository = new FakeResearchRepository()
+    const broker = createBroker(repository)
+    searchExecutor.mockResolvedValue(searchResult(
+      'Grounded model synthesis with [one source](https://example.edu/research).',
+    ))
+    fetchPage.mockImplementationOnce(async (source: UnstoredResearchSource) => {
+      throw directFetchFailure(source)
+    })
+
+    const result = await broker.ensureForStage(requestContext)
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      directPageTextFetched: false,
+      retrievedFacts: [],
+      fetchFailures: [expect.objectContaining({
+        citationId: 'R1',
+        failureCode: 'page_fetch_injection_refused',
+      })],
+      injectionSignalsDetected: ['fetch_r1_prompt_injection_language'],
+      searchSynthesis: expect.stringContaining('Grounded model synthesis'),
+    })
+    expect(repository.complete).toHaveBeenCalledTimes(1)
+    expect(repository.fail).not.toHaveBeenCalled()
   })
 
   it('persists and displays the effective configured timeout below the policy ceiling', async () => {
     vi.stubEnv('WEBCHESS_OPENCLAW_TIMEOUT_MS', '90000')
     const repository = new FakeResearchRepository()
-    const broker = new DurableResearchBroker(repository)
+    const broker = createBroker(repository)
     searchExecutor.mockResolvedValue(searchResult(
       'Grounded synthesis with [one source](https://example.edu/research).',
     ))
@@ -426,7 +548,7 @@ describe('durable research broker', () => {
 
   it('lets only the durable insert winner invoke Codex Search under concurrency', async () => {
     const repository = new FakeResearchRepository()
-    const broker = new DurableResearchBroker(repository)
+    const broker = createBroker(repository)
     searchExecutor.mockResolvedValue(searchResult(
       'Grounded synthesis with [one source](https://example.edu/research).',
     ))
@@ -447,7 +569,7 @@ describe('durable research broker', () => {
 
   it('records a terminal failure when normalization finds no safe source', async () => {
     const repository = new FakeResearchRepository()
-    const broker = new DurableResearchBroker(repository)
+    const broker = createBroker(repository)
     searchExecutor.mockResolvedValue(searchResult(
       'Only an [insecure source](http://example.com/no-proof) was returned.',
     ))
@@ -486,7 +608,7 @@ describe('durable research broker', () => {
     'maps %s to a terminal %s record without a hidden retry',
     async (error, status, failureCode) => {
       const repository = new FakeResearchRepository()
-      const broker = new DurableResearchBroker(repository)
+      const broker = createBroker(repository)
       searchExecutor.mockRejectedValue(error)
 
       const first = await broker.ensureForStage(requestContext)
@@ -506,7 +628,7 @@ describe('durable research broker', () => {
       searchSynthesis: 'Previously persisted synthesis.',
     })
     const repository = new FakeResearchRepository([existing])
-    const broker = new DurableResearchBroker(repository)
+    const broker = createBroker(repository)
 
     await expect(broker.ensureForStage(requestContext)).resolves.toBe(existing)
     expect(repository.start).not.toHaveBeenCalled()
@@ -526,7 +648,7 @@ describe('durable research broker', () => {
       startedAt: null,
     })
     const repository = new FakeResearchRepository([obsolete])
-    const broker = new DurableResearchBroker(repository)
+    const broker = createBroker(repository)
     searchExecutor.mockResolvedValue(searchResult(
       'Current evidence is available from [NIST](https://www.nist.gov/example).',
     ))
@@ -554,7 +676,7 @@ describe('durable research broker', () => {
       completedAt: null,
     })
     const repository = new FakeResearchRepository([stale])
-    const broker = new DurableResearchBroker(repository)
+    const broker = createBroker(repository)
 
     const result = await broker.ensureForStage(requestContext)
 
@@ -574,7 +696,7 @@ describe('durable research broker', () => {
 
   it('records a not-needed decision without starting the executor', async () => {
     const repository = new FakeResearchRepository()
-    const broker = new DurableResearchBroker(repository)
+    const broker = createBroker(repository)
 
     const result = await broker.ensureForStage({
       ...requestContext,
@@ -586,5 +708,38 @@ describe('durable research broker', () => {
     expect(repository.recordNotNeeded).toHaveBeenCalledTimes(1)
     expect(repository.start).not.toHaveBeenCalled()
     expect(searchExecutor).not.toHaveBeenCalled()
+  })
+
+  it('honors explicit opt-out without invoking OpenClaw or the page fetcher', async () => {
+    const repository = new FakeResearchRepository()
+    const broker = createBroker(repository)
+    const optOutConsent = {
+      version: RESEARCH_CONSENT_VERSION,
+      decision: 'no_external_research',
+      recordedAt: CREATED_AT,
+    } as const
+
+    const result = await broker.ensureForStage({
+      ...requestContext,
+      problem: 'What is the latest medical guidance today?',
+      researchConsent: optOutConsent,
+      stage: 'portia',
+    })
+
+    expect(result).toMatchObject({
+      status: 'not_needed',
+      consent: optOutConsent,
+      query: null,
+      attemptCount: 0,
+      directPageTextFetched: false,
+      retrievedFacts: [],
+      fetchFailures: [],
+    })
+    expect(repository.recordNotNeeded).toHaveBeenCalledWith(
+      expect.objectContaining({ researchConsent: optOutConsent }),
+    )
+    expect(repository.start).not.toHaveBeenCalled()
+    expect(searchExecutor).not.toHaveBeenCalled()
+    expect(fetchPage).not.toHaveBeenCalled()
   })
 })

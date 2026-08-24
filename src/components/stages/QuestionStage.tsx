@@ -3,6 +3,7 @@ import { ArrowRight, ChevronRight, Database, Eye, Layers, Target } from 'lucide-
 
 import type { HostedProvider } from '../../lib/hosted-provider'
 import { normalizeProblemInput } from '../../lib/problem'
+import type { ResearchConsentDecision } from '../../lib/research'
 import { RadialBoard } from '../RadialBoard'
 
 const EXAMPLE_PROBLEMS = [
@@ -14,7 +15,9 @@ const EXAMPLE_PROBLEMS = [
 interface QuestionStageProps {
   problem: string
   provider: HostedProvider
+  researchConsentDecision: ResearchConsentDecision | null
   setProblem: (value: string) => void
+  setResearchConsentDecision: (value: ResearchConsentDecision) => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
   selectedMemoryCount?: number
   onOpenMemory?: () => void
@@ -23,13 +26,18 @@ interface QuestionStageProps {
 export function QuestionStage({
   problem,
   provider,
+  researchConsentDecision,
   setProblem,
+  setResearchConsentDecision,
   onSubmit,
   selectedMemoryCount = 0,
   onOpenMemory,
 }: QuestionStageProps) {
   const normalizedLength = normalizeProblemInput(problem).length
-  const canBegin = normalizedLength >= 12 && normalizedLength <= 240
+  const canBegin =
+    normalizedLength >= 12 &&
+    normalizedLength <= 240 &&
+    researchConsentDecision !== null
   const needsMoreDetail = problem.length > 0 && normalizedLength < 12
 
   return (
@@ -64,6 +72,43 @@ export function QuestionStage({
             />
             <span className="character-count" id="problem-character-count">{problem.length}/240</span>
           </div>
+          <fieldset
+            className="research-consent"
+            aria-describedby="research-consent-disclosure"
+          >
+            <legend>External research for this game</legend>
+            <label>
+              <input
+                type="radio"
+                name="research-consent"
+                value="allow_search_and_page_fetch"
+                checked={researchConsentDecision === 'allow_search_and_page_fetch'}
+                onChange={() => setResearchConsentDecision('allow_search_and_page_fetch')}
+                required
+              />
+              <span>
+                <strong>Allow bounded research</strong>
+                Send the exact query shown in the lifecycle through OpenClaw Codex
+                Hosted Search, then let this local WebChess process fetch at most
+                three returned HTTPS pages.
+              </span>
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="research-consent"
+                value="no_external_research"
+                checked={researchConsentDecision === 'no_external_research'}
+                onChange={() => setResearchConsentDecision('no_external_research')}
+                required
+              />
+              <span>
+                <strong>Do not use external research</strong>
+                Continue with the model and board lifecycle without Hosted Search
+                or direct page retrieval for this game.
+              </span>
+            </label>
+          </fieldset>
           <button className="primary-button" type="submit" disabled={!canBegin}>
             Divide the problem
             <ArrowRight size={18} />
@@ -114,6 +159,14 @@ export function QuestionStage({
                   : 'OpenAI Platform data controls'
               )}
             </a>
+          </p>
+          <p className="form-data-note" id="research-consent-disclosure">
+            This versioned choice is saved with this game and inherited by a
+            bounded retry. This game UI does not ask for or store OpenClaw or
+            OpenAI credentials; the local OpenClaw runtime handles its authenticated
+            provider path separately. Search and page retrieval are recorded
+            separately, page text remains untrusted, failures stay visible, and
+            you can instead opt out without blocking play.
           </p>
         </form>
 

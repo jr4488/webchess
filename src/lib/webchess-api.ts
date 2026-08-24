@@ -18,10 +18,18 @@ import type {
 } from './lifecycle/contracts'
 import { CURRENT_LIFECYCLE_VERSIONS } from './lifecycle/versions'
 import {
+  RESEARCH_CONSENT_VERSION,
   RESEARCH_STAGES,
   RESEARCH_STATUSES,
 } from './research/contracts'
-import type { ResearchRecord } from './research/contracts'
+import type {
+  ResearchConsent,
+  ResearchConsentDecision,
+  ResearchFetchFailure,
+  ResearchRecord,
+  ResearchRetrievedFact,
+  ResearchSource,
+} from './research/contracts'
 import type {
   CellCoord,
   GeneratedAnswer,
@@ -60,6 +68,7 @@ export interface DurableGame {
   revision: number
   status: DurableGameStatus
   problem: string
+  researchConsent: ResearchConsent
   division: GameDivision | null
   state: GameView | null
   answer: GeneratedAnswer | null
@@ -103,6 +112,7 @@ export interface UpdateWilburActionCommand {
 }
 
 export interface DivideProblemOptions extends MutationOptions {
+  researchConsentDecision: ResearchConsentDecision
   /** Explicitly selected prior Wilbur observations; never inferred silently. */
   memoryObservationIds?: readonly string[]
 }
@@ -174,6 +184,10 @@ export interface MutationOptions extends RequestOptions {
   idempotencyKey?: string
 }
 
+export interface DivideProblemOptions extends MutationOptions {
+  researchConsentDecision: ResearchConsentDecision
+}
+
 const GAME_STATUSES: ReadonlySet<string> = new Set<DurableGameStatus>([
   'dividing',
   'division_failed',
@@ -238,6 +252,117 @@ function invalidResponse(message: string, cause?: unknown): WebChessApiError {
     kind: 'invalid-response',
     cause,
   })
+}
+
+const SHA256_ROUND_CONSTANTS = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+  0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+  0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+  0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+])
+
+function rotateRight(value: number, count: number): number {
+  return (value >>> count) | (value << (32 - count))
+}
+
+/** Browser-safe SHA-256 for the small, bounded direct-page excerpts. */
+function sha256Utf8Hex(value: string): string {
+  const input = new TextEncoder().encode(value)
+  const paddedLength = Math.ceil((input.length + 9) / 64) * 64
+  const padded = new Uint8Array(paddedLength)
+  padded.set(input)
+  padded[input.length] = 0x80
+
+  const bitLength = input.length * 8
+  const paddedView = new DataView(padded.buffer)
+  paddedView.setUint32(
+    paddedLength - 8,
+    Math.floor(bitLength / 0x1_0000_0000),
+    false,
+  )
+  paddedView.setUint32(paddedLength - 4, bitLength >>> 0, false)
+
+  const hash = new Uint32Array([
+    0x6a09e667,
+    0xbb67ae85,
+    0x3c6ef372,
+    0xa54ff53a,
+    0x510e527f,
+    0x9b05688c,
+    0x1f83d9ab,
+    0x5be0cd19,
+  ])
+  const schedule = new Uint32Array(64)
+
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let index = 0; index < 16; index += 1) {
+      schedule[index] = paddedView.getUint32(offset + index * 4, false)
+    }
+    for (let index = 16; index < 64; index += 1) {
+      const prior15 = schedule[index - 15]
+      const prior2 = schedule[index - 2]
+      const sigma0 = rotateRight(prior15, 7) ^
+        rotateRight(prior15, 18) ^
+        (prior15 >>> 3)
+      const sigma1 = rotateRight(prior2, 17) ^
+        rotateRight(prior2, 19) ^
+        (prior2 >>> 10)
+      schedule[index] = (
+        schedule[index - 16] + sigma0 + schedule[index - 7] + sigma1
+      ) >>> 0
+    }
+
+    let a = hash[0]
+    let b = hash[1]
+    let c = hash[2]
+    let d = hash[3]
+    let e = hash[4]
+    let f = hash[5]
+    let g = hash[6]
+    let h = hash[7]
+
+    for (let index = 0; index < 64; index += 1) {
+      const sigma1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25)
+      const choice = (e & f) ^ (~e & g)
+      const temporary1 = (
+        h + sigma1 + choice + SHA256_ROUND_CONSTANTS[index] + schedule[index]
+      ) >>> 0
+      const sigma0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22)
+      const majority = (a & b) ^ (a & c) ^ (b & c)
+      const temporary2 = (sigma0 + majority) >>> 0
+      h = g
+      g = f
+      f = e
+      e = (d + temporary1) >>> 0
+      d = c
+      c = b
+      b = a
+      a = (temporary1 + temporary2) >>> 0
+    }
+
+    hash[0] = (hash[0] + a) >>> 0
+    hash[1] = (hash[1] + b) >>> 0
+    hash[2] = (hash[2] + c) >>> 0
+    hash[3] = (hash[3] + d) >>> 0
+    hash[4] = (hash[4] + e) >>> 0
+    hash[5] = (hash[5] + f) >>> 0
+    hash[6] = (hash[6] + g) >>> 0
+    hash[7] = (hash[7] + h) >>> 0
+  }
+
+  return Array.from(hash, (word) => word.toString(16).padStart(8, '0')).join('')
 }
 
 function parseDivision(value: unknown): GameDivision | null {
@@ -315,6 +440,41 @@ export function parseDurableGame(value: unknown): DurableGame {
   ) {
     throw invalidResponse('Game source id is invalid.')
   }
+  const researchConsent = recordOf(game.researchConsent, 'Game research consent')
+  const consentVersion = nonEmptyString(
+    researchConsent.version,
+    'Game research consent version',
+  )
+  const consentDecision = nonEmptyString(
+    researchConsent.decision,
+    'Game research consent decision',
+  )
+  const consentRecordedAt = researchConsent.recordedAt === null
+    ? null
+    : timestampString(
+        researchConsent.recordedAt,
+        'Game research consent time',
+      )
+  if (
+    ![
+      'legacy-no-research-consent-v0',
+      RESEARCH_CONSENT_VERSION,
+    ].includes(consentVersion) ||
+    ![
+      'allow_search_and_page_fetch',
+      'no_external_research',
+    ].includes(consentDecision) ||
+    (
+      consentVersion === 'legacy-no-research-consent-v0' &&
+      (
+        consentDecision !== 'no_external_research' ||
+        consentRecordedAt !== null
+      )
+    ) ||
+    (consentVersion === RESEARCH_CONSENT_VERSION && consentRecordedAt === null)
+  ) {
+    throw invalidResponse('Game research consent is invalid.')
+  }
 
   return {
     id: nonEmptyString(game.id, 'Game id'),
@@ -322,6 +482,11 @@ export function parseDurableGame(value: unknown): DurableGame {
     revision: nonnegativeInteger(game.revision, 'Game revision'),
     status: status as DurableGameStatus,
     problem: nonEmptyString(game.problem, 'Game problem'),
+    researchConsent: {
+      version: consentVersion as ResearchConsent['version'],
+      decision: consentDecision as ResearchConsentDecision,
+      recordedAt: consentRecordedAt,
+    },
     division: parseDivision(game.division),
     state: parseGameState(game.state),
     answer: parseAnswer(game.answer),
@@ -536,6 +701,44 @@ function parseWebMemoryEvidence(
   return evidence as unknown as WebMemoryEvidence
 }
 
+function parseResearchConsent(value: unknown, label: string): ResearchConsent {
+  const consent = recordOf(value, label)
+  const version = nonEmptyString(consent.version, `${label} version`)
+  const decision = nonEmptyString(consent.decision, `${label} decision`)
+  const recordedAt = consent.recordedAt === null
+    ? null
+    : timestampString(consent.recordedAt, `${label} time`)
+  if (
+    !['legacy-no-research-consent-v0', RESEARCH_CONSENT_VERSION].includes(version) ||
+    !['allow_search_and_page_fetch', 'no_external_research'].includes(decision) ||
+    (version === 'legacy-no-research-consent-v0' && (
+      decision !== 'no_external_research' || recordedAt !== null
+    )) ||
+    (version === RESEARCH_CONSENT_VERSION && recordedAt === null)
+  ) {
+    throw invalidResponse(`${label} is invalid.`)
+  }
+  return {
+    version: version as ResearchConsent['version'],
+    decision: decision as ResearchConsentDecision,
+    recordedAt,
+  }
+}
+
+function safeEvidenceUrl(value: unknown, label: string): string {
+  const candidate = nonEmptyString(value, label)
+  let parsed: URL
+  try {
+    parsed = new URL(candidate)
+  } catch {
+    throw invalidResponse(`${label} is invalid.`)
+  }
+  if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '') {
+    throw invalidResponse(`${label} is unsafe.`)
+  }
+  return parsed.toString()
+}
+
 function parseResearchRecord(value: unknown): ResearchRecord {
   const research = recordOf(value, 'Lifecycle research')
   const stage = nonEmptyString(research.stage, 'Research stage')
@@ -543,10 +746,16 @@ function parseResearchRecord(value: unknown): ResearchRecord {
   if (!RESEARCH_STAGE_SET.has(stage) || !RESEARCH_STATUS_SET.has(status)) {
     throw invalidResponse('Lifecycle research stage or status is invalid.')
   }
+  const id = nonEmptyString(research.id, 'Research id')
+  const lifecycleRunId = nonEmptyString(
+    research.lifecycleRunId,
+    'Research lifecycle run id',
+  )
+  const gameId = nonEmptyString(research.gameId, 'Research game id')
   for (const [label, identifier] of [
-    ['Research id', research.id],
-    ['Research lifecycle run id', research.lifecycleRunId],
-    ['Research game id', research.gameId],
+    ['Research id', id],
+    ['Research lifecycle run id', lifecycleRunId],
+    ['Research game id', gameId],
   ] as const) {
     if (typeof identifier !== 'string' || !UUID_PATTERN.test(identifier)) {
       throw invalidResponse(`${label} is invalid.`)
@@ -555,8 +764,7 @@ function parseResearchRecord(value: unknown): ResearchRecord {
   if (
     research.requestedBy !== 'research-policy' ||
     research.provider !== 'codex' ||
-    research.transport !== 'local' ||
-    research.directPageTextFetched !== false
+    research.transport !== 'local'
   ) {
     throw invalidResponse('Lifecycle research attribution is invalid.')
   }
@@ -568,20 +776,34 @@ function parseResearchRecord(value: unknown): ResearchRecord {
   ) {
     throw invalidResponse('Lifecycle research materiality is invalid.')
   }
-  nonEmptyString(research.policyVersion, 'Research policy version')
-  nonEmptyString(research.reason, 'Research reason')
+  const policyVersion = nonEmptyString(
+    research.policyVersion,
+    'Research policy version',
+  )
+  const consent = parseResearchConsent(research.consent, 'Research consent')
+  const reason = nonEmptyString(research.reason, 'Research reason')
   const query = nullableString(research.query, 'Research query')
   const model = nullableString(research.model, 'Research model')
   const bounds = recordOf(research.bounds, 'Research bounds')
+  const resultLimit = nonnegativeInteger(
+    bounds.resultLimit,
+    'Research result limit',
+  )
+  const sourceLimit = nonnegativeInteger(
+    bounds.sourceLimit,
+    'Research source limit',
+  )
+  const timeoutMs = nonnegativeInteger(bounds.timeoutMs, 'Research timeout')
+  const synthesisCharacterLimit = nonnegativeInteger(
+    bounds.synthesisCharacterLimit,
+    'Research synthesis limit',
+  )
   if (
     bounds.invocationLimit !== 1 ||
-    nonnegativeInteger(bounds.resultLimit, 'Research result limit') < 1 ||
-    nonnegativeInteger(bounds.sourceLimit, 'Research source limit') < 1 ||
-    nonnegativeInteger(bounds.timeoutMs, 'Research timeout') < 1_000 ||
-    nonnegativeInteger(
-      bounds.synthesisCharacterLimit,
-      'Research synthesis limit',
-    ) < 500
+    resultLimit < 1 ||
+    sourceLimit < 1 ||
+    timeoutMs < 1_000 ||
+    synthesisCharacterLimit < 500
   ) {
     throw invalidResponse('Lifecycle research bounds are invalid.')
   }
@@ -595,6 +817,7 @@ function parseResearchRecord(value: unknown): ResearchRecord {
   for (const [label, array] of [
     ['executed queries', research.executedQueries],
     ['retrieved facts', research.retrievedFacts],
+    ['fetch failures', research.fetchFailures],
     ['sources', research.sources],
     ['injection signals', research.injectionSignalsDetected],
   ] as const) {
@@ -604,9 +827,11 @@ function parseResearchRecord(value: unknown): ResearchRecord {
   }
   const executedQueryValues = research.executedQueries as unknown[]
   const retrievedFactValues = research.retrievedFacts as unknown[]
+  const fetchFailureValues = research.fetchFailures as unknown[]
   const injectionSignalValues = research.injectionSignalsDetected as unknown[]
   if (
-    retrievedFactValues.length !== 0 ||
+    retrievedFactValues.length + fetchFailureValues.length > 3 ||
+    research.directPageTextFetched !== (retrievedFactValues.length > 0) ||
     executedQueryValues.some(
       (item: unknown) => typeof item !== 'string' || item.trim().length === 0,
     ) ||
@@ -616,25 +841,36 @@ function parseResearchRecord(value: unknown): ResearchRecord {
   ) {
     throw invalidResponse('Lifecycle research evidence labels are invalid.')
   }
+  const executedQueries = executedQueryValues.map((item) =>
+    nonEmptyString(item, 'Research executed query'))
+  const injectionSignalsDetected = injectionSignalValues.map((item) =>
+    nonEmptyString(item, 'Research injection signal'))
   const sourceIds = new Set<string>()
+  const sourceUrlsByCitation = new Map<string, string>()
+  const sources: ResearchSource[] = []
   for (const sourceValue of research.sources as unknown[]) {
     const source = recordOf(sourceValue, 'Research source')
+    const sourceId = typeof source.id === 'string' ? source.id : ''
+    const citationId = typeof source.citationId === 'string'
+      ? source.citationId
+      : ''
+    const ordinal = Number(source.ordinal)
+    const title = typeof source.title === 'string' ? source.title : ''
+    const hostname = typeof source.hostname === 'string' ? source.hostname : ''
+    const trust = source.trust
+    const discoveredFrom = source.discoveredFrom
     if (
-      typeof source.id !== 'string' ||
-      !UUID_PATTERN.test(source.id) ||
-      typeof source.citationId !== 'string' ||
-      source.citationId.length < 2 ||
+      !UUID_PATTERN.test(sourceId) ||
+      citationId.length < 2 ||
       !Number.isSafeInteger(source.ordinal) ||
-      (source.ordinal as number) < 1 ||
-      typeof source.title !== 'string' ||
-      source.title.trim().length === 0 ||
-      typeof source.hostname !== 'string' ||
-      source.hostname.trim().length === 0 ||
+      ordinal < 1 ||
+      title.trim().length === 0 ||
+      hostname.trim().length === 0 ||
       !['government_or_education', 'general_web'].includes(
-        source.trust as string,
+        trust as string,
       ) ||
       !['search_activity', 'synthesis_link'].includes(
-        source.discoveredFrom as string,
+        discoveredFrom as string,
       )
     ) {
       throw invalidResponse('Lifecycle research source is invalid.')
@@ -649,7 +885,7 @@ function parseResearchRecord(value: unknown): ResearchRecord {
       url.protocol !== 'https:' ||
       url.username !== '' ||
       url.password !== '' ||
-      url.hostname.toLowerCase() !== String(source.hostname).toLowerCase() ||
+      url.hostname.toLowerCase() !== hostname.toLowerCase() ||
       url.hostname.toLowerCase() === 'localhost' ||
       url.hostname.toLowerCase().endsWith('.localhost') ||
       url.hostname.toLowerCase().endsWith('.local') ||
@@ -657,12 +893,194 @@ function parseResearchRecord(value: unknown): ResearchRecord {
       /^(?:0|10|127|169\.254|172\.(?:1[6-9]|2\d|3[01])|192\.168)\./u.test(
         url.hostname,
       ) ||
-      sourceIds.has(source.id)
+      sourceIds.has(sourceId)
     ) {
       throw invalidResponse('Lifecycle research source is unsafe or repeated.')
     }
-    sourceIds.add(source.id)
-    timestampString(source.createdAt, 'Research source creation time')
+    sourceIds.add(sourceId)
+    if (sourceUrlsByCitation.has(citationId)) {
+      throw invalidResponse('Lifecycle research citation id is repeated.')
+    }
+    sourceUrlsByCitation.set(citationId, url.toString())
+    const createdAt = timestampString(
+      source.createdAt,
+      'Research source creation time',
+    )
+    sources.push({
+      id: sourceId,
+      citationId,
+      ordinal,
+      title,
+      url: url.toString(),
+      hostname,
+      trust: trust as ResearchSource['trust'],
+      discoveredFrom: discoveredFrom as ResearchSource['discoveredFrom'],
+      createdAt,
+    })
+  }
+  const fetchedCitations = new Set<string>()
+  const validateFetchRoute = (
+    evidence: Record<string, unknown>,
+    label: string,
+  ): {
+    citationId: string
+    requestedUrl: string
+    finalUrl: string | null
+    redirectChain: string[]
+  } => {
+    const citationId = nonEmptyString(evidence.citationId, `${label} citation id`)
+    const requestedUrl = safeEvidenceUrl(evidence.requestedUrl, `${label} requested URL`)
+    const finalUrl = evidence.finalUrl === null
+      ? null
+      : safeEvidenceUrl(evidence.finalUrl, `${label} final URL`)
+    if (!Array.isArray(evidence.redirectChain) || evidence.redirectChain.length < 1 || evidence.redirectChain.length > 4) {
+      throw invalidResponse(`${label} redirect chain is invalid.`)
+    }
+    const redirectChain = evidence.redirectChain.map((url, index) =>
+      safeEvidenceUrl(url, `${label} redirect ${index + 1}`))
+    if (
+      sourceUrlsByCitation.get(citationId) !== requestedUrl ||
+      redirectChain[0] !== requestedUrl ||
+      redirectChain.at(-1) !== (finalUrl ?? requestedUrl) ||
+      redirectChain.some((url) => new URL(url).hostname !== new URL(requestedUrl).hostname) ||
+      fetchedCitations.has(citationId)
+    ) {
+      throw invalidResponse(`${label} does not match its citation provenance.`)
+    }
+    fetchedCitations.add(citationId)
+    return { citationId, requestedUrl, finalUrl, redirectChain }
+  }
+  const retrievedFacts: ResearchRetrievedFact[] = []
+  for (const factValue of retrievedFactValues) {
+    const fact = recordOf(factValue, 'Research direct-page fact')
+    const route = validateFetchRoute(fact, 'Research direct-page fact')
+    const text = nonEmptyString(fact.text, 'Research direct-page accepted text')
+    const rawByteLength = nonnegativeInteger(
+      fact.rawByteLength,
+      'Research raw byte length',
+    )
+    const acceptedCharacterLength = nonnegativeInteger(
+      fact.acceptedCharacterLength,
+      'Research accepted text length',
+    )
+    const rawContentDigest = typeof fact.rawContentDigest === 'string'
+      ? fact.rawContentDigest
+      : ''
+    const contentDigest = typeof fact.contentDigest === 'string'
+      ? fact.contentDigest
+      : ''
+    const title = nonEmptyString(fact.title, 'Research direct-page title')
+    const retrievedAt = timestampString(
+      fact.retrievedAt,
+      'Research direct-page retrieval time',
+    )
+    if (
+      route.finalUrl === null ||
+      fact.provider !== 'webchess-direct-https' ||
+      fact.fetchVersion !== 'webchess-direct-page-fetch-v1' ||
+      fact.extractor !== 'webchess-readable-text-v1' ||
+      fact.digestAlgorithm !== 'sha256-utf8-accepted-text-v1' ||
+      fact.rawDigestAlgorithm !== 'sha256-raw-response-bytes-v1' ||
+      fact.untrusted !== true ||
+      fact.contentKind !== 'direct_page_text' ||
+      fact.httpStatus !== 200 ||
+      !['application/xhtml+xml', 'text/html', 'text/plain'].includes(String(fact.contentType)) ||
+      rawByteLength < 1 ||
+      rawByteLength > 1_048_576 ||
+      acceptedCharacterLength !== text.length ||
+      text.length > 6_000 ||
+      typeof fact.truncated !== 'boolean' ||
+      !/^[0-9a-f]{64}$/u.test(rawContentDigest) ||
+      !/^[0-9a-f]{64}$/u.test(contentDigest) ||
+      sha256Utf8Hex(text) !== contentDigest
+    ) {
+      throw invalidResponse('Research direct-page fact is invalid.')
+    }
+    retrievedFacts.push({
+      citationId: route.citationId,
+      requestedUrl: route.requestedUrl,
+      finalUrl: route.finalUrl,
+      title,
+      provider: 'webchess-direct-https',
+      fetchVersion: 'webchess-direct-page-fetch-v1',
+      retrievedAt,
+      httpStatus: 200,
+      contentType: fact.contentType as ResearchRetrievedFact['contentType'],
+      extractor: 'webchess-readable-text-v1',
+      rawByteLength,
+      rawContentDigest,
+      rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+      acceptedCharacterLength,
+      contentDigest,
+      digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+      redirectChain: route.redirectChain,
+      text,
+      truncated: fact.truncated,
+      untrusted: true,
+      contentKind: 'direct_page_text',
+    })
+  }
+  const fetchFailures: ResearchFetchFailure[] = []
+  for (const failureValue of fetchFailureValues) {
+    const failure = recordOf(failureValue, 'Research direct-page failure')
+    const route = validateFetchRoute(failure, 'Research direct-page failure')
+    const rawByteLength = nonnegativeInteger(
+      failure.rawByteLength,
+      'Research failure raw byte length',
+    )
+    const failureCode = nonEmptyString(
+      failure.failureCode,
+      'Research direct-page failure code',
+    )
+    const retrievedAt = timestampString(
+      failure.retrievedAt,
+      'Research direct-page failure time',
+    )
+    if (
+      !['failed', 'refused', 'timed_out'].includes(String(failure.status)) ||
+      failure.fetchVersion !== 'webchess-direct-page-fetch-v1' ||
+      failure.extractor !== 'webchess-readable-text-v1' ||
+      failure.digestAlgorithm !== 'sha256-utf8-accepted-text-v1' ||
+      failure.rawDigestAlgorithm !== 'sha256-raw-response-bytes-v1' ||
+      rawByteLength > 1_114_112 ||
+      failure.acceptedCharacterLength !== 0 ||
+      failure.contentDigest !== null ||
+      typeof failure.truncated !== 'boolean' ||
+      (failure.httpStatus !== null && (
+        !Number.isInteger(failure.httpStatus) || Number(failure.httpStatus) < 100 || Number(failure.httpStatus) > 599
+      )) ||
+      (failure.rawContentDigest !== null && (
+        typeof failure.rawContentDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(failure.rawContentDigest)
+      )) ||
+      (rawByteLength > 0 && failure.rawContentDigest === null) ||
+      !Array.isArray(failure.injectionSignalsDetected) ||
+      failure.injectionSignalsDetected.some((signal) =>
+        typeof signal !== 'string' || !/^[a-z0-9_]{3,120}$/u.test(signal))
+    ) {
+      throw invalidResponse('Research direct-page failure is invalid.')
+    }
+    fetchFailures.push({
+      citationId: route.citationId,
+      requestedUrl: route.requestedUrl,
+      finalUrl: route.finalUrl,
+      status: failure.status as ResearchFetchFailure['status'],
+      failureCode,
+      httpStatus: failure.httpStatus as number | null,
+      fetchVersion: 'webchess-direct-page-fetch-v1',
+      extractor: 'webchess-readable-text-v1',
+      rawByteLength,
+      rawContentDigest: failure.rawContentDigest as string | null,
+      rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+      acceptedCharacterLength: 0,
+      truncated: failure.truncated,
+      contentDigest: null,
+      digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+      redirectChain: route.redirectChain,
+      injectionSignalsDetected: [
+        ...(failure.injectionSignalsDetected as string[]),
+      ],
+      retrievedAt,
+    })
   }
   const searchSynthesis = nullableString(
     research.searchSynthesis,
@@ -675,16 +1093,19 @@ function parseResearchRecord(value: unknown): ResearchRecord {
   if (contentDigest !== null && !/^[0-9a-f]{64}$/u.test(contentDigest)) {
     throw invalidResponse('Lifecycle research content digest is invalid.')
   }
-  nullableString(research.failureCode, 'Research failure code')
+  const failureCode = nullableString(research.failureCode, 'Research failure code')
   const startedAt = research.startedAt === null
     ? null
     : timestampString(research.startedAt, 'Research start time')
   const completedAt = research.completedAt === null
     ? null
     : timestampString(research.completedAt, 'Research completion time')
-  timestampString(research.createdAt, 'Research creation time')
-  timestampString(research.updatedAt, 'Research update time')
-  nonnegativeInteger(research.omittedSourceCount, 'Research omitted source count')
+  const createdAt = timestampString(research.createdAt, 'Research creation time')
+  const updatedAt = timestampString(research.updatedAt, 'Research update time')
+  const omittedSourceCount = nonnegativeInteger(
+    research.omittedSourceCount,
+    'Research omitted source count',
+  )
   if (
     status === 'not_needed'
       ? query !== null || materiality !== null || attemptCount !== 0
@@ -705,7 +1126,44 @@ function parseResearchRecord(value: unknown): ResearchRecord {
   ) {
     throw invalidResponse('Completed lifecycle research is incomplete.')
   }
-  return research as unknown as ResearchRecord
+  return {
+    id,
+    lifecycleRunId,
+    gameId,
+    stage: stage as ResearchRecord['stage'],
+    requestedBy: 'research-policy',
+    consent,
+    policyVersion,
+    materiality: materiality as ResearchRecord['materiality'],
+    reason,
+    query,
+    status: status as ResearchRecord['status'],
+    provider: 'codex',
+    transport: 'local',
+    model,
+    bounds: {
+      invocationLimit: 1,
+      resultLimit,
+      sourceLimit,
+      timeoutMs,
+      synthesisCharacterLimit,
+    },
+    attemptCount,
+    executedQueries,
+    searchSynthesis,
+    directPageTextFetched: research.directPageTextFetched as boolean,
+    retrievedFacts,
+    fetchFailures,
+    sources,
+    omittedSourceCount,
+    injectionSignalsDetected,
+    contentDigest,
+    failureCode,
+    startedAt,
+    completedAt,
+    createdAt,
+    updatedAt,
+  }
 }
 
 function parseLifecycle(value: unknown): LifecycleAggregate {
@@ -912,12 +1370,12 @@ function parseLifecycle(value: unknown): LifecycleAggregate {
     }
     observationIds.add(observation.id)
   }
-  const webMemoryEvidence = lifecycle.webMemoryEvidence as unknown[] | undefined
-  if ((webMemoryEvidence?.length ?? 0) > 8) {
+  const webMemoryValues = lifecycle.webMemoryEvidence as unknown[]
+  if (webMemoryValues.length > 8) {
     throw invalidResponse('Lifecycle Web memory exceeds the eight-item limit.')
   }
   const webMemoryObservationIds = new Set<string>()
-  for (const [index, evidenceValue] of (webMemoryEvidence ?? []).entries()) {
+  const webMemoryEvidence = webMemoryValues.map((evidenceValue, index) => {
     const evidence = parseWebMemoryEvidence(evidenceValue, index)
     if (
       evidence.sourceGameId === lifecycleGameId ||
@@ -929,13 +1387,13 @@ function parseLifecycle(value: unknown): LifecycleAggregate {
       )
     }
     webMemoryObservationIds.add(evidence.observationId)
-  }
-  for (const research of lifecycle.research as unknown[]) {
-    parseResearchRecord(research)
-  }
+    return evidence
+  })
+  const research = (lifecycle.research as unknown[]).map(parseResearchRecord)
   return {
     ...lifecycle,
-    webMemoryEvidence: lifecycle.webMemoryEvidence,
+    research,
+    webMemoryEvidence,
   } as unknown as LifecycleAggregate
 }
 
@@ -1246,9 +1704,17 @@ export function createIdempotencyKey(): string {
 
 export function divideProblem(
   problem: string,
-  options: DivideProblemOptions = {},
+  options: DivideProblemOptions,
 ): Promise<DurableGame> {
   if (typeof problem !== 'string') throw new TypeError('A problem is required.')
+  if (
+    ![
+      'allow_search_and_page_fetch',
+      'no_external_research',
+    ].includes(options.researchConsentDecision)
+  ) {
+    throw new TypeError('Choose whether this game may use external research.')
+  }
   const memoryObservationIds = [...new Set(options.memoryObservationIds ?? [])]
   if (
     memoryObservationIds.length > 8 ||
@@ -1261,11 +1727,14 @@ export function divideProblem(
     {
       method: 'POST',
       headers: createMutationHeaders(options.idempotencyKey),
-      body: JSON.stringify(
-        memoryObservationIds.length > 0
-          ? { problem, memoryObservationIds }
-          : { problem },
-      ),
+      body: JSON.stringify({
+        problem,
+        researchConsent: {
+          version: RESEARCH_CONSENT_VERSION,
+          decision: options.researchConsentDecision,
+        },
+        ...(memoryObservationIds.length > 0 ? { memoryObservationIds } : {}),
+      }),
       signal: options.signal,
     },
     parseGameEnvelope,

@@ -20,6 +20,10 @@ const gameId = '7a33b7d3-9ff0-4ec0-b8d4-13e30373593a'
 const seed = '8a33b7d3-9ff0-4ec0-b8d4-13e30373593a'
 const facets = makeProblemFacets('Durable OpenClaw facet')
 const parts = composeProblemParts(facets, seed)
+const researchConsent = {
+  version: 'webchess-research-consent-v1',
+  decision: 'allow_search_and_page_fetch',
+} as const
 const sectorLabels = [
   'North',
   'North-east',
@@ -42,6 +46,10 @@ function game(
     revision,
     status,
     problem,
+    researchConsent: {
+      ...researchConsent,
+      recordedAt: '2026-08-01T20:00:00.000Z',
+    },
     division: {
       seed,
       facets,
@@ -95,7 +103,7 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
     }
 
     if (request.method() === 'POST' && pathname === '/api/divide') {
-      expect(request.postDataJSON()).toEqual({ problem })
+      expect(request.postDataJSON()).toEqual({ problem, researchConsent })
       currentGame = game('mapped', 1, null)
       await json(route, { game: currentGame })
       return
@@ -159,7 +167,8 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
     .toHaveAttribute('href', '/openclaw')
 
   await page.getByLabel('What are you trying to understand?').fill(problem)
-  await page.getByRole('button', { name: /Divide the problem/i }).press('Enter')
+  await page.getByRole('radio', { name: /Allow bounded research/i }).check()
+  await page.getByRole('button', { name: /Divide the problem/i }).click()
   const start = page.getByRole('button', {
     name: /Set the pieces in motion/i,
   })

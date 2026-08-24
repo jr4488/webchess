@@ -15,6 +15,7 @@ import type {
   PortiaReview,
   SurvivorCandidate,
 } from '../../src/lib/lifecycle/contracts'
+import { RESEARCH_CONSENT_VERSION } from '../../src/lib/research'
 import { makeProblemFacets, makeProblemParts } from '../../src/test/fixtures'
 import type { DurableGameSnapshot } from '../../src/server/games'
 import { DurableLifecycleRepository } from '../../src/server/lifecycle'
@@ -263,14 +264,18 @@ async function insertMappedRetryGame(
     text: `
       INSERT INTO games (
         id, clerk_user_id, source_game_id, is_current, revision, status,
-        problem, problem_sha256, division_seed, division_facets, problem_parts,
+        problem, problem_sha256, research_consent_version,
+        research_consent_decision, research_consent_recorded_at,
+        division_seed, division_facets, problem_parts,
         division_model, division_prompt_version, division_prompt_sha256,
         division_digest, event_version, rules_version, engine_version,
         cast_version, software_version, created_at, updated_at
       )
       VALUES (
         $1::uuid, $2::text, $3::uuid, false, 1, 'mapped',
-        $4::text, repeat('a', 64), $5::text, $6::jsonb, $7::jsonb,
+        $4::text, repeat('a', 64), 'webchess-research-consent-v1',
+        'allow_search_and_page_fetch', $12::timestamptz,
+        $5::text, $6::jsonb, $7::jsonb,
         'gpt-5.6-sol', 'webchess-division-v2', repeat('b', 64),
         repeat('c', 64), $8::smallint, $9::text, $10::text,
         $11::text, '2.0.0', $12::timestamptz, $12::timestamptz
@@ -299,6 +304,11 @@ async function insertMappedRetryGame(
     revision: 1,
     status: 'mapped',
     problem: PROBLEM,
+    researchConsent: {
+      version: RESEARCH_CONSENT_VERSION,
+      decision: 'allow_search_and_page_fetch',
+      recordedAt: now.toISOString(),
+    },
     division: {
       seed: divisionSeed,
       facets,
@@ -372,14 +382,18 @@ beforeAll(async () => {
     text: `
       INSERT INTO games (
         id, clerk_user_id, is_current, revision, status, problem,
-        problem_sha256, division_seed, division_facets, problem_parts,
+        problem_sha256, research_consent_version,
+        research_consent_decision, research_consent_recorded_at,
+        division_seed, division_facets, problem_parts,
         division_model, division_prompt_version, division_prompt_sha256,
         division_digest, event_version, rules_version, engine_version,
         cast_version, software_version, created_at, updated_at
       )
       VALUES (
         $1::uuid, $2::text, true, 1, 'mapped', $3::text,
-        repeat('a', 64), $4::text, $5::jsonb, $6::jsonb,
+        repeat('a', 64), 'webchess-research-consent-v1',
+        'allow_search_and_page_fetch', $11::timestamptz,
+        $4::text, $5::jsonb, $6::jsonb,
         'gpt-5.6-sol', 'webchess-division-v2', repeat('b', 64),
         repeat('c', 64), $7::smallint, $8::text, $9::text,
         $10::text, '2.0.0', $11::timestamptz, $11::timestamptz
@@ -406,6 +420,11 @@ beforeAll(async () => {
     revision: 1,
     status: 'mapped',
     problem: PROBLEM,
+    researchConsent: {
+      version: RESEARCH_CONSENT_VERSION,
+      decision: 'allow_search_and_page_fetch',
+      recordedAt: now.toISOString(),
+    },
     division: {
       seed: 'lifecycle-integration-seed',
       facets,
@@ -1408,14 +1427,18 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       text: `
         INSERT INTO games (
           id, clerk_user_id, is_current, revision, status, problem,
-          problem_sha256, division_seed, division_facets, problem_parts,
+          problem_sha256, research_consent_version,
+          research_consent_decision, research_consent_recorded_at,
+          division_seed, division_facets, problem_parts,
           division_model, division_prompt_version, division_prompt_sha256,
           division_digest, event_version, rules_version, engine_version,
           cast_version, software_version, created_at, updated_at
         )
         SELECT
           $1::uuid, $2::text, true, 1, status, problem, problem_sha256,
-          division_seed, division_facets, problem_parts, division_model,
+          research_consent_version, research_consent_decision,
+          research_consent_recorded_at, division_seed, division_facets,
+          problem_parts, division_model,
           division_prompt_version, division_prompt_sha256, division_digest,
           event_version, rules_version, engine_version, cast_version,
           software_version, now(), now()

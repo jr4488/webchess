@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { RESEARCH_CONSENT_VERSION } from '../../lib/research'
+
 export const MAX_JSON_BODY_BYTES = 16 * 1024
 
 export const idempotencyKeySchema = z.string().uuid()
@@ -15,6 +17,13 @@ export const divideBodySchema = z
       .pipe(z.string().min(12).max(240)),
     memoryObservationIds: z.array(z.string().uuid()).max(8).default([])
       .refine((ids) => new Set(ids).size === ids.length, 'Observation ids must be unique.'),
+    researchConsent: z.strictObject({
+      version: z.literal(RESEARCH_CONSENT_VERSION),
+      decision: z.enum([
+        'allow_search_and_page_fetch',
+        'no_external_research',
+      ]),
+    }),
   })
   .strict()
 

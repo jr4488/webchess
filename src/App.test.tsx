@@ -16,7 +16,10 @@ import type {
   WilburObservation,
 } from './lib/lifecycle/contracts'
 import { CURRENT_LIFECYCLE_VERSIONS } from './lib/lifecycle/versions'
-import type { ResearchRecord } from './lib/research'
+import {
+  RESEARCH_CONSENT_VERSION,
+  type ResearchRecord,
+} from './lib/research'
 import type {
   DurableGame,
   DurableGameStatus,
@@ -142,6 +145,11 @@ const REPLAY_GAME_ID = '123e4567-e89b-42d3-a456-426614174001'
 const WILBUR_ACTION_ID = '83000000-0000-4000-8000-000000000001'
 const WILBUR_OBSERVATION_ID = '84000000-0000-4000-8000-000000000001'
 const PROBLEM = 'How should this position move toward a useful next step?'
+const RESEARCH_CONSENT = {
+  version: RESEARCH_CONSENT_VERSION,
+  decision: 'allow_search_and_page_fetch',
+  recordedAt: '2026-08-02T18:00:00.000Z',
+} as const
 const ANSWER: GeneratedAnswer = {
   answer: 'Protect the purpose, then test the smallest reversible next step.',
   model: 'gpt-5.6-sol',
@@ -182,6 +190,7 @@ function makeMappedGame(
     revision: 1,
     status: 'mapped',
     problem,
+    researchConsent: RESEARCH_CONSENT,
     division: {
       seed: analysis.seed,
       facets: analysis.facets,
@@ -209,6 +218,7 @@ function makeDividingGame(): DurableGame {
     revision: 0,
     status: 'dividing',
     problem: PROBLEM,
+    researchConsent: RESEARCH_CONSENT,
     division: null,
     state: null,
     answer: null,
@@ -325,6 +335,7 @@ function makeResearchRecord(
     gameId: GAME_ID,
     stage: 'portia',
     requestedBy: 'research-policy',
+    consent: RESEARCH_CONSENT,
     policyVersion: 'webchess-visible-research-v1',
     materiality: 'required',
     reason: 'The candidate prompt depends on a current external benchmark.',
@@ -345,6 +356,7 @@ function makeResearchRecord(
     searchSynthesis: 'Current sources distinguish prefill latency from decode throughput.',
     directPageTextFetched: false,
     retrievedFacts: [],
+    fetchFailures: [],
     sources: [],
     omittedSourceCount: 0,
     injectionSignalsDetected: [],
@@ -591,6 +603,7 @@ async function submitProblem(problem = PROBLEM): Promise<void> {
   fireEvent.change(screen.getByLabelText(/what are you trying to understand/i), {
     target: { value: problem },
   })
+  fireEvent.click(screen.getByRole('radio', { name: /allow bounded research/i }))
   fireEvent.click(screen.getByRole('button', { name: /divide the problem/i }))
   await flushAsyncWork()
 }
@@ -922,6 +935,7 @@ describe('durable WebChess client flow', () => {
       PROBLEM,
       expect.objectContaining({
         idempotencyKey: expect.any(String),
+        researchConsentDecision: 'allow_search_and_page_fetch',
         signal: expect.any(AbortSignal),
       }),
     )

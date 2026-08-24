@@ -8,12 +8,26 @@ import {
   planResearchForStage,
 } from './policy'
 
+const ALLOW_EXTERNAL_RESEARCH = {
+  decision: 'allow_search_and_page_fetch',
+  version: 'webchess-research-consent-v1',
+} as const
+
+function researchInput(
+  input: Omit<Parameters<typeof planResearchForStage>[0], 'researchConsent'>,
+): Parameters<typeof planResearchForStage>[0] {
+  return {
+    ...input,
+    researchConsent: ALLOW_EXTERNAL_RESEARCH,
+  }
+}
+
 describe('visible research policy', () => {
   it('requires research for a current factual dependency', () => {
-    const decision = planResearchForStage({
+    const decision = planResearchForStage(researchInput({
       stage: 'portia',
       problem: 'What is the current medical guidance for this treatment today?',
-    })
+    }))
 
     expect(decision).toEqual({
       needed: true,
@@ -24,10 +38,10 @@ describe('visible research policy', () => {
   })
 
   it('requires live research for the exact active-conflict question that was misclassified', () => {
-    const decision = planResearchForStage({
+    const decision = planResearchForStage(researchInput({
       stage: 'portia',
       problem: 'How will the war in Iran end?',
-    })
+    }))
 
     expect(decision).toEqual({
       needed: true,
@@ -43,17 +57,20 @@ describe('visible research policy', () => {
     'How could new sanctions change this diplomatic crisis?',
     'What happens after this military operation?',
   ])('requires research for volatile world-event wording: %s', (problem) => {
-    expect(planResearchForStage({ stage: 'portia', problem })).toMatchObject({
+    expect(planResearchForStage(researchInput({
+      stage: 'portia',
+      problem,
+    }))).toMatchObject({
       needed: true,
       materiality: 'required',
     })
   })
 
   it('marks bounded research helpful for a technical recommendation', () => {
-    const decision = planResearchForStage({
+    const decision = planResearchForStage(researchInput({
       stage: 'answer',
       problem: 'Give me a novel way to make LLMs faster.',
-    })
+    }))
 
     expect(decision).toEqual({
       needed: true,
@@ -64,10 +81,10 @@ describe('visible research policy', () => {
   })
 
   it('preserves the budget when no current or external fact is material', () => {
-    expect(planResearchForStage({
+    expect(planResearchForStage(researchInput({
       stage: 'charlotte',
       problem: 'Explain why this metaphor feels hopeful to a child.',
-    })).toEqual({
+    }))).toEqual({
       needed: false,
       materiality: null,
       query: null,
@@ -76,10 +93,10 @@ describe('visible research policy', () => {
   })
 
   it('does not mistake an explicitly fictional war for a live geopolitical event', () => {
-    expect(planResearchForStage({
+    expect(planResearchForStage(researchInput({
       stage: 'charlotte',
       problem: 'How should the war in my novel end?',
-    })).toEqual({
+    }))).toEqual({
       needed: false,
       materiality: null,
       query: null,
@@ -99,7 +116,7 @@ describe('visible research policy', () => {
       'Web records provenance but does not introduce new evidence after the answer lifecycle has finished.',
     ],
   ] as const)('never hides research inside the %s stage', (stage, problem, reason) => {
-    expect(planResearchForStage({ stage, problem })).toEqual({
+    expect(planResearchForStage(researchInput({ stage, problem }))).toEqual({
       needed: false,
       materiality: null,
       query: null,
@@ -107,8 +124,40 @@ describe('visible research policy', () => {
     })
   })
 
+  it('records an explicit opt-out without classifying or constructing a query', () => {
+    expect(planResearchForStage({
+      stage: 'portia',
+      problem: 'What is the latest medical guidance today?',
+      researchConsent: {
+        decision: 'no_external_research',
+        version: 'webchess-research-consent-v1',
+      },
+    })).toEqual({
+      needed: false,
+      materiality: null,
+      query: null,
+      reason: 'External research was not run because this game records an explicit opt-out.',
+    })
+  })
+
+  it('fails closed for a historical game with no recorded research consent', () => {
+    expect(planResearchForStage({
+      stage: 'answer',
+      problem: 'Give me the latest technical recommendation.',
+      researchConsent: {
+        decision: 'no_external_research',
+        version: 'legacy-no-research-consent-v0',
+      },
+    })).toEqual({
+      needed: false,
+      materiality: null,
+      query: null,
+      reason: 'External research was not run because this historical game has no recorded research consent.',
+    })
+  })
+
   it('publishes a single-invocation, bounded policy configuration', () => {
-    expect(RESEARCH_POLICY_VERSION).toBe('webchess-visible-research-v3')
+    expect(RESEARCH_POLICY_VERSION).toBe('webchess-visible-research-v4')
     expect(RESEARCH_BOUNDS).toEqual({
       invocationLimit: 1,
       resultLimit: 5,

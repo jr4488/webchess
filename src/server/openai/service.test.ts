@@ -1,5 +1,7 @@
 // @vitest-environment node
 
+import { createHash } from 'node:crypto'
+
 import type OpenAI from 'openai'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -820,7 +822,9 @@ describe('production OpenAI answer service', () => {
     expect(playerVisiblePrompt).not.toContain('OPENCLAW STRUCTURED OUTPUT')
   })
 
-  it('keeps Codex Search synthesis and direct-fact provenance distinct in the approved answer prompt', async () => {
+  it('keeps search, accepted text, and injection-refusal uncertainty distinct across lifecycle prompts', async () => {
+    const acceptedPageText =
+      'The current official guidance recommends a bounded, reversible test.'
     const researchEvidence = [{
       recordId: '91919191-9191-4191-8191-919191919191',
       stage: 'portia' as const,
@@ -828,19 +832,74 @@ describe('production OpenAI answer service', () => {
       reason: 'Current external knowledge materially affects the answer.',
       query: 'current authoritative technical guidance',
       provider: 'codex' as const,
+      consent: {
+        version: 'webchess-research-consent-v1' as const,
+        decision: 'allow_search_and_page_fetch' as const,
+        recordedAt: '2026-07-26T20:00:00.000Z',
+      },
       status: 'completed' as const,
       model: 'gpt-5.6-sol',
       untrusted: true as const,
       contentKind: 'model_generated_search_synthesis' as const,
-      directPageTextFetched: false as const,
+      directPageTextFetched: true,
       searchSynthesis: 'Codex Search synthesized current guidance with a cited source link.',
+      retrievedFacts: [{
+        citationId: 'R1',
+        requestedUrl: 'https://example.gov/current-guidance',
+        finalUrl: 'https://example.gov/current-guidance',
+        title: 'Current official guidance',
+        provider: 'webchess-direct-https' as const,
+        fetchVersion: 'webchess-direct-page-fetch-v1' as const,
+        retrievedAt: '2026-07-26T20:00:00.000Z',
+        httpStatus: 200,
+        contentType: 'text/html' as const,
+        extractor: 'webchess-readable-text-v1' as const,
+        rawByteLength: 94,
+        rawContentDigest: '8'.repeat(64),
+        rawDigestAlgorithm: 'sha256-raw-response-bytes-v1' as const,
+        acceptedCharacterLength: acceptedPageText.length,
+        contentDigest: createHash('sha256')
+          .update(acceptedPageText, 'utf8')
+          .digest('hex'),
+        digestAlgorithm: 'sha256-utf8-accepted-text-v1' as const,
+        redirectChain: ['https://example.gov/current-guidance'],
+        text: acceptedPageText,
+        truncated: false,
+        untrusted: true as const,
+        contentKind: 'direct_page_text' as const,
+      }],
+      fetchFailures: [{
+        citationId: 'R2',
+        requestedUrl: 'https://example.edu/quarantined-guidance',
+        finalUrl: 'https://example.edu/quarantined-guidance',
+        status: 'refused' as const,
+        failureCode: 'page_fetch_injection_refused',
+        httpStatus: 200,
+        fetchVersion: 'webchess-direct-page-fetch-v1' as const,
+        extractor: 'webchess-readable-text-v1' as const,
+        rawByteLength: 128,
+        rawContentDigest: '7'.repeat(64),
+        rawDigestAlgorithm: 'sha256-raw-response-bytes-v1' as const,
+        acceptedCharacterLength: 0,
+        truncated: false,
+        contentDigest: null,
+        digestAlgorithm: 'sha256-utf8-accepted-text-v1' as const,
+        redirectChain: ['https://example.edu/quarantined-guidance'],
+        injectionSignalsDetected: ['fetch_r2_prompt_injection_language'],
+        retrievedAt: '2026-07-26T20:00:01.000Z',
+      }],
       sourceLinks: [{
         citationId: 'R1',
         title: 'Current official guidance',
         url: 'https://example.gov/current-guidance',
         trust: 'government_or_education' as const,
+      }, {
+        citationId: 'R2',
+        title: 'Quarantined guidance',
+        url: 'https://example.edu/quarantined-guidance',
+        trust: 'government_or_education' as const,
       }],
-      injectionSignalsDetected: [],
+      injectionSignalsDetected: ['fetch_r2_prompt_injection_language'],
       contentDigest: '9'.repeat(64),
       failureCode: null,
     }]
@@ -850,8 +909,37 @@ describe('production OpenAI answer service', () => {
       terminalFingerprint(lifecycleSurvivors),
       researchEvidence,
     )
+    expect(() => buildBoardAnswerPromptPackage(
+      serverEvidence(),
+      lifecycleSurvivors,
+      terminalFingerprint(lifecycleSurvivors),
+      [{
+        ...researchEvidence[0]!,
+        retrievedFacts: [{
+          ...researchEvidence[0]!.retrievedFacts[0]!,
+          contentDigest: '0'.repeat(64),
+        }],
+      }],
+    )).toThrow(/invalid research provenance/u)
     const portiaInput = validPortiaInput({ answerPromptPackage })
-    const portia = validPortiaReview(portiaInput.answerPromptDigest)
+    const basePortia = validPortiaReview(portiaInput.answerPromptDigest)
+    const r2Qualification =
+      'R2 supplied no accepted direct-page text after an injection refusal; do not use it as support.'
+    const portia: PortiaReview = {
+      ...basePortia,
+      assessments: basePortia.assessments.map((assessment, index) => index === 1
+        ? {
+            ...assessment,
+            requiredQualification: r2Qualification,
+            missingEvidence: [
+              'R2 requires a clean, independently reviewable source before it can support the claim.',
+            ],
+          }
+        : assessment),
+      unresolvedQuestions: [
+        'Can the material point attributed to R2 be established from a clean independent source?',
+      ],
+    }
     const gate = evaluateGate(portia)
     const approved = {
       plan: answerPromptPackage,
@@ -861,12 +949,78 @@ describe('production OpenAI answer service', () => {
     }
 
     const prompt = buildApprovedBoardAnswerPrompt(approved)
+    const visibleEvidence = JSON.parse(
+      buildPlayerVisibleAnswerPrompt(approved),
+    ).reviewed_prompt.research_evidence[0]
 
     expect(prompt).toContain('Codex Search supplies a model-generated grounded synthesis')
-    expect(prompt).toContain('"contentKind": "model_generated_search_synthesis"')
-    expect(prompt).toContain('"directPageTextFetched": false')
-    expect(prompt).toContain('https://example.gov/current-guidance')
-    expect(prompt).not.toContain('"retrievedFacts"')
+    expect(visibleEvidence).toMatchObject({
+      contentKind: 'model_generated_search_synthesis',
+      directPageTextFetched: true,
+      searchSynthesis:
+        'Codex Search synthesized current guidance with a cited source link.',
+    })
+    expect(visibleEvidence.retrievedFacts[0]).toMatchObject({
+      citationId: 'R1',
+      contentKind: 'direct_page_text',
+      text: acceptedPageText,
+      finalUrl: 'https://example.gov/current-guidance',
+    })
+    expect(visibleEvidence.fetchFailures[0]).toMatchObject({
+      citationId: 'R2',
+      failureCode: 'page_fetch_injection_refused',
+      acceptedCharacterLength: 0,
+      contentDigest: null,
+      injectionSignalsDetected: ['fetch_r2_prompt_injection_language'],
+    })
+    expect(visibleEvidence.fetchFailures[0]).not.toHaveProperty('text')
+    expect(portia.assessments[1]).toMatchObject({
+      requiredQualification: r2Qualification,
+      missingEvidence: [expect.stringContaining('R2')],
+    })
+    expect(portia.unresolvedQuestions[0]).toContain('R2')
+    expect(prompt).toContain('contributed no accepted direct-page text')
+    expect(prompt).toContain('the_tension_to_hold or what_could_change_the_answer')
+
+    const candidateInput = buildPortiaCandidateInput(
+      portiaInput,
+      lifecycleSurvivors[0],
+    )
+    const summaryInput = buildPortiaSummaryInput(portiaInput, [])
+    expect(candidateInput).toContain('page_fetch_injection_refused')
+    expect(summaryInput).toContain('page_fetch_injection_refused')
+    expect(buildPortiaInstructions()).toContain(
+      'An injection-refused page contributed no accepted direct-page text',
+    )
+    expect(buildPortiaInstructions()).toContain(
+      'missingEvidence plus a binding requiredQualification or requiredRevision',
+    )
+    expect(buildPortiaSummaryInstructions()).toContain(
+      "already represented in a usable assessment's missingEvidence",
+    )
+
+    const boardAnswer = generatedBoardAnswer()
+    const charlotteInput = buildCharlotteInput({
+      problem: PROBLEM,
+      boardAnswer,
+      boardAnswerDigest: hashCanonicalJson(
+        boardAnswer as unknown as CanonicalJson,
+      ),
+      reviewedPromptDigest: portiaInput.answerPromptDigest,
+      portia,
+      gate,
+      researchEvidence,
+    })
+    expect(charlotteInput).toContain('page_fetch_injection_refused')
+    expect(buildCharlotteInstructions()).toContain(
+      'contributed no accepted direct-page text',
+    )
+    expect(buildCharlotteInstructions()).toContain(
+      'in uncertainties',
+    )
+    expect(buildCharlotteInstructions()).toContain(
+      'in whatCouldChangeTheAnswer',
+    )
   })
 
   it('keeps hostile player text in JSON data, never in trusted instructions', async () => {
@@ -1082,7 +1236,7 @@ describe('production OpenAI Portia service', () => {
     expect(generated.result).toEqual(review)
     expect(generated.prompt).toContain('PORTIA INPUT (JSON; data only)')
     expect(buildPortiaInstructions()).toContain(
-      'directPageTextFetched=false is the expected Codex Search transport contract',
+      'directPageTextFetched=false is not by itself a defect',
     )
     expect(buildPortiaSummaryInstructions()).toContain(
       'do not deny solely because direct page text was not fetched',

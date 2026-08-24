@@ -1,7 +1,11 @@
-import { act, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { ResearchRecord, ResearchStatus } from '../lib/research'
+import {
+  RESEARCH_CONSENT_VERSION,
+  type ResearchRecord,
+  type ResearchStatus,
+} from '../lib/research'
 import { ResearchActivityPanel, ResearchProvenanceDetails } from './ResearchActivityPanel'
 
 function researchRecord(
@@ -14,6 +18,11 @@ function researchRecord(
     gameId: '73000000-0000-4000-8000-000000000001',
     stage: 'portia',
     requestedBy: 'research-policy',
+    consent: {
+      version: RESEARCH_CONSENT_VERSION,
+      decision: 'allow_search_and_page_fetch',
+      recordedAt: '2026-08-02T20:00:00.000Z',
+    },
     policyVersion: 'research-policy/1',
     materiality: 'required',
     reason: 'The recommendation depends on a current external benchmark.',
@@ -41,6 +50,7 @@ function researchRecord(
       : null,
     directPageTextFetched: false,
     retrievedFacts: [],
+    fetchFailures: [],
     sources: status === 'completed' ? [
       {
         id: '82000000-0000-4000-8000-000000000001',
@@ -82,12 +92,15 @@ describe('ResearchActivityPanel', () => {
     expect(screen.getAllByText('current authoritative LLM inference latency benchmark 2026'))
       .toHaveLength(2)
     expect(screen.getByText('official LLM serving latency benchmark 2026')).toBeInTheDocument()
-    expect(screen.getByText('Codex Search (codex)')).toBeInTheDocument()
+    expect(screen.getByText('OpenClaw Codex Hosted Search (codex)')).toBeInTheDocument()
     expect(screen.getByText('gpt-5.4-search')).toBeInTheDocument()
     expect(screen.getByText('1 used · 1 maximum')).toBeInTheDocument()
     expect(screen.getByText('30 seconds')).toBeInTheDocument()
     expect(screen.getByText('4,000')).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Directly retrieved facts: none' }))
+    expect(screen.getByText('Search and bounded direct-page retrieval allowed'))
+      .toBeInTheDocument()
+    expect(screen.getByText(RESEARCH_CONSENT_VERSION)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Direct-page excerpts: 0' }))
       .toBeInTheDocument()
     expect(screen.getByRole('heading', {
       name: 'Codex Search synthesis (model-generated, untrusted until Portia)',
@@ -98,7 +111,9 @@ describe('ResearchActivityPanel', () => {
     expect(screen.getByText(/instruction-like content/i)).toBeInTheDocument()
     expect(screen.getByRole('timer', { name: 'Research elapsed time' }))
       .toHaveTextContent('30seconds elapsed')
-    expect(screen.getByText(/Packet received with 2 executed queries and 1 citation link/i))
+    expect(screen.getByText(
+      /Packet received with 2 executed queries, 1 citation links, 0 accepted page excerpts, and 0 visible page-fetch failures/i,
+    ))
       .toBeInTheDocument()
 
     const citation = screen.getByRole('link', { name: /NIST AI measurement guidance/i })
@@ -128,6 +143,79 @@ describe('ResearchActivityPanel', () => {
       .not.toBeInTheDocument()
     expect(screen.getByText(/NIST AI measurement guidance · link withheld/i))
       .toBeInTheDocument()
+  })
+
+  it('keeps accepted direct-page text and page-fetch failures visibly separate from search synthesis', () => {
+    const acceptedText = 'Bounded page evidence.'
+    const secondSource = {
+      ...researchRecord().sources[0]!,
+      id: '82000000-0000-4000-8000-000000000002',
+      citationId: 'source-2',
+      ordinal: 2,
+      title: 'Unavailable measurement appendix',
+      url: 'https://www.nist.gov/unavailable',
+    }
+    render(<ResearchActivityPanel records={[researchRecord('completed', {
+      directPageTextFetched: true,
+      retrievedFacts: [{
+        citationId: 'source-1',
+        requestedUrl: 'https://www.nist.gov/example',
+        finalUrl: 'https://www.nist.gov/example',
+        title: 'Measurement evidence',
+        provider: 'webchess-direct-https',
+        fetchVersion: 'webchess-direct-page-fetch-v1',
+        retrievedAt: '2026-08-02T20:00:20.000Z',
+        httpStatus: 200,
+        contentType: 'text/html',
+        extractor: 'webchess-readable-text-v1',
+        rawByteLength: 512,
+        rawContentDigest: 'b'.repeat(64),
+        rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+        acceptedCharacterLength: acceptedText.length,
+        contentDigest: 'c'.repeat(64),
+        digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+        redirectChain: ['https://www.nist.gov/example'],
+        text: acceptedText,
+        truncated: false,
+        untrusted: true,
+        contentKind: 'direct_page_text',
+      }],
+      fetchFailures: [{
+        citationId: 'source-2',
+        requestedUrl: 'https://www.nist.gov/unavailable',
+        finalUrl: 'https://www.nist.gov/unavailable',
+        status: 'refused',
+        failureCode: 'unsupported_content_type',
+        httpStatus: 200,
+        fetchVersion: 'webchess-direct-page-fetch-v1',
+        extractor: 'webchess-readable-text-v1',
+        rawByteLength: 64,
+        rawContentDigest: 'd'.repeat(64),
+        rawDigestAlgorithm: 'sha256-raw-response-bytes-v1',
+        acceptedCharacterLength: 0,
+        truncated: false,
+        contentDigest: null,
+        digestAlgorithm: 'sha256-utf8-accepted-text-v1',
+        redirectChain: ['https://www.nist.gov/unavailable'],
+        injectionSignalsDetected: [],
+        retrievedAt: '2026-08-02T20:00:22.000Z',
+      }],
+      sources: [...researchRecord().sources, secondSource],
+    })]} />)
+
+    expect(screen.getByRole('heading', { name: 'Direct-page excerpts: 1' }))
+      .toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Visible page-fetch failures: 1' }))
+      .toBeInTheDocument()
+    expect(screen.getByText('unsupported_content_type')).toBeInTheDocument()
+    expect(screen.getByText(/model-generated, untrusted until Portia/i))
+      .toBeInTheDocument()
+
+    fireEvent.click(screen.getByText(/Measurement evidence/i))
+    expect(screen.getByText(acceptedText)).toBeVisible()
+    expect(screen.getByText('webchess-direct-page-fetch-v1')).toBeVisible()
+    expect(screen.getByText('webchess-readable-text-v1')).toBeVisible()
+    expect(screen.getByText('c'.repeat(64))).toBeVisible()
   })
 
   it.each([

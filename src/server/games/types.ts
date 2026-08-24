@@ -8,6 +8,7 @@ import type {
   ProblemFacet,
   ProblemPart,
 } from '../../types'
+import type { ResearchConsent } from '../../lib/research'
 import type { GameStatus } from '../db'
 
 export type DurableGameStatus = GameStatus
@@ -33,6 +34,7 @@ export interface DurableGameSnapshot {
   readonly revision: number
   readonly status: DurableGameStatus
   readonly problem: string
+  readonly researchConsent: ResearchConsent
   readonly division: DurableDivision | null
   readonly game: GameView | null
   readonly answer: GeneratedAnswer | null
@@ -53,6 +55,8 @@ export interface CreateDivisionInput {
   readonly ownerId: string
   readonly problem: string
   readonly softwareVersion: string
+  /** Required for a new root game; field retries inherit the source game. */
+  readonly researchConsent?: Omit<ResearchConsent, 'recordedAt'>
   readonly gameId?: string
   /** Present only when Retry deliberately regenerates a parent run's field. */
   readonly sourceGameId?: string

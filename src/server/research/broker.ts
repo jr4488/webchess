@@ -1,10 +1,13 @@
-import { isIP } from 'node:net'
-
 import type {
+  ResearchFetchFailure,
   ResearchRecord,
+  ResearchRetrievedFact,
   ResearchSource,
 } from '../../lib/research'
-import { hashCanonicalJson } from '../db'
+import {
+  RESEARCH_PAGE_FETCH_LIMIT,
+} from '../../lib/research'
+import { hashCanonicalJson, type CanonicalJson } from '../db'
 import {
   OpenClawCliError,
   runOpenClawWebSearch,
@@ -25,6 +28,16 @@ import type {
   ResearchRepositoryPort,
   ResearchRequestContext,
 } from './types'
+import {
+  DIRECT_PAGE_DIGEST_ALGORITHM,
+  DIRECT_PAGE_EXTRACTOR_VERSION,
+  DIRECT_PAGE_FETCH_TIMEOUT_MS,
+  DIRECT_PAGE_FETCH_VERSION,
+  DIRECT_PAGE_RAW_DIGEST_ALGORITHM,
+  SecureDirectPageFetcher,
+  isResearchFetchFailure,
+  normalizePublicHttpsUrl,
+} from './direct-page-fetch'
 
 const RESEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 const RESEARCH_MAX_SEARCH_ACTIVITIES = 24
@@ -55,64 +68,54 @@ interface NormalizedSearch {
   readonly sources: readonly Omit<ResearchSource, 'id' | 'createdAt'>[]
 }
 
-function isPrivateIpv4(hostname: string): boolean {
-  const parts = hostname.split('.').map(Number)
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) {
-    return false
+function canonicalJson(value: unknown): CanonicalJson {
+  const serialized = JSON.stringify(value)
+  if (serialized === undefined) {
+    throw new TypeError('Research provenance must be JSON serializable.')
   }
-  const [first, second] = parts
-  return Boolean(
-    first === 0 ||
-    first === 10 ||
-    first === 127 ||
-    (first === 169 && second === 254) ||
-    (first === 172 && second !== undefined && second >= 16 && second <= 31) ||
-    (first === 192 && second === 168) ||
-    first! >= 224,
-  )
-}
-
-function isPrivateIpv6(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/gu, '')
-  return (
-    normalized === '::' ||
-    normalized === '::1' ||
-    normalized.startsWith('fc') ||
-    normalized.startsWith('fd') ||
-    /^fe[89ab]/u.test(normalized)
-  )
+  return JSON.parse(serialized) as CanonicalJson
 }
 
 function safePublicUrl(value: string): URL | null {
-  let parsed: URL
-  try {
-    parsed = new URL(value)
-  } catch {
-    return null
+  return normalizePublicHttpsUrl(value)
+}
+
+function sourcesToFetch(
+  sources: readonly Omit<ResearchSource, 'id' | 'createdAt'>[],
+): readonly Omit<ResearchSource, 'id' | 'createdAt'>[] {
+  return [...sources]
+    .sort((left, right) => {
+      const leftAuthority = left.trust === 'government_or_education'
+      const rightAuthority = right.trust === 'government_or_education'
+      if (leftAuthority !== rightAuthority) return leftAuthority ? -1 : 1
+      return left.ordinal - right.ordinal
+    })
+    .slice(0, RESEARCH_PAGE_FETCH_LIMIT)
+}
+
+function pageBudgetFailure(
+  source: Omit<ResearchSource, 'id' | 'createdAt'>,
+): ResearchFetchFailure {
+  return {
+    citationId: source.citationId,
+    requestedUrl: source.url,
+    finalUrl: null,
+    status: 'timed_out',
+    failureCode: 'page_fetch_budget_exhausted',
+    httpStatus: null,
+    fetchVersion: DIRECT_PAGE_FETCH_VERSION,
+    extractor: DIRECT_PAGE_EXTRACTOR_VERSION,
+    rawByteLength: 0,
+    rawContentDigest: null,
+    rawDigestAlgorithm: DIRECT_PAGE_RAW_DIGEST_ALGORITHM,
+    acceptedCharacterLength: 0,
+    truncated: false,
+    contentDigest: null,
+    digestAlgorithm: DIRECT_PAGE_DIGEST_ALGORITHM,
+    redirectChain: [source.url],
+    injectionSignalsDetected: [],
+    retrievedAt: new Date().toISOString(),
   }
-  const hostname = parsed.hostname.toLowerCase().replace(/\.$/u, '')
-  if (
-    parsed.protocol !== 'https:' ||
-    parsed.username !== '' ||
-    parsed.password !== '' ||
-    (parsed.port !== '' && parsed.port !== '443') ||
-    hostname === 'localhost' ||
-    hostname.endsWith('.localhost') ||
-    hostname.endsWith('.local') ||
-    hostname.endsWith('.internal') ||
-    (isIP(hostname) === 4 && isPrivateIpv4(hostname)) ||
-    (isIP(hostname.replace(/^\[|\]$/gu, '')) === 6 && isPrivateIpv6(hostname))
-  ) {
-    return null
-  }
-  parsed.hash = ''
-  for (const key of [...parsed.searchParams.keys()]) {
-    if (/^(?:fbclid|gclid|mc_[a-z]+|utm_[a-z]+)$/iu.test(key)) {
-      parsed.searchParams.delete(key)
-    }
-  }
-  parsed.hostname = hostname
-  return parsed
 }
 
 function cleanTitle(value: string, hostname: string): string {
@@ -298,12 +301,24 @@ function failureStatus(error: unknown): {
   return { code: 'research_normalization_failed', status: 'failed' }
 }
 
-function configurationDigest(timeoutMs: number): string {
-  return hashCanonicalJson({
-    kind: 'webchess-visible-research-configuration-v1',
+function configurationDigest(
+  timeoutMs: number,
+  consent: ResearchRequestContext['researchConsent'],
+): string {
+  return hashCanonicalJson(canonicalJson({
+    kind: 'webchess-visible-research-configuration-v3',
     provider: 'codex',
     transport: 'local',
-    fetch: 'disabled-no-authorized-first-party-provider',
+    consent,
+    fetch: {
+      mode: DIRECT_PAGE_FETCH_VERSION,
+      pageLimit: RESEARCH_PAGE_FETCH_LIMIT,
+      acceptedCharacterLimitPerPage: 6_000,
+      rawByteLimitPerPage: 1_048_576,
+      timeoutMsPerPage: DIRECT_PAGE_FETCH_TIMEOUT_MS,
+      redirectPolicy: 'same-host-https-only',
+      dnsPolicy: 'all-addresses-global-then-pin-one',
+    },
     policyVersion: RESEARCH_POLICY_VERSION,
     bounds: {
       invocationLimit: RESEARCH_BOUNDS.invocationLimit,
@@ -312,7 +327,7 @@ function configurationDigest(timeoutMs: number): string {
       timeoutMs,
       synthesisCharacterLimit: RESEARCH_BOUNDS.synthesisCharacterLimit,
     },
-  })
+  }))
 }
 
 function staleSearching(record: ResearchRecord): boolean {
@@ -322,7 +337,11 @@ function staleSearching(record: ResearchRecord): boolean {
 }
 
 export class DurableResearchBroker implements ResearchBrokerPort {
-  constructor(private readonly repository: ResearchRepositoryPort) {}
+  constructor(
+    private readonly repository: ResearchRepositoryPort,
+    private readonly pageFetcher: Pick<SecureDirectPageFetcher, 'fetch'> =
+      new SecureDirectPageFetcher(),
+  ) {}
 
   getForGame(ownerId: string, gameId: string): Promise<readonly ResearchRecord[]> {
     return this.repository.getForGame(ownerId, gameId)
@@ -341,7 +360,10 @@ export class DurableResearchBroker implements ResearchBrokerPort {
           lifecycleState: input.lifecycleState,
           status: 'timed_out',
           failureCode: 'durable_research_deadline_expired',
-          configurationDigest: configurationDigest(existing.bounds.timeoutMs),
+          configurationDigest: configurationDigest(
+            existing.bounds.timeoutMs,
+            existing.consent,
+          ),
         })
       }
       return existing
@@ -357,7 +379,10 @@ export class DurableResearchBroker implements ResearchBrokerPort {
         ...input,
         policyVersion: RESEARCH_POLICY_VERSION,
         reason: decision.reason,
-        configurationDigest: configurationDigest(RESEARCH_BOUNDS.timeoutMs),
+        configurationDigest: configurationDigest(
+          RESEARCH_BOUNDS.timeoutMs,
+          input.researchConsent,
+        ),
       })
     }
 
@@ -372,7 +397,10 @@ export class DurableResearchBroker implements ResearchBrokerPort {
         reason: decision.reason,
         query: decision.query,
         timeoutMs: RESEARCH_BOUNDS.timeoutMs,
-        configurationDigest: configurationDigest(RESEARCH_BOUNDS.timeoutMs),
+        configurationDigest: configurationDigest(
+          RESEARCH_BOUNDS.timeoutMs,
+          input.researchConsent,
+        ),
       })
       if (!claim.created) return claim.record
       return this.repository.fail({
@@ -381,14 +409,20 @@ export class DurableResearchBroker implements ResearchBrokerPort {
         lifecycleState: input.lifecycleState,
         status: 'refused',
         failureCode: 'codex_search_configuration_invalid',
-        configurationDigest: configurationDigest(RESEARCH_BOUNDS.timeoutMs),
+        configurationDigest: configurationDigest(
+          RESEARCH_BOUNDS.timeoutMs,
+          input.researchConsent,
+        ),
       })
     }
     const effectiveTimeoutMs = Math.min(
       configured.timeoutMs,
       RESEARCH_BOUNDS.timeoutMs,
     )
-    const appliedConfigurationDigest = configurationDigest(effectiveTimeoutMs)
+    const appliedConfigurationDigest = configurationDigest(
+      effectiveTimeoutMs,
+      input.researchConsent,
+    )
     const claim = await this.repository.start({
       ...input,
       policyVersion: RESEARCH_POLICY_VERSION,
@@ -409,18 +443,56 @@ export class DurableResearchBroker implements ResearchBrokerPort {
       transport: 'local' as const,
     }
     try {
+      const brokerStartedAt = Date.now()
       const result = await runOpenClawWebSearch(decision.query, researchConfig, {
         limit: RESEARCH_BOUNDS.resultLimit,
         maxContentChars: RESEARCH_BOUNDS.synthesisCharacterLimit + 512,
         maxSearchActivities: RESEARCH_MAX_SEARCH_ACTIVITIES,
       })
       const normalized = normalizeCodexSearch(result)
+      const retrievedFacts: ResearchRetrievedFact[] = []
+      const fetchFailures: ResearchFetchFailure[] = []
+      const injectionSignalsDetected = new Set(
+        normalized.injectionSignalsDetected,
+      )
+      for (const source of sourcesToFetch(normalized.sources)) {
+        const remainingMs = effectiveTimeoutMs - (Date.now() - brokerStartedAt)
+        if (remainingMs < 1) {
+          fetchFailures.push(pageBudgetFailure(source))
+          continue
+        }
+        try {
+          const fetched = await this.pageFetcher.fetch(
+            source,
+            Math.min(DIRECT_PAGE_FETCH_TIMEOUT_MS, remainingMs),
+          )
+          retrievedFacts.push(fetched.fact)
+          fetched.injectionSignalsDetected.forEach((signal) =>
+            injectionSignalsDetected.add(signal))
+        } catch (error) {
+          if (!isResearchFetchFailure(error)) throw error
+          fetchFailures.push(error)
+          error.injectionSignalsDetected.forEach((signal) =>
+            injectionSignalsDetected.add(signal))
+        }
+      }
+      const contentDigest = hashCanonicalJson(canonicalJson({
+        kind: 'codex-search-with-direct-page-evidence-v2',
+        searchContentDigest: normalized.contentDigest,
+        retrievedFacts,
+        fetchFailures,
+      }))
       return this.repository.complete({
         ownerId: input.ownerId,
         requestId: started.id,
         lifecycleState: input.lifecycleState,
         model: result.model,
         ...normalized,
+        contentDigest,
+        directPageTextFetched: retrievedFacts.length > 0,
+        retrievedFacts,
+        fetchFailures,
+        injectionSignalsDetected: [...injectionSignalsDetected],
         configurationDigest: appliedConfigurationDigest,
       })
     } catch (error) {

@@ -24,6 +24,10 @@ const MODEL = 'gpt-5.6-sol'
 const PROMPT = 'Canonical integration division prompt.'
 const PROMPT_VERSION = 'division-v1'
 const SOFTWARE_VERSION = 'integration-test'
+const RESEARCH_CONSENT = {
+  version: 'webchess-research-consent-v1',
+  decision: 'no_external_research',
+} as const
 const USAGE_OWNERSHIP_LOCK = {
   text: `
     SELECT pg_advisory_xact_lock(
@@ -205,6 +209,7 @@ async function createPlayingGame(): Promise<DurableGameSnapshot> {
     gameId: GAME_ID,
     problem: PROBLEM,
     softwareVersion: SOFTWARE_VERSION,
+    researchConsent: RESEARCH_CONSENT,
   })
   const mapped = await repository.finishDivision({
     ownerId: OWNER,
@@ -246,6 +251,7 @@ describe('durable game repository against PostgreSQL', () => {
         gameId: GAME_ID,
         problem: PROBLEM,
         softwareVersion: SOFTWARE_VERSION,
+        researchConsent: RESEARCH_CONSENT,
       }),
     ).rejects.toMatchObject({ code: 'idempotency-conflict' })
 
@@ -268,6 +274,7 @@ describe('durable game repository against PostgreSQL', () => {
       gameId: GAME_ID,
       problem: PROBLEM,
       softwareVersion: SOFTWARE_VERSION,
+      researchConsent: RESEARCH_CONSENT,
     })
     const deletion = database.adapter.transaction([
       USAGE_OWNERSHIP_LOCK,
@@ -318,6 +325,7 @@ describe('durable game repository against PostgreSQL', () => {
         gameId: GAME_ID,
         problem: PROBLEM,
         softwareVersion: SOFTWARE_VERSION,
+        researchConsent: RESEARCH_CONSENT,
       }),
     ).rejects.toMatchObject({ code: 'idempotency-conflict' })
 
@@ -340,6 +348,7 @@ describe('durable game repository against PostgreSQL', () => {
       gameId: GAME_ID,
       problem: PROBLEM,
       softwareVersion: SOFTWARE_VERSION,
+      researchConsent: RESEARCH_CONSENT,
     }
     const results = await Promise.all([
       repository.getOrCreateDivision(inputs),
@@ -350,6 +359,10 @@ describe('durable game repository against PostgreSQL', () => {
       false,
       true,
     ])
+    expect(results[0].game.researchConsent).toEqual({
+      ...RESEARCH_CONSENT,
+      recordedAt: expect.any(String),
+    })
     const rows = await database.adapter.query({
       text: `
         SELECT id::text, is_current
@@ -728,6 +741,7 @@ describe('durable game repository against PostgreSQL', () => {
         gameId: GAME_ID,
         problem: PROBLEM,
         softwareVersion: SOFTWARE_VERSION,
+        researchConsent: RESEARCH_CONSENT,
       })).game
       if (status === 'division_failed') {
         shell = await repository.failDivision({

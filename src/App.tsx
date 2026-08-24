@@ -24,6 +24,7 @@ import { normalizeProblemInput, problemPartAt } from './lib/problem'
 import { PIECE_METAPHORS, synthesizeReading } from './lib/reading'
 import { beginModelActivity } from './lib/model-activity'
 import { isWebChessApiError } from './lib/webchess-api'
+import type { ResearchConsentDecision } from './lib/research'
 import type {
   AppendWilburObservationCommand,
   CreateWilburActionCommand,
@@ -174,6 +175,8 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   const [movePending, setMovePending] = useState(false)
   const [stage, setStage] = useState<Stage>('question')
   const [problem, setProblem] = useState('')
+  const [researchConsentDecision, setResearchConsentDecision] =
+    useState<ResearchConsentDecision | null>(null)
   const [parts, setParts] = useState<ProblemPart[]>([])
   const [pieces, setPieces] = useState<Piece[]>([])
   const [turn, setTurn] = useState<Side>('white')
@@ -226,6 +229,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   const divisionIntentRef = useRef<{
     problem: string
     memoryKey: string
+    researchConsentDecision: ResearchConsentDecision
     key: string
   } | null>(null)
   const answerIntentRef = useRef<{ gameId: string; key: string } | null>(null)
@@ -305,6 +309,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     invalidateEngineRequest(true)
     setStage('question')
     setProblem('')
+    setResearchConsentDecision(null)
     setParts([])
     setPieces([])
     setTurn('white')
@@ -367,6 +372,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
       divisionIntentRef.current = null
     }
     setProblem(nextGame.problem)
+    setResearchConsentDecision(nextGame.researchConsent.decision)
     setParts(division ? [...division.parts] : [])
     setDivisionModel(division?.model ?? '')
     setDivisionPrompt(division?.prompt ?? '')
@@ -1360,18 +1366,21 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   }
 
   const analyzeProblem = async (subject: string) => {
+    if (!researchConsentDecision) return
     divisionRequestRef.current?.abort()
     const controller = new AbortController()
     divisionRequestRef.current = controller
     const existingIntent = divisionIntentRef.current
     const memoryObservationIds = [...selectedMemoryObservationIds]
     const memoryKey = memoryObservationIds.join(':')
-    const intent = existingIntent?.problem === subject
-      && existingIntent.memoryKey === memoryKey
+    const intent = existingIntent?.problem === subject &&
+      existingIntent.memoryKey === memoryKey &&
+      existingIntent.researchConsentDecision === researchConsentDecision
       ? existingIntent
       : {
           problem: subject,
           memoryKey,
+          researchConsentDecision,
           key: runtime.api.createIdempotencyKey(),
         }
     divisionIntentRef.current = intent
@@ -1391,6 +1400,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
       const divided = await runtime.api.divideProblem(subject, {
         idempotencyKey: intent.key,
         memoryObservationIds,
+        researchConsentDecision: intent.researchConsentDecision,
         signal: controller.signal,
       })
       if (controller.signal.aborted || divisionRequestRef.current !== controller) return
@@ -1487,7 +1497,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   const beginMapping = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const cleaned = normalizeProblemInput(problem)
-    if (cleaned.length < 12) return
+    if (cleaned.length < 12 || !researchConsentDecision) return
 
     invalidateEngineRequest(true)
     setProblem(cleaned)
@@ -2189,6 +2199,8 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
           <QuestionStage
             problem={problem}
             provider={runtime.provider}
+            researchConsentDecision={researchConsentDecision}
+            setResearchConsentDecision={setResearchConsentDecision}
             setProblem={setProblem}
             onSubmit={beginMapping}
             selectedMemoryCount={selectedMemoryObservationIds.length}

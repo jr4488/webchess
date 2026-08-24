@@ -9,6 +9,7 @@ import type {
   WebMemoryIndex,
 } from '../../lib/lifecycle'
 import type { GeneratedAnswer } from '../../types'
+import type { ResearchConsent } from '../../lib/research'
 
 export type JsonPrimitive = boolean | number | string | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
@@ -110,6 +111,7 @@ export interface WebChessApiServices {
     ownerId: string
     problem: string
     memoryObservationIds?: readonly string[]
+    researchConsent: Omit<ResearchConsent, 'recordedAt'>
   } & ApiOperationContext): Promise<DurableGameDto>
 
   getCurrentGame(input: OwnerContext): Promise<DurableGameDto | null>

@@ -27,7 +27,9 @@ describe('QuestionStage', () => {
       <QuestionStage
         problem=""
         provider={API_PROVIDER}
+        researchConsentDecision={null}
         setProblem={setProblem}
+        setResearchConsentDecision={vi.fn()}
         onSubmit={vi.fn()}
       />,
     )
@@ -47,7 +49,9 @@ describe('QuestionStage', () => {
       <QuestionStage
         problem="A concrete question"
         provider={API_PROVIDER}
+        researchConsentDecision="no_external_research"
         setProblem={vi.fn()}
+        setResearchConsentDecision={vi.fn()}
         onSubmit={vi.fn()}
       />,
     )
@@ -67,7 +71,9 @@ describe('QuestionStage', () => {
       <QuestionStage
         problem="A concrete question"
         provider={OPENCLAW_PROVIDER}
+        researchConsentDecision="allow_search_and_page_fetch"
         setProblem={vi.fn()}
+        setResearchConsentDecision={vi.fn()}
         onSubmit={vi.fn()}
       />,
     )
@@ -84,5 +90,44 @@ describe('QuestionStage', () => {
     expect(
       screen.getByRole('link', { name: /How OpenClaw runs model requests/i }),
     ).toHaveAttribute('href', 'https://docs.openclaw.ai/cli/infer')
+  })
+
+  it('requires an explicit game-scoped research choice and discloses both data paths', () => {
+    const setResearchConsentDecision = vi.fn()
+    const props = {
+      problem: 'A concrete question',
+      provider: OPENCLAW_PROVIDER,
+      researchConsentDecision: null,
+      setProblem: vi.fn(),
+      setResearchConsentDecision,
+      onSubmit: vi.fn(),
+    } as const
+    const { rerender } = render(<QuestionStage {...props} />)
+
+    const allow = screen.getByRole('radio', { name: /allow bounded research/i })
+    const decline = screen.getByRole('radio', { name: /do not use external research/i })
+    expect(allow).toBeRequired()
+    expect(decline).toBeRequired()
+    expect(screen.getByRole('button', { name: /divide the problem/i })).toBeDisabled()
+    expect(screen.getByText(/exact query shown in the lifecycle/i)).toBeInTheDocument()
+    expect(screen.getByText(/at most three returned HTTPS pages/i)).toBeInTheDocument()
+    expect(screen.getByText(/inherited by a bounded retry/i)).toBeInTheDocument()
+    expect(screen.getByText(/failures stay visible/i)).toBeInTheDocument()
+
+    fireEvent.click(allow)
+    expect(setResearchConsentDecision).toHaveBeenCalledWith(
+      'allow_search_and_page_fetch',
+    )
+
+    rerender(
+      <QuestionStage
+        {...props}
+        researchConsentDecision="allow_search_and_page_fetch"
+      />,
+    )
+    expect(screen.getByRole('button', { name: /divide the problem/i })).toBeEnabled()
+
+    fireEvent.click(decline)
+    expect(setResearchConsentDecision).toHaveBeenCalledWith('no_external_research')
   })
 })

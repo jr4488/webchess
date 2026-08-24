@@ -51,6 +51,10 @@ const PROMPT_VERSION = 'division-v1'
 const PROMPT = 'Canonical division prompt for repository tests.'
 const FACETS = makeProblemFacets('Repository facet')
 const PARTS = composeProblemParts(FACETS, SEED)
+const RESEARCH_CONSENT = {
+  version: 'webchess-research-consent-v1',
+  decision: 'allow_search_and_page_fetch',
+} as const
 
 function jsonValue(value: unknown): CanonicalJson {
   return JSON.parse(JSON.stringify(value)) as CanonicalJson
@@ -141,6 +145,9 @@ function gameRow(
     status: 'playing',
     problem: PROBLEM,
     problem_sha256: sha256Hex(PROBLEM),
+    research_consent_version: RESEARCH_CONSENT.version,
+    research_consent_decision: RESEARCH_CONSENT.decision,
+    research_consent_recorded_at: NOW,
     division_seed: SEED,
     division_facets: FACETS,
     problem_parts: PARTS,
@@ -324,6 +331,16 @@ function finishInput(
 }
 
 describe('durable game lifecycle', () => {
+  it('requires an explicit current research choice before creating a root game', async () => {
+    const repository = new DurableGameRepository(new ScriptedAdapter([]))
+    await expect(repository.createDivision({
+      ownerId: OWNER_ID,
+      problem: PROBLEM,
+      softwareVersion: '0.2.0-test',
+      gameId: GAME_ID,
+    })).rejects.toMatchObject({ code: 'invalid-input' })
+  })
+
   it('creates an owner-bound current division without requiring runtime secrets', async () => {
     const database = new ScriptedAdapter([
       {
@@ -337,6 +354,7 @@ describe('durable game lifecycle', () => {
       ownerId: OWNER_ID,
       problem: `  ${PROBLEM}  `,
       softwareVersion: '0.2.0-test',
+      researchConsent: RESEARCH_CONSENT,
       gameId: GAME_ID,
     })
 
@@ -345,6 +363,10 @@ describe('durable game lifecycle', () => {
       status: 'dividing',
       revision: 0,
       problem: PROBLEM,
+      researchConsent: {
+        ...RESEARCH_CONSENT,
+        recordedAt: NOW,
+      },
       division: null,
       game: null,
     })
@@ -358,6 +380,9 @@ describe('durable game lifecycle', () => {
       CURRENT_GAME_VERSIONS.engine,
       CURRENT_GAME_VERSIONS.cast,
       '0.2.0-test',
+      null,
+      RESEARCH_CONSENT.version,
+      RESEARCH_CONSENT.decision,
       null,
     ])
     expect(database.calls[0]?.text).not.toContain(
@@ -396,6 +421,7 @@ describe('durable game lifecycle', () => {
       ownerId: OWNER_ID,
       problem: PROBLEM,
       softwareVersion: '0.2.0-test',
+      researchConsent: RESEARCH_CONSENT,
       gameId: GAME_ID,
     })
 
@@ -937,6 +963,7 @@ describe('repository validation and fail-closed snapshots', () => {
       ownerId: OWNER_ID,
       problem: PROBLEM,
       softwareVersion: '0.2.0-test',
+      researchConsent: RESEARCH_CONSENT,
     })
 
     expect(database.calls[0]?.values?.[1]).toMatch(
@@ -1157,6 +1184,7 @@ describe('division idempotency and compare-and-swap recovery', () => {
         gameId: GAME_ID,
         problem: PROBLEM,
         softwareVersion: '0.2.0-test',
+        researchConsent: RESEARCH_CONSENT,
       }),
     ).rejects.toMatchObject({ code: 'idempotency-conflict' })
 
@@ -1179,6 +1207,7 @@ describe('division idempotency and compare-and-swap recovery', () => {
         gameId: GAME_ID,
         problem: PROBLEM,
         softwareVersion: '0.2.0-test',
+        researchConsent: RESEARCH_CONSENT,
       }),
     ).rejects.toMatchObject({ code: 'integrity-error' })
   })
@@ -1196,6 +1225,7 @@ describe('division idempotency and compare-and-swap recovery', () => {
         gameId: GAME_ID,
         problem: PROBLEM,
         softwareVersion: '0.2.0-test',
+        researchConsent: RESEARCH_CONSENT,
       })
 
     expect(recovered).toMatchObject({
@@ -1215,6 +1245,7 @@ describe('division idempotency and compare-and-swap recovery', () => {
         gameId: GAME_ID,
         problem: PROBLEM,
         softwareVersion: '0.2.0-test',
+        researchConsent: RESEARCH_CONSENT,
       }),
     ).rejects.toMatchObject({ code: 'idempotency-conflict' })
 
@@ -1237,6 +1268,7 @@ describe('division idempotency and compare-and-swap recovery', () => {
           gameId: GAME_ID,
           problem: PROBLEM,
           softwareVersion: '0.2.0-test',
+          researchConsent: RESEARCH_CONSENT,
         }),
       ).rejects.toMatchObject({ code: 'idempotency-conflict' })
     }
@@ -1257,6 +1289,7 @@ describe('division idempotency and compare-and-swap recovery', () => {
         gameId: GAME_ID,
         problem: PROBLEM,
         softwareVersion: '0.2.0-test',
+        researchConsent: RESEARCH_CONSENT,
       })
 
     expect(recovered.game).toMatchObject({

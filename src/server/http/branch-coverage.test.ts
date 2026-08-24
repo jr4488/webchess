@@ -65,6 +65,11 @@ const GAME: DurableGameDto = {
   revision: 3,
   status: 'playing',
   problem: 'Which project should I choose?',
+  researchConsent: {
+    version: 'webchess-research-consent-v1',
+    decision: 'allow_search_and_page_fetch',
+    recordedAt: '2026-07-26T20:00:00.000Z',
+  },
   division: null,
   state: null,
   answer: null,

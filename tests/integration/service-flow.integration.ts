@@ -4,6 +4,7 @@ import {
   getLegalMoves,
   getPieceAt,
 } from '../../src/lib/game'
+import { RESEARCH_CONSENT_VERSION } from '../../src/lib/research'
 import type { DurableGame } from '../../src/lib/webchess-api'
 import { DurableGameRepository } from '../../src/server/games'
 import {
@@ -257,6 +258,10 @@ describe('complete API service flow against PostgreSQL', () => {
     let game = await services.divide({
       ownerId: OWNER,
       problem: PROBLEM,
+      researchConsent: {
+        version: RESEARCH_CONSENT_VERSION,
+        decision: 'allow_search_and_page_fetch',
+      },
       ...operationContext(DIVISION_REQUEST_ID),
       idempotencyKey: operationId(1),
       requestId: DIVISION_REQUEST_ID,

@@ -125,6 +125,7 @@ export function handleDivideRequest(
         ...operationContext(scope, request),
         problem: body.problem,
         memoryObservationIds: body.memoryObservationIds,
+        researchConsent: body.researchConsent,
       })
 
       return jsonResponse({ game }, { status: 201 })

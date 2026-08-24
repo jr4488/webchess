@@ -85,6 +85,9 @@ describe('local OpenClaw WebChess experience', () => {
         },
       },
     )
+    fireEvent.click(screen.getByRole('radio', {
+      name: /do not use external research/i,
+    }))
     fireEvent.click(screen.getByRole('button', { name: /divide the problem/i }))
 
     expect(

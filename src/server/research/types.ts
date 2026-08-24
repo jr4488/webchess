@@ -1,6 +1,9 @@
 import type {
+  ResearchConsent,
+  ResearchFetchFailure,
   ResearchMateriality,
   ResearchRecord,
+  ResearchRetrievedFact,
   ResearchSource,
   ResearchStage,
 } from '../../lib/research'
@@ -19,6 +22,7 @@ export interface ResearchRequestContext {
   readonly lifecycleState: string
   readonly stage: ResearchStage
   readonly problem: string
+  readonly researchConsent: ResearchConsent
 }
 
 export interface ResearchBrokerPort {
@@ -54,6 +58,9 @@ export interface CompleteResearchInput {
   readonly model: string
   readonly executedQueries: readonly string[]
   readonly searchSynthesis: string
+  readonly directPageTextFetched: boolean
+  readonly retrievedFacts: readonly ResearchRetrievedFact[]
+  readonly fetchFailures: readonly ResearchFetchFailure[]
   readonly sources: readonly Omit<ResearchSource, 'id' | 'createdAt'>[]
   readonly omittedSourceCount: number
   readonly injectionSignalsDetected: readonly string[]

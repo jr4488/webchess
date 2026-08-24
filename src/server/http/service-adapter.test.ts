@@ -94,6 +94,15 @@ function webMemoryEvidence(attachedAt: string | null): WebMemoryEvidence {
     attachedAt,
   }
 }
+const RESEARCH_CONSENT = {
+  version: 'webchess-research-consent-v1',
+  decision: 'allow_search_and_page_fetch',
+  recordedAt: NOW.toISOString(),
+} as const
+const RESEARCH_CONSENT_CHOICE = {
+  version: RESEARCH_CONSENT.version,
+  decision: RESEARCH_CONSENT.decision,
+} as const
 
 const STORED_ANSWER: GeneratedAnswer = {
   answer:
@@ -112,6 +121,7 @@ function snapshot(
     revision: 0,
     status: 'dividing',
     problem: PROBLEM,
+    researchConsent: RESEARCH_CONSENT,
     division: null,
     game: null,
     answer: null,
@@ -1002,6 +1012,7 @@ function operationInput() {
   return {
     ownerId: OWNER_ID,
     problem: PROBLEM,
+    researchConsent: RESEARCH_CONSENT_CHOICE,
     ipAddress: '203.0.113.17',
     idempotencyKey: IDEMPOTENCY_KEY,
     requestId: REQUEST_ID,
@@ -1212,6 +1223,19 @@ describe('durable HTTP service adapter', () => {
     expect(
       dependencies.lifecycleRepository?.attachWebMemoryEvidence,
     ).toHaveBeenCalledWith(OWNER_ID, REQUEST_ID, [WEB_MEMORY_OBSERVATION_ID])
+    expect(dependencies.usage.reserveModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestSha256: hashCanonicalJson({
+          operation: 'division/v4-web-memory-research-consent',
+          problem: PROBLEM,
+          memoryObservationIds: [WEB_MEMORY_OBSERVATION_ID],
+          researchConsent: RESEARCH_CONSENT_CHOICE,
+          model: OPENAI_MODEL,
+          promptVersion: DIVISION_PROMPT_VERSION,
+          softwareVersion: 'webchess-test',
+        } as unknown as CanonicalJson),
+      }),
+    )
     expect(dependencies.divisionGenerator).toHaveBeenCalledWith(
       { problem: PROBLEM, webMemoryEvidence: [evidence] },
       expect.objectContaining({ userId: OWNER_ID }),
@@ -2606,13 +2630,16 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('binds visible Codex research into the exact prompt before Portia adjudicates it', async () => {
+    const acceptedPageText =
+      'The current official guidance recommends a bounded, reversible test.'
     const researchRecord = {
       id: '91919191-9191-4191-8191-919191919191',
       lifecycleRunId: '55555555-5555-4555-8555-555555555555',
       gameId: GAME_ID,
       stage: 'portia' as const,
       requestedBy: 'research-policy' as const,
-      policyVersion: 'webchess-visible-research-v1',
+      consent: RESEARCH_CONSENT,
+      policyVersion: 'webchess-visible-research-v4',
       materiality: 'required' as const,
       reason: 'Portia needs current external evidence before reviewing this exact board-derived prompt.',
       query: `${PROBLEM} current authoritative evidence`,
@@ -2631,8 +2658,33 @@ describe('durable HTTP service adapter', () => {
       executedQueries: [`${PROBLEM} current authoritative evidence`],
       searchSynthesis:
         'Codex Search found current source links. This remains model-generated synthesis for Portia to assess.',
-      directPageTextFetched: false as const,
-      retrievedFacts: [] as const,
+      directPageTextFetched: true,
+      retrievedFacts: [{
+        citationId: 'R1',
+        requestedUrl: 'https://example.gov/current-source',
+        finalUrl: 'https://example.gov/current-source',
+        title: 'Current primary source',
+        provider: 'webchess-direct-https' as const,
+        fetchVersion: 'webchess-direct-page-fetch-v1' as const,
+        retrievedAt: NOW.toISOString(),
+        httpStatus: 200,
+        contentType: 'text/html' as const,
+        extractor: 'webchess-readable-text-v1' as const,
+        rawByteLength: 94,
+        rawContentDigest: '8'.repeat(64),
+        rawDigestAlgorithm: 'sha256-raw-response-bytes-v1' as const,
+        acceptedCharacterLength: acceptedPageText.length,
+        contentDigest: createHash('sha256')
+          .update(acceptedPageText, 'utf8')
+          .digest('hex'),
+        digestAlgorithm: 'sha256-utf8-accepted-text-v1' as const,
+        redirectChain: ['https://example.gov/current-source'],
+        text: acceptedPageText,
+        truncated: false,
+        untrusted: true as const,
+        contentKind: 'direct_page_text' as const,
+      }],
+      fetchFailures: [],
       sources: [{
         id: '92929292-9292-4292-8292-929292929292',
         citationId: 'R1',
@@ -2679,6 +2731,7 @@ describe('durable HTTP service adapter', () => {
       lifecycleState: 'portia_pending',
       stage: 'portia',
       problem: PROBLEM,
+      researchConsent: RESEARCH_CONSENT,
     })
     expect(dependencies.portiaGenerator).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2688,8 +2741,16 @@ describe('durable HTTP service adapter', () => {
             status: 'completed',
             provider: 'codex',
             contentKind: 'model_generated_search_synthesis',
-            directPageTextFetched: false,
+            consent: RESEARCH_CONSENT,
+            directPageTextFetched: true,
             searchSynthesis: researchRecord.searchSynthesis,
+            retrievedFacts: [expect.objectContaining({
+              citationId: 'R1',
+              text: acceptedPageText,
+              contentKind: 'direct_page_text',
+              untrusted: true,
+            })],
+            fetchFailures: [],
             sourceLinks: [expect.objectContaining({
               citationId: 'R1',
               url: 'https://example.gov/current-source',

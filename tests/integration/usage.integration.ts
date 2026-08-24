@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { composeProblemParts } from '../../src/lib/division'
+import { RESEARCH_CONSENT_VERSION } from '../../src/lib/research'
 import { DurableGameRepository } from '../../src/server/games'
 import {
   createUsageController,
@@ -40,6 +41,10 @@ const MATURE_ACTIVE_REQUEST_ID = '14000000-0000-4000-8000-000000000008'
 const MATURE_ACTIVE_LEASE_TOKEN = '14000000-0000-4000-8000-000000000009'
 const WILBUR_RATE_ACTION_ID = '14000000-0000-4000-8000-00000000000a'
 const SHA256 = 'a'.repeat(64)
+const NO_EXTERNAL_RESEARCH_CONSENT = {
+  version: RESEARCH_CONSENT_VERSION,
+  decision: 'no_external_research' as const,
+}
 
 let wilburRateKeySequence = 0
 
@@ -167,6 +172,7 @@ async function createDivisionShell(
     gameId,
     problem,
     softwareVersion: 'integration-test',
+    researchConsent: NO_EXTERNAL_RESEARCH_CONSENT,
   })
   await database.adapter.query({
     text: `
@@ -501,6 +507,7 @@ describe('durable usage accounting against PostgreSQL', () => {
       gameId: REQUEST_ID,
       problem: 'How can this integration remain durable across retries?',
       softwareVersion: 'integration-test',
+      researchConsent: NO_EXTERNAL_RESEARCH_CONSENT,
     })
     expect(created.created).toBe(true)
 
@@ -2419,6 +2426,7 @@ describe('durable usage accounting against PostgreSQL', () => {
       gameId: REQUEST_ID,
       problem: 'Should forced deletion win while provider work is active?',
       softwareVersion: 'integration-test',
+      researchConsent: NO_EXTERNAL_RESEARCH_CONSENT,
     })
     await usage.attachModelRequestGame({
       userId: OWNER,
