@@ -293,7 +293,7 @@ describe('OpenClaw durable service bootstrap', () => {
       expect.objectContaining({
         modelProvider: 'openclaw',
         requiresModelApiKey: false,
-        softwareVersion: 'webchess@2.2.0-openclaw',
+        softwareVersion: 'webchess@2.2.0-rc.1-openclaw',
       }),
     )
     expect(harness.createPostgresSqlAdapter).toHaveBeenCalledOnce()

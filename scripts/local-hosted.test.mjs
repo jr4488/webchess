@@ -266,7 +266,7 @@ describe('local hosted launcher', () => {
       })
       const firstSecret = first.appEnv[LOCAL_SESSION_SECRET_NAME]
       expect(firstSecret).toBe('c'.repeat(64))
-      expect(first.appEnv.WEBCHESS_SOFTWARE_VERSION).toBe('2.2.0-local')
+      expect(first.appEnv.WEBCHESS_SOFTWARE_VERSION).toBe('2.2.0-rc.1-local')
 
       const second = await ensureLocalEnvFiles({
         generateHmac: () => {

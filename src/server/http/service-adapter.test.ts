@@ -1037,8 +1037,8 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('uses the canonical candidate identity for fallback provenance', () => {
-    expect(normalizeSoftwareVersion(undefined)).toBe('webchess@2.2.0')
-    expect(normalizeSoftwareVersion('   ')).toBe('webchess@2.2.0')
+    expect(normalizeSoftwareVersion(undefined)).toBe('webchess@2.2.0-rc.1')
+    expect(normalizeSoftwareVersion('   ')).toBe('webchess@2.2.0-rc.1')
     expect(normalizeSoftwareVersion('deployment-sha')).toBe('deployment-sha')
   })
 

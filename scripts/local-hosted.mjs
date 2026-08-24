@@ -290,7 +290,7 @@ export function buildLocalAppEnv({
     WEBCHESS_HMAC_SECRET: hmacSecret,
     [LOCAL_SESSION_SECRET_NAME]: localSessionSecret,
     WEBCHESS_OPENCLAW_ENABLED: '',
-    WEBCHESS_SOFTWARE_VERSION: '2.2.0-local',
+    WEBCHESS_SOFTWARE_VERSION: '2.2.0-rc.1-local',
     ...LOCAL_HOSTED_QUOTAS,
   })
 }
