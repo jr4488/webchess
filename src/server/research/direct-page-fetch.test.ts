@@ -176,6 +176,31 @@ describe('SecureDirectPageFetcher', () => {
     expect(deps.request).toHaveBeenCalledTimes(1)
   })
 
+  it('handles a maximum-size run of unmatched inert closing tags in linear work', async () => {
+    const visible = '<main>Bounded public evidence.</main>'
+    const inertOpening = '<script>'
+    const unmatchedClosing = '</style>'
+    const repetitions = Math.floor(
+      (DIRECT_PAGE_MAX_RAW_BYTES - Buffer.byteLength(visible)) /
+      (Buffer.byteLength(inertOpening) + Buffer.byteLength(unmatchedClosing)),
+    )
+    const adversarialPrefix = visible +
+      inertOpening.repeat(repetitions) +
+      unmatchedClosing.repeat(repetitions)
+    const body = adversarialPrefix + 'x'.repeat(
+      DIRECT_PAGE_MAX_RAW_BYTES - Buffer.byteLength(adversarialPrefix),
+    )
+    const request = vi.fn(async () => response(body))
+
+    const fetched = await new SecureDirectPageFetcher(dependencies({ request })).fetch(SOURCE)
+
+    expect(Buffer.byteLength(body)).toBe(DIRECT_PAGE_MAX_RAW_BYTES)
+    expect(fetched.fact.rawByteLength).toBe(DIRECT_PAGE_MAX_RAW_BYTES)
+    expect(fetched.fact.text).toBe('Bounded public evidence.')
+    expect(fetched.fact.text).not.toContain('x')
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
   it('truncates accepted text at exactly 6000 characters without truncating raw evidence', async () => {
     const body = 'x'.repeat(6_100)
     const fetched = await new SecureDirectPageFetcher(dependencies({

@@ -425,7 +425,8 @@ function tagEnd(body: string, start: number): number {
 function extractVisibleHtml(body: string): { text: string; title: string | null } {
   const output: string[] = []
   const titleOutput: string[] = []
-  const inertStack: string[] = []
+  const inertElementCounts = new Map<string, number>()
+  let inertDepth = 0
   let inTitle = false
   let index = 0
   while (index < body.length) {
@@ -439,7 +440,7 @@ function extractVisibleHtml(body: string): { text: string; title: string | null 
       const next = body.indexOf('<', index)
       const text = body.slice(index, next < 0 ? body.length : next)
       if (inTitle) titleOutput.push(text)
-      if (inertStack.length === 0) output.push(text)
+      if (inertDepth === 0) output.push(text)
       index = next < 0 ? body.length : next
       continue
     }
@@ -451,13 +452,21 @@ function extractVisibleHtml(body: string): { text: string; title: string | null 
     if (name === 'title') inTitle = !closing
     if (INERT_HTML_ELEMENTS.has(name)) {
       if (closing) {
-        const last = inertStack.lastIndexOf(name)
-        if (last >= 0) inertStack.splice(last, 1)
+        const count = inertElementCounts.get(name) ?? 0
+        if (count > 0) {
+          inertDepth -= 1
+          if (count === 1) {
+            inertElementCounts.delete(name)
+          } else {
+            inertElementCounts.set(name, count - 1)
+          }
+        }
       } else if (!raw.endsWith('/')) {
-        inertStack.push(name)
+        inertElementCounts.set(name, (inertElementCounts.get(name) ?? 0) + 1)
+        inertDepth += 1
       }
     }
-    if (inertStack.length === 0 && HTML_BLOCK_ELEMENTS.has(name)) {
+    if (inertDepth === 0 && HTML_BLOCK_ELEMENTS.has(name)) {
       output.push('\n')
     }
     index = end + 1
