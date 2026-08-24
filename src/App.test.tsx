@@ -2460,6 +2460,32 @@ describe('durable WebChess client flow', () => {
     expect(screen.getByRole('button', { name: /set the pieces in motion/i })).toBeEnabled()
   })
 
+  it('creates a same-field replay from the completed v2 lifecycle', async () => {
+    serverGame = makeAnsweredGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('wilbur_observed', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
+    )
+    await renderRestoredApp()
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: /start another game on this field/i,
+    }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /set the pieces in motion/i }))
+        .toBeEnabled()
+    })
+    expect(apiHarness.replayGame).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: 13 },
+      { idempotencyKey: expect.any(String) },
+    )
+  })
+
   it('locks reset after an ambiguous replay until a same-key retry resolves its child', async () => {
     serverGame = makeAnsweredGame()
     const firstMount = await renderRestoredApp()

@@ -2341,6 +2341,9 @@ function WebChessExperience({
             caseExportPending={caseExportPending}
             caseExportError={caseExportError}
             caseExportNotice={caseExportNotice}
+            replayPending={replayPending}
+            replayError={replayError}
+            replayDisabled={replayDisabled}
             localCaseVerificationEnabled={runtime.kind === 'openclaw'}
             onRefresh={() => void refreshLifecycle()}
             onRetry={() => void retryLifecyclePath()}
@@ -2350,6 +2353,7 @@ function WebChessExperience({
             onObserve={observeWilburAction}
             onExportCase={exportLifecycleCase}
             onVerifyCase={runtime.api.verifyLocalCaseBundle}
+            onReplay={() => void replayProblem()}
           />
         )}
 

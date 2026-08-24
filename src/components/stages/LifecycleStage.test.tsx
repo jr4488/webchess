@@ -488,6 +488,9 @@ function renderStage(
     caseExportError?: string
     caseExportNotice?: string
     caseExportPending?: boolean
+    replayDisabled?: boolean
+    replayError?: string
+    replayPending?: boolean
     localCaseVerificationEnabled?: boolean
     boardAnswer?: GeneratedAnswer | null
     answerFailurePrompt?: string
@@ -500,6 +503,7 @@ function renderStage(
       observation: AppendWilburObservationCommand,
     ) => Promise<boolean>
     onExportCase?: (profile: WebChessCaseProfile) => Promise<void>
+    onReplay?: () => void
     onVerifyCase?: (bundle: Blob) => Promise<WebChessCaseVerificationResult>
   } = {},
 ) {
@@ -509,6 +513,7 @@ function renderStage(
   const onUpdateAction = options.onUpdateAction ?? vi.fn()
   const onObserve = options.onObserve ?? vi.fn(async () => true)
   const onExportCase = options.onExportCase ?? vi.fn(async () => undefined)
+  const onReplay = options.onReplay ?? vi.fn()
   const onVerifyCase = options.onVerifyCase ?? vi.fn(async () => ({
     ok: true,
     errors: [],
@@ -543,6 +548,9 @@ function renderStage(
       caseExportPending={options.caseExportPending ?? false}
       caseExportError={options.caseExportError ?? ''}
       caseExportNotice={options.caseExportNotice ?? ''}
+      replayPending={options.replayPending ?? false}
+      replayError={options.replayError ?? ''}
+      replayDisabled={options.replayDisabled ?? false}
       localCaseVerificationEnabled={options.localCaseVerificationEnabled ?? false}
       onRefresh={vi.fn()}
       onRetry={onRetry}
@@ -552,6 +560,7 @@ function renderStage(
       onObserve={onObserve}
       onExportCase={onExportCase}
       onVerifyCase={onVerifyCase}
+      onReplay={onReplay}
     />,
   )
 
@@ -559,6 +568,7 @@ function renderStage(
     onCreateAction,
     onObserve,
     onExportCase,
+    onReplay,
     onVerifyCase,
     onRetry,
     onRetryAnswer,
@@ -567,6 +577,30 @@ function renderStage(
 }
 
 describe('LifecycleStage terminal Gate experience', () => {
+  it('offers a counted same-field replay after the v2 lifecycle completes', () => {
+    const onReplay = vi.fn()
+    renderStage(aggregate('wilbur_observed', 'answer'), { onReplay })
+
+    expect(screen.getByText(/new counted trajectory/i)).toBeInTheDocument()
+    expect(screen.getByText(/completed game and its lifecycle remain preserved/i))
+      .toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', {
+      name: /start another game on this field/i,
+    }))
+    expect(onReplay).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the v2 replay action disabled while creation is pending', () => {
+    renderStage(aggregate('charlotte_complete', 'answer'), {
+      replayDisabled: true,
+      replayPending: true,
+    })
+
+    expect(screen.getByRole('button', {
+      name: /creating same-field replay/i,
+    })).toBeDisabled()
+  })
+
   it('exports the selected case profile without calling a provider', async () => {
     const onExportCase = vi.fn(async () => undefined)
     renderStage(aggregate('charlotte_complete', 'answer'), { onExportCase })

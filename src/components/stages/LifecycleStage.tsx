@@ -79,6 +79,9 @@ interface LifecycleStageProps {
   caseExportPending: boolean
   caseExportError: string
   caseExportNotice: string
+  replayPending: boolean
+  replayError: string
+  replayDisabled: boolean
   localCaseVerificationEnabled: boolean
   onRefresh: () => void
   onRetry: () => void
@@ -95,6 +98,7 @@ interface LifecycleStageProps {
   ) => Promise<boolean>
   onExportCase: (profile: WebChessCaseProfile) => Promise<void>
   onVerifyCase: (bundle: Blob) => Promise<WebChessCaseVerificationResult>
+  onReplay: () => void
 }
 
 const EMPTY_SET = new Set<string>()
@@ -401,6 +405,9 @@ export function LifecycleStage({
   caseExportPending,
   caseExportError,
   caseExportNotice,
+  replayPending,
+  replayError,
+  replayDisabled,
   localCaseVerificationEnabled,
   onRefresh,
   onRetry,
@@ -410,6 +417,7 @@ export function LifecycleStage({
   onObserve,
   onExportCase,
   onVerifyCase,
+  onReplay,
 }: LifecycleStageProps) {
   const [caseProfile, setCaseProfile] = useState<WebChessCaseProfile>(
     'research-redacted-v1',
@@ -1597,6 +1605,55 @@ export function LifecycleStage({
                   ) : null}
                 </form>
               ) : null}
+            </section>
+          ) : null}
+
+          {lifecycle && [
+            'charlotte_complete',
+            'wilbur_planning',
+            'wilbur_in_progress',
+            'wilbur_observed',
+          ].includes(lifecycle.state) ? (
+            <section
+              className="lifecycle-card"
+              aria-labelledby={`same-field-replay-heading-${lifecycle.id}`}
+            >
+              <div className="lifecycle-card__title">
+                <span><RefreshCw size={17} aria-hidden="true" /></span>
+                <div>
+                  <small>Replay · new counted trajectory</small>
+                  <h2 id={`same-field-replay-heading-${lifecycle.id}`}>
+                    Test another path through the same field
+                  </h2>
+                </div>
+              </div>
+              <p>
+                This creates a new game with the same 64 facets in the same
+                places. Guided play follows the same deterministic path; your
+                own moves can create another trajectory. The completed game and
+                its lifecycle remain preserved for export and inspection.
+              </p>
+              {replayError ? (
+                <div className="replay-error" role="alert">
+                  <CircleAlert size={20} aria-hidden="true" />
+                  <div>
+                    <strong>The replay was not confirmed.</strong>
+                    <p>{replayError} Retry this saved replay request before starting another question.</p>
+                  </div>
+                </div>
+              ) : null}
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={replayDisabled}
+                aria-busy={replayPending}
+                onClick={onReplay}
+              >
+                <RefreshCw size={16} aria-hidden="true" />
+                {replayPending
+                  ? 'Creating same-field replay…'
+                  : 'Start another game on this field'}
+              </button>
             </section>
           ) : null}
         </article>
