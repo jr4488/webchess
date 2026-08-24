@@ -1,22 +1,21 @@
 import { pathToFileURL } from 'node:url'
 
-import { Client } from 'pg'
-
 import {
   DeploymentMigrationError,
   checkCanonicalMigrationsReadOnly,
   loadCanonicalMigrations,
 } from './deployment-database.mjs'
 import {
-  assertSafeDatabaseTlsMode,
-  hasVercelMarker,
+  DeploymentDatabaseConfigurationError,
+  hasEffectiveVercelMarker,
+  reviewedDatabaseClientConfig,
 } from './deployment-preflight.mjs'
 
 function nonBlank(value) {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-export function runtimeDatabaseUrl(environment = process.env) {
+function requiredRuntimeDatabaseUrl(environment) {
   const connectionString = environment.DATABASE_URL
   if (!nonBlank(connectionString)) {
     throw new Error(
@@ -28,7 +27,29 @@ export function runtimeDatabaseUrl(environment = process.env) {
       'DATABASE_URL must not contain surrounding whitespace.',
     )
   }
-  assertSafeDatabaseTlsMode(connectionString)
+  return connectionString
+}
+
+export function runtimeDatabaseClientConfig(environment = process.env) {
+  return reviewedDatabaseClientConfig(
+    requiredRuntimeDatabaseUrl(environment),
+    {
+      allowLoopbackPlaintext: !hasEffectiveVercelMarker(environment),
+      applicationName: 'webchess-schema-check',
+      environment,
+      variableName: 'DATABASE_URL',
+    },
+  )
+}
+
+export function runtimeDatabaseUrl(environment = process.env) {
+  const connectionString = requiredRuntimeDatabaseUrl(environment)
+  reviewedDatabaseClientConfig(connectionString, {
+    allowLoopbackPlaintext: !hasEffectiveVercelMarker(environment),
+    applicationName: 'webchess-schema-check',
+    environment,
+    variableName: 'DATABASE_URL',
+  })
   return connectionString
 }
 
@@ -47,11 +68,9 @@ export function schemaCheckMode(arguments_ = []) {
   )
 }
 
-async function connectRuntimeDatabase(connectionString) {
-  const client = new Client({
-    application_name: 'webchess-schema-check',
-    connectionString,
-  })
+async function connectRuntimeDatabase(config) {
+  const { Client } = await import('pg')
+  const client = new Client(config)
   await client.connect()
   return client
 }
@@ -68,14 +87,14 @@ export async function runSchemaCompatibilityCheck({
   }
   if (
     mode === 'vercel-only' &&
-    !hasVercelMarker(environment)
+    !hasEffectiveVercelMarker(environment)
   ) {
     return { checked: false }
   }
 
-  const connectionString = runtimeDatabaseUrl(environment)
+  const clientConfig = runtimeDatabaseClientConfig(environment)
   const migrations = await loadMigrations()
-  const client = await connect(connectionString)
+  const client = await connect(clientConfig)
 
   try {
     await checkCanonicalMigrationsReadOnly(client, migrations)
@@ -90,6 +109,9 @@ export function schemaCheckFailureMessage(error) {
   if (error instanceof DeploymentMigrationError) {
     return `Vercel database schema compatibility check failed: ${error.message}`
   }
+  if (error instanceof DeploymentDatabaseConfigurationError) {
+    return error.message
+  }
   if (
     error instanceof Error &&
     (
@@ -98,9 +120,6 @@ export function schemaCheckFailureMessage(error) {
       ) ||
       error.message.startsWith(
         'DATABASE_URL must not contain surrounding',
-      ) ||
-      error.message.startsWith(
-        'DATABASE_URL must not set sslmode=disable',
       )
     )
   ) {

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { validateDeploymentEnvironment } from './deployment-preflight.mjs'
+import {
+  reviewedDatabaseClientConfig,
+  validateDeploymentEnvironment,
+} from './deployment-preflight.mjs'
 
 const previewEnvironment = () => ({
   VERCEL: '1',
@@ -9,7 +12,8 @@ const previewEnvironment = () => ({
   VERCEL_PROJECT_ID: 'prj_webchess_example',
   WEBCHESS_EXPECTED_VERCEL_PROJECT_ID: 'prj_webchess_example',
   VERCEL_GIT_COMMIT_SHA: '1'.repeat(40),
-  DATABASE_URL: 'postgresql://runtime.example/webchess',
+  DATABASE_URL:
+    'postgresql://runtime:runtime-secret@runtime.example/webchess',
   CLERK_SECRET_KEY: 'sk_test_example',
   CLERK_WEBHOOK_SIGNING_SECRET: 'whsec_test_example',
   WEBCHESS_HMAC_SECRET: 'a'.repeat(32),
@@ -89,7 +93,7 @@ describe('validateDeploymentEnvironment', () => {
 
   it('allows empty provider credential variables', () => {
     const environment = previewEnvironment()
-    environment.OPENAI_API_KEY = '   '
+    environment.OPENAI_API_KEY = ''
     environment.HF_TOKEN = ''
 
     expect(validateDeploymentEnvironment(environment)).toEqual({
@@ -168,7 +172,7 @@ describe('validateDeploymentEnvironment', () => {
 
   it('allows empty transport variables and an enabled TLS verifier', () => {
     const environment = previewEnvironment()
-    environment.OPENAI_BASE_URL = '   '
+    environment.OPENAI_BASE_URL = ''
     environment.HTTP_PROXY = ''
     environment.NODE_EXTRA_CA_CERTS = ''
     environment.NODE_TLS_REJECT_UNAUTHORIZED = '1'
@@ -178,6 +182,30 @@ describe('validateDeploymentEnvironment', () => {
       siteOrigin: 'https://webchess-preview-abc.vercel.app',
     })
   })
+
+  it.each([
+    ['OPENAI_API_KEY', 'only OpenAI account OAuth'],
+    ['NODE_EXTRA_CA_CERTS', 'custom provider endpoints'],
+    ['SSL_CERT_FILE', 'custom provider endpoints'],
+    ['OPENSSL_CONF', 'custom provider endpoints'],
+    ['PGOPTIONS', 'DATABASE_URL is the only approved'],
+  ])(
+    'rejects a whitespace-only forbidden environment value: %s',
+    (variableName, expectedMessage) => {
+      const environment = previewEnvironment()
+      environment[variableName] = '   '
+
+      let message = ''
+      try {
+        validateDeploymentEnvironment(environment)
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error)
+      }
+
+      expect(message).toContain(variableName)
+      expect(message).toContain(expectedMessage)
+    },
+  )
 
   it('rejects sslmode=disable for a remote database without echoing the URL', () => {
     const environment = previewEnvironment()
@@ -191,24 +219,223 @@ describe('validateDeploymentEnvironment', () => {
       message = error instanceof Error ? error.message : String(error)
     }
 
-    expect(message).toContain(
-      'DATABASE_URL must not set sslmode=disable for a non-loopback database',
-    )
+    expect(message).toContain('DATABASE_URL contains an unapproved sslmode')
     expect(message).not.toContain(environment.DATABASE_URL)
   })
 
   it.each([
-    'postgresql://runtime@localhost/webchess?sslmode=disable',
-    'postgresql://runtime@127.0.0.1/webchess?sslmode=disable',
-    'postgresql://runtime@[::1]/webchess?sslmode=disable',
-  ])('allows sslmode=disable only for a loopback database: %s', (databaseUrl) => {
+    'postgresql://runtime:local-secret@127.0.0.1/webchess?sslmode=disable',
+    'postgresql://runtime:local-secret@[::1]/webchess?sslmode=disable',
+  ])('rejects plaintext loopback PostgreSQL in hosted deployment: %s', (databaseUrl) => {
     const environment = previewEnvironment()
     environment.DATABASE_URL = databaseUrl
 
-    expect(validateDeploymentEnvironment(environment)).toEqual({
-      target: 'preview',
-      siteOrigin: 'https://webchess-preview-abc.vercel.app',
+    expect(() => validateDeploymentEnvironment(environment)).toThrow(
+      'DATABASE_URL must use verified TLS in a hosted deployment',
+    )
+  })
+
+  it('builds an explicit verified remote client configuration without a connection string', () => {
+    const environment = previewEnvironment()
+    const config = reviewedDatabaseClientConfig(
+      `${environment.DATABASE_URL}?sslmode=verify-full`,
+      {
+        applicationName: 'webchess-test',
+        environment,
+      },
+    )
+
+    expect(config).toEqual({
+      application_name: 'webchess-test',
+      database: 'webchess',
+      host: 'runtime.example',
+      port: 5432,
+      ssl: { rejectUnauthorized: true },
+      sslnegotiation: 'postgres',
+      user: 'runtime',
     })
+    expect(config.password).toBe('runtime-secret')
+    expect(Object.keys(config)).not.toContain('password')
+    expect(config).not.toHaveProperty('connectionString')
+  })
+
+  it('builds an explicit non-TLS client configuration only for loopback', () => {
+    const config = reviewedDatabaseClientConfig(
+      'postgresql://runtime:local-secret@[::1]/webchess?sslmode=disable',
+      {
+        applicationName: 'webchess-test',
+        allowLoopbackPlaintext: true,
+        environment: {},
+      },
+    )
+
+    expect(config).toMatchObject({
+      host: '::1',
+      ssl: false,
+      sslnegotiation: 'postgres',
+    })
+    expect(config.password).toBe('local-secret')
+  })
+
+  it('requires an explicit opt-in before building a plaintext loopback configuration', () => {
+    expect(() => reviewedDatabaseClientConfig(
+      'postgresql://runtime:local-secret@127.0.0.1/webchess?sslmode=disable',
+      {
+        applicationName: 'webchess-test',
+        environment: {},
+      },
+    )).toThrow(
+      'DATABASE_URL must use verified TLS in a hosted deployment',
+    )
+  })
+
+  it('never treats DNS localhost as a plaintext loopback exception', () => {
+    expect(() => reviewedDatabaseClientConfig(
+      'postgresql://runtime:local-secret@localhost/webchess?sslmode=disable',
+      {
+        applicationName: 'webchess-test',
+        allowLoopbackPlaintext: true,
+        environment: {},
+      },
+    )).toThrow('DATABASE_URL contains an unapproved sslmode')
+  })
+
+  it.each([
+    'host=shadow.invalid',
+    'port=6543',
+    'user=shadow-user',
+    'password=shadow-secret',
+    'database=shadow-database',
+    'dbname=shadow-database',
+    'ssl=0',
+    'sslmode=no-verify',
+    'sslmode=disable',
+    'sslmode=allow',
+    'sslmode=prefer',
+    'sslmode=require',
+    'sslmode=verify-ca',
+    'uselibpqcompat=true',
+  ])('rejects a PostgreSQL query override without exposing it: %s', (query) => {
+    const environment = previewEnvironment()
+    const secret = 'query-secret-do-not-print'
+    environment.DATABASE_URL =
+      `postgresql://runtime:${secret}@runtime.example/webchess?${query}`
+
+    let message = ''
+    try {
+      validateDeploymentEnvironment(environment)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(message).toContain('DATABASE_URL')
+    expect(message).not.toContain(environment.DATABASE_URL)
+    expect(message).not.toContain(secret)
+    expect(message).not.toContain(query)
+  })
+
+  it.each([
+    'PGAPPNAME',
+    'PGBINARY',
+    'PGCLIENT_ENCODING',
+    'PGCLIENTENCODING',
+    'PGCONNECT_TIMEOUT',
+    'PGHOST',
+    'PGHOSTADDR',
+    'PGPORT',
+    'PGDATABASE',
+    'PGUSER',
+    'PGPASSWORD',
+    'PGPASSFILE',
+    'PGOPTIONS',
+    'PGREPLICATION',
+    'PGREQUIRESSL',
+    'PGSERVICE',
+    'PGSERVICEFILE',
+    'PGSSLMODE',
+    'PGSSLCERT',
+    'PGSSLKEY',
+    'PGSSLROOTCERT',
+    'PGSSLNEGOTIATION',
+    'PGSYSCONFDIR',
+    'PGTARGETSESSIONATTRS',
+    'NODE_EXTRA_CA_CERTS',
+    'NODE_OPTIONS',
+    'NODE_PG_FORCE_NATIVE',
+    'NODE_USE_SYSTEM_CA',
+    'OPENSSL_CONF',
+    'SSL_CERT_DIR',
+    'SSL_CERT_FILE',
+  ])('rejects a PostgreSQL environment override without its value: %s', (name) => {
+    const environment = previewEnvironment()
+    const secret = `do-not-print-${name.toLowerCase()}`
+    environment[name] = secret
+
+    let message = ''
+    try {
+      validateDeploymentEnvironment(environment)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(message).toContain(name)
+    expect(message).toContain('DATABASE_URL is the only approved')
+    expect(message).not.toContain(secret)
+  })
+
+  it.each([
+    'NODE_PG_FORCE_NATIVE',
+    'PGOPTIONS',
+  ])('rejects an effective whitespace-only PostgreSQL override: %s', (name) => {
+    const environment = previewEnvironment()
+    environment[name] = '   '
+
+    expect(() => validateDeploymentEnvironment(environment)).toThrow(name)
+  })
+
+  it('allows an enabled Node TLS verifier but rejects the disabling value', () => {
+    const allowed = previewEnvironment()
+    allowed.NODE_TLS_REJECT_UNAUTHORIZED = '1'
+    expect(validateDeploymentEnvironment(allowed).target).toBe('preview')
+
+    const rejected = previewEnvironment()
+    rejected.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+    expect(() => validateDeploymentEnvironment(rejected)).toThrow(
+      'NODE_TLS_REJECT_UNAUTHORIZED',
+    )
+  })
+
+  it.each([
+    'postgresql://runtime:secret@192.0.2.10/webchess',
+    'postgresql://runtime:secret@[2001:db8::10]/webchess',
+    'postgresql://runtime:secret@127.0.0.1/webchess?sslmode=verify-full',
+    'postgresql://runtime:secret@[::1]/webchess?sslmode=verify-full',
+  ])('rejects a TLS IP literal that cannot receive hostname verification: %s', (databaseUrl) => {
+    const environment = previewEnvironment()
+    environment.DATABASE_URL = databaseUrl
+
+    expect(() => validateDeploymentEnvironment(environment)).toThrow(
+      'DATABASE_URL must use a DNS hostname',
+    )
+  })
+
+  it.each([
+    'postgresql://runtime%00shadow:secret@runtime.example/webchess',
+    'postgresql://runtime:secret%00shadow@runtime.example/webchess',
+    'postgresql://runtime:secret@runtime.example/webchess%00shadow',
+  ])('rejects percent-encoded NULs without echoing the URL: %s', (databaseUrl) => {
+    const environment = previewEnvironment()
+    environment.DATABASE_URL = databaseUrl
+
+    let message = ''
+    try {
+      validateDeploymentEnvironment(environment)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(message).toContain('invalid control characters')
+    expect(message).not.toContain(databaseUrl)
   })
 
   it('rejects a migration-owner credential without echoing it', () => {

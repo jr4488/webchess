@@ -1,8 +1,11 @@
+import { spawnSync } from 'node:child_process'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import { deploymentMigrationChecksum } from './deployment-database.mjs'
 import {
   runSchemaCompatibilityCheck,
+  runtimeDatabaseClientConfig,
   runtimeDatabaseUrl,
   schemaCheckMode,
   schemaCheckFailureMessage,
@@ -53,7 +56,8 @@ describe('Vercel schema compatibility command', () => {
     await expect(
       runSchemaCompatibilityCheck({
         environment: {
-          DATABASE_URL: 'postgresql://runtime.example/webchess',
+          DATABASE_URL:
+            'postgresql://runtime:runtime-secret@runtime.example/webchess',
         },
         mode: 'vercel-only',
         connect,
@@ -83,30 +87,166 @@ describe('Vercel schema compatibility command', () => {
     const databaseUrl =
       'postgresql://runtime:do-not-print@runtime.example/webchess?sslmode=disable'
 
+    let configurationError
     let message = ''
     try {
       runtimeDatabaseUrl({ DATABASE_URL: databaseUrl })
     } catch (error) {
+      configurationError = error
       message = error instanceof Error ? error.message : String(error)
     }
 
-    expect(message).toContain(
-      'DATABASE_URL must not set sslmode=disable for a non-loopback database',
-    )
+    expect(message).toContain('DATABASE_URL contains an unapproved sslmode')
     expect(message).not.toContain(databaseUrl)
-    expect(schemaCheckFailureMessage(new Error(message))).toBe(message)
+    expect(schemaCheckFailureMessage(configurationError)).toBe(message)
   })
 
   it.each([
-    'postgresql://runtime@localhost/webchess?sslmode=disable',
-    'postgresql://runtime@127.0.0.1/webchess?sslmode=disable',
-    'postgresql://runtime@[::1]/webchess?sslmode=disable',
+    'postgresql://runtime:local-secret@127.0.0.1/webchess?sslmode=disable',
+    'postgresql://runtime:local-secret@[::1]/webchess?sslmode=disable',
   ])('allows sslmode=disable for a loopback runtime database: %s', (databaseUrl) => {
     expect(runtimeDatabaseUrl({ DATABASE_URL: databaseUrl })).toBe(databaseUrl)
   })
 
+  it.each([
+    'postgresql://runtime:local-secret@127.0.0.1/webchess?sslmode=disable',
+    'postgresql://runtime:local-secret@[::1]/webchess?sslmode=disable',
+  ])('rejects plaintext loopback for a hosted schema check: %s', (databaseUrl) => {
+    expect(() => runtimeDatabaseClientConfig({
+      DATABASE_URL: databaseUrl,
+      VERCEL: '1',
+    })).toThrow('must use verified TLS in a hosted deployment')
+  })
+
+  it('rejects plaintext DNS localhost even for a local schema check', () => {
+    expect(() => runtimeDatabaseClientConfig({
+      DATABASE_URL:
+        'postgresql://runtime:local-secret@localhost/webchess?sslmode=disable',
+    })).toThrow('DATABASE_URL contains an unapproved sslmode')
+  })
+
+  it('returns only explicit reviewed connection fields', () => {
+    const config = runtimeDatabaseClientConfig({
+      DATABASE_URL:
+        'postgresql://runtime:runtime-secret@runtime.example:6543/webchess?sslmode=verify-full',
+    })
+
+    expect(config).toEqual({
+      application_name: 'webchess-schema-check',
+      database: 'webchess',
+      host: 'runtime.example',
+      port: 6543,
+      ssl: { rejectUnauthorized: true },
+      sslnegotiation: 'postgres',
+      user: 'runtime',
+    })
+    expect(config.password).toBe('runtime-secret')
+    expect(config).not.toHaveProperty('connectionString')
+  })
+
+  it.each([
+    'host=shadow.invalid',
+    'ssl=0',
+    'sslmode=require',
+    'uselibpqcompat=true',
+  ])('rejects a runtime URL transport override: %s', (query) => {
+    const databaseUrl =
+      `postgresql://runtime:do-not-print@runtime.example/webchess?${query}`
+
+    expect(() => runtimeDatabaseClientConfig({
+      DATABASE_URL: databaseUrl,
+    })).toThrow('DATABASE_URL')
+  })
+
+  it.each([
+    'PGHOST',
+    'PGPORT',
+    'PGPASSWORD',
+    'PGPASSFILE',
+    'PGSSLMODE',
+    'NODE_EXTRA_CA_CERTS',
+    'NODE_PG_FORCE_NATIVE',
+    'NODE_USE_SYSTEM_CA',
+    'SSL_CERT_FILE',
+  ])(
+    'rejects runtime PostgreSQL environment injection: %s',
+    (name) => {
+      const secret = 'environment-secret-do-not-print'
+      expect(() => runtimeDatabaseClientConfig({
+        DATABASE_URL:
+          'postgresql://runtime:runtime-secret@runtime.example/webchess',
+        [name]: secret,
+      })).toThrow(name)
+    },
+  )
+
+  it('rejects native-driver injection before importing pg', () => {
+    const result = spawnSync(process.execPath, [
+      '--input-type=module',
+      '--eval',
+      `
+        import { runSchemaCompatibilityCheck } from './scripts/deployment-schema-check.mjs'
+        try {
+          await runSchemaCompatibilityCheck({
+            environment: {
+              DATABASE_URL: 'postgresql://runtime:secret@runtime.example/webchess',
+            },
+          })
+          process.exitCode = 2
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error))
+          if (!(error instanceof Error) || !error.message.includes('NODE_PG_FORCE_NATIVE')) {
+            process.exitCode = 3
+          }
+        }
+      `,
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, NODE_PG_FORCE_NATIVE: '   ' },
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('NODE_PG_FORCE_NATIVE')
+    expect(result.stderr).not.toContain('pg-native')
+    expect(result.stderr).not.toContain('runtime:secret')
+  })
+
+  it('honors an ambient hosted marker omitted from the injected environment', () => {
+    const result = spawnSync(process.execPath, [
+      '--input-type=module',
+      '--eval',
+      `
+        import { runSchemaCompatibilityCheck } from './scripts/deployment-schema-check.mjs'
+        try {
+          await runSchemaCompatibilityCheck({
+            environment: {
+              DATABASE_URL: 'postgresql://runtime:local-secret@127.0.0.1/webchess?sslmode=disable',
+            },
+            mode: 'vercel-only',
+          })
+          process.exitCode = 2
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error))
+          if (!(error instanceof Error) || !error.message.includes('verified TLS in a hosted deployment')) {
+            process.exitCode = 3
+          }
+        }
+      `,
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, VERCEL: '1' },
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('verified TLS in a hosted deployment')
+    expect(result.stderr).not.toContain('local-secret')
+  })
+
   it('checks the runtime database without reading the owner URL', async () => {
-    const runtimeUrl = 'postgresql://runtime.example/webchess'
+    const runtimeUrl =
+      'postgresql://runtime:runtime-secret@runtime.example/webchess'
     const client = new FakeSchemaClient([
       {
         id: migration.id,
@@ -132,7 +272,17 @@ describe('Vercel schema compatibility command', () => {
     ).resolves.toEqual({ checked: true })
 
     expect(connect).toHaveBeenCalledTimes(1)
-    expect(connect).toHaveBeenCalledWith(runtimeUrl)
+    expect(connect).toHaveBeenCalledWith({
+      application_name: 'webchess-schema-check',
+      database: 'webchess',
+      host: 'runtime.example',
+      port: 5432,
+      ssl: { rejectUnauthorized: true },
+      sslnegotiation: 'postgres',
+      user: 'runtime',
+    })
+    expect(connect.mock.calls[0][0].password).toBe('runtime-secret')
+    expect(connect.mock.calls[0][0]).not.toHaveProperty('connectionString')
     expect(client.end).toHaveBeenCalledOnce()
     expect(logger.log).toHaveBeenCalledWith(
       'Vercel database schema compatibility check passed.',
@@ -146,7 +296,8 @@ describe('Vercel schema compatibility command', () => {
       runSchemaCompatibilityCheck({
         environment: {
           VERCEL: '1',
-          DATABASE_URL: 'postgresql://runtime.example/webchess',
+          DATABASE_URL:
+            'postgresql://runtime:runtime-secret@runtime.example/webchess',
         },
         connect: async () => client,
         loadMigrations: async () => [migration],

@@ -1,7 +1,5 @@
 import { pathToFileURL } from 'node:url'
 
-import { Client } from 'pg'
-
 import {
   DeploymentMigrationError,
   applyCanonicalMigrations,
@@ -11,13 +9,17 @@ import {
   ReleaseSourceError,
   verifyReleaseSource,
 } from './deployment-source-check.mjs'
-import { assertSafeDatabaseTlsMode } from './deployment-preflight.mjs'
+import {
+  DeploymentDatabaseConfigurationError,
+  hasEffectiveVercelMarker,
+  reviewedDatabaseClientConfig,
+} from './deployment-preflight.mjs'
 
 function nonBlank(value) {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-export function migrationOwnerDatabaseUrl(environment = process.env) {
+function requiredMigrationOwnerDatabaseUrl(environment) {
   const connectionString = environment.MIGRATION_DATABASE_URL
   if (!nonBlank(connectionString)) {
     throw new Error(
@@ -29,15 +31,37 @@ export function migrationOwnerDatabaseUrl(environment = process.env) {
       'MIGRATION_DATABASE_URL must not contain surrounding whitespace.',
     )
   }
-  assertSafeDatabaseTlsMode(connectionString, 'MIGRATION_DATABASE_URL')
   return connectionString
 }
 
-async function connectMigrationOwner(connectionString) {
-  const client = new Client({
-    application_name: 'webchess-migration-owner',
-    connectionString,
+export function migrationOwnerDatabaseClientConfig(
+  environment = process.env,
+) {
+  return reviewedDatabaseClientConfig(
+    requiredMigrationOwnerDatabaseUrl(environment),
+    {
+      allowLoopbackPlaintext: !hasEffectiveVercelMarker(environment),
+      applicationName: 'webchess-migration-owner',
+      environment,
+      variableName: 'MIGRATION_DATABASE_URL',
+    },
+  )
+}
+
+export function migrationOwnerDatabaseUrl(environment = process.env) {
+  const connectionString = requiredMigrationOwnerDatabaseUrl(environment)
+  reviewedDatabaseClientConfig(connectionString, {
+    allowLoopbackPlaintext: !hasEffectiveVercelMarker(environment),
+    applicationName: 'webchess-migration-owner',
+    environment,
+    variableName: 'MIGRATION_DATABASE_URL',
   })
+  return connectionString
+}
+
+async function connectMigrationOwner(config) {
+  const { Client } = await import('pg')
+  const client = new Client(config)
   await client.connect()
   return client
 }
@@ -61,8 +85,8 @@ export async function runMigrationOwner({
     )
   }
 
-  const connectionString = migrationOwnerDatabaseUrl(environment)
-  const client = await connect(connectionString)
+  const clientConfig = migrationOwnerDatabaseClientConfig(environment)
+  const client = await connect(clientConfig)
 
   try {
     const result = await applyCanonicalMigrations(client, migrations)
@@ -82,15 +106,15 @@ export function migrationFailureMessage(error) {
   if (error instanceof DeploymentMigrationError) {
     return `WebChess database migration failed: ${error.message}`
   }
+  if (error instanceof DeploymentDatabaseConfigurationError) {
+    return error.message
+  }
   if (
     error instanceof Error &&
     (
       error.message.startsWith('MIGRATION_DATABASE_URL is required') ||
       error.message.startsWith(
         'MIGRATION_DATABASE_URL must not contain',
-      ) ||
-      error.message.startsWith(
-        'MIGRATION_DATABASE_URL must not set sslmode=disable',
       )
     )
   ) {

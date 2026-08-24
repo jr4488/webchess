@@ -1,7 +1,10 @@
+import { spawnSync } from 'node:child_process'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import {
   migrationFailureMessage,
+  migrationOwnerDatabaseClientConfig,
   migrationOwnerDatabaseUrl,
   runMigrationOwner,
 } from './deployment-migrate.mjs'
@@ -51,45 +54,188 @@ describe('migration-owner deployment command', () => {
   it('requires MIGRATION_DATABASE_URL and never falls back to DATABASE_URL', () => {
     expect(() =>
       migrationOwnerDatabaseUrl({
-        DATABASE_URL: 'postgresql://runtime.example/webchess',
+        DATABASE_URL:
+          'postgresql://runtime:runtime-secret@runtime.example/webchess',
       }),
     ).toThrow('MIGRATION_DATABASE_URL is required')
 
     expect(
       migrationOwnerDatabaseUrl({
-        DATABASE_URL: 'postgresql://runtime.example/webchess',
+        DATABASE_URL:
+          'postgresql://runtime:runtime-secret@runtime.example/webchess',
         MIGRATION_DATABASE_URL:
-          'postgresql://migration-owner.example/webchess',
+          'postgresql://migration-owner:owner-secret@migration-owner.example/webchess',
       }),
-    ).toBe('postgresql://migration-owner.example/webchess')
+    ).toBe(
+      'postgresql://migration-owner:owner-secret@migration-owner.example/webchess',
+    )
   })
 
   it('rejects sslmode=disable for a remote owner database without echoing it', () => {
     const databaseUrl =
       'postgresql://owner:do-not-print@owner.example/webchess?sslmode=disable'
 
+    let configurationError
     let message = ''
     try {
       migrationOwnerDatabaseUrl({ MIGRATION_DATABASE_URL: databaseUrl })
     } catch (error) {
+      configurationError = error
       message = error instanceof Error ? error.message : String(error)
     }
 
     expect(message).toContain(
-      'MIGRATION_DATABASE_URL must not set sslmode=disable for a non-loopback database',
+      'MIGRATION_DATABASE_URL contains an unapproved sslmode',
     )
     expect(message).not.toContain(databaseUrl)
-    expect(migrationFailureMessage(new Error(message))).toBe(message)
+    expect(migrationFailureMessage(configurationError)).toBe(message)
   })
 
   it.each([
-    'postgresql://owner@localhost/webchess?sslmode=disable',
-    'postgresql://owner@127.0.0.1/webchess?sslmode=disable',
-    'postgresql://owner@[::1]/webchess?sslmode=disable',
+    'postgresql://owner:local-secret@127.0.0.1/webchess?sslmode=disable',
+    'postgresql://owner:local-secret@[::1]/webchess?sslmode=disable',
   ])('allows sslmode=disable for a loopback owner database: %s', (databaseUrl) => {
     expect(
       migrationOwnerDatabaseUrl({ MIGRATION_DATABASE_URL: databaseUrl }),
     ).toBe(databaseUrl)
+  })
+
+  it.each([
+    'postgresql://owner:local-secret@127.0.0.1/webchess?sslmode=disable',
+    'postgresql://owner:local-secret@[::1]/webchess?sslmode=disable',
+  ])('rejects plaintext loopback for a hosted owner command: %s', (databaseUrl) => {
+    expect(() => migrationOwnerDatabaseClientConfig({
+      MIGRATION_DATABASE_URL: databaseUrl,
+      VERCEL: '1',
+    })).toThrow('must use verified TLS in a hosted deployment')
+  })
+
+  it('rejects plaintext DNS localhost even for a local owner command', () => {
+    expect(() => migrationOwnerDatabaseClientConfig({
+      MIGRATION_DATABASE_URL:
+        'postgresql://owner:local-secret@localhost/webchess?sslmode=disable',
+    })).toThrow('MIGRATION_DATABASE_URL contains an unapproved sslmode')
+  })
+
+  it('returns only explicit reviewed owner connection fields', () => {
+    const config = migrationOwnerDatabaseClientConfig({
+      MIGRATION_DATABASE_URL:
+        'postgresql://owner:owner-secret@owner.example:6543/webchess?sslmode=verify-full',
+    })
+
+    expect(config).toEqual({
+      application_name: 'webchess-migration-owner',
+      database: 'webchess',
+      host: 'owner.example',
+      port: 6543,
+      ssl: { rejectUnauthorized: true },
+      sslnegotiation: 'postgres',
+      user: 'owner',
+    })
+    expect(config.password).toBe('owner-secret')
+    expect(config).not.toHaveProperty('connectionString')
+  })
+
+  it.each([
+    'password=shadow-secret',
+    'dbname=shadow-database',
+    'ssl=0',
+    'sslmode=prefer',
+    'sslmode=verify-ca',
+    'uselibpqcompat=true',
+  ])('rejects a migration URL transport override: %s', (query) => {
+    const databaseUrl =
+      `postgresql://owner:do-not-print@owner.example/webchess?${query}`
+
+    expect(() => migrationOwnerDatabaseClientConfig({
+      MIGRATION_DATABASE_URL: databaseUrl,
+    })).toThrow('MIGRATION_DATABASE_URL')
+  })
+
+  it.each([
+    'PGHOST',
+    'PGDATABASE',
+    'PGUSER',
+    'PGPASSWORD',
+    'PGPASSFILE',
+    'PGSERVICE',
+    'PGSERVICEFILE',
+    'PGSSLMODE',
+    'PGSSLROOTCERT',
+    'NODE_EXTRA_CA_CERTS',
+    'NODE_PG_FORCE_NATIVE',
+    'NODE_USE_SYSTEM_CA',
+    'OPENSSL_CONF',
+  ])('rejects migration PostgreSQL environment injection: %s', (name) => {
+    const secret = 'environment-secret-do-not-print'
+    expect(() => migrationOwnerDatabaseClientConfig({
+      MIGRATION_DATABASE_URL:
+        'postgresql://owner:owner-secret@owner.example/webchess',
+      [name]: secret,
+    })).toThrow(name)
+  })
+
+  it('rejects native-driver injection before importing pg', () => {
+    const result = spawnSync(process.execPath, [
+      '--input-type=module',
+      '--eval',
+      `
+        import { runMigrationOwner } from './scripts/deployment-migrate.mjs'
+        try {
+          await runMigrationOwner({
+            environment: {
+              MIGRATION_DATABASE_URL: 'postgresql://owner:secret@owner.example/webchess',
+            },
+            loadMigrations: async () => [],
+            verifySource: async () => ({ branch: 'test', commit: '1'.repeat(40) }),
+          })
+          process.exitCode = 2
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error))
+          if (!(error instanceof Error) || !error.message.includes('NODE_PG_FORCE_NATIVE')) {
+            process.exitCode = 3
+          }
+        }
+      `,
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, NODE_PG_FORCE_NATIVE: '   ' },
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('NODE_PG_FORCE_NATIVE')
+    expect(result.stderr).not.toContain('pg-native')
+    expect(result.stderr).not.toContain('owner:secret')
+  })
+
+  it('honors an ambient hosted marker omitted from the owner environment', () => {
+    const result = spawnSync(process.execPath, [
+      '--input-type=module',
+      '--eval',
+      `
+        import { migrationOwnerDatabaseClientConfig } from './scripts/deployment-migrate.mjs'
+        try {
+          migrationOwnerDatabaseClientConfig({
+            MIGRATION_DATABASE_URL: 'postgresql://owner:local-secret@127.0.0.1/webchess?sslmode=disable',
+          })
+          process.exitCode = 2
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error))
+          if (!(error instanceof Error) || !error.message.includes('verified TLS in a hosted deployment')) {
+            process.exitCode = 3
+          }
+        }
+      `,
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, VERCEL: '1' },
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('verified TLS in a hosted deployment')
+    expect(result.stderr).not.toContain('local-secret')
   })
 
   it('applies canonical migrations through only the owner connection', async () => {
@@ -112,9 +258,10 @@ describe('migration-owner deployment command', () => {
     await expect(
       runMigrationOwner({
         environment: {
-          DATABASE_URL: 'postgresql://runtime.example/webchess',
+          DATABASE_URL:
+            'postgresql://runtime:runtime-secret@runtime.example/webchess',
           MIGRATION_DATABASE_URL:
-            'postgresql://migration-owner.example/webchess',
+            'postgresql://migration-owner:owner-secret@migration-owner.example/webchess',
         },
         connect,
         loadMigrations,
@@ -127,9 +274,17 @@ describe('migration-owner deployment command', () => {
     })
 
     expect(connect).toHaveBeenCalledTimes(1)
-    expect(connect).toHaveBeenCalledWith(
-      'postgresql://migration-owner.example/webchess',
-    )
+    expect(connect).toHaveBeenCalledWith({
+      application_name: 'webchess-migration-owner',
+      database: 'webchess',
+      host: 'migration-owner.example',
+      port: 5432,
+      ssl: { rejectUnauthorized: true },
+      sslnegotiation: 'postgres',
+      user: 'migration-owner',
+    })
+    expect(connect.mock.calls[0][0].password).toBe('owner-secret')
+    expect(connect.mock.calls[0][0]).not.toHaveProperty('connectionString')
     expect(verifySource).toHaveBeenCalledTimes(2)
     expect(loadMigrations).toHaveBeenCalledOnce()
     expect(order).toEqual(['verify', 'load', 'verify', 'connect'])
@@ -202,7 +357,7 @@ describe('migration-owner deployment command', () => {
       runMigrationOwner({
         environment: {
           MIGRATION_DATABASE_URL:
-            'postgresql://migration-owner.example/webchess',
+            'postgresql://migration-owner:owner-secret@migration-owner.example/webchess',
         },
         connect,
         loadMigrations: async () => [migration],
@@ -228,7 +383,7 @@ describe('migration-owner deployment command', () => {
       runMigrationOwner({
         environment: {
           MIGRATION_DATABASE_URL:
-            'postgresql://migration-owner.example/webchess',
+            'postgresql://migration-owner:owner-secret@migration-owner.example/webchess',
         },
         connect,
         loadMigrations: async () => [migration],

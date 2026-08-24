@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import { pathToFileURL } from 'node:url'
 
 const PRODUCTION_SITE_ORIGIN = 'https://webchess.anansiportia.com'
@@ -86,9 +87,39 @@ const EXACT_UNSAFE_PROVIDER_TRANSPORT_NAMES = new Set([
 ])
 
 const LOOPBACK_DATABASE_HOSTS = new Set([
-  'localhost',
   '127.0.0.1',
   '::1',
+])
+
+const POSTGRES_TRANSPORT_ENVIRONMENT_NAMES = new Set([
+  'NODE_EXTRA_CA_CERTS',
+  'NODE_OPTIONS',
+  'NODE_PG_FORCE_NATIVE',
+  'NODE_USE_SYSTEM_CA',
+  'OPENSSL_CONF',
+  'PGAPPNAME',
+  'PGBINARY',
+  'PGCLIENT_ENCODING',
+  'PGCLIENTENCODING',
+  'PGCONNECT_TIMEOUT',
+  'PGDATABASE',
+  'PGHOST',
+  'PGHOSTADDR',
+  'PGOPTIONS',
+  'PGPASSFILE',
+  'PGPASSWORD',
+  'PGPORT',
+  'PGREQUIRESSL',
+  'PGREPLICATION',
+  'PGSERVICE',
+  'PGSERVICEFILE',
+  'PGSSLMODE',
+  'PGSSLNEGOTIATION',
+  'PGSYSCONFDIR',
+  'PGTARGETSESSIONATTRS',
+  'PGUSER',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE',
 ])
 
 const EXPECTED_VERCEL_PROJECT_ID_VARIABLE =
@@ -106,9 +137,31 @@ const GIT_COMMIT_PATTERN = /^[a-f0-9]{40}$/i
 const nonBlank = (value) =>
   typeof value === 'string' && value.trim().length > 0
 
+const hasRawEnvironmentValue = (value) =>
+  typeof value === 'string' && value.length > 0
+
+function containsAsciiControl(value, { includeSpace = false } = {}) {
+  const upperBound = includeSpace ? 0x20 : 0x1f
+  return Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint <= upperBound || codePoint === 0x7f
+  })
+}
+
+export class DeploymentDatabaseConfigurationError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'DeploymentDatabaseConfigurationError'
+  }
+}
+
+function databaseConfigurationError(message) {
+  return new DeploymentDatabaseConfigurationError(message)
+}
+
 function providerCredentialEnvironmentNames(environment) {
   return [...new Set(Object.entries(environment)
-    .filter(([, value]) => nonBlank(value))
+    .filter(([, value]) => hasRawEnvironmentValue(value))
     .map(([rawName]) => rawName.trim().toUpperCase())
     .filter((name) =>
       PROVIDER_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(name)) ||
@@ -119,7 +172,7 @@ function providerCredentialEnvironmentNames(environment) {
 
 function unsafeProviderTransportEnvironmentNames(environment) {
   return [...new Set(Object.entries(environment)
-    .filter(([, value]) => nonBlank(value))
+    .filter(([, value]) => hasRawEnvironmentValue(value))
     .filter(([rawName, rawValue]) => {
       const name = rawName.trim().toUpperCase()
       return EXACT_UNSAFE_PROVIDER_TRANSPORT_NAMES.has(name) ||
@@ -132,32 +185,227 @@ function unsafeProviderTransportEnvironmentNames(environment) {
     .sort()
 }
 
-export function assertSafeDatabaseTlsMode(
-  connectionString,
-  variableName = 'DATABASE_URL',
-) {
-  if (!nonBlank(connectionString)) return
+function postgresTransportEnvironmentNames(environment) {
+  return [...new Set(Object.entries(environment)
+    .filter(([rawName, value]) => {
+      if (!hasRawEnvironmentValue(value)) return false
+      const name = rawName.trim().toUpperCase()
+      return POSTGRES_TRANSPORT_ENVIRONMENT_NAMES.has(name) ||
+        name.startsWith('PGSSL') ||
+        (
+          name === 'NODE_TLS_REJECT_UNAUTHORIZED' &&
+          value.trim() === '0'
+        )
+    })
+    .map(([rawName]) => rawName.trim().toUpperCase()))]
+    .sort()
+}
+
+function assertNoPostgresTransportEnvironment(environment, variableName) {
+  const names = postgresTransportEnvironmentNames(environment)
+  if (names.length > 0) {
+    throw databaseConfigurationError(
+      `${names.join(', ')} must not be configured; ${variableName} is the only approved PostgreSQL connection source.`,
+    )
+  }
+}
+
+function controlledDatabaseUrl(connectionString, variableName) {
+  if (!nonBlank(connectionString)) {
+    throw databaseConfigurationError(`${variableName} is required.`)
+  }
+  if (
+    connectionString !== connectionString.trim() ||
+    containsAsciiControl(connectionString, { includeSpace: true })
+  ) {
+    throw databaseConfigurationError(
+      `${variableName} must be an exact PostgreSQL URL without whitespace.`,
+    )
+  }
 
   let parsed
   try {
     parsed = new URL(connectionString)
   } catch {
-    return
-  }
-
-  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) return
-
-  const disablesTls = [...parsed.searchParams.entries()].some(
-    ([rawName, rawValue]) =>
-      rawName.toLowerCase() === 'sslmode' &&
-      rawValue.trim().toLowerCase() === 'disable',
-  )
-  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/gu, '')
-  if (disablesTls && !LOOPBACK_DATABASE_HOSTS.has(hostname)) {
-    throw new Error(
-      `${variableName} must not set sslmode=disable for a non-loopback database.`,
+    throw databaseConfigurationError(
+      `${variableName} must be a valid PostgreSQL URL.`,
     )
   }
+  if (
+    !['postgres:', 'postgresql:'].includes(parsed.protocol) ||
+    parsed.hash
+  ) {
+    throw databaseConfigurationError(
+      `${variableName} must be a valid PostgreSQL URL.`,
+    )
+  }
+
+  let user
+  let password
+  let database
+  try {
+    user = decodeURIComponent(parsed.username)
+    password = decodeURIComponent(parsed.password)
+    database = decodeURIComponent(parsed.pathname.slice(1))
+  } catch {
+    throw databaseConfigurationError(
+      `${variableName} contains invalid percent-encoded connection fields.`,
+    )
+  }
+  if (
+    !parsed.hostname ||
+    !user ||
+    !password ||
+    !database
+  ) {
+    throw databaseConfigurationError(
+      `${variableName} must include explicit host, database, username, and password components.`,
+    )
+  }
+  if ([user, password, database].some((value) =>
+    containsAsciiControl(value),
+  )) {
+    throw databaseConfigurationError(
+      `${variableName} contains invalid control characters in connection fields.`,
+    )
+  }
+
+  const port = parsed.port ? Number(parsed.port) : 5432
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw databaseConfigurationError(
+      `${variableName} contains an invalid PostgreSQL port.`,
+    )
+  }
+
+  const query = [...parsed.searchParams.entries()]
+  const queryNames = query.map(([name]) => name.toLowerCase())
+  if (
+    queryNames.some((name) =>
+      [
+        'database',
+        'dbname',
+        'host',
+        'password',
+        'port',
+        'user',
+      ].includes(name),
+    )
+  ) {
+    throw databaseConfigurationError(
+      `${variableName} must not override authority, credentials, or database through query parameters.`,
+    )
+  }
+  if (queryNames.includes('uselibpqcompat')) {
+    throw databaseConfigurationError(
+      `${variableName} must not enable alternate libpq TLS semantics.`,
+    )
+  }
+  if (
+    query.length > 1 ||
+    (query.length === 1 && query[0][0] !== 'sslmode')
+  ) {
+    throw databaseConfigurationError(
+      `${variableName} contains unsupported PostgreSQL query parameters.`,
+    )
+  }
+
+  const sslMode = query.length === 1 ? query[0][1] : null
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/gu, '')
+  const loopback = LOOPBACK_DATABASE_HOSTS.has(hostname)
+  const verifyTls = !loopback || sslMode === 'verify-full'
+  if (verifyTls && isIP(hostname) !== 0) {
+    throw databaseConfigurationError(
+      `${variableName} must use a DNS hostname for verified TLS.`,
+    )
+  }
+  if (sslMode === 'disable' && !loopback) {
+    throw databaseConfigurationError(
+      `${variableName} contains an unapproved sslmode; non-loopback databases require verified TLS.`,
+    )
+  }
+  if (
+    sslMode !== null &&
+    sslMode !== 'verify-full' &&
+    !(loopback && sslMode === 'disable')
+  ) {
+    throw databaseConfigurationError(
+      `${variableName} contains an unapproved sslmode; non-loopback databases require verified TLS.`,
+    )
+  }
+
+  return {
+    database,
+    host: hostname,
+    loopback,
+    password,
+    port,
+    user,
+    verifyTls,
+  }
+}
+
+export function reviewedDatabaseClientConfig(
+  connectionString,
+  {
+    applicationName,
+    allowLoopbackPlaintext = false,
+    environment = process.env,
+    variableName = 'DATABASE_URL',
+  } = {},
+) {
+  if (!nonBlank(applicationName)) {
+    throw databaseConfigurationError(
+      'A reviewed PostgreSQL application name is required.',
+    )
+  }
+  assertNoPostgresTransportEnvironment(environment, variableName)
+  if (environment !== process.env) {
+    assertNoPostgresTransportEnvironment(process.env, variableName)
+  }
+  const reviewed = controlledDatabaseUrl(connectionString, variableName)
+  if (
+    !allowLoopbackPlaintext &&
+    reviewed.loopback &&
+    !reviewed.verifyTls
+  ) {
+    throw databaseConfigurationError(
+      `${variableName} must use verified TLS in a hosted deployment.`,
+    )
+  }
+  const config = {
+    application_name: applicationName,
+    database: reviewed.database,
+    host: reviewed.host,
+    port: reviewed.port,
+    ssl: reviewed.verifyTls
+      ? { rejectUnauthorized: true }
+      : false,
+    sslnegotiation: 'postgres',
+    user: reviewed.user,
+  }
+  Object.defineProperty(config, 'password', {
+    configurable: false,
+    enumerable: false,
+    value: reviewed.password,
+    writable: false,
+  })
+  return config
+}
+
+export function assertSafeDatabaseTlsMode(
+  connectionString,
+  variableName = 'DATABASE_URL',
+  environment = {},
+  options = {},
+) {
+  if (!nonBlank(connectionString)) return
+  reviewedDatabaseClientConfig(connectionString, {
+    applicationName: 'webchess-deployment-preflight',
+    allowLoopbackPlaintext:
+      options.allowLoopbackPlaintext ?? false,
+    environment,
+    variableName,
+  })
 }
 
 export const hasVercelMarker = (environment) =>
@@ -168,6 +416,13 @@ export const hasVercelMarker = (environment) =>
     'VERCEL_URL',
     'VERCEL_PROJECT_ID',
   ].some((variableName) => environment[variableName] !== undefined)
+
+export const hasEffectiveVercelMarker = (environment) =>
+  hasVercelMarker(environment) ||
+  (
+    environment !== process.env &&
+    hasVercelMarker(process.env)
+  )
 
 function deploymentTarget(environment) {
   const standardTarget = environment.VERCEL_ENV?.trim()
@@ -312,7 +567,12 @@ export function validateDeploymentEnvironment(environment = process.env) {
     }
   }
   try {
-    assertSafeDatabaseTlsMode(environment.DATABASE_URL)
+    assertSafeDatabaseTlsMode(
+      environment.DATABASE_URL,
+      'DATABASE_URL',
+      environment,
+      { allowLoopbackPlaintext: false },
+    )
   } catch (error) {
     errors.push(
       error instanceof Error
