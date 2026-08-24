@@ -1,5 +1,5 @@
-import type { CSSProperties, ReactNode } from 'react'
-import { ArrowRight, CircleAlert, RefreshCw, RotateCcw, Shield, Sparkles } from 'lucide-react'
+import { useId, useState, type CSSProperties, type ReactNode } from 'react'
+import { ArrowRight, CircleAlert, FileText, RefreshCw, RotateCcw, Shield, Sparkles } from 'lucide-react'
 
 import { PIECE_GLYPHS } from '../../constants'
 import { cellKey } from '../../lib/board'
@@ -183,6 +183,43 @@ function AnswerText({ answer }: { answer: string }) {
   )
 }
 
+function AnswerPromptDisclosure({ prompt }: { prompt: string }) {
+  const [open, setOpen] = useState(false)
+  const panelId = useId()
+
+  return (
+    <div className="answer-prompt">
+      <button
+        aria-controls={panelId}
+        aria-expanded={open}
+        className="secondary-button answer-prompt-button"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <FileText size={15} aria-hidden="true" />
+        {open ? 'Hide Answer prompt artifact' : 'Inspect Answer prompt artifact'}
+      </button>
+      {open ? (
+        <div
+          aria-label="Answer prompt artifact"
+          className="answer-prompt-panel"
+          id={panelId}
+          role="region"
+        >
+          <p>
+            This secret-free artifact records the WebChess instruction template
+            and verified game-derived content supplied to the final model turn.
+            When applicable, it also records the fixed OpenClaw system role. It
+            excludes credentials, private model reasoning, invalid provider
+            output, request headers, and runtime logs.
+          </p>
+          <pre>{prompt}</pre>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 interface ReadingStageProps {
   problem: string
   provider: HostedProvider
@@ -346,10 +383,7 @@ export function ReadingStage({
                   <RefreshCw size={15} /> Try the answer again
                 </button>
                 {answerPrompt && (
-                  <details className="answer-prompt">
-                    <summary>See the prompt used for this attempt</summary>
-                    <pre>{answerPrompt}</pre>
-                  </details>
+                  <AnswerPromptDisclosure prompt={answerPrompt} />
                 )}
               </div>
             </>
@@ -361,10 +395,7 @@ export function ReadingStage({
               <h2>A direction from the captured signals</h2>
               <AnswerText answer={answer} />
               {answerPrompt && (
-                <details className="answer-prompt">
-                  <summary>See the prompt made from the game</summary>
-                  <pre>{answerPrompt}</pre>
-                </details>
+                <AnswerPromptDisclosure prompt={answerPrompt} />
               )}
             </div>
           )}

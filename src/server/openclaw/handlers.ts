@@ -11,6 +11,7 @@ import {
   type OpenClawEnvironment,
 } from './config'
 import {
+  isOpenClawAnswerPublicError,
   isOpenClawPublicError,
   OpenClawPublicError,
 } from './errors'
@@ -135,6 +136,9 @@ function errorResponse(error: unknown): Response {
       error: {
         code: publicError.code,
         message: publicError.message,
+        ...(isOpenClawAnswerPublicError(publicError)
+          ? { prompt: publicError.publicPrompt }
+          : {}),
       },
     },
     publicError.status,

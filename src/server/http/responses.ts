@@ -1,4 +1,8 @@
-import { ApiError, isApiError } from './errors'
+import {
+  ApiError,
+  isApiError,
+  isSafePromptApiError,
+} from './errors'
 
 const NO_STORE_HEADERS = {
   'Cache-Control': 'private, no-store, max-age=0',
@@ -67,6 +71,9 @@ function publicError(error: ApiError, requestId: string): Response {
         code: error.code,
         message: error.message,
         ...(error.issues ? { issues: error.issues } : {}),
+        ...(isSafePromptApiError(error)
+          ? { prompt: error.publicPrompt }
+          : {}),
         requestId,
       },
     },

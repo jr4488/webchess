@@ -33,6 +33,7 @@ import {
   LifecycleRepositoryError,
   type LifecycleRepositoryPort,
 } from '../lifecycle'
+import { OpenClawAnswerContractError } from '../openclaw/errors'
 import {
   buildBoardAnswerPromptPackage,
   DIVISION_PROMPT_VERSION,
@@ -1710,6 +1711,40 @@ describe('durable HTTP service adapter', () => {
     expect(dependencies.usage.settleModelRequest).toHaveBeenCalledBefore(
       vi.mocked(dependencies.repository.storeAnswer),
     )
+  })
+
+  it('settles a terminal corrective Answer failure and exposes only its safe prompt', async () => {
+    const publicPrompt = [
+      'SYSTEM ROLE',
+      'CORRECTION REQUIRED',
+      'Verified board evidence only.',
+    ].join('\n\n')
+    vi.mocked(dependencies.answerGenerator).mockRejectedValue(
+      new OpenClawAnswerContractError(publicPrompt),
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies).answer({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      expectedRevision: 2,
+      ipAddress: '203.0.113.17',
+      idempotencyKey: IDEMPOTENCY_KEY,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({
+      code: 'UPSTREAM_FAILURE',
+      status: 502,
+      publicPrompt,
+    })
+
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'failed',
+        failureCode: 'provider_contract_invalid',
+      }),
+    )
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
   })
 
   it.each(['failed', 'indeterminate', 'rejected'] satisfies ModelRequestStatus[])(

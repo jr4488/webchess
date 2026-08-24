@@ -1472,6 +1472,41 @@ describe('durable WebChess client flow', () => {
       .toBeInTheDocument()
   })
 
+  it('reuses the automatic Answer key while a promptless 502 is reconciled', async () => {
+    serverGame = moveGame(
+      makeTerminalReadyGame(),
+      'white-rook-1',
+      { ring: 0, sector: 4 },
+    )
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('gate_passed', { portia: true, gate: true }),
+    )
+    apiHarness.createIdempotencyKey
+      .mockReturnValueOnce('98000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('98000000-0000-4000-8000-000000000002')
+    apiHarness.requestGameAnswer.mockRejectedValueOnce(
+      new WebChessApiError(
+        'The model connection ended before a result was confirmed.',
+        { kind: 'http-error', status: 502 },
+      ),
+    )
+
+    await renderRestoredApp()
+    await waitFor(() => expect(apiHarness.requestGameAnswer).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.getByText(ANSWER.answer)).toBeInTheDocument())
+
+    const firstOptions = apiHarness.requestGameAnswer.mock.calls[0]?.[2] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.requestGameAnswer.mock.calls[1]?.[2] as {
+      idempotencyKey: string
+    }
+    expect(firstOptions.idempotencyKey).toBe(
+      '98000000-0000-4000-8000-000000000001',
+    )
+    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+  })
+
   it('reveals research-only Portia poll progress without changing lifecycle revision or its seven stages', async () => {
     vi.useFakeTimers()
     serverGame = moveGame(
@@ -1653,6 +1688,55 @@ describe('durable WebChess client flow', () => {
         idempotencyKey: expect.any(String),
         signal: expect.any(AbortSignal),
       }),
+    )
+  })
+
+  it('shows a terminal corrective prompt and uses a fresh logical request for retry', async () => {
+    serverGame = makeAnswerFailedGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('gate_passed', { portia: true, gate: true }),
+    )
+    apiHarness.createIdempotencyKey
+      .mockReturnValueOnce('97000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('97000000-0000-4000-8000-000000000002')
+    apiHarness.requestGameAnswer.mockRejectedValueOnce(
+      new WebChessApiError(
+        'The model did not return a valid WebChess result after one corrective turn.',
+        {
+          kind: 'http-error',
+          prompt: 'SYSTEM ROLE\n\nCORRECTION REQUIRED\nVerified board evidence.',
+          status: 502,
+        },
+      ),
+    )
+
+    await renderRestoredApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Try the answer again' }))
+
+    const summary = await screen.findByText(
+      'Inspect corrective Answer role content',
+    )
+    fireEvent.click(summary)
+    expect(screen.getByRole('region', {
+      name: 'Corrective Answer role content',
+    })).toHaveTextContent('CORRECTION REQUIRED')
+    expect(screen.getByText(/up to two additional OpenClaw model turns/i))
+      .toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try the answer again' }))
+    await waitFor(() => expect(screen.getByText(ANSWER.answer)).toBeInTheDocument())
+
+    const firstOptions = apiHarness.requestGameAnswer.mock.calls[0]?.[2] as {
+      idempotencyKey: string
+    }
+    const retryOptions = apiHarness.requestGameAnswer.mock.calls[1]?.[2] as {
+      idempotencyKey: string
+    }
+    expect(firstOptions.idempotencyKey).toBe(
+      '97000000-0000-4000-8000-000000000001',
+    )
+    expect(retryOptions.idempotencyKey).toBe(
+      '97000000-0000-4000-8000-000000000002',
     )
   })
 

@@ -114,6 +114,8 @@ export type WebChessApiErrorKind =
 
 export class WebChessApiError extends Error {
   readonly kind: WebChessApiErrorKind
+  /** Exact application-authored prompt returned for a failed model attempt. */
+  readonly prompt: string | null
   readonly status: number | null
   readonly serverCode: string | null
   readonly retryAfterSeconds: number | null
@@ -122,6 +124,7 @@ export class WebChessApiError extends Error {
     message: string,
     options: {
       kind: WebChessApiErrorKind
+      prompt?: string | null
       status?: number | null
       serverCode?: string | null
       retryAfterSeconds?: number | null
@@ -131,6 +134,7 @@ export class WebChessApiError extends Error {
     super(message)
     this.name = 'WebChessApiError'
     this.kind = options.kind
+    this.prompt = options.prompt ?? null
     this.status = options.status ?? null
     this.serverCode = options.serverCode ?? null
     this.retryAfterSeconds = options.retryAfterSeconds ?? null
@@ -744,6 +748,7 @@ function parseRetryAfter(value: string | null): number | null {
 function errorDetails(value: unknown): {
   message?: string
   code?: string
+  prompt?: string
 } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
   const payload = value as Record<string, unknown>
@@ -760,7 +765,10 @@ function errorDetails(value: unknown): {
     (typeof payload.code === 'string' && payload.code) ||
     (typeof nested?.code === 'string' && nested.code) ||
     undefined
-  return { message, code }
+  const prompt =
+    (typeof nested?.prompt === 'string' && nested.prompt) ||
+    undefined
+  return { message, code, prompt }
 }
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
@@ -807,6 +815,7 @@ async function requestJson<T>(
     const details = errorDetails(payload)
     throw new WebChessApiError(details.message ?? defaultErrorMessage(response.status), {
       kind: apiErrorKind(response.status),
+      prompt: details.prompt ?? null,
       status: response.status,
       serverCode: details.code ?? null,
       retryAfterSeconds: parseRetryAfter(response.headers.get('Retry-After')),

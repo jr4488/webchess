@@ -1,3 +1,5 @@
+import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../../types'
+
 export type ApiErrorCode =
   | 'AUTHENTICATION_REQUIRED'
   | 'AUTHENTICATION_UNAVAILABLE'
@@ -47,6 +49,32 @@ export class ApiError extends Error {
     this.retryAfterSeconds = options.retryAfterSeconds
     this.issues = options.issues
   }
+}
+
+/**
+ * The sole public HTTP error allowed to carry prompt content. Its fixed
+ * UPSTREAM_FAILURE/502 identity prevents unrelated API errors from becoming a
+ * generic serialization path for server data.
+ */
+export class SafePromptApiError extends ApiError {
+  override name = 'SafePromptApiError'
+
+  constructor(message: string, readonly publicPrompt: string) {
+    if (
+      publicPrompt.length === 0 ||
+      publicPrompt.length > MAX_PERSISTED_MODEL_PROMPT_CHARS ||
+      publicPrompt.includes('\0')
+    ) {
+      throw new TypeError('The public prompt is outside its safe disclosure bounds.')
+    }
+    super('UPSTREAM_FAILURE', 502, message)
+  }
+}
+
+export function isSafePromptApiError(
+  error: unknown,
+): error is SafePromptApiError {
+  return error instanceof SafePromptApiError
 }
 
 export function isApiError(error: unknown): error is ApiError {

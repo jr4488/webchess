@@ -53,8 +53,14 @@ import {
   runOpenClawModel,
 } from './cli'
 import { resolveOpenClawConfig } from './config'
-import { OpenClawProviderError } from './errors'
-import { parseStructuredModelOutput } from './generation'
+import {
+  OpenClawAnswerContractError,
+  OpenClawProviderError,
+} from './errors'
+import {
+  buildAnswerContractCorrectionPrompt,
+  parseStructuredModelOutput,
+} from './generation'
 
 const UNREPORTED_USAGE = Object.freeze({
   reported: false,
@@ -65,6 +71,67 @@ const UNREPORTED_USAGE = Object.freeze({
   cacheWriteInputTokens: 0,
   reasoningOutputTokens: 0,
 })
+
+const ANSWER_CORRECTION_IDEMPOTENCY_SUFFIX = ':answer-contract-correction'
+
+interface OpenClawAnswerAttempt {
+  model: string
+  result: AnswerResult | null
+}
+
+function normalizedIdempotencyKey(value: string | undefined): string | undefined {
+  const normalized = value?.trim()
+  return normalized || undefined
+}
+
+function correctionIdempotencyKey(value: string | undefined): string | undefined {
+  const normalized = normalizedIdempotencyKey(value)
+  if (!normalized) return undefined
+  return `${normalized.slice(
+    0,
+    255 - ANSWER_CORRECTION_IDEMPOTENCY_SUFFIX.length,
+  )}${ANSWER_CORRECTION_IDEMPOTENCY_SUFFIX}`
+}
+
+function abortedAnswerError(): OpenClawProviderError {
+  return new OpenClawProviderError(
+    'request_aborted',
+    true,
+    'The configured OpenClaw model ended before a result was confirmed.',
+  )
+}
+
+async function generateOpenClawAnswerAttempt(
+  prompt: string,
+  context: ModelRequestContext,
+  idempotencyKey: string | undefined,
+): Promise<OpenClawAnswerAttempt> {
+  const config = resolveOpenClawConfig()
+  try {
+    const generated = await runOpenClawModel(prompt, config, {
+      idempotencyKey,
+      signal: context.signal,
+      thinking: 'medium',
+    })
+    let result: AnswerResult | null = null
+    try {
+      result = normalizeWebChessAnswer(
+        WebChessAnswerSchema.parse(
+          parseStructuredModelOutput(generated.outputText),
+        ),
+      )
+    } catch {
+      // Invalid provider text is never copied into the corrective prompt or
+      // public error. The same strict five-field validator runs on both turns.
+    }
+    return {
+      model: modelAttribution(generated.provider, generated.model),
+      result,
+    }
+  } catch (error) {
+    translateCliError(error)
+  }
+}
 
 function outputContract(schema: z.ZodType): string {
   return `OPENCLAW STRUCTURED OUTPUT\nReturn exactly one JSON value matching this JSON Schema and no surrounding commentary or Markdown fence:\n${JSON.stringify(z.toJSONSchema(schema))}`
@@ -160,26 +227,67 @@ export async function generateOpenClawAnswerV2(
   context: ModelRequestContext,
 ): Promise<ModelGeneration<AnswerResult>> {
   const transportPrompt = buildOpenClawAnswerPrompt(inputValue)
+  const correctionPrompt = buildAnswerContractCorrectionPrompt(transportPrompt)
   const largestRoleEnvelope = buildOpenClawAnswerModelPrompt(
     transportPrompt,
     'openai/persistence-bound',
   )
-  if (largestRoleEnvelope.length > MAX_PERSISTED_MODEL_PROMPT_CHARS) {
+  const largestCorrectionEnvelope = buildOpenClawAnswerModelPrompt(
+    correctionPrompt,
+    'openai/persistence-bound',
+  )
+  if (
+    largestRoleEnvelope.length > MAX_PERSISTED_MODEL_PROMPT_CHARS ||
+    largestCorrectionEnvelope.length > MAX_PERSISTED_MODEL_PROMPT_CHARS
+  ) {
     throw new ModelInputError(
       `The complete Answer model prompt exceeds the ${MAX_PERSISTED_MODEL_PROMPT_CHARS.toLocaleString()}-character durable limit.`,
     )
   }
-  const generated = await generateStructured(
-    'completed-game answer',
+
+  const firstAttempt = await generateOpenClawAnswerAttempt(
     transportPrompt,
     context,
-    (value) => normalizeWebChessAnswer(WebChessAnswerSchema.parse(value)),
+    normalizedIdempotencyKey(context.idempotencyKey),
   )
-  const prompt = buildOpenClawAnswerModelPrompt(
-    transportPrompt,
-    generated.model,
+  if (firstAttempt.result) {
+    return {
+      providerId: null,
+      model: firstAttempt.model,
+      prompt: buildOpenClawAnswerModelPrompt(
+        transportPrompt,
+        firstAttempt.model,
+      ),
+      result: firstAttempt.result,
+      usage: UNREPORTED_USAGE,
+    }
+  }
+
+  if (context.signal?.aborted) throw abortedAnswerError()
+
+  // This is one logical WebChess Answer operation but two provider turns. The
+  // local transport reports no token usage, so zeroes here must not be read as
+  // zero OpenAI/OpenClaw allowance or billing impact.
+  const correctedAttempt = await generateOpenClawAnswerAttempt(
+    correctionPrompt,
+    context,
+    correctionIdempotencyKey(context.idempotencyKey),
   )
-  return { ...generated, prompt, usage: UNREPORTED_USAGE }
+  const publicPrompt = buildOpenClawAnswerModelPrompt(
+    correctionPrompt,
+    correctedAttempt.model,
+  )
+  if (!correctedAttempt.result) {
+    throw new OpenClawAnswerContractError(publicPrompt)
+  }
+
+  return {
+    providerId: null,
+    model: correctedAttempt.model,
+    prompt: publicPrompt,
+    result: correctedAttempt.result,
+    usage: UNREPORTED_USAGE,
+  }
 }
 
 /** Exact combined transport prompt used by the local OpenClaw model turn. */

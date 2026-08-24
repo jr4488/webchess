@@ -468,6 +468,7 @@ function renderStage(
   options: {
     busy?: boolean
     boardAnswer?: GeneratedAnswer | null
+    answerFailurePrompt?: string
     game?: DurableGame | null
     gameStatus?: 'completed' | 'answering' | 'answer_failed' | 'answered'
     onCreateAction?: (index: number) => void
@@ -496,6 +497,7 @@ function renderStage(
       lifecycle={lifecycle}
       gameStatus={options.gameStatus ?? 'completed'}
       boardAnswer={options.boardAnswer ?? null}
+      answerFailurePrompt={options.answerFailurePrompt ?? ''}
       busy={options.busy ?? false}
       error=""
       actionPendingIndex={null}
@@ -542,6 +544,45 @@ describe('LifecycleStage terminal Gate experience', () => {
     expect(screen.queryByTestId('process-graphic')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Try the answer again' }))
     expect(onRetryAnswer).toHaveBeenCalledOnce()
+  })
+
+  it('discloses the exact safe corrective prompt on terminal Answer contract failure', () => {
+    const lifecycle = aggregate('gate_passed', 'answer')
+    renderStage(
+      {
+        ...lifecycle,
+        gate: {
+          ...lifecycle.gate!,
+          passed: true,
+          missingRequirements: [],
+          recommendedNextTransition: 'answer',
+          explanation: 'Portia permitted the exact board-derived prompt.',
+        },
+      },
+      {
+        gameStatus: 'answer_failed',
+        answerFailurePrompt: 'SYSTEM ROLE\n\nCORRECTION REQUIRED\nVerified board evidence.',
+      },
+    )
+
+    const disclosure = screen.getByText(
+      'Inspect corrective Answer role content',
+    ).closest('details')
+    expect(disclosure).not.toBeNull()
+    expect(disclosure).not.toHaveAttribute('open')
+    fireEvent.click(within(disclosure as HTMLElement).getByText(
+      'Inspect corrective Answer role content',
+    ))
+    expect(disclosure).toHaveAttribute('open')
+    expect(screen.getByRole('region', {
+      name: 'Corrective Answer role content',
+    })).toHaveTextContent('CORRECTION REQUIRED')
+    expect(screen.getByText(/not yet persisted across reload/i))
+      .toBeInTheDocument()
+    expect(screen.getByText(/can consume up to two additional OpenClaw model turns/i))
+      .toBeInTheDocument()
+    expect(screen.getByText(/excludes credentials, private model reasoning/i))
+      .toBeInTheDocument()
   })
 
   it('reopens a premature terminal stop when its bounded field repair was unused', () => {

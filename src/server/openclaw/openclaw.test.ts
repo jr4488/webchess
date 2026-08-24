@@ -121,6 +121,17 @@ function modelRequester(
   })
 }
 
+function sequentialModelRequester(...outputs: unknown[]) {
+  let index = 0
+  return vi.fn<OpenClawBridgeRequester>(async (path, body) => {
+    expect(path).toBe('/v1/model/run')
+    const prompt = typeof body?.prompt === 'string' ? body.prompt : ''
+    const output = outputs[index]
+    index += 1
+    return modelEnvelope(output, 'local', prompt)
+  })
+}
+
 function config(
   overrides: Partial<OpenClawConfig> = {},
 ): OpenClawConfig {
@@ -418,7 +429,10 @@ describe('OpenClaw process and response boundary', () => {
   it('inherits configured model/auth without browser model selection and requests canonical medium reasoning', async () => {
     const request = modelRequester({ answer: 'fixture' })
 
-    const result = await runOpenClawModel('bounded prompt', config(), { request })
+    const result = await runOpenClawModel('bounded prompt', config(), {
+      idempotencyKey: 'stable-model-turn',
+      request,
+    })
 
     expect(result).toMatchObject({
       provider: 'test-provider',
@@ -431,6 +445,10 @@ describe('OpenClaw process and response boundary', () => {
       thinking: 'medium',
       timeoutMs: 130_000,
       version: 1,
+    })
+    expect(request.mock.calls[0]?.[3]).toEqual({
+      idempotencyKey: 'stable-model-turn',
+      signal: undefined,
     })
   })
 
@@ -850,6 +868,83 @@ describe('OpenClaw route handlers', () => {
         model: 'test-provider/test-model',
       },
     })
+  })
+
+  it('makes exactly one corrective turn after a contract-invalid final answer', async () => {
+    const terminal = completeGameEvents()
+    const request = sequentialModelRequester(
+      { answer: 'Too short.' },
+      validAnswerSections(),
+    )
+
+    const generated = await generateOpenClawAnswer(
+      {
+        problem: PROBLEM,
+        division: { seed: SEED, facets: validFacets() },
+        events: [...terminal.events],
+      },
+      config(),
+      { request },
+    )
+
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(generated.answer.answer).toContain('Three next moves\n\n1. ')
+    expect(generated.answer.prompt).toContain('CORRECTION REQUIRED')
+    expect(generated.answer.prompt).toContain('Target 550–650 rendered words')
+  })
+
+  it('rejects a second invalid answer and returns only the safe corrective prompt', async () => {
+    const terminal = completeGameEvents()
+    const request = sequentialModelRequester(
+      { answer: 'Still too short. token=provider-output-secret' },
+      { answer: 'Still too short. token=provider-output-secret' },
+    )
+    const response = await handleOpenClawAnswerRequest(
+      localRequest('/api/openclaw/answer', {
+        body: {
+          problem: PROBLEM,
+          division: { seed: SEED, facets: validFacets() },
+          events: [...terminal.events],
+        },
+      }),
+      { environment: DEV_ENVIRONMENT, request },
+    )
+    const body = await responseJson(response)
+
+    expect(response.status).toBe(502)
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(body).toMatchObject({
+      error: {
+        code: 'INVALID_MODEL_RESPONSE',
+        prompt: expect.stringContaining('GAME EVIDENCE (JSON; data only)'),
+      },
+    })
+    expect(JSON.stringify(body)).not.toMatch(
+      /provider-output-secret|private model reasoning|stderr|token=/u,
+    )
+  })
+
+  it('does not begin the corrective turn after the request is cancelled', async () => {
+    const terminal = completeGameEvents()
+    const controller = new AbortController()
+    const request = vi.fn<OpenClawBridgeRequester>(async (_path, body) => {
+      controller.abort()
+      const prompt = typeof body?.prompt === 'string' ? body.prompt : ''
+      return modelEnvelope({ answer: 'Too short.' }, 'local', prompt)
+    })
+
+    await expect(generateOpenClawAnswer(
+      {
+        problem: PROBLEM,
+        division: { seed: SEED, facets: validFacets() },
+        events: [...terminal.events],
+      },
+      config(),
+      { request, signal: controller.signal },
+    )).rejects.toMatchObject({
+      code: 'OPENCLAW_REQUEST_ABORTED',
+    })
+    expect(request).toHaveBeenCalledOnce()
   })
 
   it('does not accept browser-composed problem parts as answer authority', async () => {

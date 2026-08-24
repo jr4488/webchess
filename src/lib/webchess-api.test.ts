@@ -352,6 +352,7 @@ describe('durable WebChess browser API', () => {
             error: {
               code: 'server-code',
               message: 'Server explanation',
+              prompt: 'Safe corrective prompt.',
             },
           },
           status,
@@ -367,6 +368,7 @@ describe('durable WebChess browser API', () => {
       kind,
       status,
       serverCode: 'server-code',
+      prompt: 'Safe corrective prompt.',
       retryAfterSeconds: 12,
       message: 'Server explanation',
     })

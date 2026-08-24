@@ -34,7 +34,10 @@ import {
 import {
   OpenClawCliError,
 } from './cli'
-import { OpenClawProviderError } from './errors'
+import {
+  OpenClawAnswerContractError,
+  OpenClawProviderError,
+} from './errors'
 import {
   buildOpenClawAnswerPrompt,
   generateOpenClawAnswerV2,
@@ -231,13 +234,147 @@ describe('OpenClaw WebChess 2.2 model generation', () => {
     expect(generated.prompt).toContain('SYSTEM ROLE')
     expect(generated.prompt).toContain('test-provider/test-model')
     expect(generated.result.answer).toContain('reversible step')
-    expect(harness.buildFullPrompt).toHaveBeenCalledTimes(2)
+    expect(harness.runOpenClawModel).toHaveBeenCalledOnce()
+    expect(harness.buildFullPrompt).toHaveBeenCalledTimes(3)
+  })
+
+  it('uses one deterministic corrective turn without weakening the Answer contract', async () => {
+    const controller = new AbortController()
+    const context: ModelRequestContext = {
+      ...requestContext,
+      idempotencyKey: 'answer-provider-request',
+      signal: controller.signal,
+    }
+    harness.runOpenClawModel
+      .mockResolvedValueOnce(modelResult({ answer: 'Too short.' }))
+      .mockResolvedValueOnce(modelResult(validAnswer()))
+
+    const generated = await generateOpenClawAnswerV2(serverEvidence(), context)
+
+    expect(harness.runOpenClawModel).toHaveBeenCalledTimes(2)
+    expect(harness.runOpenClawModel).toHaveBeenNthCalledWith(
+      1,
+      expect.not.stringContaining('CORRECTION REQUIRED'),
+      expect.any(Object),
+      expect.objectContaining({
+        idempotencyKey: 'answer-provider-request',
+        signal: controller.signal,
+        thinking: 'medium',
+      }),
+    )
+    expect(harness.runOpenClawModel).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('CORRECTION REQUIRED'),
+      expect.any(Object),
+      expect.objectContaining({
+        idempotencyKey: 'answer-provider-request:answer-contract-correction',
+        signal: controller.signal,
+        thinking: 'medium',
+      }),
+    )
+    expect(generated.result.answer).toContain('Three next moves\n\n1. ')
+    expect(generated.prompt).toContain('CORRECTION REQUIRED')
+    expect(generated.usage).toMatchObject({ reported: false, totalTokens: 0 })
+  })
+
+  it('uses the same per-turn idempotency keys when a logical Answer request is replayed', async () => {
+    const context: ModelRequestContext = {
+      ...requestContext,
+      idempotencyKey: 'stable-answer-request',
+    }
+    harness.runOpenClawModel
+      .mockResolvedValueOnce(modelResult({ answer: 'Too short.' }))
+      .mockResolvedValueOnce(modelResult(validAnswer()))
+      .mockResolvedValueOnce(modelResult({ answer: 'Too short again.' }))
+      .mockResolvedValueOnce(modelResult(validAnswer()))
+
+    await generateOpenClawAnswerV2(serverEvidence(), context)
+    await generateOpenClawAnswerV2(serverEvidence(), context)
+
+    expect(harness.runOpenClawModel.mock.calls.map((call) =>
+      call[2]?.idempotencyKey)).toEqual([
+      'stable-answer-request',
+      'stable-answer-request:answer-contract-correction',
+      'stable-answer-request',
+      'stable-answer-request:answer-contract-correction',
+    ])
+  })
+
+  it('rejects the second invalid response without a third turn or provider output disclosure', async () => {
+    harness.runOpenClawModel.mockResolvedValue(modelResult({
+      answer: 'Still invalid. token=provider-output-secret',
+    }))
+
+    const error = await rejectionFrom(
+      generateOpenClawAnswerV2(serverEvidence(), requestContext),
+    )
+
+    expect(error).toBeInstanceOf(OpenClawAnswerContractError)
+    expect(harness.runOpenClawModel).toHaveBeenCalledTimes(2)
+    expect(error).toMatchObject({
+      publicPrompt: expect.stringContaining('CORRECTION REQUIRED'),
+    })
+    expect((error as OpenClawAnswerContractError).publicPrompt).not.toMatch(
+      /provider-output-secret|token=|stderr|private model reasoning/u,
+    )
+  })
+
+  it('does not start a corrective turn after cancellation of the invalid first turn', async () => {
+    const controller = new AbortController()
+    harness.runOpenClawModel.mockImplementationOnce(async () => {
+      controller.abort()
+      return modelResult({ answer: 'Too short.' })
+    })
+
+    const error = await rejectionFrom(generateOpenClawAnswerV2(
+      serverEvidence(),
+      { ...requestContext, signal: controller.signal },
+    ))
+
+    expect(error).toBeInstanceOf(OpenClawProviderError)
+    expect(error).toMatchObject({ failureCode: 'request_aborted' })
+    expect(harness.runOpenClawModel).toHaveBeenCalledOnce()
+  })
+
+  it('stops after an aborted corrective turn', async () => {
+    harness.runOpenClawModel
+      .mockResolvedValueOnce(modelResult({ answer: 'Too short.' }))
+      .mockRejectedValueOnce(new OpenClawCliError('aborted', 'cancelled'))
+
+    const error = await rejectionFrom(
+      generateOpenClawAnswerV2(serverEvidence(), requestContext),
+    )
+
+    expect(error).toBeInstanceOf(OpenClawProviderError)
+    expect(error).toMatchObject({ failureCode: 'request_aborted' })
+    expect(harness.runOpenClawModel).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not correct a provider failure that produced no candidate answer', async () => {
+    harness.runOpenClawModel.mockRejectedValueOnce(
+      new OpenClawCliError('failed', 'provider connection failed'),
+    )
+
+    await expect(generateOpenClawAnswerV2(serverEvidence(), requestContext))
+      .rejects.toMatchObject({ failureCode: 'provider_connection_lost' })
+    expect(harness.runOpenClawModel).toHaveBeenCalledOnce()
   })
 
   it('rejects an Answer role envelope that cannot be persisted durably', async () => {
     harness.buildFullPrompt.mockReturnValue(
       'x'.repeat(MAX_PERSISTED_MODEL_PROMPT_CHARS + 1),
     )
+
+    await expect(generateOpenClawAnswerV2(serverEvidence(), requestContext))
+      .rejects.toBeInstanceOf(ModelInputError)
+    expect(harness.runOpenClawModel).not.toHaveBeenCalled()
+  })
+
+  it('rejects an oversized corrective envelope before spending the first provider turn', async () => {
+    harness.buildFullPrompt.mockImplementation((transportPrompt: string) =>
+      transportPrompt.includes('CORRECTION REQUIRED')
+        ? 'x'.repeat(MAX_PERSISTED_MODEL_PROMPT_CHARS + 1)
+        : 'persistable initial envelope')
 
     await expect(generateOpenClawAnswerV2(serverEvidence(), requestContext))
       .rejects.toBeInstanceOf(ModelInputError)

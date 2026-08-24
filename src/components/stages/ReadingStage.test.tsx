@@ -251,7 +251,17 @@ describe('ReadingStage final answer', () => {
       answerError: 'The model provider could not complete this answer.',
     })
 
-    expect(screen.getByText(/see the prompt used for this attempt/i)).toBeInTheDocument()
+    const promptButton = screen.getByRole('button', {
+      name: /inspect answer prompt artifact/i,
+    })
+    expect(promptButton).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(promptButton)
+    expect(promptButton).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('region', {
+      name: /answer prompt artifact/i,
+    })).toHaveTextContent('Canonical prompt returned with the failed attempt.')
+    expect(screen.getByText(/excludes credentials, private model reasoning/i))
+      .toBeInTheDocument()
     expect(screen.queryByText(/waiting to be sent/i)).not.toBeInTheDocument()
   })
 
@@ -396,7 +406,9 @@ describe('ReadingStage final answer', () => {
     expect(onRetryAnswer).toHaveBeenCalledOnce()
     expect(onReplay).toHaveBeenCalledOnce()
     expect(onReset).toHaveBeenCalledOnce()
-    expect(screen.queryByText(/see the prompt used/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', {
+      name: /inspect answer prompt artifact/i,
+    })).not.toBeInTheDocument()
   })
 
   it('shows durable answer activity while a pending response is restored', () => {

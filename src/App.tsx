@@ -132,6 +132,14 @@ function isAmbiguousWilburMutationFailure(error: unknown): boolean {
   )
 }
 
+function isAmbiguousAnswerMutationFailure(error: unknown): boolean {
+  return isWebChessApiError(error) && !error.prompt && (
+    error.kind === 'transport' ||
+    error.kind === 'invalid-response' ||
+    (error.status !== null && error.status >= 500)
+  )
+}
+
 function outcomeNotice(outcome: GameOutcome): string {
   if (outcome.reason === 'king-captured' && outcome.winner) {
     const winner = outcome.winner === 'white' ? 'White' : 'Black'
@@ -1051,9 +1059,16 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
           error.kind === 'http-error' &&
           (error.status === 502 || error.status === 504)
         ) {
-          answerIntentRef.current = null
+          if (error.prompt) answerIntentRef.current = null
           lifecycleBackoffMsRef.current = 0
+          const failurePrompt = error.prompt
           await restoreCurrentGame({ silent: true })
+          if (failurePrompt) {
+            setAnswerPrompt(failurePrompt)
+            setAnswerError(error.message)
+            setAnswerStatus('error')
+            setAnswerActivity(null)
+          }
           return
         }
         const recoverable = isWebChessApiError(error) && (
@@ -1244,12 +1259,15 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
           if (runtime.signInPath) window.location.assign(runtime.signInPath)
           return
         }
-        if (!isWebChessApiError(error) || error.kind !== 'transport') {
+        if (!isAmbiguousAnswerMutationFailure(error)) {
           answerIntentRef.current = null
         }
         if (isWebChessApiError(error) && error.kind === 'conflict') {
           await restoreCurrentGame()
           return
+        }
+        if (isWebChessApiError(error) && error.prompt) {
+          setAnswerPrompt(error.prompt)
         }
         setAnswerError(
           error instanceof Error
@@ -1581,15 +1599,19 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
       setAnswerActivity(null)
     } catch (error) {
       if (controller.signal.aborted) return
-      if (!isWebChessApiError(error) || error.kind !== 'transport') {
+      if (!isAmbiguousAnswerMutationFailure(error)) {
         answerIntentRef.current = null
       }
+      const failurePrompt = isWebChessApiError(error) ? error.prompt : null
+      await restoreCurrentGame({ silent: true })
+      if (failurePrompt) setAnswerPrompt(failurePrompt)
       setAnswerError(
         error instanceof Error
           ? error.message
           : 'The board-derived answer could not be completed.',
       )
-      await restoreCurrentGame({ silent: true })
+      setAnswerStatus('error')
+      setAnswerActivity(null)
     } finally {
       if (lifecycleRequestRef.current === controller) {
         lifecycleRequestRef.current = null
@@ -2100,6 +2122,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
             lifecycle={lifecycle}
             gameStatus={lifecycleGameStatus}
             boardAnswer={game?.answer ?? null}
+            answerFailurePrompt={answerPrompt}
             busy={lifecycleBusy}
             error={lifecycleError}
             actionPendingIndex={actionPendingIndex}

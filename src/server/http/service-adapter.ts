@@ -105,7 +105,10 @@ import {
   hashUserRateKey,
   loadUsageConfig,
 } from '../usage'
-import { OpenClawProviderError } from '../openclaw/errors'
+import {
+  OpenClawAnswerContractError,
+  OpenClawProviderError,
+} from '../openclaw/errors'
 import type {
   GetModelRequestResultResult,
   ModelOperation,
@@ -116,7 +119,12 @@ import type {
   UsageController,
   UsageDenied,
 } from '../usage'
-import { ApiError, isApiError, serviceUnavailable } from './errors'
+import {
+  ApiError,
+  isApiError,
+  SafePromptApiError,
+  serviceUnavailable,
+} from './errors'
 import type { WebChessApiServices } from './ports'
 
 const FALLBACK_SOFTWARE_VERSION = `webchess@${WEBCHESS_SOFTWARE_VERSION}`
@@ -576,6 +584,12 @@ function repositoryError(error: unknown): ApiError | null {
 }
 
 function modelError(error: unknown): ApiError | null {
+  if (error instanceof OpenClawAnswerContractError) {
+    return new SafePromptApiError(
+      'The model did not return a valid WebChess result after one corrective turn.',
+      error.publicPrompt,
+    )
+  }
   if (error instanceof OpenClawProviderError) {
     return new ApiError(
       error.failureCode === 'provider_timeout'

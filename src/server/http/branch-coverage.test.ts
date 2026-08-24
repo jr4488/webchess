@@ -27,7 +27,12 @@ vi.mock('@clerk/nextjs/webhooks', () => ({
 }))
 
 import { MAX_JSON_BODY_BYTES } from './contracts'
-import { ApiError, isApiError, serviceUnavailable } from './errors'
+import {
+  ApiError,
+  isApiError,
+  SafePromptApiError,
+  serviceUnavailable,
+} from './errors'
 import {
   createRequestId,
   getClientIpAddress,
@@ -346,6 +351,22 @@ describe('private response helpers and errors', () => {
       error: {
         code: 'RATE_LIMITED',
         issues: [{ path: 'value', message: 'Invalid value.' }],
+      },
+    })
+
+    const promptResponse = errorResponse(
+      new SafePromptApiError(
+        'The corrective Answer contract failed.',
+        'Safe application-authored prompt.',
+      ),
+      'request_prompt',
+    )
+    await expect(promptResponse.json()).resolves.toEqual({
+      error: {
+        code: 'UPSTREAM_FAILURE',
+        message: 'The corrective Answer contract failed.',
+        prompt: 'Safe application-authored prompt.',
+        requestId: 'request_prompt',
       },
     })
 

@@ -22,7 +22,10 @@ import {
   runOpenClawModel,
 } from './cli'
 import type { OpenClawConfig } from './config'
-import { OpenClawPublicError } from './errors'
+import {
+  OpenClawAnswerPublicError,
+  OpenClawPublicError,
+} from './errors'
 
 const MAX_GAME_EVENTS = 256
 
@@ -70,6 +73,20 @@ const ANSWER_JSON_CONTRACT = `OPENCLAW JSON OUTPUT
 Return exactly one JSON object and no commentary. The object must have this shape:
 {"answer":"...","what_the_conflicts_emphasized":"...","the_tension_to_hold":"...","three_next_moves":["...","...","..."],"what_could_change_the_answer":"..."}
 Use only these five fields and satisfy every length, structure, and word-count requirement above.`
+
+export const ANSWER_CONTRACT_CORRECTION = `CORRECTION REQUIRED
+The previous response did not pass the WebChess answer validator. Return a newly composed JSON object only; do not discuss the correction or repeat these instructions.
+- Use exactly the five fields in the JSON shape above.
+- Target 550–650 rendered words across all five fields so the final answer remains within 450–750 words after headings and action numbers are added.
+- Begin the "answer" field with one paragraph containing exactly two or three complete sentences.
+- Make "answer", "what_the_conflicts_emphasized", "the_tension_to_hold", and "what_could_change_the_answer" at least 80 characters each.
+- Put exactly three actions in "three_next_moves"; make each at least 30 characters and do not add numeric prefixes.
+- Return valid JSON with no Markdown fence or surrounding commentary.`
+
+/** The invalid provider output is deliberately omitted from the corrective turn. */
+export function buildAnswerContractCorrectionPrompt(prompt: string): string {
+  return `${prompt}\n\n${ANSWER_CONTRACT_CORRECTION}`
+}
 
 export function parseStructuredModelOutput(value: string): unknown {
   const trimmed = value.trim()
@@ -238,26 +255,50 @@ export async function generateOpenClawAnswer(
   const prompt = `${buildWebChessPrompt(evidence)}
 
 ${ANSWER_JSON_CONTRACT}`
-  const generated = await runOpenClawModel(prompt, config, {
+  let promptUsed = prompt
+  let generated = await runOpenClawModel(promptUsed, config, {
     request: options.request,
     signal: options.signal,
   })
 
-  let answer: ReturnType<typeof normalizeWebChessAnswer>
-  try {
-    answer = normalizeWebChessAnswer(
-      parseStructuredModelOutput(generated.outputText),
-    )
-  } catch (error) {
-    if (error instanceof OpenClawPublicError) throw error
-    throw modelResponseError()
+  const normalizeOutput = (
+    outputText: string,
+  ): ReturnType<typeof normalizeWebChessAnswer> | null => {
+    try {
+      return normalizeWebChessAnswer(
+        parseStructuredModelOutput(outputText),
+      )
+    } catch {
+      return null
+    }
+  }
+
+  let answer = normalizeOutput(generated.outputText)
+  if (!answer) {
+    if (options.signal?.aborted) {
+      throw new OpenClawPublicError(
+        'OPENCLAW_REQUEST_ABORTED',
+        408,
+        'The local OpenClaw model turn was cancelled.',
+      )
+    }
+    promptUsed = buildAnswerContractCorrectionPrompt(prompt)
+    generated = await runOpenClawModel(promptUsed, config, {
+      request: options.request,
+      signal: options.signal,
+    })
+    answer = normalizeOutput(generated.outputText)
+  }
+
+  if (!answer) {
+    throw new OpenClawAnswerPublicError(promptUsed)
   }
 
   return {
     answer: {
       answer: answer.answer,
       model: modelAttribution(generated.provider, generated.model),
-      prompt,
+      prompt: promptUsed,
     },
   }
 }

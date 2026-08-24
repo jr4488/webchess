@@ -22,6 +22,8 @@ export class OpenClawCliError extends Error {
 }
 
 export interface OpenClawCommandOptions {
+  /** Stable logical turn identity for transports that support replay safety. */
+  idempotencyKey?: string
   signal?: AbortSignal
 }
 
@@ -472,6 +474,7 @@ export async function runOpenClawModel(
   config: OpenClawConfig,
   options: {
     request?: OpenClawBridgeRequester
+    idempotencyKey?: string
     signal?: AbortSignal
     thinking?: 'low' | 'medium'
   } = {},
@@ -485,7 +488,10 @@ export async function runOpenClawModel(
       version: 1,
     },
     config,
-    { signal: options.signal },
+    {
+      idempotencyKey: options.idempotencyKey,
+      signal: options.signal,
+    },
   )
   return parseModelRunEnvelope(stdout, config.transport, prompt)
 }

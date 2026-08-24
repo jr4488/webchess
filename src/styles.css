@@ -3655,14 +3655,16 @@ button:disabled {
   border-top: 1px solid var(--line);
 }
 
-.answer-prompt summary {
-  padding: 12px 0 2px;
-  color: var(--vermillion);
-  cursor: pointer;
-  font-size: 0.6rem;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
+.answer-prompt-button {
+  min-height: 40px;
+  margin-top: 12px;
+}
+
+.answer-prompt-panel > p {
+  margin: 12px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.7rem;
+  line-height: 1.55;
 }
 
 .answer-prompt pre {
@@ -6373,6 +6375,30 @@ body {
 
 .answer-failed-card .primary-button {
   margin-top: 8px;
+}
+
+.answer-failure-prompt {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid rgba(var(--gold-rgb), 0.3);
+  border-radius: 9px;
+  background: rgba(var(--paper-deep-rgb), 0.32);
+}
+
+.answer-failure-prompt > summary {
+  color: var(--gold);
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.answer-failure-prompt > summary:focus-visible {
+  outline: 2px solid var(--vermillion);
+  outline-offset: 4px;
+}
+
+.answer-failure-prompt > p {
+  margin-top: 12px;
 }
 
 .charlotte-unavailable-summary {

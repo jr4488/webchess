@@ -65,6 +65,7 @@ interface LifecycleStageProps {
   lifecycle: LifecycleAggregate | null
   gameStatus: 'completed' | 'answering' | 'answer_failed' | 'answered'
   boardAnswer: GeneratedAnswer | null
+  answerFailurePrompt: string
   busy: boolean
   error: string
   actionPendingIndex: number | null
@@ -274,6 +275,7 @@ export function LifecycleStage({
   lifecycle,
   gameStatus,
   boardAnswer,
+  answerFailurePrompt,
   busy,
   error,
   actionPendingIndex,
@@ -549,16 +551,54 @@ export function LifecycleStage({
                   <h2 id="answer-failed-heading">The Answer response could not be accepted</h2>
                 </div>
               </div>
-              <p>
-                Portia approved the board-derived prompt and the Gate passed. The Answer
-                model response did not satisfy WebChess’s required output contract, so the
-                board, prompt, and approval record were preserved without publishing a
-                malformed answer.
-              </p>
-              <p>
-                Automatic retries have stopped. Start one fresh Answer attempt when you are
-                ready; it will reuse the approved prompt with a new request identity.
-              </p>
+              {answerFailurePrompt ? (
+                <p>
+                  Portia approved the board-derived prompt and the Gate passed. The Answer
+                  model failed WebChess’s required output contract on its initial and one
+                  corrective turn, so the board, prompt, and approval record were preserved
+                  without publishing malformed output.
+                </p>
+              ) : (
+                <p>
+                  Portia approved the board-derived prompt and the Gate passed, but this
+                  Answer attempt ended without an accepted result. The saved stop can reflect
+                  provider availability, configuration, cancellation, or contract validation;
+                  the board, approved prompt, and lifecycle record remain preserved.
+                </p>
+              )}
+              {answerFailurePrompt ? (
+                <p>
+                  One bounded corrective model turn was already attempted inside this
+                  Answer request. Automatic retries have stopped. A fresh Answer attempt
+                  uses a new request identity and can consume up to two additional OpenClaw
+                  model turns, with the corresponding account allowance or provider billing.
+                </p>
+              ) : (
+                <p>
+                  Automatic retries have stopped. Start one fresh Answer attempt when you are
+                  ready; it will reuse the approved prompt with a new request identity.
+                </p>
+              )}
+              {answerFailurePrompt ? (
+                <details className="answer-failure-prompt">
+                  <summary>Inspect corrective Answer role content</summary>
+                  <p>
+                    This secret-free role projection contains the applicable fixed, pinned
+                    OpenClaw system role plus the exact WebChess user role used for the one
+                    bounded corrective turn. It excludes credentials, private model reasoning,
+                    invalid provider output, request headers, and runtime logs. This failure
+                    projection is available for the current response but is not yet persisted
+                    across reload; the approved player-visible input remains durable.
+                  </p>
+                  <div
+                    className="answer-prompt-disclosure__prompt"
+                    role="region"
+                    aria-label="Corrective Answer role content"
+                  >
+                    <pre><code>{answerFailurePrompt}</code></pre>
+                  </div>
+                </details>
+              ) : null}
               <button
                 className="primary-button"
                 type="button"
