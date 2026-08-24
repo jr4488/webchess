@@ -363,9 +363,10 @@ webchess_assert_account_oauth_only
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install @openclaw/codex@2026.7.1-1 --pin
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install npm-pack:../webchess-2.2.0-rc.1.tgz
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set tools.web.search.provider codex
-openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set plugins.allow '["codex","webchess"]' --strict-json
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set plugins.allow '["codex","openai","webchess"]' --strict-json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config validate
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect codex --runtime --json
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect openai --runtime --json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect webchess --runtime --json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" capability web providers --json
 test -n "${WEBCHESS_OPENCLAW_DATABASE_URL:-}"
@@ -385,14 +386,20 @@ ordinary researchers use normal supported Chrome with JavaScript, cookies/local
 storage, and access to this loopback URL.
 
 The provider inventory is a no-query setup check. Before launch, its `search`
-array must include an available, selected `codex` entry, and both plugin
-inspections must report loaded runtimes. If the entry or either plugin is
+array must include an available, selected `codex` entry, and all three plugin
+inspections must report loaded runtimes. If the entry or any plugin is
 missing, stop. These commands do not send the research question and do not
 prove that the researcher's account can execute Hosted Search. The official
 Codex provider and model inference both use OpenClaw's selected OpenAI
 account/OAuth profile. Neither may use a WebChess-side, Codex, OpenAI, or other
 provider API key/token; a missing account capability must fail visibly rather
 than select a substitute.
+
+WebChess includes the `openai` allowlist entry solely to activate the pinned
+OpenClaw runtime's bundled provider for the selected account/OAuth model;
+cached agent model-catalog discovery remains disabled. This does not make any
+API-key credential path supported by WebChess: the launch guard rejects every
+nonempty provider-key or token variable and every non-OAuth profile.
 
 At launch and around each status, model, and search boundary, the packed plugin
 attests the exact
@@ -403,7 +410,8 @@ changed, symlink-substituted, differently ordered, or unsupported-platform
 components are startup/request failures, not permission to use another binary,
 credential, provider, or transport. It freezes live OpenClaw configuration and
 accepts only one explicit `openai/*` model with empty fallbacks, the `codex`
-search provider, `plugins.allow` containing exactly `codex` and `webchess`, no
+search provider, `plugins.allow` containing exactly `codex`, `openai`, and
+`webchess`, no
 custom plugin path or extra plugin entry, and the private agent-scoped stdio
 Codex app-server contract. Before native Codex starts, database/PG, SSH, HMAC,
 bridge, profile, provider, and other secret-bearing variables are cleared; any

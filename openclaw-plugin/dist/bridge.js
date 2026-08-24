@@ -31,7 +31,7 @@ const CODEX_SEARCH_ATTESTATION_ERROR = 'WebChess requires the exact official @op
 const CODEX_SEARCH_PROBE_ERROR = 'WebChess could not complete its one-time authenticated Codex Hosted Search readiness probe. Verify the OpenAI account OAuth profile and official codex plugin, then relaunch WebChess.';
 const OPENAI_MODEL_PROBE_ERROR = 'WebChess could not complete its one-time authenticated OpenAI model readiness probe. Verify the selected OpenAI account model and OAuth profile, then relaunch WebChess.';
 const CODEX_SEARCH_RUNTIME_ERROR = 'WebChess requires the official Codex Hosted Search managed app-server in private stdio, agent-scoped mode. Remove custom Codex app-server command, argument, transport, URL, header, token, or user-home overrides, then relaunch WebChess.';
-const OPENCLAW_PLUGIN_CONFIG_ERROR = 'WebChess requires plugins.allow to contain only codex and webchess, with no custom plugin load paths or additional plugin entries. Restore the dedicated WebChess OpenClaw profile, then relaunch WebChess.';
+const OPENCLAW_PLUGIN_CONFIG_ERROR = 'WebChess requires plugins.allow to contain exactly codex, openai, and webchess, with no custom plugin load paths or additional plugin entries. Restore the dedicated WebChess OpenClaw profile, then relaunch WebChess.';
 const OPENCLAW_AUTO_CA_MARKER = 'OPENCLAW_NODE_EXTRA_CA_CERTS_READY';
 const LINUX_SYSTEM_CA_PATHS = [
     '/etc/ssl/certs/ca-certificates.crt',
@@ -1084,11 +1084,12 @@ async function runOpenAiModelReadinessProbe(simpleCompletion, prepared, config, 
 function hasCompatiblePluginConfig(config) {
     const plugins = config.plugins;
     if (!isRecord(plugins) || !Array.isArray(plugins.allow) ||
-        plugins.allow.length !== 2)
+        plugins.allow.length !== 3)
         return false;
     const allow = plugins.allow.map((value) => typeof value === 'string' ? value.trim().toLowerCase() : '');
-    if (new Set(allow).size !== 2 ||
+    if (new Set(allow).size !== 3 ||
         !allow.includes('codex') ||
+        !allow.includes('openai') ||
         !allow.includes('webchess'))
         return false;
     const load = plugins.load;

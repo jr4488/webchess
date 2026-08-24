@@ -44,7 +44,12 @@ to its configured Codex Search provider under the user's OpenClaw/provider
 account. The public installation path pins the official
 `@openclaw/codex@2026.7.1-1` provider plugin at npm integrity
 `sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==`,
-selects provider `codex`, and allowlists that plugin beside `webchess`. It uses
+selects provider `codex`, and uses an exact allowlist of the pinned OpenClaw
+runtime's bundled `openai` model provider, the pinned `codex` search provider,
+and packed `webchess`. WebChess includes the `openai` entry solely to activate
+the bundled provider for the selected account/OAuth model; cached agent
+model-catalog discovery remains disabled. This does not make any API-key
+credential path supported by WebChess. It uses
 the same selected OpenAI account/OAuth profile as model inference. The supported
 path permits no WebChess-side, Codex, OpenAI, alternate-provider API-key,
 API-token, service-account, or equivalent fallback. Relevant credential

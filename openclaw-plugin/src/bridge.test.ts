@@ -207,7 +207,7 @@ function fakeApi(
         defaults: { model: { primary: 'openai/gpt-5.6-sol' } },
         list: [{ id: 'researcher', default: true }],
       },
-      plugins: { allow: ['codex', 'webchess'] },
+      plugins: { allow: ['codex', 'openai', 'webchess'] },
       tools: {
         web: {
           search: {
@@ -503,7 +503,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const api = fakeApi()
     const liveConfig = structuredClone(api.config)
     api.config.plugins = {
-      allow: ['codex', 'webchess'],
+      allow: ['codex', 'openai', 'webchess'],
       entries: {
         codex: {
           config: {
@@ -529,7 +529,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const api = fakeApi()
     const liveConfig = structuredClone(api.config)
     liveConfig.plugins = {
-      allow: ['codex', 'webchess'],
+      allow: ['codex', 'openai', 'webchess'],
       entries: { codex: { config: { appServer } } },
     }
     vi.mocked(api.runtime.config.current).mockReturnValue(liveConfig)
@@ -550,7 +550,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     })).rejects.toThrow(/OpenAI account OAuth profile/u)
   })
 
-  it('enables the pinned bundled model catalog without agent discovery', async () => {
+  it('enables the pinned bundled provider while skipping agent discovery', async () => {
     const runtime = simpleRuntime()
     const prepare = runtime.prepareSimpleCompletionModelForAgent
     runtime.prepareSimpleCompletionModelForAgent = vi.fn(async (params) => {
@@ -1057,7 +1057,7 @@ describe('OpenClaw plugin runtime bridge', () => {
   ) => {
     const api = fakeApi()
     api.config.plugins = {
-      allow: ['codex', 'webchess'],
+      allow: ['codex', 'openai', 'webchess'],
       entries: { codex: { config: { appServer } } },
     }
 
@@ -1073,7 +1073,7 @@ describe('OpenClaw plugin runtime bridge', () => {
   it('accepts explicit safe defaults for the managed Codex app-server', async () => {
     const api = fakeApi()
     api.config.plugins = {
-      allow: ['codex', 'webchess'],
+      allow: ['codex', 'openai', 'webchess'],
       entries: {
         codex: {
           config: {
@@ -1097,17 +1097,31 @@ describe('OpenClaw plugin runtime bridge', () => {
 
   it.each([
     ['missing allowlist', {}],
-    ['extra allowed plugin', { allow: ['codex', 'webchess', 'private'] }],
-    ['duplicate allowed plugin', { allow: ['codex', 'codex'] }],
+    ['missing bundled OpenAI provider', { allow: ['codex', 'webchess'] }],
+    [
+      'extra allowed plugin',
+      { allow: ['codex', 'openai', 'webchess', 'private'] },
+    ],
+    ['duplicate allowed plugin', { allow: ['codex', 'openai', 'codex'] }],
     [
       'custom plugin load path',
-      { allow: ['codex', 'webchess'], load: { paths: ['/private/plugin'] } },
+      {
+        allow: ['codex', 'openai', 'webchess'],
+        load: { paths: ['/private/plugin'] },
+      },
     ],
     [
       'additional plugin entry',
       {
-        allow: ['codex', 'webchess'],
+        allow: ['codex', 'openai', 'webchess'],
         entries: { codex: {}, private: {} },
+      },
+    ],
+    [
+      'custom OpenAI plugin entry',
+      {
+        allow: ['codex', 'openai', 'webchess'],
+        entries: { openai: { enabled: true } },
       },
     ],
   ])('rejects an unsafe dedicated-profile plugin config: %s', async (
@@ -1124,9 +1138,9 @@ describe('OpenClaw plugin runtime bridge', () => {
     expect(api.runtime.webSearch.listProviders).not.toHaveBeenCalled()
   })
 
-  it('accepts the exact plugin allowlist in either order', async () => {
+  it('accepts the exact plugin allowlist in any order', async () => {
     const api = fakeApi()
-    api.config.plugins = { allow: ['webchess', 'codex'] }
+    api.config.plugins = { allow: ['webchess', 'openai', 'codex'] }
     const bridge = await start(api)
     await bridge.close()
   })
@@ -1147,7 +1161,7 @@ describe('OpenClaw plugin runtime bridge', () => {
   it('accepts the pinned Codex plugin schema defaults', async () => {
     const api = fakeApi()
     api.config.plugins = {
-      allow: ['codex', 'webchess'],
+      allow: ['codex', 'openai', 'webchess'],
       entries: {
         codex: {
           enabled: true,
@@ -1193,7 +1207,7 @@ describe('OpenClaw plugin runtime bridge', () => {
   ) => {
     const api = fakeApi()
     api.config.plugins = {
-      allow: ['codex', 'webchess'],
+      allow: ['codex', 'openai', 'webchess'],
       entries: { codex: { enabled: true, config } },
     }
 
@@ -3029,7 +3043,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const bridge = await start(api, { environment })
     try {
       api.config.plugins = {
-        allow: ['codex', 'webchess'],
+        allow: ['codex', 'openai', 'webchess'],
         entries: {
           codex: {
             config: { appServer: { homeScope: 'user' } },
@@ -3099,7 +3113,7 @@ describe('OpenClaw plugin runtime bridge', () => {
       })
       .mockImplementationOnce(async () => {
         api.config.plugins = {
-          allow: ['codex', 'webchess'],
+          allow: ['codex', 'openai', 'webchess'],
           entries: {
             codex: {
               config: { appServer: { command: '/private/drift/codex' } },
