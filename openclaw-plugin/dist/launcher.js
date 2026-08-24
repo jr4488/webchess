@@ -8,11 +8,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startWebChessBridge, } from './bridge.js';
 const DEFAULT_PORT = 3210;
-// A cold staged Next.js compile and OpenClaw provider/database health check can
-// legitimately exceed one minute on a busy local machine. Keep each probe
-// bounded while giving the foreground launcher enough time to become ready.
-const STARTUP_TIMEOUT_MS = 120_000;
-const READINESS_REQUEST_TIMEOUT_MS = 30_000;
+// A cold staged Next.js compile and the authenticated model/search status
+// request can legitimately exceed one minute. The bridge bounds that request
+// at 150 seconds, so the launcher must not abort a healthy response sooner.
+export const STARTUP_TIMEOUT_MS = 240_000;
+export const READINESS_REQUEST_TIMEOUT_MS = 180_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 const RUNTIME_IDENTITY_FORMAT = 'webchess-openclaw-runtime-identity/1';
 const RUNTIME_IDENTITY_FILENAME = 'runtime-identity.json';
@@ -530,7 +530,7 @@ function signalServerTree(server, signal) {
 function hasServerExited(server) {
     return server.exitCode !== null || server.signalCode !== null;
 }
-async function waitForServer(url, server, fetcher, timeoutMs) {
+export async function waitForServer(url, server, fetcher, timeoutMs, requestTimeoutMs = READINESS_REQUEST_TIMEOUT_MS) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         if (hasServerExited(server)) {
@@ -539,7 +539,7 @@ async function waitForServer(url, server, fetcher, timeoutMs) {
         try {
             const response = await fetcher(url, {
                 cache: 'no-store',
-                signal: AbortSignal.timeout(Math.min(READINESS_REQUEST_TIMEOUT_MS, Math.max(1, deadline - Date.now()))),
+                signal: AbortSignal.timeout(Math.min(requestTimeoutMs, Math.max(1, deadline - Date.now()))),
             });
             if (response.ok) {
                 const status = await response.json();

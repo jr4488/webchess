@@ -23,6 +23,9 @@ import {
   resolveRuntimeIdentityPath,
   resolveWebChessBuildIdentity,
   resolveWebChessRoot,
+  READINESS_REQUEST_TIMEOUT_MS,
+  STARTUP_TIMEOUT_MS,
+  waitForServer,
   WEBCHESS_LOCAL_DATA_NOTICE,
   type LauncherDependencies,
   type SpawnedServer,
@@ -77,6 +80,40 @@ class FakeServer extends EventEmitter implements SpawnedServer {
 }
 
 describe('OpenClaw WebChess launcher', () => {
+  it('allows one authenticated readiness response to use its full bounded window', async () => {
+    expect(READINESS_REQUEST_TIMEOUT_MS).toBeGreaterThanOrEqual(150_000)
+    expect(STARTUP_TIMEOUT_MS).toBeGreaterThan(READINESS_REQUEST_TIMEOUT_MS)
+
+    const server = new FakeServer()
+    const fetcher = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 45)
+        init?.signal?.addEventListener('abort', () => {
+          clearTimeout(timer)
+          reject(init.signal?.reason)
+        }, { once: true })
+      })
+      return new Response(JSON.stringify({
+        available: true,
+        database: { available: true, majorVersion: 17 },
+        lifecycle: 'webchess-2.0',
+        model: { configurationReady: true },
+      }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }) as typeof globalThis.fetch
+
+    await expect(waitForServer(
+      'http://127.0.0.1:4312/api/openclaw/status',
+      server,
+      fetcher,
+      100,
+      75,
+    )).resolves.toBeUndefined()
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
   it('distinguishes the software release from the lifecycle schema in launcher copy', () => {
     expect(WEBCHESS_LOCAL_DATA_NOTICE).toContain(
       'WebChess software 2.2.0-rc.1',
