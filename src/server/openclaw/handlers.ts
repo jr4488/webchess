@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   getOpenClawStatus,
   OpenClawCliError,
-  type OpenClawExecutor,
+  type OpenClawBridgeRequester,
 } from './cli'
 import {
   OpenClawConfigurationError,
@@ -41,7 +41,7 @@ const LOCAL_NO_STORE_HEADERS = {
 export interface OpenClawHandlerDependencies {
   environment?: OpenClawEnvironment
   ensureServices?: () => Promise<OpenClawDatabaseStatus>
-  execute?: OpenClawExecutor
+  request?: OpenClawBridgeRequester
   seed?: () => string
 }
 
@@ -81,7 +81,7 @@ function mapCliError(error: OpenClawCliError): OpenClawPublicError {
       return new OpenClawPublicError(
         'OPENCLAW_NOT_FOUND',
         503,
-        'OpenClaw was not found. Install it locally or configure the plugin with its executable path.',
+        'The authenticated OpenClaw plugin bridge is unavailable. Launch WebChess through the installed plugin.',
       )
     case 'timeout':
       return new OpenClawPublicError(
@@ -165,7 +165,7 @@ export async function handleOpenClawStatusRequest(
     const config = resolveOpenClawConfig(dependencies.environment)
     const [modelStatus, databaseResult] = await Promise.all([
       getOpenClawStatus(config, {
-        execute: dependencies.execute,
+        request: dependencies.request,
         signal: request.signal,
       }),
       (dependencies.ensureServices ?? getOpenClawDatabaseStatus)()
@@ -220,7 +220,7 @@ export async function handleOpenClawDivideRequest(
       body.data.problem,
       resolveOpenClawConfig(dependencies.environment),
       {
-        execute: dependencies.execute,
+        request: dependencies.request,
         seed: dependencies.seed,
         signal: request.signal,
       },
@@ -249,7 +249,7 @@ export async function handleOpenClawAnswerRequest(
       body.data,
       resolveOpenClawConfig(dependencies.environment),
       {
-        execute: dependencies.execute,
+        request: dependencies.request,
         signal: request.signal,
       },
     )

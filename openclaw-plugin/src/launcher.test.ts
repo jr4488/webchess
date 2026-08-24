@@ -12,6 +12,21 @@ import {
   type LauncherDependencies,
   type SpawnedServer,
 } from './launcher.js'
+import type { OpenClawBridgeApi, WebChessBridge } from './bridge.js'
+
+const BRIDGE: Pick<WebChessBridge, 'token' | 'url'> = {
+  token: 'b'.repeat(43),
+  url: 'http://127.0.0.1:44123',
+}
+
+const API = {
+  config: {},
+  runtime: {
+    version: '2026.7.1-2',
+    agent: {},
+    webSearch: {},
+  },
+} as unknown as OpenClawBridgeApi
 
 class FakeServer extends EventEmitter implements SpawnedServer {
   exitCode: number | null = null
@@ -57,6 +72,8 @@ describe('OpenClaw WebChess launcher', () => {
         WEBCHESS_OPENCLAW_OWNER_ID: 'openclaw_test_installation',
       },
       '/managed/node_modules/next/dist/bin/next',
+      '/plugin/webchess',
+      BRIDGE,
     )
     expect(spec.cwd).toBe('/plugin/webchess')
     expect(spec.url).toBe('http://127.0.0.1:3210/openclaw')
@@ -86,6 +103,8 @@ describe('OpenClaw WebChess launcher', () => {
       WEBCHESS_OPENCLAW_DATABASE_URL:
         'postgresql://webchess:test@127.0.0.1:55432/webchess',
       WEBCHESS_OPENCLAW_ENABLED: 'true',
+      WEBCHESS_OPENCLAW_BRIDGE_TOKEN: BRIDGE.token,
+      WEBCHESS_OPENCLAW_BRIDGE_URL: BRIDGE.url,
       WEBCHESS_OPENCLAW_OWNER_ID: 'openclaw_test_installation',
       WEBCHESS_OPENCLAW_TIMEOUT_MS: '150000',
       WEBCHESS_OPENCLAW_TRANSPORT: 'local',
@@ -104,6 +123,8 @@ describe('OpenClaw WebChess launcher', () => {
           'postgresql://webchess:test@127.0.0.1:55432/webchess',
       },
       '/managed/node_modules/next/dist/bin/next',
+      '/plugin/webchess',
+      BRIDGE,
     )
     expect(withoutProviderEnvironment.env.OPENAI_API_KEY).toBe('')
   })
@@ -157,6 +178,10 @@ describe('OpenClaw WebChess launcher', () => {
       }),
       shutdownTimeoutMs: 25,
       spawnServer: vi.fn(() => server),
+      startBridge: vi.fn(async () => ({
+        ...BRIDGE,
+        close: vi.fn(async () => undefined),
+      })),
       stageRuntime: vi.fn(async () => '/tmp/staged-webchess-test'),
       startupTimeoutMs: 1,
     }
@@ -165,6 +190,7 @@ describe('OpenClaw WebChess launcher', () => {
       launchWebChess(
         { openBrowser: false, port: 4312 },
         dependencies,
+        API,
       ),
     ).rejects.toThrow(/did not become ready/u)
 

@@ -12,6 +12,12 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import {
+  startWebChessBridge,
+  type OpenClawBridgeApi,
+  type WebChessBridge,
+} from './bridge.js'
+
 const DEFAULT_PORT = 3210
 // A cold staged Next.js compile and OpenClaw provider/database health check can
 // legitimately exceed one minute on a busy local machine. Keep each probe
@@ -75,6 +81,10 @@ export interface LauncherDependencies {
       stdio: 'inherit'
     },
   ) => SpawnedServer
+  startBridge: (
+    api: OpenClawBridgeApi,
+    runtimeRoot: string,
+  ) => Promise<WebChessBridge>
   stageRuntime: (sourceRoot: string, nextBinary: string) => Promise<string>
   startupTimeoutMs: number
 }
@@ -217,18 +227,31 @@ export function buildNextLaunchSpec(
   environment: NodeJS.ProcessEnv = process.env,
   nextBinary: string = resolveNextBinary(),
   installationRoot: string = root,
+  bridge?: Pick<WebChessBridge, 'token' | 'url'>,
 ): NextLaunchSpec {
+  if (!bridge) {
+    throw new Error('The authenticated OpenClaw runtime bridge is required.')
+  }
   const url = `http://127.0.0.1:${options.port}/openclaw`
   const origin = `http://127.0.0.1:${options.port}`
   const localDatabaseUrl = dedicatedDatabaseUrl(environment)
-  const localEnvironment = { ...environment }
+  const localEnvironment: NodeJS.ProcessEnv = {
+    NODE_ENV: 'development',
+  }
   for (const name of [
-    'VERCEL',
-    'VERCEL_ENV',
-    'VERCEL_TARGET_ENV',
-    'VERCEL_URL',
+    'COLORTERM',
+    'LANG',
+    'LC_ALL',
+    'PATH',
+    'TEMP',
+    'TERM',
+    'TMP',
+    'TMPDIR',
+    'TZ',
   ]) {
-    delete localEnvironment[name]
+    if (environment[name] !== undefined) {
+      localEnvironment[name] = environment[name]
+    }
   }
   Object.assign(localEnvironment, {
     CLERK_SECRET_KEY: '',
@@ -266,6 +289,8 @@ export function buildNextLaunchSpec(
       environment.WEBCHESS_HOURLY_MODEL_REQUEST_LIMIT ?? '1000',
     WEBCHESS_OPENCLAW_DATABASE_URL: localDatabaseUrl,
     WEBCHESS_OPENCLAW_ENABLED: 'true',
+    WEBCHESS_OPENCLAW_BRIDGE_TOKEN: bridge.token,
+    WEBCHESS_OPENCLAW_BRIDGE_URL: bridge.url,
     WEBCHESS_OPENCLAW_OWNER_ID: installationOwnerId(
       environment,
       installationRoot,
@@ -325,6 +350,7 @@ const defaultDependencies: LauncherDependencies = {
       ...options,
       shell: false,
     }),
+  startBridge: startWebChessBridge,
   stageRuntime: stageWebChessRuntime,
   startupTimeoutMs: STARTUP_TIMEOUT_MS,
 }
@@ -449,19 +475,28 @@ export async function terminateServerAndWait(
 export async function launchWebChess(
   options: WebChessLaunchOptions,
   dependencies: LauncherDependencies = defaultDependencies,
+  api?: OpenClawBridgeApi,
 ): Promise<void> {
+  if (!api) {
+    throw new Error(
+      'WebChess must be launched from the OpenClaw plugin runtime.',
+    )
+  }
   const sourceRoot = resolveWebChessRoot()
   const nextBinary = resolveNextBinary()
   await access(nextBinary)
   const runtimeRoot = await dependencies.stageRuntime(sourceRoot, nextBinary)
   let server: SpawnedServer | null = null
+  let bridge: WebChessBridge | null = null
   try {
+    bridge = await dependencies.startBridge(api, runtimeRoot)
     const spec = buildNextLaunchSpec(
       runtimeRoot,
       options,
       dependencies.environment,
       nextBinary,
       sourceRoot,
+      bridge,
     )
     const spawnedServer = dependencies.spawnServer(spec.command, spec.args, {
       cwd: spec.cwd,
@@ -512,6 +547,7 @@ export async function launchWebChess(
     if (server && !hasServerExited(server)) {
       await terminateServerAndWait(server, dependencies.shutdownTimeoutMs)
     }
+    if (bridge) await bridge.close()
     await dependencies.removeRuntime(runtimeRoot)
   }
 }

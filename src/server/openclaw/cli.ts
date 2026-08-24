@@ -1,8 +1,4 @@
-import {
-  execFile,
-  type ChildProcess,
-  type ExecFileException,
-} from 'node:child_process'
+import { createHash } from 'node:crypto'
 
 import { z } from 'zod'
 
@@ -29,149 +25,132 @@ export interface OpenClawCommandOptions {
   signal?: AbortSignal
 }
 
-export type OpenClawExecutor = (
-  args: readonly string[],
+export type OpenClawBridgeRequester = (
+  path: '/v1/model/run' | '/v1/status' | '/v1/web/search',
+  body: Record<string, unknown> | null,
   config: OpenClawConfig,
   options?: OpenClawCommandOptions,
 ) => Promise<string>
 
-interface ExecFileOptions {
-  encoding: 'utf8'
-  maxBuffer: number
-  shell: false
-  signal?: AbortSignal
-  windowsHide: true
-}
-
-type ExecFileCallback = (
-  error: ExecFileException | null,
-  stdout: string,
-  stderr: string,
-) => void
-
-export type ExecFileInvoker = (
-  file: string,
-  args: readonly string[],
-  options: ExecFileOptions,
-  callback: ExecFileCallback,
-) => Pick<ChildProcess, 'kill'>
-
-const invokeExecFile: ExecFileInvoker = (file, args, options, callback) =>
-  execFile(file, [...args], options, callback)
-
-function classifyExecutionError(
-  error: ExecFileException,
-  timedOut: boolean,
-  signal?: AbortSignal,
-  stderr = '',
-): OpenClawCliError {
-  if (timedOut) {
-    return new OpenClawCliError(
-      'timeout',
-      'OpenClaw did not finish within the local request timeout.',
-    )
-  }
-  if (signal?.aborted || error.code === 'ABORT_ERR') {
-    return new OpenClawCliError(
-      'aborted',
-      'The local OpenClaw request was cancelled.',
-    )
-  }
-  if (error.code === 'ENOENT') {
-    return new OpenClawCliError(
+function bridgeConfig(config: OpenClawConfig): {
+  token: string
+  url: string
+} {
+  if (!config.bridgeToken || !config.bridgeUrl) {
+    throw new OpenClawCliError(
       'not-found',
-      'The OpenClaw executable was not found.',
+      'The authenticated OpenClaw plugin bridge is not configured.',
     )
   }
-  if (
-    /codex app-server hosted search turn (?:aborted|timed out)/iu.test(stderr)
-  ) {
-    return new OpenClawCliError(
-      'timeout',
-      'Codex Search exceeded its configured OpenClaw time boundary.',
-    )
-  }
-  return new OpenClawCliError(
-    'failed',
-    'OpenClaw could not complete the local command.',
-  )
+  return { token: config.bridgeToken, url: config.bridgeUrl }
 }
 
-export function createOpenClawExecutor(
-  invoke: ExecFileInvoker = invokeExecFile,
-): OpenClawExecutor {
-  return async (args, config, options = {}) =>
-    new Promise<string>((resolve, reject) => {
-      let timedOut = false
-      let settled = false
-      const timers: {
-        forceKill?: ReturnType<typeof setTimeout>
-        timeout?: ReturnType<typeof setTimeout>
-      } = {}
-      let child: Pick<ChildProcess, 'kill'>
+function bridgeFailureKind(status: number, code: unknown): OpenClawCliFailureKind {
+  if (status === 408 || code === 'OPENCLAW_ABORTED') return 'aborted'
+  if (status === 504 || code === 'OPENCLAW_TIMEOUT') return 'timeout'
+  if (status === 404) return 'not-found'
+  if (code === 'INVALID_MODEL_RESULT' || code === 'RESPONSE_TOO_LARGE') {
+    return 'invalid-output'
+  }
+  return 'failed'
+}
 
-      try {
-        child = invoke(
-          config.binary,
-          args,
-          {
-            encoding: 'utf8',
-            maxBuffer: config.maxOutputBytes,
-            shell: false,
-            signal: options.signal,
-            windowsHide: true,
-          },
-          (error, stdout, stderr) => {
-            if (settled) return
-            settled = true
-            if (timers.timeout) clearTimeout(timers.timeout)
-            if (timers.forceKill) clearTimeout(timers.forceKill)
-
-            if (error) {
-              reject(classifyExecutionError(
-                error,
-                timedOut,
-                options.signal,
-                stderr,
-              ))
-              return
-            }
-            if (timedOut) {
-              reject(new OpenClawCliError(
-                'timeout',
-                'OpenClaw did not finish within the local request timeout.',
-              ))
-              return
-            }
-            resolve(stdout)
-          },
+async function readBoundedResponse(
+  response: Response,
+  maxBytes: number,
+): Promise<string> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const next = await reader.read()
+      if (next.done) break
+      total += next.value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel()
+        throw new OpenClawCliError(
+          'invalid-output',
+          'The OpenClaw bridge response exceeded its byte limit.',
         )
-      } catch {
-        reject(new OpenClawCliError(
-          'failed',
-          'OpenClaw could not start the local command.',
-        ))
-        return
       }
+      chunks.push(next.value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8')
+}
 
-      if (settled) return
-      timers.timeout = setTimeout(() => {
-        if (settled) return
-        timedOut = true
-        child.kill('SIGTERM')
-        timers.forceKill = setTimeout(() => {
-          child.kill('SIGKILL')
-        }, 1_000)
-        settled = true
-        reject(new OpenClawCliError(
+export function createOpenClawBridgeRequester(
+  fetcher: typeof globalThis.fetch = globalThis.fetch,
+): OpenClawBridgeRequester {
+  return async (requestPath, body, config, options = {}) => {
+    const bridge = bridgeConfig(config)
+    const timeoutController = new AbortController()
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      timeoutController.abort()
+    }, config.timeoutMs)
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, timeoutController.signal])
+      : timeoutController.signal
+    try {
+      const response = await fetcher(`${bridge.url}${requestPath}`, {
+        body: body === null ? undefined : JSON.stringify(body),
+        cache: 'no-store',
+        headers: {
+          Authorization: `Bearer ${bridge.token}`,
+          ...(body === null ? {} : { 'Content-Type': 'application/json' }),
+        },
+        method: body === null ? 'GET' : 'POST',
+        redirect: 'error',
+        signal,
+      })
+      const output = await readBoundedResponse(response, config.maxOutputBytes)
+      if (!response.ok) {
+        let code: unknown
+        try {
+          const parsed = JSON.parse(output) as {
+            error?: { code?: unknown }
+          }
+          code = parsed.error?.code
+        } catch {
+          // Only the status is needed to produce a sanitized failure.
+        }
+        throw new OpenClawCliError(
+          bridgeFailureKind(response.status, code),
+          'The OpenClaw plugin bridge rejected the request.',
+        )
+      }
+      return output
+    } catch (error) {
+      if (error instanceof OpenClawCliError) throw error
+      if (timedOut) {
+        throw new OpenClawCliError(
           'timeout',
           'OpenClaw did not finish within the local request timeout.',
-        ))
-      }, config.timeoutMs)
-    })
+        )
+      }
+      if (options.signal?.aborted) {
+        throw new OpenClawCliError(
+          'aborted',
+          'The local OpenClaw request was cancelled.',
+        )
+      }
+      throw new OpenClawCliError(
+        'failed',
+        'The authenticated OpenClaw plugin bridge was unavailable.',
+      )
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
 }
 
-export const executeOpenClawCommand = createOpenClawExecutor()
+export const requestOpenClawBridge = createOpenClawBridgeRequester()
 
 const ModelOutputSchema = z.object({
   text: z.string(),
@@ -183,6 +162,8 @@ const ModelRunEnvelopeSchema = z.object({
   transport: z.enum(['local', 'gateway']),
   provider: z.string().min(1).max(200),
   model: z.string().min(1).max(200),
+  inputBytes: z.number().int().nonnegative(),
+  inputSha256: z.string().regex(/^[a-f0-9]{64}$/u),
   outputs: z.array(ModelOutputSchema).min(1).max(16),
 })
 
@@ -254,7 +235,7 @@ export interface OpenClawWebSearchParseOptions {
 }
 
 export interface OpenClawWebSearchOptions {
-  execute?: OpenClawExecutor
+  request?: OpenClawBridgeRequester
   limit?: number
   maxContentChars?: number
   maxSearchActivities?: number
@@ -365,6 +346,8 @@ export function parseOpenClawWebSearchEnvelope(
     capability: z.literal('web.search'),
     transport: z.literal('local'),
     provider: z.literal('codex'),
+    inputBytes: z.number().int().nonnegative(),
+    inputSha256: z.string().regex(/^[a-f0-9]{64}$/u),
     attempts: z.array(z.unknown()).length(0),
     outputs: z.array(z.strictObject({
       result: z.strictObject({
@@ -392,6 +375,10 @@ export function parseOpenClawWebSearchEnvelope(
   if (
     !result ||
     result.query !== expectedQuery ||
+    parsed.data.inputBytes !== Buffer.byteLength(expectedQuery, 'utf8') ||
+    parsed.data.inputSha256 !== createHash('sha256')
+      .update(expectedQuery, 'utf8')
+      .digest('hex') ||
     !hasValidExternalContentBoundary(content)
   ) {
     throw invalidWebSearchEnvelope()
@@ -437,12 +424,27 @@ export function modelAttribution(
 export function parseModelRunEnvelope(
   stdout: string,
   expectedTransport: OpenClawTransport,
+  expectedInput?: string,
 ): ModelRunResult {
   const parsed = ModelRunEnvelopeSchema.safeParse(parseJson(stdout))
   if (!parsed.success || parsed.data.transport !== expectedTransport) {
     throw new OpenClawCliError(
       'invalid-output',
       'OpenClaw returned an unexpected model response envelope.',
+    )
+  }
+  if (
+    expectedInput !== undefined &&
+    (
+      parsed.data.inputBytes !== Buffer.byteLength(expectedInput, 'utf8') ||
+      parsed.data.inputSha256 !== createHash('sha256')
+        .update(expectedInput, 'utf8')
+        .digest('hex')
+    )
+  ) {
+    throw new OpenClawCliError(
+      'invalid-output',
+      'OpenClaw did not confirm exact prompt transport.',
     )
   }
 
@@ -469,29 +471,23 @@ export async function runOpenClawModel(
   prompt: string,
   config: OpenClawConfig,
   options: {
-    execute?: OpenClawExecutor
+    request?: OpenClawBridgeRequester
     signal?: AbortSignal
     thinking?: 'low' | 'medium'
   } = {},
 ): Promise<ModelRunResult> {
-  const transportFlag = config.transport === 'gateway' ? '--gateway' : '--local'
-  const stdout = await (options.execute ?? executeOpenClawCommand)(
-    [
-      '--no-color',
-      'infer',
-      'model',
-      'run',
-      transportFlag,
-      '--json',
-      '--thinking',
-      options.thinking ?? 'medium',
-      '--prompt',
+  const stdout = await (options.request ?? requestOpenClawBridge)(
+    '/v1/model/run',
+    {
       prompt,
-    ],
+      thinking: options.thinking ?? 'medium',
+      timeoutMs: config.timeoutMs,
+      version: 1,
+    },
     config,
     { signal: options.signal },
   )
-  return parseModelRunEnvelope(stdout, config.transport)
+  return parseModelRunEnvelope(stdout, config.transport, prompt)
 }
 
 /**
@@ -527,20 +523,14 @@ export async function runOpenClawWebSearch(
     ...config,
     transport: 'local',
   }
-  const stdout = await (options.execute ?? executeOpenClawCommand)(
-    [
-      '--no-color',
-      'infer',
-      'web',
-      'search',
-      '--provider',
-      'codex',
-      '--limit',
-      String(limit),
-      '--json',
-      '--query',
+  const stdout = await (options.request ?? requestOpenClawBridge)(
+    '/v1/web/search',
+    {
+      limit,
       query,
-    ],
+      timeoutMs: localConfig.timeoutMs,
+      version: 1,
+    },
     localConfig,
     { signal: options.signal },
   )
@@ -561,104 +551,67 @@ export interface OpenClawStatus {
   version?: string
 }
 
-function parseResolvedDefault(value: unknown): string | null {
-  if (typeof value === 'string') return cleanDisplayValue(value)
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-
-  const record = value as Record<string, unknown>
-  if (typeof record.provider !== 'string' || typeof record.model !== 'string') {
-    return null
-  }
-  return modelAttribution(record.provider, record.model)
-}
-
-function parseAuthStatus(stdout: string): {
-  missingProviders: number
-  model: string | null
-} {
-  const value = parseJson(stdout)
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new OpenClawCliError(
-      'invalid-output',
-      'OpenClaw returned an invalid authentication status.',
-    )
-  }
-
-  const record = value as Record<string, unknown>
-  const auth = record.auth
-  let missingProviders = 0
-  if (auth && typeof auth === 'object' && !Array.isArray(auth)) {
-    const missing = (auth as Record<string, unknown>).missingProvidersInUse
-    if (Array.isArray(missing)) missingProviders = missing.length
-  }
-
-  return {
-    missingProviders,
-    model: parseResolvedDefault(record.resolvedDefault),
-  }
-}
-
-function parseVersion(stdout: string): string | null {
-  const firstLine = stdout.split(/\r?\n/u, 1)[0] ?? ''
-  return cleanDisplayValue(firstLine)
-}
-
 export async function getOpenClawStatus(
   config: OpenClawConfig,
   options: {
-    execute?: OpenClawExecutor
+    request?: OpenClawBridgeRequester
     signal?: AbortSignal
   } = {},
 ): Promise<OpenClawStatus> {
-  const execute = options.execute ?? executeOpenClawCommand
-  let version: string | undefined
-
   try {
-    const versionStdout = await execute(
-      ['--no-color', '--version'],
+    const stdout = await (options.request ?? requestOpenClawBridge)(
+      '/v1/status',
+      null,
       config,
       { signal: options.signal },
     )
-    version = parseVersion(versionStdout) ?? undefined
-
-    const authStdout = await execute(
-      ['--no-color', 'infer', 'model', 'auth', 'status', '--json'],
-      config,
-      { signal: options.signal },
-    )
-    const auth = parseAuthStatus(authStdout)
-    if (!auth.model || auth.missingProviders > 0) {
+    const parsed = z.strictObject({
+      available: z.boolean(),
+      model: z.string().min(1).max(200).nullable(),
+      protocolVersion: z.literal(1),
+      transport: z.enum(['local', 'gateway']),
+      version: z.string().min(1).max(200),
+    }).safeParse(parseJson(stdout))
+    if (!parsed.success) {
+      throw new OpenClawCliError(
+        'invalid-output',
+        'The OpenClaw bridge returned an invalid readiness envelope.',
+      )
+    }
+    const model = parsed.data.model
+      ? cleanDisplayValue(parsed.data.model)
+      : null
+    if (!parsed.data.available || !model) {
       return {
         available: false,
-        message: 'Configure a usable default model in OpenClaw, then try again.',
-        ...(auth.model ? { model: auth.model } : {}),
+        message: 'Configure a usable default model and authentication in OpenClaw, then try again.',
+        ...(model ? { model } : {}),
         reason: 'not-configured',
-        transport: config.transport,
-        ...(version ? { version } : {}),
+        transport: parsed.data.transport,
+        version: parsed.data.version,
       }
     }
 
     return {
       available: true,
-      model: auth.model,
-      transport: config.transport,
-      ...(version ? { version } : {}),
+      model,
+      transport: parsed.data.transport,
+      version: parsed.data.version,
     }
   } catch (error) {
     if (error instanceof OpenClawCliError && error.kind === 'not-found') {
       return {
         available: false,
-        message: 'Install OpenClaw locally or configure the plugin with its executable path.',
+        message: 'Launch WebChess through the installed OpenClaw plugin.',
         reason: 'cli-not-found',
         transport: config.transport,
       }
     }
     return {
       available: false,
-      message: 'OpenClaw is installed but its model configuration is not ready.',
+      message: 'The authenticated OpenClaw plugin bridge is not ready.',
       reason: 'unavailable',
       transport: config.transport,
-      ...(version ? { version } : {}),
     }
   }
 }

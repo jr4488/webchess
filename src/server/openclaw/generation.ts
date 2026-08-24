@@ -18,7 +18,7 @@ import {
 
 import {
   modelAttribution,
-  type OpenClawExecutor,
+  type OpenClawBridgeRequester,
   runOpenClawModel,
 } from './cli'
 import type { OpenClawConfig } from './config'
@@ -150,7 +150,7 @@ export async function generateOpenClawDivision(
   problemValue: unknown,
   config: OpenClawConfig,
   options: {
-    execute?: OpenClawExecutor
+    request?: OpenClawBridgeRequester
     seed?: () => string
     signal?: AbortSignal
   } = {},
@@ -170,7 +170,7 @@ export async function generateOpenClawDivision(
 
 ${DIVISION_JSON_CONTRACT}`
   const generated = await runOpenClawModel(prompt, config, {
-    execute: options.execute,
+    request: options.request,
     signal: options.signal,
   })
 
@@ -202,7 +202,7 @@ export async function generateOpenClawAnswer(
   input: OpenClawAnswerBody,
   config: OpenClawConfig,
   options: {
-    execute?: OpenClawExecutor
+    request?: OpenClawBridgeRequester
     signal?: AbortSignal
   } = {},
 ): Promise<OpenClawAnswerResult> {
@@ -239,7 +239,7 @@ export async function generateOpenClawAnswer(
 
 ${ANSWER_JSON_CONTRACT}`
   const generated = await runOpenClawModel(prompt, config, {
-    execute: options.execute,
+    request: options.request,
     signal: options.signal,
   })
 

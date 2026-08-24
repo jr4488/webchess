@@ -1,12 +1,14 @@
 // @vitest-environment node
 
+import { createHash } from 'node:crypto'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import {
   OpenClawCliError,
   parseOpenClawWebSearchEnvelope,
   runOpenClawWebSearch,
-  type OpenClawExecutor,
+  type OpenClawBridgeRequester,
 } from './cli'
 import type { OpenClawConfig } from './config'
 
@@ -16,6 +18,8 @@ const MARKER_ID = '0123456789abcdef'
 function config(overrides: Partial<OpenClawConfig> = {}): OpenClawConfig {
   return {
     binary: 'openclaw-research',
+    bridgeToken: 't'.repeat(43),
+    bridgeUrl: 'http://127.0.0.1:44123',
     maxOutputBytes: 64 * 1024,
     timeoutMs: 45_000,
     transport: 'local',
@@ -57,6 +61,8 @@ function webSearchEnvelope(overrides: EnvelopeOverrides = {}): string {
     capability: 'web.search',
     transport: overrides.transport ?? 'local',
     provider: overrides.outerProvider ?? 'codex',
+    inputBytes: Buffer.byteLength(QUERY, 'utf8'),
+    inputSha256: createHash('sha256').update(QUERY, 'utf8').digest('hex'),
     attempts: [],
     outputs: [{
       result: {
@@ -100,35 +106,29 @@ describe('Codex Hosted Search CLI adapter', () => {
   it('invokes the explicit local Codex capability with bounded caller config', async () => {
     const signal = new AbortController().signal
     const researchConfig = config({ transport: 'gateway' })
-    const execute = vi.fn<OpenClawExecutor>(async () => webSearchEnvelope())
+    const request = vi.fn<OpenClawBridgeRequester>(async () => webSearchEnvelope())
 
     const result = await runOpenClawWebSearch(QUERY, researchConfig, {
-      execute,
+      request,
       limit: 4,
       maxContentChars: 2_000,
       maxSearchActivities: 3,
       signal,
     })
 
-    expect(execute).toHaveBeenCalledTimes(1)
-    expect(execute.mock.calls[0]?.[0]).toEqual([
-      '--no-color',
-      'infer',
-      'web',
-      'search',
-      '--provider',
-      'codex',
-      '--limit',
-      '4',
-      '--json',
-      '--query',
-      QUERY,
-    ])
-    expect(execute.mock.calls[0]?.[1]).toEqual({
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(request.mock.calls[0]?.[0]).toBe('/v1/web/search')
+    expect(request.mock.calls[0]?.[1]).toEqual({
+      limit: 4,
+      query: QUERY,
+      timeoutMs: 45_000,
+      version: 1,
+    })
+    expect(request.mock.calls[0]?.[2]).toEqual({
       ...researchConfig,
       transport: 'local',
     })
-    expect(execute.mock.calls[0]?.[2]).toEqual({ signal })
+    expect(request.mock.calls[0]?.[3]).toEqual({ signal })
     expect(result).toMatchObject({
       query: QUERY,
       provider: 'codex',
@@ -261,14 +261,14 @@ describe('Codex Hosted Search CLI adapter', () => {
   })
 
   it('rejects unbounded query and limit inputs before invoking OpenClaw', async () => {
-    const execute = vi.fn<OpenClawExecutor>()
+    const request = vi.fn<OpenClawBridgeRequester>()
     await expect(runOpenClawWebSearch(' query with padding ', config(), {
-      execute,
+      request,
     })).rejects.toBeInstanceOf(RangeError)
     await expect(runOpenClawWebSearch(QUERY, config(), {
-      execute,
+      request,
       limit: 11,
     })).rejects.toBeInstanceOf(RangeError)
-    expect(execute).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
   })
 })

@@ -374,6 +374,8 @@ describe('durable research broker', () => {
       query,
       {
         binary: 'openclaw-research-test',
+        bridgeToken: null,
+        bridgeUrl: null,
         maxOutputBytes: 512 * 1024,
         timeoutMs: RESEARCH_BOUNDS.timeoutMs,
         transport: 'local',

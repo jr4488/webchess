@@ -6,6 +6,8 @@ export type OpenClawEnvironment = Readonly<
 
 export interface OpenClawConfig {
   binary: string
+  bridgeToken: string | null
+  bridgeUrl: string | null
   maxOutputBytes: number
   timeoutMs: number
   transport: OpenClawTransport
@@ -60,6 +62,57 @@ function resolveTransport(value: string | undefined): OpenClawTransport {
   )
 }
 
+function resolveBridge(environment: OpenClawEnvironment): {
+  bridgeToken: string | null
+  bridgeUrl: string | null
+} {
+  const rawUrl = environment.WEBCHESS_OPENCLAW_BRIDGE_URL?.trim()
+  const rawToken = environment.WEBCHESS_OPENCLAW_BRIDGE_TOKEN
+  if (!rawUrl && !rawToken) {
+    return { bridgeToken: null, bridgeUrl: null }
+  }
+  if (!rawUrl || !rawToken) {
+    throw new OpenClawConfigurationError(
+      'The OpenClaw bridge URL and bearer must be configured together.',
+    )
+  }
+  if (
+    Buffer.byteLength(rawToken, 'utf8') < 32 ||
+    Buffer.byteLength(rawToken, 'utf8') > 512 ||
+    /[\p{C}\s]/gu.test(rawToken)
+  ) {
+    throw new OpenClawConfigurationError(
+      'WEBCHESS_OPENCLAW_BRIDGE_TOKEN is invalid.',
+    )
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    throw new OpenClawConfigurationError(
+      'WEBCHESS_OPENCLAW_BRIDGE_URL is invalid.',
+    )
+  }
+  if (
+    parsed.protocol !== 'http:' ||
+    parsed.hostname !== '127.0.0.1' ||
+    !parsed.port ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== '/' ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new OpenClawConfigurationError(
+      'WEBCHESS_OPENCLAW_BRIDGE_URL must be an uncredentialed 127.0.0.1 HTTP origin with an explicit port.',
+    )
+  }
+  return {
+    bridgeToken: rawToken,
+    bridgeUrl: parsed.origin,
+  }
+}
+
 export function resolveOpenClawConfig(
   environment: OpenClawEnvironment = process.env,
 ): OpenClawConfig {
@@ -72,6 +125,7 @@ export function resolveOpenClawConfig(
 
   return {
     binary,
+    ...resolveBridge(environment),
     maxOutputBytes: MAX_OPENCLAW_OUTPUT_BYTES,
     timeoutMs: resolveTimeout(environment.WEBCHESS_OPENCLAW_TIMEOUT_MS),
     transport: resolveTransport(environment.WEBCHESS_OPENCLAW_TRANSPORT),

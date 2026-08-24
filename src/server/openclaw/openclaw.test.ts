@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import type { ExecFileException } from 'node:child_process'
+import { createHash } from 'node:crypto'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -13,14 +13,13 @@ import {
 import type { ReplayState } from '@/lib/game-contract'
 
 import {
-  createOpenClawExecutor,
+  createOpenClawBridgeRequester,
   getOpenClawStatus,
   modelAttribution,
   OpenClawCliError,
   parseModelRunEnvelope,
   runOpenClawModel,
-  type ExecFileInvoker,
-  type OpenClawExecutor,
+  type OpenClawBridgeRequester,
 } from './cli'
 import {
   isOpenClawLocalModeEnabled,
@@ -93,6 +92,7 @@ function validAnswerSections() {
 function modelEnvelope(
   output: unknown,
   transport: 'local' | 'gateway' = 'local',
+  input = '',
 ) {
   return JSON.stringify({
     ok: true,
@@ -101,10 +101,23 @@ function modelEnvelope(
     provider: 'test-provider',
     model: 'test-model',
     attempts: [],
+    inputBytes: Buffer.byteLength(input, 'utf8'),
+    inputSha256: createHash('sha256').update(input, 'utf8').digest('hex'),
     outputs: [{
       text: typeof output === 'string' ? output : JSON.stringify(output),
       mediaUrl: null,
     }],
+  })
+}
+
+function modelRequester(
+  output: unknown,
+  transport: 'local' | 'gateway' = 'local',
+) {
+  return vi.fn<OpenClawBridgeRequester>(async (path, body) => {
+    expect(path).toBe('/v1/model/run')
+    const prompt = typeof body?.prompt === 'string' ? body.prompt : ''
+    return modelEnvelope(output, transport, prompt)
   })
 }
 
@@ -113,6 +126,8 @@ function config(
 ): OpenClawConfig {
   return {
     binary: 'openclaw',
+    bridgeToken: 't'.repeat(43),
+    bridgeUrl: 'http://127.0.0.1:44123',
     maxOutputBytes: 4 * 1024 * 1024,
     timeoutMs: 130_000,
     transport: 'local',
@@ -231,6 +246,20 @@ describe('OpenClaw local configuration and request boundary', () => {
     expect(() => resolveOpenClawConfig({
       WEBCHESS_OPENCLAW_BIN: 'open\0claw',
     })).toThrow(/invalid character/u)
+    expect(resolveOpenClawConfig({
+      WEBCHESS_OPENCLAW_BRIDGE_TOKEN: 't'.repeat(43),
+      WEBCHESS_OPENCLAW_BRIDGE_URL: 'http://127.0.0.1:43123',
+    })).toMatchObject({
+      bridgeToken: 't'.repeat(43),
+      bridgeUrl: 'http://127.0.0.1:43123',
+    })
+    expect(() => resolveOpenClawConfig({
+      WEBCHESS_OPENCLAW_BRIDGE_TOKEN: 't'.repeat(43),
+    })).toThrow(/configured together/u)
+    expect(() => resolveOpenClawConfig({
+      WEBCHESS_OPENCLAW_BRIDGE_TOKEN: 't'.repeat(43),
+      WEBCHESS_OPENCLAW_BRIDGE_URL: 'http://localhost:43123',
+    })).toThrow(/127\.0\.0\.1/u)
   })
 
   it('accepts only exact loopback hosts and exact same-origin mutations', () => {
@@ -325,123 +354,71 @@ describe('OpenClaw local configuration and request boundary', () => {
 })
 
 describe('OpenClaw process and response boundary', () => {
-  it('uses execFile arguments with no shell and force-terminates timed-out work', async () => {
-    vi.useFakeTimers()
-    let callback:
-      | ((
-        error: ExecFileException | null,
-        stdout: string,
-        stderr: string,
-      ) => void)
-      | undefined
-    const kill = vi.fn(() => true)
-    const invoke: ExecFileInvoker = vi.fn((_file, _args, options, next) => {
-      expect(options).toMatchObject({
-        encoding: 'utf8',
-        maxBuffer: 4 * 1024 * 1024,
-        shell: false,
-        windowsHide: true,
+  it('uses authenticated loopback JSON and never places the prompt in a URL or header', async () => {
+    const prompt = `${'x'.repeat(131_072)}\nlarge prompt tail`
+    const fetcher = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      expect(String(input)).toBe('http://127.0.0.1:44123/v1/model/run')
+      expect(String(input)).not.toContain(prompt)
+      expect(init?.headers).toMatchObject({
+        Authorization: `Bearer ${'t'.repeat(43)}`,
+        'Content-Type': 'application/json',
       })
-      callback = next
-      return { kill }
-    })
-    const execute = createOpenClawExecutor(invoke)
-    const pending = execute(['--version'], config({ timeoutMs: 10 }))
-    const rejection = expect(pending).rejects.toMatchObject({ kind: 'timeout' })
-
-    await vi.advanceTimersByTimeAsync(10)
-    expect(kill).toHaveBeenCalledWith('SIGTERM')
-    callback?.(
-      Object.assign(new Error('private stderr must not escape'), {
-        killed: true,
-        signal: 'SIGTERM',
-      }) as ExecFileException,
-      '',
-      '',
-    )
-    await rejection
-  })
-
-  it('classifies not-found, aborted, and generic process failures without exposing details', async () => {
-    const cases = [
-      {
-        error: Object.assign(new Error('private path'), { code: 'ENOENT' }),
-        expected: 'not-found',
-        signal: undefined,
-      },
-      {
-        error: Object.assign(new Error('private abort'), { code: 'ABORT_ERR' }),
-        expected: 'aborted',
-        signal: AbortSignal.abort(),
-      },
-      {
-        error: Object.assign(new Error('private stderr'), { code: 1 }),
-        expected: 'failed',
-        signal: undefined,
-      },
-    ] as const
-
-    for (const testCase of cases) {
-      const invoke: ExecFileInvoker = vi.fn((_file, _args, _options, next) => {
-        queueMicrotask(() => next(
-          testCase.error as ExecFileException,
-          '',
-          '',
-        ))
-        return { kill: vi.fn(() => true) }
+      expect(JSON.stringify(init?.headers)).not.toContain(prompt)
+      const body = JSON.parse(String(init?.body)) as { prompt: string }
+      expect(body.prompt).toBe(prompt)
+      return new Response(modelEnvelope('ok', 'local', prompt), {
+        headers: { 'content-type': 'application/json' },
       })
-      const execute = createOpenClawExecutor(invoke)
-      await expect(execute(
-        ['--version'],
-        config(),
-        { signal: testCase.signal },
-      )).rejects.toMatchObject({ kind: testCase.expected })
-    }
+    })
+    const request = createOpenClawBridgeRequester(fetcher)
+
+    await expect(runOpenClawModel(prompt, config(), { request }))
+      .resolves.toMatchObject({ outputText: 'ok' })
   })
 
-  it('classifies OpenClaw hosted-search aborts as timeouts without exposing stderr', async () => {
-    const invoke: ExecFileInvoker = vi.fn((_file, _args, _options, next) => {
-      queueMicrotask(() => next(
-        Object.assign(new Error('private process details'), { code: 1 }),
-        '',
-        'Error: codex app-server hosted search turn aborted',
-      ))
-      return { kill: vi.fn(() => true) }
-    })
+  it('bounds bridge time and output without exposing transport details', async () => {
+    const hangingFetch = vi.fn<typeof globalThis.fetch>(async (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('private abort detail', 'AbortError'))
+        }, { once: true })
+      }))
+    const timedRequest = createOpenClawBridgeRequester(hangingFetch)
+    await expect(timedRequest(
+      '/v1/status',
+      null,
+      config({ timeoutMs: 5 }),
+    )).rejects.toMatchObject({ kind: 'timeout' })
 
-    const pending = createOpenClawExecutor(invoke)(
-      ['infer', 'web', 'search'],
-      config(),
+    const oversizedRequest = createOpenClawBridgeRequester(
+      vi.fn(async () => new Response('x'.repeat(1_025))),
     )
-    await expect(pending).rejects.toMatchObject({ kind: 'timeout' })
-    await expect(pending).rejects.not.toThrow(/private process details/u)
+    await expect(oversizedRequest(
+      '/v1/status',
+      null,
+      config({ maxOutputBytes: 1_024 }),
+    )).rejects.toMatchObject({ kind: 'invalid-output' })
   })
 
-  it('resolves successful execFile output and supports the explicit gateway transport', async () => {
-    const invoke: ExecFileInvoker = vi.fn((_file, _args, _options, next) => {
-      queueMicrotask(() => next(null, 'successful output', ''))
-      return { kill: vi.fn(() => true) }
-    })
-    await expect(createOpenClawExecutor(invoke)(
-      ['--version'],
-      config(),
-    )).resolves.toBe('successful output')
-
-    const execute = vi.fn<OpenClawExecutor>(async () =>
-      modelEnvelope({ answer: 'gateway fixture' }, 'gateway'))
+  it('supports an explicitly configured gateway-labelled bridge envelope', async () => {
+    const request = modelRequester({ answer: 'gateway fixture' }, 'gateway')
     await expect(runOpenClawModel(
       'gateway prompt',
       config({ transport: 'gateway' }),
-      { execute },
+      { request },
     )).resolves.toMatchObject({ transport: 'gateway' })
-    expect(execute.mock.calls[0]?.[0]).toContain('--gateway')
+    expect(request).toHaveBeenCalledWith(
+      '/v1/model/run',
+      expect.objectContaining({ prompt: 'gateway prompt' }),
+      expect.any(Object),
+      expect.any(Object),
+    )
   })
 
   it('inherits configured model/auth without browser model selection and requests canonical medium reasoning', async () => {
-    const execute = vi.fn<OpenClawExecutor>(async () =>
-      modelEnvelope({ answer: 'fixture' }))
+    const request = modelRequester({ answer: 'fixture' })
 
-    const result = await runOpenClawModel('bounded prompt', config(), { execute })
+    const result = await runOpenClawModel('bounded prompt', config(), { request })
 
     expect(result).toMatchObject({
       provider: 'test-provider',
@@ -449,21 +426,12 @@ describe('OpenClaw process and response boundary', () => {
       outputText: JSON.stringify({ answer: 'fixture' }),
       transport: 'local',
     })
-    const args = execute.mock.calls[0]?.[0] ?? []
-    expect(args).toEqual([
-      '--no-color',
-      'infer',
-      'model',
-      'run',
-      '--local',
-      '--json',
-      '--thinking',
-      'medium',
-      '--prompt',
-      'bounded prompt',
-    ])
-    expect(args).not.toContain('--model')
-    expect(args).toContain('--thinking')
+    expect(request.mock.calls[0]?.[1]).toEqual({
+      prompt: 'bounded prompt',
+      thinking: 'medium',
+      timeoutMs: 130_000,
+      version: 1,
+    })
   })
 
   it('strictly parses the envelope and creates safe provider/model attribution', () => {
@@ -478,6 +446,11 @@ describe('OpenClaw process and response boundary', () => {
       modelEnvelope({}, 'gateway'),
       'local',
     )).toThrow(/unexpected model response/u)
+    expect(() => parseModelRunEnvelope(
+      modelEnvelope('ok', 'local', 'different prompt'),
+      'local',
+      'expected prompt',
+    )).toThrow(/exact prompt transport/u)
     expect(modelAttribution('anthropic', 'claude-test')).toBe(
       'anthropic/claude-test',
     )
@@ -489,65 +462,53 @@ describe('OpenClaw process and response boundary', () => {
     )
   })
 
-  it('returns only sanitized readiness fields from auth status', async () => {
-    const execute = vi.fn<OpenClawExecutor>(async (args) => {
-      if (args.includes('--version')) return 'OpenClaw 2026.7.1-2\n'
-      return JSON.stringify({
-        resolvedDefault: 'provider/configured-model',
-        configPath: '/private/user/config.json',
-        auth: {
-          missingProvidersInUse: [],
-          accounts: [{ label: 'private-account-label', token: 'secret' }],
-        },
-      })
-    })
+  it('returns only sanitized readiness fields from the plugin bridge', async () => {
+    const request = vi.fn<OpenClawBridgeRequester>(async () => JSON.stringify({
+      available: true,
+      model: 'provider/configured-model',
+      protocolVersion: 1,
+      transport: 'local',
+      version: '2026.7.1-2',
+    }))
 
-    const status = await getOpenClawStatus(config(), { execute })
+    const status = await getOpenClawStatus(config(), { request })
     expect(status).toEqual({
       available: true,
       model: 'provider/configured-model',
       transport: 'local',
-      version: 'OpenClaw 2026.7.1-2',
+      version: '2026.7.1-2',
     })
     expect(JSON.stringify(status)).not.toMatch(
       /private|account-label|configPath|token|secret/u,
     )
   })
 
-  it('reports unconfigured and unavailable auth states without returning auth records', async () => {
-    const notConfigured = vi.fn<OpenClawExecutor>(async (args) => {
-      if (args.includes('--version')) return 'OpenClaw fixture\n'
-      return JSON.stringify({
-        resolvedDefault: {
-          provider: 'provider',
-          model: 'configured-model',
-        },
-        auth: {
-          missingProvidersInUse: ['provider'],
-          accounts: [{ token: 'never-return-this' }],
-        },
-      })
-    })
+  it('reports unconfigured and unavailable bridge states without returning details', async () => {
+    const notConfigured = vi.fn<OpenClawBridgeRequester>(async () =>
+      JSON.stringify({
+        available: true,
+        model: null,
+        protocolVersion: 1,
+        transport: 'local',
+        version: 'OpenClaw fixture',
+      }))
     await expect(getOpenClawStatus(config(), {
-      execute: notConfigured,
+      request: notConfigured,
     })).resolves.toEqual({
       available: false,
-      message: 'Configure a usable default model in OpenClaw, then try again.',
-      model: 'provider/configured-model',
+      message: 'Configure a usable default model and authentication in OpenClaw, then try again.',
       reason: 'not-configured',
       transport: 'local',
       version: 'OpenClaw fixture',
     })
 
-    const unavailable = vi.fn<OpenClawExecutor>(async (args) => {
-      if (args.includes('--version')) return 'OpenClaw fixture\n'
+    const unavailable = vi.fn<OpenClawBridgeRequester>(async () => {
       throw new OpenClawCliError('failed', 'private auth details')
     })
-    const status = await getOpenClawStatus(config(), { execute: unavailable })
+    const status = await getOpenClawStatus(config(), { request: unavailable })
     expect(status).toMatchObject({
       available: false,
       reason: 'unavailable',
-      version: 'OpenClaw fixture',
     })
     expect(JSON.stringify(status)).not.toContain('private auth details')
   })
@@ -564,8 +525,8 @@ describe('OpenClaw process and response boundary', () => {
 })
 
 describe('OpenClaw route handlers', () => {
-  it('reports a missing local CLI as sanitized, non-cacheable readiness state', async () => {
-    const execute = vi.fn<OpenClawExecutor>(async () => {
+  it('reports a missing plugin bridge as sanitized, non-cacheable readiness state', async () => {
+    const request = vi.fn<OpenClawBridgeRequester>(async () => {
       throw new OpenClawCliError(
         'not-found',
         'private executable lookup details',
@@ -582,7 +543,7 @@ describe('OpenClaw route handlers', () => {
           serverVersion: '17.6',
         }),
         environment: DEV_ENVIRONMENT,
-        execute,
+        request,
       },
     )
 
@@ -600,7 +561,7 @@ describe('OpenClaw route handlers', () => {
       model: {
         checked: 'configuration',
         configurationReady: false,
-        message: 'Install OpenClaw locally or configure the plugin with its executable path.',
+        message: 'Launch WebChess through the installed OpenClaw plugin.',
         reason: 'cli-not-found',
         transport: 'local',
       },
@@ -615,13 +576,13 @@ describe('OpenClaw route handlers', () => {
   })
 
   it('reports independently checked model configuration and PostgreSQL 17 readiness', async () => {
-    const execute = vi.fn<OpenClawExecutor>(async (args) => {
-      if (args.includes('--version')) return 'OpenClaw fixture\n'
-      return JSON.stringify({
-        auth: { missingProvidersInUse: [] },
-        resolvedDefault: { model: 'fixture-model', provider: 'fixture-provider' },
-      })
-    })
+    const request = vi.fn<OpenClawBridgeRequester>(async () => JSON.stringify({
+      available: true,
+      model: 'fixture-provider/fixture-model',
+      protocolVersion: 1,
+      transport: 'local',
+      version: 'OpenClaw fixture',
+    }))
     const response = await handleOpenClawStatusRequest(
       localRequest('/api/openclaw/status', { method: 'GET' }),
       {
@@ -633,7 +594,7 @@ describe('OpenClaw route handlers', () => {
           serverVersion: '17.10',
         }),
         environment: DEV_ENVIRONMENT,
-        execute,
+        request,
       },
     )
 
@@ -665,13 +626,13 @@ describe('OpenClaw route handlers', () => {
   })
 
   it('reports an unsupported database without claiming model or search failure', async () => {
-    const execute = vi.fn<OpenClawExecutor>(async (args) => {
-      if (args.includes('--version')) return 'OpenClaw fixture\n'
-      return JSON.stringify({
-        auth: { missingProvidersInUse: [] },
-        resolvedDefault: { model: 'fixture-model', provider: 'fixture-provider' },
-      })
-    })
+    const request = vi.fn<OpenClawBridgeRequester>(async () => JSON.stringify({
+      available: true,
+      model: 'fixture-provider/fixture-model',
+      protocolVersion: 1,
+      transport: 'local',
+      version: 'OpenClaw fixture',
+    }))
     const response = await handleOpenClawStatusRequest(
       localRequest('/api/openclaw/status', { method: 'GET' }),
       {
@@ -686,7 +647,7 @@ describe('OpenClaw route handlers', () => {
           )
         },
         environment: DEV_ENVIRONMENT,
-        execute,
+        request,
       },
     )
 
@@ -710,29 +671,28 @@ describe('OpenClaw route handlers', () => {
   })
 
   it('rejects a cross-site status probe before launching OpenClaw', async () => {
-    const execute = vi.fn<OpenClawExecutor>()
+    const request = vi.fn<OpenClawBridgeRequester>()
     const response = await handleOpenClawStatusRequest(
       localRequest('/api/openclaw/status', {
         fetchSite: 'cross-site',
         method: 'GET',
       }),
-      { environment: DEV_ENVIRONMENT, execute },
+      { environment: DEV_ENVIRONMENT, request },
     )
 
     expect(response.status).toBe(403)
-    expect(execute).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
   })
 
   it('divides locally with validated facets, a server seed, and no credentials', async () => {
-    const execute = vi.fn<OpenClawExecutor>(async () =>
-      modelEnvelope({ facets: validFacets().reverse() }))
+    const request = modelRequester({ facets: validFacets().reverse() })
     const response = await handleOpenClawDivideRequest(
       localRequest('/api/openclaw/divide', {
         body: { problem: PROBLEM },
       }),
       {
         environment: DEV_ENVIRONMENT,
-        execute,
+        request,
         seed: () => SEED,
       },
     )
@@ -750,20 +710,22 @@ describe('OpenClaw route handlers', () => {
         seed: SEED,
       },
     })
-    const args = execute.mock.calls[0]?.[0] ?? []
-    expect(args).not.toContain('--model')
-    expect(args).toContain('--thinking')
-    expect(args.join(' ')).not.toMatch(/api[_-]?key|authorization|credential/iu)
+    expect(request.mock.calls[0]?.[0]).toBe('/v1/model/run')
+    const bridgeBody = request.mock.calls[0]?.[1]
+    expect(bridgeBody).toMatchObject({ thinking: 'medium' })
+    expect(JSON.stringify(bridgeBody)).not.toMatch(
+      /api[_-]?key|authorization|credential/iu,
+    )
   })
 
   it('rejects cross-origin and unsupported credential/model fields before execution', async () => {
-    const execute = vi.fn<OpenClawExecutor>()
+    const request = vi.fn<OpenClawBridgeRequester>()
     const crossOrigin = await handleOpenClawDivideRequest(
       localRequest('/api/openclaw/divide', {
         body: { problem: PROBLEM },
         origin: 'https://attacker.example',
       }),
-      { environment: DEV_ENVIRONMENT, execute },
+      { environment: DEV_ENVIRONMENT, request },
     )
     expect(crossOrigin.status).toBe(403)
 
@@ -775,20 +737,20 @@ describe('OpenClaw route handlers', () => {
           model: 'must-not-be-selected',
         },
       }),
-      { environment: DEV_ENVIRONMENT, execute },
+      { environment: DEV_ENVIRONMENT, request },
     )
     expect(unsupported.status).toBe(400)
 
     const missingProblem = await handleOpenClawDivideRequest(
       localRequest('/api/openclaw/divide', { body: {} }),
-      { environment: DEV_ENVIRONMENT, execute },
+      { environment: DEV_ENVIRONMENT, request },
     )
     expect(missingProblem.status).toBe(400)
-    expect(execute).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
   })
 
   it('does not expose CLI failures or stderr to the browser', async () => {
-    const execute = vi.fn<OpenClawExecutor>(async () => {
+    const request = vi.fn<OpenClawBridgeRequester>(async () => {
       throw new OpenClawCliError(
         'failed',
         'token=private-value stderr=/private/config',
@@ -798,7 +760,7 @@ describe('OpenClaw route handlers', () => {
       localRequest('/api/openclaw/divide', {
         body: { problem: PROBLEM },
       }),
-      { environment: DEV_ENVIRONMENT, execute },
+      { environment: DEV_ENVIRONMENT, request },
     )
     const body = await response.text()
 
@@ -808,7 +770,7 @@ describe('OpenClaw route handlers', () => {
   })
 
   it('rejects forged or incomplete histories before making a final model call', async () => {
-    const execute = vi.fn<OpenClawExecutor>()
+    const request = vi.fn<OpenClawBridgeRequester>()
     const response = await handleOpenClawAnswerRequest(
       localRequest('/api/openclaw/answer', {
         body: {
@@ -825,18 +787,18 @@ describe('OpenClaw route handlers', () => {
           }],
         },
       }),
-      { environment: DEV_ENVIRONMENT, execute },
+      { environment: DEV_ENVIRONMENT, request },
     )
 
     expect(response.status).toBe(400)
     expect(await responseJson(response)).toMatchObject({
       error: { code: 'INVALID_GAME_REPLAY' },
     })
-    expect(execute).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
   })
 
   it('requires a terminal canonical replay before invoking the answer model', async () => {
-    const execute = vi.fn<OpenClawExecutor>()
+    const request = vi.fn<OpenClawBridgeRequester>()
     const response = await handleOpenClawAnswerRequest(
       localRequest('/api/openclaw/answer', {
         body: {
@@ -845,20 +807,19 @@ describe('OpenClaw route handlers', () => {
           events: [],
         },
       }),
-      { environment: DEV_ENVIRONMENT, execute },
+      { environment: DEV_ENVIRONMENT, request },
     )
 
     expect(response.status).toBe(409)
     expect(await responseJson(response)).toMatchObject({
       error: { code: 'GAME_NOT_COMPLETE' },
     })
-    expect(execute).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
   })
 
   it('recomputes the cast, replays a terminal game, and validates the final reading', async () => {
     const terminal = completeGameEvents()
-    const execute = vi.fn<OpenClawExecutor>(async () =>
-      modelEnvelope(validAnswerSections()))
+    const request = modelRequester(validAnswerSections())
     const body = {
       problem: PROBLEM,
       division: { seed: SEED, facets: validFacets() },
@@ -868,7 +829,7 @@ describe('OpenClaw route handlers', () => {
     const generated = await generateOpenClawAnswer(
       body,
       config(),
-      { execute },
+      { request },
     )
     expect(generated).toMatchObject({
       answer: {
@@ -880,7 +841,7 @@ describe('OpenClaw route handlers', () => {
 
     const routeResponse = await handleOpenClawAnswerRequest(
       localRequest('/api/openclaw/answer', { body }),
-      { environment: DEV_ENVIRONMENT, execute },
+      { environment: DEV_ENVIRONMENT, request },
     )
     expect(routeResponse.status).toBe(200)
     expect(await responseJson(routeResponse)).toMatchObject({
@@ -892,7 +853,7 @@ describe('OpenClaw route handlers', () => {
   })
 
   it('does not accept browser-composed problem parts as answer authority', async () => {
-    const execute = vi.fn<OpenClawExecutor>()
+    const request = vi.fn<OpenClawBridgeRequester>()
     const response = await handleOpenClawAnswerRequest(
       localRequest('/api/openclaw/answer', {
         body: {
@@ -902,13 +863,13 @@ describe('OpenClaw route handlers', () => {
           parts: composeProblemParts(validFacets(), 'browser-selected-seed'),
         },
       }),
-      { environment: DEV_ENVIRONMENT, execute },
+      { environment: DEV_ENVIRONMENT, request },
     )
 
     expect(response.status).toBe(400)
     expect(await responseJson(response)).toMatchObject({
       error: { code: 'INVALID_REQUEST' },
     })
-    expect(execute).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
   })
 })

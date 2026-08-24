@@ -16,6 +16,8 @@ declare module 'openclaw/plugin-sdk/plugin-entry' {
   }
 
   interface OpenClawPluginApi {
+    config: import('./bridge.js').OpenClawBridgeApi['config']
+    runtime: import('./bridge.js').OpenClawBridgeApi['runtime']
     registerCli(
       registrar: (context: { program: CliProgram }) => Promise<void> | void,
       options: {
@@ -38,4 +40,13 @@ declare module 'openclaw/plugin-sdk/plugin-entry' {
   export function definePluginEntry(
     definition: OpenClawPluginDefinition,
   ): OpenClawPluginDefinition
+}
+
+declare module 'openclaw/plugin-sdk/simple-completion-runtime' {
+  export function completeWithPreparedSimpleCompletionModel(
+    params: unknown,
+  ): Promise<unknown>
+  export function prepareSimpleCompletionModelForAgent(
+    params: unknown,
+  ): Promise<unknown>
 }

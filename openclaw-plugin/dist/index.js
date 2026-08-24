@@ -12,7 +12,7 @@ export default definePluginEntry({
                 .option('--port <port>', 'Loopback port for the local WebChess interface', '3210')
                 .option('--no-open', 'Print the URL without opening a browser')
                 .action(async (options) => {
-                await launchWebChess(parseLaunchOptions(options));
+                await launchWebChess(parseLaunchOptions(options), undefined, api);
             });
         }, {
             descriptors: [
