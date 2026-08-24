@@ -5,6 +5,10 @@ import type { FormEvent } from 'react'
 
 import { Header } from './components/Header'
 import {
+  OpenClawReleaseIdentityBanner,
+  type OpenClawReleaseIdentity,
+} from './components/OpenClawReleaseIdentity'
+import {
   countDueWebMemoryActions,
   WebMemoryPanel,
 } from './components/WebMemoryPanel'
@@ -165,11 +169,26 @@ export function App() {
   return <WebChessExperience runtime={HOSTED_WEBCHESS_RUNTIME} />
 }
 
-export function OpenClawApp() {
-  return <WebChessExperience runtime={OPENCLAW_WEBCHESS_RUNTIME} />
+export function OpenClawApp({
+  releaseIdentity = null,
+}: {
+  releaseIdentity?: OpenClawReleaseIdentity | null
+}) {
+  return (
+    <WebChessExperience
+      runtime={OPENCLAW_WEBCHESS_RUNTIME}
+      openClawReleaseIdentity={releaseIdentity}
+    />
+  )
 }
 
-function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
+function WebChessExperience({
+  runtime,
+  openClawReleaseIdentity = null,
+}: {
+  runtime: WebChessRuntime
+  openClawReleaseIdentity?: OpenClawReleaseIdentity | null
+}) {
   const [game, setGame] = useState<DurableGame | null>(null)
   const [restoring, setRestoring] = useState(true)
   const [restoreError, setRestoreError] = useState('')
@@ -2192,6 +2211,12 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
         dueMemoryCount={dueWebMemoryCount}
         localMode={runtime.kind === 'openclaw'}
       />
+
+      {runtime.kind === 'openclaw' ? (
+        <OpenClawReleaseIdentityBanner
+          identity={openClawReleaseIdentity}
+        />
+      ) : null}
 
       <WebMemoryPanel
         open={webMemoryOpen}

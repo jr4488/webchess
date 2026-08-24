@@ -18,6 +18,7 @@ const RUNTIME_IDENTITY_FORMAT = 'webchess-openclaw-runtime-identity/1';
 const RUNTIME_IDENTITY_FILENAME = 'runtime-identity.json';
 const MAX_RUNTIME_IDENTITY_BYTES = 4_096;
 const LOCAL_OWNER_PATTERN = /^openclaw_[a-z0-9_-]{8,80}$/u;
+export const WEBCHESS_LOCAL_DATA_NOTICE = 'WebChess software 2.2.0-rc.1 stores game history and the webchess-2.0 lifecycle schema in the dedicated local PostgreSQL database. Model requests use your configured OpenClaw provider, which may be remote.';
 const RUNTIME_ENTRIES = [
     'CODE_OF_CONDUCT.md',
     'CONTRIBUTING.md',
@@ -627,7 +628,7 @@ export async function launchWebChess(options, dependencies = defaultDependencies
         try {
             await waitForServer(spec.readinessUrl, spawnedServer, dependencies.fetch, dependencies.startupTimeoutMs);
             console.log(`WebChess is ready at ${spec.url}`);
-            console.log('Game history and WebChess 2.0 lifecycle data stay in the dedicated local PostgreSQL database. Model requests use your configured OpenClaw provider, which may be remote.');
+            console.log(WEBCHESS_LOCAL_DATA_NOTICE);
             if (options.openBrowser)
                 dependencies.openBrowser(spec.url);
             const result = await waitForExit(spawnedServer);

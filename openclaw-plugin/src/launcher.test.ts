@@ -23,6 +23,7 @@ import {
   resolveRuntimeIdentityPath,
   resolveWebChessBuildIdentity,
   resolveWebChessRoot,
+  WEBCHESS_LOCAL_DATA_NOTICE,
   type LauncherDependencies,
   type SpawnedServer,
 } from './launcher.js'
@@ -76,6 +77,15 @@ class FakeServer extends EventEmitter implements SpawnedServer {
 }
 
 describe('OpenClaw WebChess launcher', () => {
+  it('distinguishes the software release from the lifecycle schema in launcher copy', () => {
+    expect(WEBCHESS_LOCAL_DATA_NOTICE).toContain(
+      'WebChess software 2.2.0-rc.1',
+    )
+    expect(WEBCHESS_LOCAL_DATA_NOTICE).toContain(
+      'webchess-2.0 lifecycle schema',
+    )
+  })
+
   it('defaults to a foreground loopback launch using local inference', () => {
     expect(parseLaunchOptions({})).toEqual({
       openBrowser: true,
