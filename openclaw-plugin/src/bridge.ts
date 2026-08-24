@@ -80,6 +80,7 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
   'BUNDLE_HTTPS_PROXY',
   'BUNDLE_NO_PROXY',
   'BUNDLE_SSL_CA_CERT',
+  'BUN_OPTIONS',
   'CLAUDE_AI_SESSION_KEY',
   'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
   'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
@@ -89,6 +90,8 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
   'CLERK_WEBHOOK_SIGNING_SECRET',
   'CODEX_API_KEY',
   'CODEX_CA_CERTIFICATE',
+  'CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID',
+  'CODEX_INTERNAL_ORIGINATOR_OVERRIDE',
   'CODEX_NETWORK_ALLOW_LOCAL_BINDING',
   'CODEX_NETWORK_PROXY_ACTIVE',
   'CODEX_NETWORK_PROXY_ATTRIBUTION',
@@ -100,6 +103,7 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
   'DISCORD_BOT_TOKEN',
   'DOCKER_HTTP_PROXY',
   'DOCKER_HTTPS_PROXY',
+  'DYLD_INSERT_LIBRARIES',
   'ELECTRON_GET_USE_PROXY',
   'FTP_PROXY',
   'ftp_proxy',
@@ -112,10 +116,17 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
   'https_proxy',
   'LINE_CHANNEL_ACCESS_TOKEN',
   'KUBECONFIG',
+  'LD_PRELOAD',
   'MIGRATION_DATABASE_URL',
   'MSTEAMS_CERTIFICATE_PATH',
   'MONGODB_URI',
   'NGROK_AUTHTOKEN',
+  'NODE_DEBUG',
+  'NODE_DEBUG_NATIVE',
+  'NODE_EXTRA_CA_CERTS',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'NODE_TLS_REJECT_UNAUTHORIZED',
   'NODE_USE_BUNDLED_CA',
   'NODE_USE_ENV_PROXY',
   'NODE_USE_OPENSSL_CA',
@@ -133,7 +144,15 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
   'npm_config_https_proxy',
   'npm_config_noproxy',
   'npm_config_proxy',
+  'OPENAI_API_BASE',
   'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'OPENAI_CUSTOM_HEADERS',
+  'OPENAI_LOG',
+  'OPENAI_ORGANIZATION',
+  'OPENAI_ORG_ID',
+  'OPENAI_PROJECT',
+  'OPENAI_PROJECT_ID',
   'OPENCLAW_APNS_PRIVATE_KEY',
   'OPENCLAW_APNS_PRIVATE_KEY_P8',
   'OPENCLAW_APNS_PRIVATE_KEY_PATH',
@@ -141,12 +160,24 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
   'OPENCLAW_BROWSER_CDP_AUTH_TOKEN',
   'OPENCLAW_BROWSER_NOVNC_PASSWORD',
   'OPENCLAW_CLAWHUB_TOKEN',
+  'OPENCLAW_BUILD_PRIVATE_QA',
+  'OPENCLAW_DEBUG_PROXY_BLOB_DIR',
+  'OPENCLAW_DEBUG_PROXY_CERT_DIR',
+  'OPENCLAW_DEBUG_PROXY_DB_PATH',
+  'OPENCLAW_DEBUG_PROXY_ENABLED',
+  'OPENCLAW_DEBUG_PROXY_REQUIRE',
+  'OPENCLAW_DEBUG_PROXY_SESSION_ID',
+  'OPENCLAW_DEBUG_PROXY_URL',
+  'OPENCLAW_ENABLE_PRIVATE_QA_CLI',
   'OPENCLAW_GATEWAY_PASSWORD',
   'OPENCLAW_GATEWAY_TOKEN',
   'OPENCLAW_MCP_TOKEN',
+  OPENCLAW_AUTO_CA_MARKER,
   'OPENCLAW_OAUTH_DIR',
   'OPENCLAW_PROFILE',
+  'OPENCLAW_QA_FORCE_RUNTIME',
   'OPENCLAW_VAPID_PRIVATE_KEY',
+  'OPENSSL_CONF',
   'PGDATABASE',
   'PGHOST',
   'PGPASSWORD',
@@ -160,6 +191,9 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
   'PIP_PROXY',
   'REDIS_URL',
   'REQUESTS_CA_BUNDLE',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE',
+  'SSLKEYLOGFILE',
   'SSH_AGENT_PID',
   'SSH_AUTH_SOCK',
   'SSH_CLIENT',
@@ -966,7 +1000,7 @@ function hasProviderSecretEnvironment(
   environment: NodeJS.ProcessEnv,
 ): boolean {
   return Object.entries(environment).some(([rawName, rawValue]) => {
-    if (!rawValue?.trim()) return false
+    if (rawValue === undefined || rawValue === '') return false
     const name = rawName.trim().toUpperCase()
     return !PROVIDER_CREDENTIAL_ENVIRONMENT_ALLOWLIST.has(name) &&
       isProviderCredentialEnvironmentName(name)
@@ -990,11 +1024,7 @@ function isProviderCredentialEnvironmentName(name: string): boolean {
     /^OPENCLAW_LIVE_.+_KEYS?$/u.test(name)
 }
 
-function hasUnsafeProviderTransportEnvironment(
-  environment: NodeJS.ProcessEnv,
-): boolean {
-  const autoCaAccepted = hasAttestedOpenClawSystemCa(environment)
-  const exactNames = new Set([
+const UNSAFE_PROVIDER_TRANSPORT_ENVIRONMENT_NAMES = new Set([
     'ALL_PROXY',
     'BUNDLE_HTTP_PROXY',
     'BUNDLE_HTTPS_PROXY',
@@ -1002,6 +1032,8 @@ function hasUnsafeProviderTransportEnvironment(
     'BUNDLE_SSL_CA_CERT',
     'BUN_OPTIONS',
     'CODEX_CA_CERTIFICATE',
+    'CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID',
+    'CODEX_INTERNAL_ORIGINATOR_OVERRIDE',
     'CODEX_NETWORK_ALLOW_LOCAL_BINDING',
     'CODEX_NETWORK_PROXY_ACTIVE',
     'CURL_CA_BUNDLE',
@@ -1031,7 +1063,9 @@ function hasUnsafeProviderTransportEnvironment(
     'OPENAI_API_BASE',
     'OPENAI_BASE_URL',
     'OPENAI_CUSTOM_HEADERS',
+    'OPENAI_ORGANIZATION',
     'OPENAI_ORG_ID',
+    'OPENAI_PROJECT',
     'OPENAI_PROJECT_ID',
     'OPENAI_LOG',
     'OPENCLAW_BUILD_PRIVATE_QA',
@@ -1053,26 +1087,38 @@ function hasUnsafeProviderTransportEnvironment(
     'YARN_NO_PROXY',
     '__CODEX_SNAPSHOT_OVERRIDE',
     '__CODEX_SNAPSHOT_PROXY_OVERRIDE',
-  ])
+])
+
+function isUnsafeProviderTransportEnvironmentName(name: string): boolean {
+  return UNSAFE_PROVIDER_TRANSPORT_ENVIRONMENT_NAMES.has(name) ||
+    name === 'NODE_EXTRA_CA_CERTS' ||
+    name === 'NODE_TLS_REJECT_UNAUTHORIZED' ||
+    name === OPENCLAW_AUTO_CA_MARKER ||
+    name.startsWith('CODEX_NETWORK_PROXY_') ||
+    name.startsWith('OPENCLAW_DEBUG_PROXY_') ||
+    name.startsWith('OPENCLAW_QA_')
+}
+
+function hasUnsafeProviderTransportEnvironment(
+  environment: NodeJS.ProcessEnv,
+): boolean {
+  const autoCaAccepted = hasAttestedOpenClawSystemCa(environment)
   return Object.entries(environment).some(([rawName, rawValue]) => {
-    if (!rawValue?.trim()) return false
+    if (rawValue === undefined || rawValue === '') return false
     const name = rawName.trim().toUpperCase()
     if (name === 'NODE_EXTRA_CA_CERTS' || name === OPENCLAW_AUTO_CA_MARKER) {
       return !autoCaAccepted
     }
-    return exactNames.has(name) ||
-      name.startsWith('CODEX_NETWORK_PROXY_') ||
-      name.startsWith('OPENCLAW_DEBUG_PROXY_') ||
-      name.startsWith('OPENCLAW_QA_') ||
-      (name === 'NODE_TLS_REJECT_UNAUTHORIZED' && rawValue.trim() === '0')
+    if (name === 'NODE_TLS_REJECT_UNAUTHORIZED') return rawValue !== '1'
+    return isUnsafeProviderTransportEnvironmentName(name)
   })
 }
 
 function hasAttestedOpenClawSystemCa(
   environment: NodeJS.ProcessEnv,
 ): boolean {
-  const caPath = environment.NODE_EXTRA_CA_CERTS?.trim()
-  const marker = environment[OPENCLAW_AUTO_CA_MARKER]?.trim()
+  const caPath = environment.NODE_EXTRA_CA_CERTS
+  const marker = environment[OPENCLAW_AUTO_CA_MARKER]
   if (!caPath && !marker) return false
   if (process.platform !== 'linux' || marker !== '1' || !caPath) return false
   const firstReadable = LINUX_SYSTEM_CA_PATHS.find((candidate) => {
@@ -1106,7 +1152,7 @@ function codexAppServerClearEnv(
     const name = exactName.toUpperCase()
     if (!name || name === 'CODEX_HOME') continue
     if (isProviderCredentialEnvironmentName(name) ||
-      name.startsWith('CODEX_NETWORK_PROXY_') ||
+      isUnsafeProviderTransportEnvironmentName(name) ||
       /^(?:PG|POSTGRES|SSH_)/u.test(name) ||
       /(?:^|_)(?:BRIDGE|DATABASE|HMAC)(?:_|$)/u.test(name) ||
       /(?:^|_)(?:PASSWORD|PRIVATE_KEY|SECRET)(?:_|$)/u.test(name)) {
