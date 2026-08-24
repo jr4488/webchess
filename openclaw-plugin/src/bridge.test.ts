@@ -580,6 +580,34 @@ describe('OpenClaw plugin runtime bridge', () => {
     })
   })
 
+  it('binds the Codex provider from the registry activated by enumeration', async () => {
+    const api = fakeApi()
+    const provider = api.runtime.webSearch.listProviders()[0]
+    expect(provider).toBeDefined()
+    const activeRuntime = pluginRegistryRuntime(api)
+    const activeRegistry = activeRuntime.getGlobalPluginRegistry()
+    expect(activeRegistry).not.toBeNull()
+    let registry = {
+      plugins: [],
+      webSearchProviders: [],
+    } as NonNullable<typeof activeRegistry>
+    const registryRuntime: OpenClawPluginRegistryRuntime = {
+      getGlobalPluginRegistry: vi.fn(() => registry),
+    }
+    api.runtime.webSearch.listProviders = vi.fn(() => {
+      registry = activeRegistry!
+      return [provider!]
+    })
+
+    const bridge = await start(api, { pluginRegistryRuntime: registryRuntime })
+
+    expect(api.runtime.webSearch.listProviders).toHaveBeenCalledWith({
+      config: expect.any(Object),
+    })
+    expect(registryRuntime.getGlobalPluginRegistry).toHaveBeenCalled()
+    await bridge.close()
+  })
+
   it('rejects a codex-named Hosted Search provider owned by another plugin', async () => {
     const api = fakeApi()
     api.runtime.webSearch.listProviders = vi.fn(() => [{

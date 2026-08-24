@@ -1349,13 +1349,16 @@ async function resolveBoundCodexSearchProvider(
   attestor: CodexPackageAttestor,
 ): Promise<BoundCodexResolution> {
   try {
+    // Provider enumeration is the pinned runtime's supported lazy-activation
+    // seam. Read the global registry only after enumeration so the record and
+    // registration belong to the same activated registry as the provider.
+    const listed = api.runtime.webSearch.listProviders({ config })
+      .filter((provider) => provider.id === 'codex')
     const registry = registryRuntime.getGlobalPluginRegistry()
     if (!registry) return { bound: null, error: CODEX_SEARCH_PROVIDER_ERROR }
     const records = registry.plugins.filter((record) => record.id === 'codex')
     const registrations = registry.webSearchProviders.filter((entry) =>
       entry.pluginId === 'codex' && entry.provider.id === 'codex')
-    const listed = api.runtime.webSearch.listProviders({ config })
-      .filter((provider) => provider.id === 'codex')
     if (records.length === 0 || registrations.length === 0 || listed.length === 0) {
       return { bound: null, error: CODEX_SEARCH_PROVIDER_ERROR }
     }
