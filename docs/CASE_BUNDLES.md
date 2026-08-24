@@ -4,8 +4,9 @@
 is separate from the account-wide `webchess-account-export/4` format and does
 not replace that privacy export.
 
-When a lifecycle record exists, choose **Export this lifecycle for inspection**
-and one of three allowlist profiles. An export is a point-in-time snapshot, so
+When a lifecycle record exists, open **Export this lifecycle for inspection**,
+choose one of three allowlist profiles, and select **Download case bundle**. An
+export is a point-in-time snapshot, so
 its recorded lifecycle state may be in progress, failed, or complete:
 
 - `private-full-v1` retains the stored question, mapped field, model result
@@ -18,6 +19,23 @@ its recorded lifecycle state may be in progress, failed, or complete:
 - `metadata-only-v1` is the narrowest profile. It retains the structural
   lifecycle and move metadata needed for integrity and board-event checks, but
   omits case narrative, move request digests, and move idempotency keys.
+
+Every bundle newly exported by the current implementation retains the
+case-scoped research-consent tuple and bounded request metadata:
+policy/materiality, status, official provider/transport/model, limits,
+attempts, source count, content digest, failure code, and timestamps.
+`private-full-v1` additionally retains the query, synthesis, discovered source
+URLs, guarded direct-page facts/excerpts, fetch failures, injection signals,
+and other case text. The two redacted profiles omit that narrative and retain
+only source host/trust/discovery metadata; the omission ledger names what was
+removed. A successful provider label is provenance, not proof that a source or
+claim is correct.
+
+Earlier `/1` bundles used the same format identifier before the consent tuple
+and fetch-failure ledger were added. They remain importable for compatibility,
+but verification emits a prominent legacy-provenance warning and lists those
+missing fields under **Not verified**. Do not interpret a successfully imported
+legacy bundle as containing current consent or direct-fetch provenance.
 
 Every profile is assembled with explicit field allowlists. The bundle records
 the selected policy and a field-level omission ledger. For each redacted
@@ -44,7 +62,7 @@ non-sensitive in a particular case.
 
 ## Offline, read-only verification
 
-The local OpenClaw interface also offers **Import & verify case** for files up
+The local OpenClaw interface also offers **Import & verify case bundle** for files up
 to the default 3,000,000-byte local export ceiling. The browser sends the file
 only to the authenticated loopback WebChess process, which verifies it in
 memory without persistence or provider calls. That convenience check does not
@@ -92,6 +110,13 @@ the checkout dirty before this CLI comparison.
 Redacted profiles use deterministic neutral 64-square problem parts. That
 preserves canonical chess geometry and move legality, but it cannot verify the
 omitted problem-to-square wording or capture narration.
+
+Offline verification applies the same pure canonical public-HTTPS URL policy
+as the live direct-page fetcher and checks retained route/source consistency.
+It cannot reconstruct historical DNS resolution, prove which pinned peer
+accepted the connection, verify the historical TLS negotiation, or establish
+that a recorded retrieval actually occurred. Those network-history limits are
+reported under **Not verified** rather than inferred from a URL or digest.
 
 The OpenClaw launcher hashes the exact staged application payload. A clean
 source-link installation also contributes its Git commit. A packed installation

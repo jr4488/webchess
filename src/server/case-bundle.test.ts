@@ -453,6 +453,42 @@ function researchFactRows(): Pick<
   }
 }
 
+function researchOptOutRows(): Pick<
+  CaseBundleSourceRows,
+  'game' | 'researchRequests' | 'researchSources'
+> {
+  const rows = sourceRows()
+  const research = researchFailureRows()
+  const request = research.researchRequests[0]!
+  return {
+    game: {
+      ...rows.game,
+      researchConsentDecision: 'no_external_research',
+    },
+    researchRequests: [{
+      ...request,
+      researchConsentDecision: 'no_external_research',
+      materiality: null,
+      query: null,
+      status: 'not_needed',
+      model: null,
+      attemptCount: 0,
+      executedQueries: [],
+      searchSynthesis: null,
+      directPageTextFetched: false,
+      retrievedFacts: [],
+      fetchFailures: [],
+      omittedSourceCount: 0,
+      injectionSignals: [],
+      contentDigest: null,
+      failureCode: null,
+      startedAt: null,
+      completedAt: NOW,
+    }],
+    researchSources: [],
+  }
+}
+
 function bundle(
   profile: 'private-full-v1' | 'research-redacted-v1' | 'metadata-only-v1',
   overrides: Partial<CaseBundleSourceRows> = {},
@@ -565,7 +601,14 @@ describe('webchess-case-bundle/1', () => {
     )
     rebuildManifest(created)
 
-    expect(verifyCaseBundle(created).errors).toEqual([])
+    const legacyResult = verifyCaseBundle(created)
+    expect(legacyResult.errors).toEqual([])
+    expect(legacyResult.warnings.join(' ')).toMatch(
+      /LEGACY PROVENANCE WARNING/u,
+    )
+    expect(legacyResult.notVerified.join(' ')).toMatch(
+      /research-consent provenance.*fetch-failure history/u,
+    )
     if (profile === 'private-full-v1') {
       const legacyRequest = researchRequests[0]!
       const factRequest = researchFactRows().researchRequests[0]!
@@ -642,6 +685,151 @@ describe('webchess-case-bundle/1', () => {
     }))
   })
 
+  it('states which direct-page network history cannot be established offline', () => {
+    const created = bundle('private-full-v1', researchFailureRows())
+    const result = verifyCaseBundle(created)
+
+    expect(result.errors).toEqual([])
+    expect(result.notVerified.join(' ')).toMatch(
+      /Historical DNS resolution.*pinned connection peer.*TLS negotiation.*retrieval event/u,
+    )
+    expect(created.data.verificationBoundary).toMatchObject({
+      doesNotVerify: expect.arrayContaining([
+        expect.stringMatching(/Historical DNS resolution/u),
+      ]),
+    })
+  })
+
+  it.each([
+    ['an IP literal', 'https://127.0.0.1/private-case-evidence', '127.0.0.1', 'general_web'],
+    ['a local hostname', 'https://metadata.internal/private-case-evidence', 'metadata.internal', 'general_web'],
+    ['a custom port', 'https://example.edu:444/private-case-evidence', 'example.edu', 'government_or_education'],
+    ['a noncanonical tracking query', 'https://example.edu/private-case-evidence?utm_source=test', 'example.edu', 'government_or_education'],
+  ] as const)(
+    'rejects a rehashed direct-page route using %s',
+    (_name, url, hostname, trust) => {
+      const created = structuredClone(
+        bundle('private-full-v1', researchFailureRows()),
+      ) as unknown as MutableBundle
+      const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+      const request = (
+        lifecycle.researchRequests as Record<string, CanonicalJson>[]
+      )[0]!
+      const failure = (
+        request.fetchFailures as Record<string, CanonicalJson>[]
+      )[0]!
+      const source = (
+        lifecycle.researchSources as Record<string, CanonicalJson>[]
+      )[0]!
+      failure.requestedUrl = url
+      failure.finalUrl = url
+      failure.redirectChain = [url]
+      source.url = url
+      source.hostname = hostname
+      source.trust = trust
+      rebuildManifest(created)
+
+      const result = verifyCaseBundle(created)
+      expect(result.errors).toContain(
+        'data.lifecycle.researchRequests[0].fetchFailures[0] has an invalid direct-page URL or redirect chain.',
+      )
+      expect(result.errors).toContain(
+        'researchSources[0] violates the canonical research-source provenance contract.',
+      )
+    },
+  )
+
+  it('rejects rehashed source hostname, trust, and ordinal provenance', () => {
+    const mutateSource = (
+      mutate: (
+        source: Record<string, CanonicalJson>,
+        failure: Record<string, CanonicalJson>,
+      ) => void,
+    ) => {
+      const created = structuredClone(
+        bundle('private-full-v1', researchFailureRows()),
+      ) as unknown as MutableBundle
+      const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+      const request = (
+        lifecycle.researchRequests as Record<string, CanonicalJson>[]
+      )[0]!
+      const failure = (
+        request.fetchFailures as Record<string, CanonicalJson>[]
+      )[0]!
+      const source = (
+        lifecycle.researchSources as Record<string, CanonicalJson>[]
+      )[0]!
+      mutate(source, failure)
+      rebuildManifest(created)
+      return verifyCaseBundle(created)
+    }
+
+    const hostname = mutateSource((source) => {
+      source.hostname = 'other.edu'
+    })
+    const trust = mutateSource((source) => {
+      source.trust = 'general_web'
+    })
+    const ordinal = mutateSource((source, failure) => {
+      source.ordinal = 2
+      source.citationId = 'R2'
+      failure.citationId = 'R2'
+    })
+
+    expect(hostname.errors).toContain(
+      'researchSources[0] violates the canonical research-source provenance contract.',
+    )
+    expect(hostname.errors).toContain(
+      'researchRequests[0] direct-page evidence does not match its disclosed source citation and URL.',
+    )
+    expect(trust.errors).toContain(
+      'researchSources[0] violates the canonical research-source provenance contract.',
+    )
+    expect(ordinal.errors).toContain(
+      `researchSources ordinals must be contiguous from 1 for request ${String(researchFailureRows().researchRequests[0]!.id)}.`,
+    )
+  })
+
+  it('rejects a rehashed current opt-out with completed research evidence', () => {
+    const created = structuredClone(
+      bundle('private-full-v1', researchOptOutRows()),
+    ) as unknown as MutableBundle
+    expect(verifyCaseBundle(created).errors).toEqual([])
+
+    const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+    const request = (
+      lifecycle.researchRequests as Record<string, CanonicalJson>[]
+    )[0]!
+    const research = researchFailureRows()
+    request.status = 'completed'
+    request.materiality = 'required'
+    request.query = 'A query that must not survive current opt-out.'
+    request.model = 'gpt-5.6-sol'
+    request.attemptCount = 1
+    request.executedQueries = ['A query that must not survive current opt-out.']
+    request.searchSynthesis = 'Synthesis that must not survive current opt-out.'
+    request.fetchFailures = structuredClone(
+      research.researchRequests[0]!.fetchFailures,
+    ) as CanonicalJson
+    request.contentDigest = '8'.repeat(64)
+    request.startedAt = NOW
+    lifecycle.researchSources = structuredClone(
+      research.researchSources,
+    ) as CanonicalJson
+    rebuildManifest(created)
+
+    const result = verifyCaseBundle(created)
+    expect(result.errors).toContain(
+      'data.lifecycle.researchRequests[0] violates the current research opt-out invariants.',
+    )
+    expect(result.errors).toContain(
+      'data.lifecycle.researchRequests[0] contains direct-page evidence despite research opt-out.',
+    )
+    expect(result.errors).toContain(
+      'researchSources[0] retains source evidence despite current research opt-out.',
+    )
+  })
+
   it('rejects rehashed direct-page evidence detached from its source route', () => {
     const mismatchedSource = structuredClone(
       bundle('private-full-v1', researchFailureRows()),
@@ -691,10 +879,10 @@ describe('webchess-case-bundle/1', () => {
     const crossHostFailure = (
       crossHostRequest.fetchFailures as Record<string, CanonicalJson>[]
     )[0]!
-    crossHostFailure.finalUrl = 'https://other.example/evidence'
+    crossHostFailure.finalUrl = 'https://other.org/evidence'
     crossHostFailure.redirectChain = [
       'https://example.edu/private-case-evidence',
-      'https://other.example/evidence',
+      'https://other.org/evidence',
     ]
     rebuildManifest(crossHost)
 

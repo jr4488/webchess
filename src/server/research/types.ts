@@ -51,6 +51,14 @@ export interface RecordNoResearchInput extends ResearchRequestContext {
   readonly configurationDigest: string
 }
 
+export interface ResearchPolicyLookupInput {
+  readonly ownerId: string
+  readonly gameId: string
+  readonly stage: ResearchStage
+  readonly policyVersion: string
+  readonly researchConsent: ResearchConsent
+}
+
 export interface CompleteResearchInput {
   readonly ownerId: string
   readonly requestId: string
@@ -79,6 +87,7 @@ export interface FailResearchInput {
 
 export interface ResearchRepositoryPort {
   getForGame(ownerId: string, gameId: string): Promise<readonly ResearchRecord[]>
+  getForPolicy(input: ResearchPolicyLookupInput): Promise<ResearchRecord | null>
   recordNotNeeded(input: RecordNoResearchInput): Promise<ResearchRecord>
   start(input: StartResearchInput): Promise<StartResearchResult>
   complete(input: CompleteResearchInput): Promise<ResearchRecord>

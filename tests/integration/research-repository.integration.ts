@@ -546,6 +546,31 @@ describe('durable visible research repository on PostgreSQL 17', () => {
   })
 
   it('rejects mismatched consent before returning an existing policy claim', async () => {
+    await expect(research.getForPolicy({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      stage: 'portia',
+      policyVersion: RESEARCH_POLICY_VERSION,
+      researchConsent: RESEARCH_CONSENT,
+    })).resolves.toMatchObject({
+      status: 'completed',
+      consent: RESEARCH_CONSENT,
+    })
+
+    await expect(research.getForPolicy({
+      ownerId: OWNER,
+      gameId: GAME_ID,
+      stage: 'portia',
+      policyVersion: RESEARCH_POLICY_VERSION,
+      researchConsent: {
+        ...RESEARCH_CONSENT,
+        decision: 'no_external_research',
+      },
+    })).rejects.toMatchObject({
+      code: 'conflict',
+      message: 'The supplied research consent does not match the owning game.',
+    })
+
     await expect(research.start({
       ownerId: OWNER,
       gameId: GAME_ID,
@@ -853,6 +878,17 @@ describe('durable visible research repository on PostgreSQL 17', () => {
     })
 
     try {
+      await expect(research.getForPolicy({
+        ownerId: OWNER,
+        gameId: GAME_ID,
+        stage: 'portia',
+        policyVersion: RESEARCH_POLICY_VERSION,
+        researchConsent: RESEARCH_CONSENT,
+      })).rejects.toMatchObject({
+        code: 'integrity-error',
+        message: 'The existing research request consent does not match the owning game.',
+      })
+
       await expect(research.start({
         ownerId: OWNER,
         gameId: GAME_ID,

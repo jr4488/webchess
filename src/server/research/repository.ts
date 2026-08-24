@@ -31,6 +31,7 @@ import type {
   CompleteResearchInput,
   FailResearchInput,
   RecordNoResearchInput,
+  ResearchPolicyLookupInput,
   ResearchRepositoryPort,
   StartResearchInput,
   StartResearchResult,
@@ -478,21 +479,20 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
     return record
   }
 
-  private async existingForPolicy(input: {
-    ownerId: string
-    gameId: string
-    stage: string
-    policyVersion: string
-    consent: ResearchConsent
-  }): Promise<ResearchRecord | null> {
+  async getForPolicy(
+    input: ResearchPolicyLookupInput,
+  ): Promise<ResearchRecord | null> {
+    const owner = assertOwner(input.ownerId)
+    const game = assertUuid(input.gameId, 'Game id')
+    const consent = assertConsent(input.researchConsent)
     const values = [
-      input.ownerId,
-      input.gameId,
+      owner,
+      game,
       input.stage,
       input.policyVersion,
-      input.consent.version,
-      input.consent.decision,
-      input.consent.recordedAt,
+      consent.version,
+      consent.decision,
+      consent.recordedAt,
     ] as const
     const results = await this.database.transaction([
       {
@@ -682,12 +682,12 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
     }
     const storedId = resultId(result)
     if (storedId) return this.getById(owner, storedId)
-    const existing = await this.existingForPolicy({
+    const existing = await this.getForPolicy({
       ownerId: owner,
       gameId,
       stage: input.stage,
       policyVersion: input.policyVersion,
-      consent,
+      researchConsent: consent,
     })
     if (existing) return existing
     throw new ResearchRepositoryError(
@@ -823,12 +823,12 @@ export class DurableResearchRepository implements ResearchRepositoryPort {
         record: await this.getById(owner, storedId),
       }
     }
-    const existing = await this.existingForPolicy({
+    const existing = await this.getForPolicy({
       ownerId: owner,
       gameId,
       stage: input.stage,
       policyVersion: input.policyVersion,
-      consent,
+      researchConsent: consent,
     })
     if (existing) return { created: false, record: existing }
     throw new ResearchRepositoryError(

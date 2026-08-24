@@ -1059,14 +1059,22 @@ export class SecureDirectPageFetcher {
         }
         const acceptedContentType = contentType as AllowedContentType
         const extracted = readableText(decoded, acceptedContentType)
-        const cleaned = cleanExternalText(extracted.text, extracted.title)
+        const extractedTitle = canonicalTitle(extracted.title, '')
+        const fallbackTitleUsed = extractedTitle.length === 0
+        const title = fallbackTitleUsed
+          ? canonicalTitle(null, source.title)
+          : extractedTitle
+        const titleForSafetyScan = fallbackTitleUsed
+          ? `${extracted.title ?? ''}\n${source.title}`
+          : extracted.title
+        const cleaned = cleanExternalText(extracted.text, titleForSafetyScan)
         const contentDigest = acceptedTextDigest(cleaned.text)
         return {
           fact: {
             citationId: source.citationId,
             requestedUrl: source.url,
             finalUrl: current.toString(),
-            title: canonicalTitle(extracted.title, source.title),
+            title,
             provider: 'webchess-direct-https',
             fetchVersion: DIRECT_PAGE_FETCH_VERSION,
             retrievedAt,

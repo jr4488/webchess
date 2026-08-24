@@ -22,6 +22,7 @@ import {
 } from './db/hash'
 import type { CanonicalJson } from './db/hash'
 import type { SqlRow, SqlStatement } from './db/sql'
+import { normalizePublicHttpsUrl } from './research/direct-page-fetch'
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const UUID_PATTERN =
@@ -119,6 +120,8 @@ const PROVIDER_BOUNDARY_NOTE =
   'Rows describe persisted request ledger evidence. Verification performs no provider call and does not prove provider identity, output truthfulness, or efficacy.'
 const DATABASE_LEDGER_BOUNDARY =
   'Exact applied IDs, checksums, and timestamps from the read-only transaction. Local source compatibility is a separate verifier check.'
+const DIRECT_PAGE_NETWORK_HISTORY_BOUNDARY =
+  'Historical DNS resolution, the pinned connection peer, TLS negotiation, and the retrieval event cannot be established from an offline case bundle.'
 const VERIFICATION_BOUNDARY = {
   canVerifyOffline: [
     'format and supported profile',
@@ -138,6 +141,7 @@ const VERIFICATION_BOUNDARY = {
     'remote publication or continued availability of the referenced source commit',
     'bundle authorship or authenticity; the SHA-256 manifest is recomputable and is not a signature',
     'whether every retained allowlisted metadata value is non-sensitive in a particular case',
+    DIRECT_PAGE_NETWORK_HISTORY_BOUNDARY,
   ],
   importBehavior:
     'Read-only inspection only. Verification does not write a database, start a game, or call a model provider.',
@@ -1777,14 +1781,14 @@ const FETCH_FAILURE_FIELDS = [
   'retrievedAt',
 ] as const
 
+function canonicalPublicHttpsUrl(value: unknown): URL | null {
+  if (typeof value !== 'string') return null
+  const normalized = normalizePublicHttpsUrl(value)
+  return normalized?.toString() === value ? normalized : null
+}
+
 function validPublicHttpsUrl(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length > 2_048) return false
-  try {
-    const url = new URL(value)
-    return url.protocol === 'https:' && url.username === '' && url.password === ''
-  } catch {
-    return false
-  }
+  return canonicalPublicHttpsUrl(value) !== null
 }
 
 function validBoundedStringArray(
@@ -1831,24 +1835,130 @@ function checkResearchConsentShape(
   }
 }
 
+function emptyArrayWhenPresent(
+  record: Record<string, unknown>,
+  field: string,
+): boolean {
+  return !Object.hasOwn(record, field) ||
+    (Array.isArray(record[field]) && record[field].length === 0)
+}
+
+function checkCurrentOptOutShape(
+  record: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): void {
+  if (
+    record.researchConsentVersion !== 'webchess-research-consent-v1' ||
+    record.researchConsentDecision !== 'no_external_research'
+  ) return
+
+  const nullWhenPresent = (field: string): boolean =>
+    !Object.hasOwn(record, field) || record[field] === null
+  const falseWhenPresent = (field: string): boolean =>
+    !Object.hasOwn(record, field) || record[field] === false
+  if (
+    record.status !== 'not_needed' ||
+    record.materiality !== null ||
+    record.model !== null ||
+    record.attemptCount !== 0 ||
+    record.omittedSourceCount !== 0 ||
+    record.contentDigest !== null ||
+    record.failureCode !== null ||
+    record.startedAt !== null ||
+    typeof record.completedAt !== 'string' ||
+    !Number.isFinite(Date.parse(record.completedAt)) ||
+    !nullWhenPresent('query') ||
+    !nullWhenPresent('searchSynthesis') ||
+    !falseWhenPresent('directPageTextFetched') ||
+    !emptyArrayWhenPresent(record, 'executedQueries') ||
+    !emptyArrayWhenPresent(record, 'retrievedFacts') ||
+    !emptyArrayWhenPresent(record, 'fetchFailures') ||
+    !emptyArrayWhenPresent(record, 'injectionSignals')
+  ) {
+    errors.push(
+      `${label} violates the current research opt-out invariants.`,
+    )
+  }
+}
+
+function expectedResearchSourceTrust(
+  hostname: string,
+): 'government_or_education' | 'general_web' {
+  return /(?:\.gov|\.edu)$/u.test(hostname)
+    ? 'government_or_education'
+    : 'general_web'
+}
+
+function checkResearchSourceProvenance(
+  record: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): void {
+  const ordinal = record.ordinal
+  const hostname = record.hostname
+  const hostnameUrl = typeof hostname === 'string'
+    ? canonicalPublicHttpsUrl(`https://${hostname}/`)
+    : null
+  const sourceUrl = Object.hasOwn(record, 'url')
+    ? canonicalPublicHttpsUrl(record.url)
+    : null
+  const titleIsValid = !Object.hasOwn(record, 'title') || (
+    typeof record.title === 'string' &&
+    record.title.length >= 1 &&
+    record.title.length <= 500 &&
+    record.title.trim() === record.title
+  )
+  const urlIsValid = !Object.hasOwn(record, 'url') || (
+    sourceUrl !== null && sourceUrl.hostname === hostname
+  )
+  if (
+    !validJsonInteger(ordinal, 1, 8) ||
+    record.citationId !== `R${String(ordinal)}` ||
+    typeof hostname !== 'string' ||
+    hostnameUrl?.hostname !== hostname ||
+    record.trust !== (
+      typeof hostname === 'string'
+        ? expectedResearchSourceTrust(hostname)
+        : null
+    ) ||
+    !['search_activity', 'synthesis_link'].includes(
+      String(record.discoveredFrom),
+    ) ||
+    !titleIsValid ||
+    !urlIsValid
+  ) {
+    errors.push(`${label} violates the canonical research-source provenance contract.`)
+  }
+}
+
 function checkFetchRoute(
   record: Record<string, unknown>,
   label: string,
   errors: string[],
 ): void {
   const chain = record.redirectChain
-  const validRoute = validPublicHttpsUrl(record.requestedUrl) &&
-    (record.finalUrl === null || validPublicHttpsUrl(record.finalUrl)) &&
-    validBoundedStringArray(chain, 1, 4) &&
-    chain.every((url) => validPublicHttpsUrl(url)) &&
-    chain[0] === record.requestedUrl &&
-    chain.at(-1) === (record.finalUrl ?? record.requestedUrl)
-  if (!validRoute) {
+  const requestedUrl = canonicalPublicHttpsUrl(record.requestedUrl)
+  const finalUrl = record.finalUrl === null
+    ? null
+    : canonicalPublicHttpsUrl(record.finalUrl)
+  const canonicalChain = Array.isArray(chain)
+    ? chain.map((url) => canonicalPublicHttpsUrl(url))
+    : []
+  if (
+    !requestedUrl ||
+    (record.finalUrl !== null && !finalUrl) ||
+    !Array.isArray(chain) ||
+    chain.length < 1 ||
+    chain.length > 4 ||
+    canonicalChain.some((url) => url === null) ||
+    chain[0] !== record.requestedUrl ||
+    chain.at(-1) !== (record.finalUrl ?? record.requestedUrl)
+  ) {
     errors.push(`${label} has an invalid direct-page URL or redirect chain.`)
     return
   }
-  const requestedHost = new URL(record.requestedUrl as string).hostname
-  if ((chain as string[]).some((url) => new URL(url).hostname !== requestedHost)) {
+  if (canonicalChain.some((url) => url?.hostname !== requestedUrl.hostname)) {
     errors.push(`${label} contains a cross-host redirect.`)
   }
 }
@@ -1868,6 +1978,7 @@ function checkRetrievedFact(
     typeof record.title !== 'string' ||
     record.title.length < 1 ||
     record.title.length > 500 ||
+    record.title.trim() !== record.title ||
     record.provider !== 'webchess-direct-https' ||
     record.fetchVersion !== 'webchess-direct-page-fetch-v1' ||
     record.extractor !== 'webchess-readable-text-v1' ||
@@ -2122,7 +2233,7 @@ function verifyProfileShape(
   data: Record<string, unknown>,
   profile: WebChessCaseProfile,
   errors: string[],
-): void {
+): boolean {
   const redaction = objectAt(data.redaction, 'data.redaction')
   const currentPolicy = PROFILE_FIELD_POLICIES[profile]
   const legacyPolicy = LEGACY_PROFILE_FIELD_POLICIES[profile]
@@ -2405,6 +2516,7 @@ function verifyProfileShape(
   for (const [index, request] of researchRequests.entries()) {
     const label = `data.lifecycle.researchRequests[${index}]`
     checkResearchConsentShape(request, label, errors)
+    checkCurrentOptOutShape(request, label, errors)
     checkResearchEvidenceShape(request, label, errors, legacy)
     if (
       Object.hasOwn(request, 'researchConsentVersion') &&
@@ -2589,6 +2701,7 @@ function verifyProfileShape(
   if (!sameCanonicalJson(verificationBoundary, VERIFICATION_BOUNDARY)) {
     errors.push('data.verificationBoundary does not match the canonical format boundary.')
   }
+  return legacy
 }
 
 function addUniqueId(
@@ -2687,8 +2800,11 @@ function checkLifecycleReferences(
     512,
   )
   const researchIds = addUniqueId(researchRequests, 'researchRequests', errors)
+  const requestsById = new Map<string, Record<string, unknown>>()
   for (const [index, value] of researchRequests.entries()) {
     const record = objectAt(value, `researchRequests[${index}]`)
+    const requestId = stringAt(record.id, `researchRequests[${index}].id`)
+    requestsById.set(requestId, record)
     if (record.gameId !== gameId || record.lifecycleRunId !== lifecycleRunId) {
       errors.push(`researchRequests[${index}] has an invalid game or lifecycle link.`)
     }
@@ -2703,18 +2819,29 @@ function checkLifecycleReferences(
     string,
     Map<string, Record<string, unknown>>
   >()
+  const sourceOrdinalsByRequest = new Map<string, Set<number>>()
+  const sourceUrlsByRequest = new Map<string, Set<string>>()
   for (const [index, value] of researchSources.entries()) {
-    const source = objectAt(value, `researchSources[${index}]`)
+    const label = `researchSources[${index}]`
+    const source = objectAt(value, label)
+    checkResearchSourceProvenance(source, label, errors)
     const requestId = stringAt(
       source.researchRequestId,
-      `researchSources[${index}].researchRequestId`,
+      `${label}.researchRequestId`,
     )
     if (!researchIds.has(requestId)) {
-      errors.push(`researchSources[${index}] refers to a missing research request.`)
+      errors.push(`${label} refers to a missing research request.`)
+    }
+    const request = requestsById.get(requestId)
+    if (
+      request?.researchConsentVersion === 'webchess-research-consent-v1' &&
+      request.researchConsentDecision === 'no_external_research'
+    ) {
+      errors.push(`${label} retains source evidence despite current research opt-out.`)
     }
     const citationId = stringAt(
       source.citationId,
-      `researchSources[${index}].citationId`,
+      `${label}.citationId`,
     )
     const requestSources = sourcesByRequest.get(requestId) ?? new Map()
     if (requestSources.has(citationId)) {
@@ -2724,6 +2851,38 @@ function checkLifecycleReferences(
     }
     requestSources.set(citationId, source)
     sourcesByRequest.set(requestId, requestSources)
+
+    const ordinal = Number(source.ordinal)
+    const ordinals = sourceOrdinalsByRequest.get(requestId) ?? new Set<number>()
+    if (ordinals.has(ordinal)) {
+      errors.push(`researchSources contains duplicate ordinal ${ordinal} for request ${requestId}.`)
+    }
+    ordinals.add(ordinal)
+    sourceOrdinalsByRequest.set(requestId, ordinals)
+
+    if (typeof source.url === 'string') {
+      const urls = sourceUrlsByRequest.get(requestId) ?? new Set<string>()
+      if (urls.has(source.url)) {
+        errors.push(`researchSources contains a duplicate URL for request ${requestId}.`)
+      }
+      urls.add(source.url)
+      sourceUrlsByRequest.set(requestId, urls)
+    }
+  }
+  for (const [requestId, sources] of sourcesByRequest) {
+    const request = requestsById.get(requestId)
+    const ordinals = sourceOrdinalsByRequest.get(requestId) ?? new Set<number>()
+    const expectedOrdinals = Array.from(
+      { length: sources.size },
+      (_, index) => index + 1,
+    )
+    if (expectedOrdinals.some((ordinal) => !ordinals.has(ordinal))) {
+      errors.push(`researchSources ordinals must be contiguous from 1 for request ${requestId}.`)
+    }
+    const sourceLimit = Number(request?.sourceLimit)
+    if (!Number.isSafeInteger(sourceLimit) || sources.size > sourceLimit) {
+      errors.push(`researchSources exceeds the recorded source limit for request ${requestId}.`)
+    }
   }
   for (const [requestIndex, value] of researchRequests.entries()) {
     const request = objectAt(value, `researchRequests[${requestIndex}]`)
@@ -2759,7 +2918,12 @@ function checkLifecycleReferences(
       }
       fetchedCitations.add(citationId)
       const source = requestSources?.get(citationId)
-      if (!source || source.url !== evidence.requestedUrl) {
+      const requestedUrl = canonicalPublicHttpsUrl(evidence.requestedUrl)
+      if (
+        !source ||
+        source.url !== evidence.requestedUrl ||
+        requestedUrl?.hostname !== source.hostname
+      ) {
         errors.push(
           `researchRequests[${requestIndex}] direct-page evidence does not match its disclosed source citation and URL.`,
         )
@@ -3165,6 +3329,7 @@ export function verifyCaseBundle(
     'retry ancestry before the bundled run without separately exported ancestor records',
     'historical correspondence between failure counts and failed or indeterminate model requests outside this point-in-time bundle',
     'semantic correctness of retained narrative payloads beyond their recorded digest and version bindings',
+    DIRECT_PAGE_NETWORK_HISTORY_BOUNDARY,
   ]
   let replay = {
     checked: false,
@@ -3235,7 +3400,15 @@ export function verifyCaseBundle(
     }
 
     const profileErrorCount = errors.length
-    verifyProfileShape(data, bundle.profile, errors)
+    const legacyProfile = verifyProfileShape(data, bundle.profile, errors)
+    if (legacyProfile) {
+      warnings.push(
+        'LEGACY PROVENANCE WARNING: this same-format bundle predates current research-consent and direct-page fetch-failure fields.',
+      )
+      notVerified.push(
+        'research-consent provenance and direct-page fetch-failure history omitted by this legacy same-format profile',
+      )
+    }
     if (errors.length === profileErrorCount) {
       verified.push('profile-specific field allowlists and replay payload shape')
       verified.push('canonical boundary metadata and declared omission ledger')

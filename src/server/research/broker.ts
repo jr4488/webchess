@@ -187,7 +187,7 @@ function sanitizedSynthesis(body: string): {
 }
 
 function sourceCandidates(
-  body: string,
+  sanitizedSynthesis: string,
   activities: readonly OpenClawWebSearchActivity[],
 ): readonly {
   discoveredFrom: ResearchSource['discoveredFrom']
@@ -209,14 +209,14 @@ function sourceCandidates(
     }
   }
   const markdownLink = /\[([^\]\n]{1,500})\]\((https?:\/\/[^\s)]+)\)/giu
-  for (const match of body.matchAll(markdownLink)) {
+  for (const match of sanitizedSynthesis.matchAll(markdownLink)) {
     candidates.push({
       discoveredFrom: 'synthesis_link',
       title: match[1] ?? '',
       url: match[2] ?? '',
     })
   }
-  const withoutMarkdown = body.replace(markdownLink, ' ')
+  const withoutMarkdown = sanitizedSynthesis.replace(markdownLink, ' ')
   const bareUrl = /https?:\/\/[^\s<>()"']+/giu
   for (const match of withoutMarkdown.matchAll(bareUrl)) {
     candidates.push({
@@ -235,7 +235,7 @@ export function normalizeCodexSearch(
   const safe = sanitizedSynthesis(body)
   const seen = new Set<string>()
   const allSources: Array<Omit<ResearchSource, 'id' | 'createdAt'>> = []
-  for (const candidate of sourceCandidates(body, result.searches)) {
+  for (const candidate of sourceCandidates(safe.synthesis, result.searches)) {
     const parsed = safePublicUrl(candidate.url)
     if (!parsed) continue
     const url = parsed.toString()
@@ -348,10 +348,13 @@ export class DurableResearchBroker implements ResearchBrokerPort {
   }
 
   async ensureForStage(input: ResearchRequestContext): Promise<ResearchRecord> {
-    const existing = (await this.repository.getForGame(input.ownerId, input.gameId))
-      .find((record) =>
-        record.stage === input.stage &&
-        record.policyVersion === RESEARCH_POLICY_VERSION)
+    const existing = await this.repository.getForPolicy({
+      ownerId: input.ownerId,
+      gameId: input.gameId,
+      stage: input.stage,
+      policyVersion: RESEARCH_POLICY_VERSION,
+      researchConsent: input.researchConsent,
+    })
     if (existing) {
       if (staleSearching(existing)) {
         return this.repository.fail({
