@@ -15,7 +15,7 @@
     "repository": "https://github.com/jr4488/webchess",
     "commit": null,
     "archive": {
-      "downloadPath": "/downloads/webchess-source.zip",
+      "downloadPath": null,
       "sha256": null
     }
   },

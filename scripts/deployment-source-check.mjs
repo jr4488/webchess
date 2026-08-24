@@ -4,6 +4,8 @@ import { pathToFileURL } from 'node:url'
 
 const execFileAsync = promisify(execFile)
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/
+const CANONICAL_REPOSITORY_URL =
+  'https://github.com/jr4488/webchess.git'
 
 export class ReleaseSourceError extends Error {
   constructor(message) {
@@ -87,11 +89,26 @@ export async function verifyReleaseSource({
     )
   }
 
+  const remoteUrls = (await git([
+    'remote',
+    'get-url',
+    '--all',
+    remoteName,
+  ])).trim().split(/\r?\n/u)
+  if (
+    remoteUrls.length !== 1 ||
+    remoteUrls[0] !== CANONICAL_REPOSITORY_URL
+  ) {
+    throw new ReleaseSourceError(
+      'Release source upstream must be the canonical WebChess repository without embedded credentials or mirrors.',
+    )
+  }
+
   const remoteState = await git([
     'ls-remote',
     '--exit-code',
     '--heads',
-    remoteName,
+    CANONICAL_REPOSITORY_URL,
     remoteRef,
   ])
   const remoteLines = remoteState.trim().split(/\r?\n/)
@@ -132,7 +149,11 @@ export async function verifyReleaseSource({
     )
   }
 
-  return { branch, commit }
+  return {
+    branch,
+    commit,
+    repository: CANONICAL_REPOSITORY_URL,
+  }
 }
 
 async function run() {

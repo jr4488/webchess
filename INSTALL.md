@@ -313,10 +313,14 @@ npm run plugin:build
 git diff --exit-code -- openclaw-plugin/dist
 mkdir -p public/downloads
 cp ../webchess-release-identity.json public/downloads/webchess-release-identity.json
-cp ../webchess-paper-3.1.pdf public/downloads/webchess-white-paper.pdf
-printf '%s  %s\n' "$WEBCHESS_PAPER_SHA256" public/downloads/webchess-white-paper.pdf | sha256sum --check
+export WEBCHESS_SOURCE_ARCHIVE_NAME="$(node -e 'const m=require("../webchess-release-identity.json"); process.stdout.write(m.source.archive.downloadPath.split("/").at(-1))')"
+cp ../webchess-source.zip "public/downloads/$WEBCHESS_SOURCE_ARCHIVE_NAME"
+export WEBCHESS_RELEASE_SOURCE_SHA="$WEBCHESS_RELEASE_SHA"
 npm run downloads:generate
+printf '%s  %s\n' "$WEBCHESS_PAPER_SHA256" public/downloads/webchess-white-paper.pdf | sha256sum --check
+cmp --silent ../webchess-paper-3.1.pdf public/downloads/webchess-white-paper.pdf
 npm run release:identity:check
+npm run release:identity:check-public
 npm pack --dry-run
 npm pack
 test -f webchess-2.2.0-rc.1.tgz

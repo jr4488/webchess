@@ -44,20 +44,18 @@ describe('public release identity copy', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('links only to the configured full immutable source commit', () => {
+  it('does not let an environment SHA replace the resolved manifest', () => {
     process.env.WEBCHESS_RELEASE_SHA = SHA
     delete process.env.VERCEL_GIT_COMMIT_SHA
 
     render(<SiteFooter />)
 
-    expect(screen.getByRole('link', { name: 'Immutable source' })).toHaveAttribute(
-      'href',
-      `https://github.com/jr4488/webchess/tree/${SHA}`,
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Source identity pending',
     )
-    expect(screen.getByRole('link', { name: 'Release identity' })).toHaveAttribute(
-      'href',
-      '/downloads/webchess-release-identity.json',
-    )
+    expect(
+      screen.queryByRole('link', { name: 'Immutable source' }),
+    ).not.toBeInTheDocument()
   })
 
   it('labels paper 3.0 as historical and sends readers to local installation', () => {

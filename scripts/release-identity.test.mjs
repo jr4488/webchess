@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   RELEASE_IDENTITY_TEMPLATE_PATH,
+  checkPublicReleaseArtifacts,
   checkReleaseIdentity,
   generateReleaseIdentity,
   resolveReleaseIdentity,
@@ -27,8 +28,33 @@ const COMMIT = '0384978b2ba709da4c9824f2821c8623d3f84364'
 const CANDIDATE_PAPER_PATH = 'docs/WEBCHESS_WHITE_PAPER_V3_1.md'
 const HISTORICAL_PAPER_PATH = 'docs/WEBCHESS_WHITE_PAPER_V3.md'
 const PAPER_PDF = Buffer.from('%PDF-1.4\nexact paper PDF bytes')
+
+function fixtureSourceArchive(commit) {
+  const prefix = `webchess-${commit}/`
+  const name = Buffer.from(prefix)
+  const local = Buffer.alloc(30 + name.length)
+  local.writeUInt32LE(0x04034b50, 0)
+  local.writeUInt16LE(name.length, 26)
+  name.copy(local, 30)
+  const central = Buffer.alloc(46 + name.length)
+  central.writeUInt32LE(0x02014b50, 0)
+  central.writeUInt16LE(name.length, 28)
+  name.copy(central, 46)
+  const comment = Buffer.from(commit)
+  const end = Buffer.alloc(22 + comment.length)
+  end.writeUInt32LE(0x06054b50, 0)
+  end.writeUInt16LE(1, 8)
+  end.writeUInt16LE(1, 10)
+  end.writeUInt32LE(central.length, 12)
+  end.writeUInt32LE(local.length, 16)
+  end.writeUInt16LE(comment.length, 20)
+  comment.copy(end, 22)
+  return Buffer.concat([local, central, end])
+}
+
+const SOURCE_ARCHIVE = fixtureSourceArchive(COMMIT)
 const SOURCE_ARCHIVE_SHA256 = createHash('sha256')
-  .update('exact source archive bytes')
+  .update(SOURCE_ARCHIVE)
   .digest('hex')
 const PAPER_PDF_SHA256 = createHash('sha256')
   .update(PAPER_PDF)
@@ -75,6 +101,11 @@ async function releaseFixture() {
     root,
     'public/downloads/webchess-white-paper.pdf',
     PAPER_PDF,
+  )
+  await writeFixtureFile(
+    root,
+    `public/downloads/webchess-source-${COMMIT}.zip`,
+    SOURCE_ARCHIVE,
   )
   await writeFixtureFile(root, '.gitignore', 'public/downloads\n')
   return {
@@ -183,7 +214,7 @@ describe('release identity provenance', () => {
       repository: 'https://github.com/jr4488/webchess',
       commit: COMMIT,
       archive: {
-        downloadPath: '/downloads/webchess-source.zip',
+        downloadPath: `/downloads/webchess-source-${COMMIT}.zip`,
         sha256: SOURCE_ARCHIVE_SHA256,
       },
     })
@@ -199,6 +230,12 @@ describe('release identity provenance', () => {
     await expect(readFile(fixture.identityPath, 'utf8')).resolves.toBe(
       `${JSON.stringify(identity, null, 2)}\n`,
     )
+    await expect(checkPublicReleaseArtifacts({
+      environment: { WEBCHESS_RELEASE_SHA: COMMIT },
+      identityPath: fixture.identityPath,
+      root: fixture.root,
+      templatePath: fixture.templatePath,
+    })).resolves.toEqual(identity)
     expect(git).toHaveBeenCalledWith([
       'ls-files',
       '-z',
@@ -221,9 +258,22 @@ describe('release identity provenance', () => {
     await git(['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'fixture'])
     const { stdout } = await git(['rev-parse', 'HEAD'])
     const commit = stdout.trim()
+    const archive = fixtureSourceArchive(commit)
+    await writeFile(
+      join(
+        fixture.root,
+        'public',
+        'downloads',
+        `webchess-source-${commit}.zip`,
+      ),
+      archive,
+    )
 
     const identity = await generateReleaseIdentity({
-      inputs: releaseInputs({ sourceCommit: commit }),
+      inputs: releaseInputs({
+        sourceArchiveSha256: createHash('sha256').update(archive).digest('hex'),
+        sourceCommit: commit,
+      }),
       outputPath: fixture.identityPath,
       root: fixture.root,
       templatePath: fixture.templatePath,

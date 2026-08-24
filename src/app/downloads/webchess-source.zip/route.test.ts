@@ -1,123 +1,80 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-import { GET } from './route'
+import { parsePublicReleaseIdentity } from '@/lib/release-source'
+import { sourceArchiveResponse } from './route'
 
-const originalCommit = process.env.VERCEL_GIT_COMMIT_SHA
-const originalRelease = process.env.WEBCHESS_RELEASE_SHA
-const originalVercel = process.env.VERCEL
-const originalVercelEnvironment = process.env.VERCEL_ENV
-const originalVercelTargetEnvironment = process.env.VERCEL_TARGET_ENV
-const originalVercelUrl = process.env.VERCEL_URL
+const SHA = '0123456789abcdef0123456789abcdef01234567'
 
-afterEach(() => {
-  if (originalCommit === undefined) {
-    delete process.env.VERCEL_GIT_COMMIT_SHA
-  } else {
-    process.env.VERCEL_GIT_COMMIT_SHA = originalCommit
-  }
-  if (originalRelease === undefined) delete process.env.WEBCHESS_RELEASE_SHA
-  else process.env.WEBCHESS_RELEASE_SHA = originalRelease
-  if (originalVercel === undefined) delete process.env.VERCEL
-  else process.env.VERCEL = originalVercel
-  if (originalVercelEnvironment === undefined) delete process.env.VERCEL_ENV
-  else process.env.VERCEL_ENV = originalVercelEnvironment
-  if (originalVercelTargetEnvironment === undefined) {
-    delete process.env.VERCEL_TARGET_ENV
-  } else {
-    process.env.VERCEL_TARGET_ENV = originalVercelTargetEnvironment
-  }
-  if (originalVercelUrl === undefined) delete process.env.VERCEL_URL
-  else process.env.VERCEL_URL = originalVercelUrl
-})
+function identity() {
+  const parsed = parsePublicReleaseIdentity({
+    schema: 'webchess-release-identity/1',
+    status: 'resolved',
+    release: { version: '2.2.0-rc.1' },
+    source: {
+      repository: 'https://github.com/jr4488/webchess',
+      commit: SHA,
+      archive: {
+        downloadPath: `/downloads/webchess-source-${SHA}.zip`,
+        sha256: 'a'.repeat(64),
+      },
+    },
+    paper: {
+      candidate: {
+        edition: '3.1',
+        repositoryPath: 'docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md',
+        pdf: {
+          downloadPath: '/downloads/webchess-white-paper.pdf',
+          sha256: 'b'.repeat(64),
+        },
+      },
+    },
+  })
+  if (!parsed) throw new Error('Invalid release identity test fixture.')
+  return parsed
+}
 
 describe('source archive download', () => {
-  it('redirects only when the reviewed release and deployment commits match', () => {
-    process.env.WEBCHESS_RELEASE_SHA =
-      '0123456789abcdef0123456789abcdef01234567'
-    process.env.VERCEL_GIT_COMMIT_SHA =
-      '0123456789abcdef0123456789abcdef01234567'
-
-    const response = GET()
+  it('redirects to the retained commit-addressed artifact only when all identities match', () => {
+    const response = sourceArchiveResponse({
+      environment: {
+        WEBCHESS_RELEASE_SHA: SHA,
+        VERCEL_GIT_COMMIT_SHA: SHA,
+      },
+      identity: identity(),
+    })
 
     expect(response.status).toBe(307)
     expect(response.headers.get('location')).toBe(
-      'https://github.com/jr4488/webchess/archive/0123456789abcdef0123456789abcdef01234567.zip',
+      `/downloads/webchess-source-${SHA}.zip`,
     )
-    expect(response.headers.get('cache-control')).toBe(
-      'no-store',
-    )
-  })
-
-  it('fails closed outside Vercel when no immutable SHA is available', async () => {
-    delete process.env.VERCEL
-    delete process.env.VERCEL_ENV
-    delete process.env.VERCEL_TARGET_ENV
-    delete process.env.VERCEL_URL
-    process.env.VERCEL_GIT_COMMIT_SHA = 'not-a-commit'
-
-    const response = GET()
-
-    expect(response.status).toBe(503)
-    expect(response.headers.get('location')).toBeNull()
-    await expect(response.json()).resolves.toMatchObject({
-      error: { code: 'RELEASE_SHA_UNAVAILABLE' },
-    })
-  })
-
-  it('does not treat deployment metadata alone as reviewed release identity', async () => {
-    delete process.env.WEBCHESS_RELEASE_SHA
-    process.env.VERCEL_GIT_COMMIT_SHA =
-      '0123456789abcdef0123456789abcdef01234567'
-
-    const response = GET()
-
-    expect(response.status).toBe(503)
-    expect(response.headers.get('location')).toBeNull()
-    await expect(response.json()).resolves.toMatchObject({
-      error: { code: 'RELEASE_SHA_UNAVAILABLE' },
-    })
+    expect(response.headers.get('location')).not.toContain('github.com')
+    expect(response.headers.get('cache-control')).toBe('no-store')
   })
 
   it.each([
-    ['VERCEL', '1'],
-    ['VERCEL_ENV', 'preview'],
-    ['VERCEL_TARGET_ENV', 'preview'],
-    ['VERCEL_URL', 'webchess-preview.vercel.app'],
-  ] as const)('fails closed with the %s marker when release provenance is unavailable', async (name, value) => {
-    process.env[name] = value
-    process.env.VERCEL_GIT_COMMIT_SHA = 'not-a-commit'
-
-    const response = GET()
-
-    expect(response.status).toBe(503)
-    expect(response.headers.get('cache-control')).toBe('no-store')
-    await expect(response.json()).resolves.toMatchObject({
-      error: { code: 'RELEASE_SHA_UNAVAILABLE' },
-    })
-  })
-
-  it('allows an explicit reviewed release SHA when deployment metadata is absent', () => {
-    process.env.VERCEL = '1'
-    delete process.env.VERCEL_GIT_COMMIT_SHA
-    process.env.WEBCHESS_RELEASE_SHA =
-      'fedcba9876543210fedcba9876543210fedcba98'
-
-    expect(GET().headers.get('location')).toBe(
-      'https://github.com/jr4488/webchess/archive/fedcba9876543210fedcba9876543210fedcba98.zip',
-    )
-  })
-
-  it('fails closed when explicit and deployment SHAs conflict', async () => {
-    process.env.WEBCHESS_RELEASE_SHA =
-      'fedcba9876543210fedcba9876543210fedcba98'
-    process.env.VERCEL_GIT_COMMIT_SHA =
-      '0123456789abcdef0123456789abcdef01234567'
-
-    const response = GET()
+    {
+      environment: { WEBCHESS_RELEASE_SHA: SHA },
+      identity: null,
+    },
+    {
+      environment: { VERCEL_GIT_COMMIT_SHA: SHA },
+      identity: identity(),
+    },
+    {
+      environment: {
+        WEBCHESS_RELEASE_SHA: SHA,
+        VERCEL_GIT_COMMIT_SHA:
+          'fedcba9876543210fedcba9876543210fedcba98',
+      },
+      identity: identity(),
+    },
+  ])('fails closed for missing, implicit, or conflicting identity', async (fixture) => {
+    const response = sourceArchiveResponse(fixture)
 
     expect(response.status).toBe(503)
+    expect(response.headers.get('location')).toBeNull()
     await expect(response.json()).resolves.toMatchObject({
-      error: { code: 'RELEASE_SHA_UNAVAILABLE' },
+      error: { code: 'RELEASE_IDENTITY_UNAVAILABLE' },
     })
   })
 })

@@ -51,6 +51,23 @@ describe('downloadable white-paper formulas', () => {
     expect(html).not.toContain('/blob/main/')
   })
 
+  it('pins candidate paper links only when an exact release commit is supplied', () => {
+    const commit = '0123456789abcdef0123456789abcdef01234567'
+    const sourcePath = 'docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md'
+    const markdown = '[Install](../INSTALL.md#requirements)'
+
+    expect(renderWhitePaperHtml(markdown, new Map(), {
+      sourceCommit: commit,
+      sourcePath,
+    })).toContain(
+      `https://github.com/jr4488/webchess/blob/${commit}/INSTALL.md#requirements`,
+    )
+    expect(renderWhitePaperHtml(markdown, new Map(), {
+      sourceCommit: null,
+      sourcePath,
+    })).toContain('href="../INSTALL.md#requirements"')
+  })
+
   it('removes CommonMark hard-break markers from PDF text', () => {
     const portable = downloadablePdfMarkdown(
       ['**Paper version:** 3.0\\', '**Date:** August 15, 2026'].join('\n'),

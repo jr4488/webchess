@@ -26,7 +26,11 @@ function successfulGit(overrides = new Map()) {
       'origin\0refs/heads/release/webchess\n',
     ],
     [
-      'ls-remote --exit-code --heads origin refs/heads/release/webchess',
+      'remote get-url --all origin',
+      'https://github.com/jr4488/webchess.git\n',
+    ],
+    [
+      'ls-remote --exit-code --heads https://github.com/jr4488/webchess.git refs/heads/release/webchess',
       `${COMMIT}\trefs/heads/release/webchess\n`,
     ],
     ...overrides,
@@ -48,8 +52,9 @@ describe('release source verification', () => {
     await expect(verifyReleaseSource({ git })).resolves.toEqual({
       branch: 'release/webchess',
       commit: COMMIT,
+      repository: 'https://github.com/jr4488/webchess.git',
     })
-    expect(git).toHaveBeenCalledTimes(7)
+    expect(git).toHaveBeenCalledTimes(8)
   })
 
   it('refuses tracked or untracked workspace changes before network access', async () => {
@@ -97,7 +102,7 @@ describe('release source verification', () => {
     const git = successfulGit(
       new Map([
         [
-          'ls-remote --exit-code --heads origin refs/heads/release/webchess',
+          'ls-remote --exit-code --heads https://github.com/jr4488/webchess.git refs/heads/release/webchess',
           `${'f'.repeat(40)}\trefs/heads/release/webchess\n`,
         ],
       ]),
@@ -108,6 +113,24 @@ describe('release source verification', () => {
     ).rejects.toThrow(
       'HEAD does not match the live remote branch commit',
     )
+  })
+
+  it('refuses forks, mirrors, multiple URLs, and credential-bearing remotes', async () => {
+    for (const remoteUrls of [
+      'https://github.com/someone/webchess.git\n',
+      'https://github.com/jr4488/webchess.git\nssh://mirror/webchess\n',
+      'https://token@example.invalid/webchess.git\n',
+    ]) {
+      const git = successfulGit(
+        new Map([
+          ['remote get-url --all origin', remoteUrls],
+        ]),
+      )
+
+      await expect(verifyReleaseSource({ git })).rejects.toThrow(
+        'canonical WebChess repository',
+      )
+    }
   })
 
   it('uses sanitized, bounded errors', async () => {

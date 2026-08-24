@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, extname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -9,7 +9,9 @@ import remarkGfm from 'remark-gfm'
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const downloadDirectory = join(repositoryRoot, 'public', 'downloads')
-const whitePaperRepositoryPath = 'docs/WEBCHESS_WHITE_PAPER_V3.md'
+const candidateWhitePaperRepositoryPath =
+  'docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md'
+const historicalWhitePaperRepositoryPath = 'docs/WEBCHESS_WHITE_PAPER_V3.md'
 const historicalWhitePaperSourceCommit =
   '0384978b2ba709da4c9824f2821c8623d3f84364'
 const historicalWhitePaperSoftwareVersion = '2.2.0'
@@ -18,21 +20,40 @@ const sourcePaths = {
   installation: join(repositoryRoot, 'INSTALL.md'),
   license: join(repositoryRoot, 'LICENSE'),
   package: join(repositoryRoot, 'package.json'),
-  whitePaper: join(repositoryRoot, whitePaperRepositoryPath),
+  candidateWhitePaper: join(
+    repositoryRoot,
+    candidateWhitePaperRepositoryPath,
+  ),
+  historicalWhitePaper: join(
+    repositoryRoot,
+    historicalWhitePaperRepositoryPath,
+  ),
 }
 
 const outputPaths = {
+  candidateWhitePaperHtml: join(
+    downloadDirectory,
+    'webchess-white-paper.html',
+  ),
+  candidateWhitePaperMarkdown: join(
+    downloadDirectory,
+    'webchess-white-paper.md',
+  ),
+  candidateWhitePaperPdf: join(
+    downloadDirectory,
+    'webchess-white-paper.pdf',
+  ),
   installation: join(downloadDirectory, 'webchess-installation.md'),
   license: join(downloadDirectory, 'LICENSE'),
-  whitePaperHtml: join(
+  historicalWhitePaperHtml: join(
     downloadDirectory,
     'webchess-white-paper-v3-historical.html',
   ),
-  whitePaperMarkdown: join(
+  historicalWhitePaperMarkdown: join(
     downloadDirectory,
     'webchess-white-paper-v3-historical.md',
   ),
-  whitePaperPdf: join(
+  historicalWhitePaperPdf: join(
     downloadDirectory,
     'webchess-white-paper-v3-historical.pdf',
   ),
@@ -249,7 +270,11 @@ function downloadablePdfMarkdown(source) {
   return downloadableMarkdown(source).replace(/\\(?=\r?$)/gmu, '')
 }
 
-function repositoryHref(sourcePath, href) {
+function repositoryHref(
+  sourcePath,
+  href,
+  sourceCommit = historicalWhitePaperSourceCommit,
+) {
   if (
     !href ||
     href.startsWith('#') ||
@@ -257,6 +282,13 @@ function repositoryHref(sourcePath, href) {
     /^[a-z][a-z\d+.-]*:/i.test(href)
   ) {
     return href
+  }
+
+  if (sourceCommit === null) {
+    return href
+  }
+  if (!/^[0-9a-f]{40}$/u.test(sourceCommit)) {
+    throw new Error('White-paper source links require an exact lowercase commit.')
   }
 
   const [relativePath, fragment] = href.split('#', 2)
@@ -276,10 +308,17 @@ function repositoryHref(sourcePath, href) {
   }
 
   const suffix = fragment ? `#${fragment}` : ''
-  return `${repositoryUrl}/blob/${historicalWhitePaperSourceCommit}/${normalizedParts.join('/')}${suffix}`
+  return `${repositoryUrl}/blob/${sourceCommit}/${normalizedParts.join('/')}${suffix}`
 }
 
-function renderWhitePaperHtml(markdown, images) {
+function renderWhitePaperHtml(
+  markdown,
+  images,
+  {
+    sourceCommit = historicalWhitePaperSourceCommit,
+    sourcePath = historicalWhitePaperRepositoryPath,
+  } = {},
+) {
   const article = renderToStaticMarkup(
     createElement(
       ReactMarkdown,
@@ -290,7 +329,7 @@ function renderWhitePaperHtml(markdown, images) {
             createElement(
               'a',
               {
-                href: repositoryHref(whitePaperRepositoryPath, href),
+                href: repositoryHref(sourcePath, href, sourceCommit),
                 title,
               },
               children,
@@ -1076,17 +1115,25 @@ function createPdf(markdown, softwareVersion, images) {
 }
 
 async function main() {
-  const [installation, license, packageSource, whitePaper] = await Promise.all([
+  const [
+    installation,
+    license,
+    packageSource,
+    candidateWhitePaper,
+    historicalWhitePaper,
+  ] = await Promise.all([
     readFile(sourcePaths.installation, 'utf8'),
     readFile(sourcePaths.license, 'utf8'),
     readFile(sourcePaths.package, 'utf8'),
-    readFile(sourcePaths.whitePaper, 'utf8'),
+    readFile(sourcePaths.candidateWhitePaper, 'utf8'),
+    readFile(sourcePaths.historicalWhitePaper, 'utf8'),
   ])
 
   assertDocument('INSTALL.md', installation)
   assertDocument('LICENSE', license)
   assertDocument('package.json', packageSource)
-  assertDocument(whitePaperRepositoryPath, whitePaper)
+  assertDocument(candidateWhitePaperRepositoryPath, candidateWhitePaper)
+  assertDocument(historicalWhitePaperRepositoryPath, historicalWhitePaper)
 
   const softwareVersion = JSON.parse(packageSource).version
   if (
@@ -1096,25 +1143,92 @@ async function main() {
     throw new Error('package.json must provide a semantic software version')
   }
 
-  const whitePaperImages = await loadWhitePaperImages(whitePaper)
-  const whitePaperHtml = renderWhitePaperHtml(whitePaper, whitePaperImages)
-  const whitePaperPdf = createPdf(
-    downloadablePdfMarkdown(whitePaper),
+  const configuredSourceCommit = process.env.WEBCHESS_RELEASE_SOURCE_SHA
+    ?.trim()
+    .toLowerCase() ?? null
+  if (
+    configuredSourceCommit !== null &&
+    !/^[0-9a-f]{40}$/u.test(configuredSourceCommit)
+  ) {
+    throw new Error(
+      'WEBCHESS_RELEASE_SOURCE_SHA must be an exact 40-character hexadecimal commit.',
+    )
+  }
+
+  const [candidateImages, historicalImages] = await Promise.all([
+    loadWhitePaperImages(candidateWhitePaper),
+    loadWhitePaperImages(historicalWhitePaper),
+  ])
+  const candidateWhitePaperHtml = renderWhitePaperHtml(
+    candidateWhitePaper,
+    candidateImages,
+    {
+      sourceCommit: configuredSourceCommit,
+      sourcePath: candidateWhitePaperRepositoryPath,
+    },
+  )
+  const candidateWhitePaperPdf = createPdf(
+    downloadablePdfMarkdown(candidateWhitePaper),
+    softwareVersion,
+    candidateImages,
+  )
+  const historicalWhitePaperHtml = renderWhitePaperHtml(
+    historicalWhitePaper,
+    historicalImages,
+  )
+  const historicalWhitePaperPdf = createPdf(
+    downloadablePdfMarkdown(historicalWhitePaper),
     historicalWhitePaperSoftwareVersion,
-    whitePaperImages,
+    historicalImages,
   )
 
   await mkdir(downloadDirectory, { recursive: true })
-  await Promise.all([
+  const writes = [
     writeFile(outputPaths.installation, installation, 'utf8'),
     writeFile(outputPaths.license, license, 'utf8'),
-    writeFile(outputPaths.whitePaperHtml, whitePaperHtml, 'utf8'),
-    writeFile(outputPaths.whitePaperMarkdown, whitePaper, 'utf8'),
-    writeFile(outputPaths.whitePaperPdf, whitePaperPdf),
-  ])
+    writeFile(
+      outputPaths.historicalWhitePaperHtml,
+      historicalWhitePaperHtml,
+      'utf8',
+    ),
+    writeFile(
+      outputPaths.historicalWhitePaperMarkdown,
+      historicalWhitePaper,
+      'utf8',
+    ),
+    writeFile(
+      outputPaths.historicalWhitePaperPdf,
+      historicalWhitePaperPdf,
+    ),
+  ]
+  if (configuredSourceCommit === null) {
+    writes.push(...[
+      rm(outputPaths.candidateWhitePaperHtml, { force: true }),
+      rm(outputPaths.candidateWhitePaperMarkdown, { force: true }),
+      rm(outputPaths.candidateWhitePaperPdf, { force: true }),
+    ])
+  } else {
+    writes.push(...[
+      writeFile(
+        outputPaths.candidateWhitePaperHtml,
+        candidateWhitePaperHtml,
+        'utf8',
+      ),
+      writeFile(
+        outputPaths.candidateWhitePaperMarkdown,
+        candidateWhitePaper,
+        'utf8',
+      ),
+      writeFile(
+        outputPaths.candidateWhitePaperPdf,
+        candidateWhitePaperPdf,
+      ),
+    ])
+  }
+  await Promise.all(writes)
 
   console.log(
-    `Generated ${Object.keys(outputPaths).length} download artifacts in public/downloads`,
+    `Generated ${configuredSourceCommit === null ? 5 : 8} download artifacts in public/downloads`,
   )
 }
 

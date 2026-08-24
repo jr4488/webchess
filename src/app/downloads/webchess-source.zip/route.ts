@@ -1,22 +1,29 @@
-import { configuredReleaseCommit } from '@/lib/release-source'
+import {
+  loadPublicReleaseIdentity,
+  retainedReleaseArchivePath,
+} from '@/lib/release-source'
+import type { PublicReleaseIdentity } from '@/lib/release-source'
 
-const REPOSITORY_ARCHIVE_ROOT =
-  'https://github.com/jr4488/webchess/archive'
+type ReleaseEnvironment = Readonly<{
+  VERCEL_GIT_COMMIT_SHA?: string
+  WEBCHESS_RELEASE_SHA?: string
+}>
 
-function archiveUrl(): string | null {
-  const commit = configuredReleaseCommit()
-  return commit ? `${REPOSITORY_ARCHIVE_ROOT}/${commit}.zip` : null
-}
-
-export function GET(): Response {
-  const location = archiveUrl()
+export function sourceArchiveResponse({
+  environment = process.env as ReleaseEnvironment,
+  identity = loadPublicReleaseIdentity(),
+}: {
+  environment?: ReleaseEnvironment
+  identity?: PublicReleaseIdentity | null
+} = {}): Response {
+  const location = retainedReleaseArchivePath(environment, identity)
   if (!location) {
     return Response.json(
       {
         error: {
-          code: 'RELEASE_SHA_UNAVAILABLE',
+          code: 'RELEASE_IDENTITY_UNAVAILABLE',
           message:
-            'The immutable release source identity is unavailable; branch archives are never substituted.',
+            'The resolved release identity and retained source artifact are unavailable; branch and generated GitHub archives are never substituted.',
         },
       },
       {
@@ -36,4 +43,8 @@ export function GET(): Response {
       Location: location,
     },
   })
+}
+
+export function GET(): Response {
+  return sourceArchiveResponse()
 }

@@ -17,6 +17,8 @@ import {
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDeepStrictEqual, promisify } from 'node:util'
 
+import { validateCanonicalSourceArchive } from './create-release-source-archive.mjs'
+
 const execFileAsync = promisify(execFile)
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -90,7 +92,9 @@ function releaseIdentityShape({
       repository: 'https://github.com/jr4488/webchess',
       commit: sourceCommit,
       archive: {
-        downloadPath: '/downloads/webchess-source.zip',
+        downloadPath: sourceCommit
+          ? `/downloads/webchess-source-${sourceCommit}.zip`
+          : null,
         sha256: sourceArchiveSha256,
       },
     },
@@ -349,6 +353,10 @@ async function verifyTrackedPaper({
     )
   }
 
+  await verifyPaperFile({ edition, path, root })
+}
+
+async function verifyPaperFile({ edition, path, root }) {
   const absolutePath = resolve(root, path)
   const repositoryRelativePath = relative(root, absolutePath)
   if (
@@ -418,6 +426,56 @@ async function verifyCandidatePaperPdf({ identity, root }) {
   }
 }
 
+async function verifySourceArchive({ identity, root }) {
+  const expectedDownloadPath =
+    `/downloads/webchess-source-${identity.source.commit}.zip`
+  if (identity.source.archive.downloadPath !== expectedDownloadPath) {
+    throw new ReleaseIdentityError(
+      'The retained source archive path must be addressed by the exact release commit.',
+    )
+  }
+  const archivePath = resolve(
+    root,
+    'public',
+    `.${identity.source.archive.downloadPath}`,
+  )
+  const publicRoot = resolve(root, 'public')
+  const publicRelativePath = relative(publicRoot, archivePath)
+  if (
+    !publicRelativePath ||
+    publicRelativePath.startsWith('..') ||
+    resolve(publicRoot, publicRelativePath) !== archivePath
+  ) {
+    throw new ReleaseIdentityError(
+      'The retained source archive path escapes the public artifact root.',
+    )
+  }
+  let archive
+  try {
+    archive = await readFile(archivePath)
+  } catch {
+    throw new ReleaseIdentityError(
+      'The exact retained source ZIP must exist before release identity generation or checking.',
+    )
+  }
+  try {
+    validateCanonicalSourceArchive(archive, {
+      commit: identity.source.commit,
+      prefix: `webchess-${identity.source.commit}/`,
+    })
+  } catch {
+    throw new ReleaseIdentityError(
+      'The retained source ZIP is not the canonical commit-addressed Git archive.',
+    )
+  }
+  const digest = createHash('sha256').update(archive).digest('hex')
+  if (digest !== identity.source.archive.sha256) {
+    throw new ReleaseIdentityError(
+      'The retained source ZIP bytes do not match source.archive.sha256.',
+    )
+  }
+}
+
 export function releaseInputsFromEnvironment(environment = process.env) {
   return {
     paperPdfSha256:
@@ -456,6 +514,7 @@ export async function generateReleaseIdentity({
   }
   await verifyDeclaredPapers({ git: runGit, identity, root })
   await verifyCandidatePaperPdf({ identity, root })
+  await verifySourceArchive({ identity, root })
 
   await mkdir(dirname(outputPath), { recursive: true })
   const temporaryPath = `${outputPath}.${process.pid}.${randomUUID()}.tmp`
@@ -507,6 +566,7 @@ export async function checkReleaseIdentity({
   }
   await verifyDeclaredPapers({ git: runGit, identity, root })
   await verifyCandidatePaperPdf({ identity, root })
+  await verifySourceArchive({ identity, root })
   const finalHead = await exactCleanHead(runGit)
   if (finalHead !== initialHead) {
     throw new ReleaseIdentityError(
@@ -514,6 +574,72 @@ export async function checkReleaseIdentity({
     )
   }
   return identity
+}
+
+function verifyDeploymentCommitBinding(identity, environment) {
+  const reviewed = environment.WEBCHESS_RELEASE_SHA?.trim().toLowerCase()
+  const deployed = environment.VERCEL_GIT_COMMIT_SHA?.trim().toLowerCase()
+  if (reviewed !== identity.source.commit) {
+    throw new ReleaseIdentityError(
+      'WEBCHESS_RELEASE_SHA must match the resolved public release identity.',
+    )
+  }
+  if (deployed && deployed !== identity.source.commit) {
+    throw new ReleaseIdentityError(
+      'VERCEL_GIT_COMMIT_SHA does not match the resolved public release identity.',
+    )
+  }
+}
+
+export async function checkPublicReleaseArtifacts({
+  environment = process.env,
+  identityPath = RELEASE_IDENTITY_OUTPUT_PATH,
+  root = repositoryRoot,
+  templatePath,
+} = {}) {
+  validateReleaseIdentityTemplate(
+    await readJson(
+      templatePath ?? templatePathForRoot(root),
+      'The tracked release-identity template',
+    ),
+  )
+  const identity = validateResolvedReleaseIdentity(
+    await readJson(
+      identityPath,
+      'The generated release identity',
+    ),
+  )
+  verifyDeploymentCommitBinding(identity, environment)
+  await verifyPaperFile({
+    edition: identity.paper.candidate.edition,
+    path: identity.paper.candidate.repositoryPath,
+    root,
+  })
+  await verifyPaperFile({
+    edition: identity.paper.historical.edition,
+    path: identity.paper.historical.repositoryPath,
+    root,
+  })
+  await verifyCandidatePaperPdf({ identity, root })
+  await verifySourceArchive({ identity, root })
+  return identity
+}
+
+async function publicReleaseCheckConfigured(environment = process.env) {
+  const deploymentRequested = Boolean(
+    environment.WEBCHESS_RELEASE_SHA ||
+    environment.VERCEL ||
+    environment.VERCEL_ENV ||
+    environment.VERCEL_TARGET_ENV ||
+    environment.VERCEL_URL,
+  )
+  let manifestExists = true
+  try {
+    await readFile(RELEASE_IDENTITY_OUTPUT_PATH)
+  } catch {
+    manifestExists = false
+  }
+  return deploymentRequested || manifestExists
 }
 
 async function run() {
@@ -533,8 +659,26 @@ async function run() {
       )
       return
     }
+    if (command === 'check-public') {
+      const identity = await checkPublicReleaseArtifacts()
+      console.log(
+        `Verified retained public artifacts for ${identity.source.commit}.`,
+      )
+      return
+    }
+    if (command === 'check-public-if-configured') {
+      if (!(await publicReleaseCheckConfigured())) {
+        console.log('No public release identity configured; retained artifact gate skipped.')
+        return
+      }
+      const identity = await checkPublicReleaseArtifacts()
+      console.log(
+        `Verified retained public artifacts for ${identity.source.commit}.`,
+      )
+      return
+    }
     throw new ReleaseIdentityError(
-      'Usage: node scripts/release-identity.mjs <generate|check>',
+      'Usage: node scripts/release-identity.mjs <generate|check|check-public|check-public-if-configured>',
     )
   } catch (error) {
     console.error(

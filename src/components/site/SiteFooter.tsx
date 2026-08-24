@@ -26,7 +26,11 @@ export function SiteFooter() {
               <li><Link href="/#episode">Episode</Link></li>
               <li><Link href="/#lifecycle">Lifecycle</Link></li>
               <li><Link href="/research">Research program</Link></li>
-              <li><Link href="/white-paper">Historical paper 3.0</Link></li>
+              <li>
+                <Link href="/white-paper">
+                  {immutableSourceUrl ? 'Mapped paper 3.1' : 'Historical paper 3.0'}
+                </Link>
+              </li>
               <li><Link href="/install">Install the local research build</Link></li>
               <li>
                 {immutableSourceUrl ? (

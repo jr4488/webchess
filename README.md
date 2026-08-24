@@ -218,10 +218,14 @@ npm run plugin:build
 git diff --exit-code -- openclaw-plugin/dist
 mkdir -p public/downloads
 cp ../webchess-release-identity.json public/downloads/webchess-release-identity.json
-cp ../webchess-paper-3.1.pdf public/downloads/webchess-white-paper.pdf
-printf '%s  %s\n' "$WEBCHESS_PAPER_SHA256" public/downloads/webchess-white-paper.pdf | sha256sum --check
+export WEBCHESS_SOURCE_ARCHIVE_NAME="$(node -e 'const m=require("../webchess-release-identity.json"); process.stdout.write(m.source.archive.downloadPath.split("/").at(-1))')"
+cp ../webchess-source.zip "public/downloads/$WEBCHESS_SOURCE_ARCHIVE_NAME"
+export WEBCHESS_RELEASE_SOURCE_SHA="$WEBCHESS_RELEASE_SHA"
 npm run downloads:generate
+printf '%s  %s\n' "$WEBCHESS_PAPER_SHA256" public/downloads/webchess-white-paper.pdf | sha256sum --check
+cmp --silent ../webchess-paper-3.1.pdf public/downloads/webchess-white-paper.pdf
 npm run release:identity:check
+npm run release:identity:check-public
 npm pack --dry-run
 npm pack
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install npm-pack:./webchess-2.2.0-rc.1.tgz
@@ -376,18 +380,23 @@ contemporaneous code mapping.
 The tracked template at
 `docs/releases/webchess-release-identity.template.json` intentionally contains
 nulls for the as-yet nonexistent code-freeze and paper artifacts. A release
-operator must first commit edition 3.1, freeze the exact source, obtain the
-SHA-256 digests of the immutable GitHub source ZIP and the exact published PDF,
-and then run from an otherwise clean checkout:
+operator must first commit edition 3.1, freeze the exact source, create the
+retained uncompressed Git archive and deterministic paper PDF, and then bind
+their exact bytes from an otherwise clean checkout:
 
 ```bash
 export WEBCHESS_RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
-export WEBCHESS_RELEASE_SOURCE_ARCHIVE_SHA256='<64 lowercase hex characters>'
-export WEBCHESS_RELEASE_PAPER_PATH='docs/<committed-edition-3.1-paper>.md'
-export WEBCHESS_RELEASE_PAPER_PDF_SHA256='<64 lowercase hex characters>'
-test -f public/downloads/webchess-white-paper.pdf
+export WEBCHESS_RELEASE_SHA="$WEBCHESS_RELEASE_SOURCE_SHA"
+npm run --silent release:source-archive > ../webchess-source-archive.json
+export WEBCHESS_RELEASE_SOURCE_ARCHIVE_SHA256="$(node -e 'const r=require("../webchess-source-archive.json"); process.stdout.write(r.sha256)')"
+export WEBCHESS_RELEASE_PAPER_PATH='docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md'
+npm run downloads:generate
+export WEBCHESS_RELEASE_PAPER_PDF_SHA256="$(sha256sum public/downloads/webchess-white-paper.pdf | cut -d' ' -f1)"
 npm run release:identity:generate
 npm run release:identity:check
+npm run release:identity:check-public
+npm run --silent release:source-archive > ../webchess-source-archive-second.json
+test "$(node -e 'const r=require("../webchess-source-archive-second.json"); process.stdout.write(r.sha256)')" = "$WEBCHESS_RELEASE_SOURCE_ARCHIVE_SHA256"
 ```
 
 The generated `public/downloads/webchess-release-identity.json` is deliberately
@@ -400,12 +409,13 @@ artifact exits nonzero. Until that gate and the public byte-for-byte checks
 pass, the site must continue to display “source identity pending” and the
 source ZIP route must return 503.
 
-`npm run downloads:generate` preserves paper 3.0 only at filenames containing
-`v3-historical`; it never writes the edition 3.1 path. The exact candidate PDF
-must already exist at `public/downloads/webchess-white-paper.pdf`, and the
-identity generator/checker verifies those local PDF bytes against the injected
-SHA-256. This prevents a historical PDF from silently occupying the candidate
-paper URL.
+`npm run downloads:generate` always preserves paper 3.0 at filenames containing
+`v3-historical`. It writes the edition 3.1 Markdown, HTML, and deterministic PDF
+only when `WEBCHESS_RELEASE_SOURCE_SHA` is an exact commit. The identity checks
+hash both that PDF and the retained commit-addressed source ZIP; an environment
+SHA alone cannot make the site advertise release source. This prevents a
+historical PDF or a generated GitHub archive from silently occupying a mapped
+candidate URL.
 
 ## Documentation
 

@@ -155,12 +155,15 @@ export function ProductHome() {
           </p>
           <div className="wc-hero-ctas">
             <Link className="wc-btn" href="/install">Run WebChess locally</Link>
-            <Link className="wc-btn wc-btn-plain" href="/white-paper">Read historical paper 3.0</Link>
             {immutableSourceUrl ? (
-              <a className="wc-btn wc-btn-plain" href="/downloads/webchess-white-paper.pdf" download>
-                Download mapped paper 3.1
-              </a>
-            ) : null}
+              <Link className="wc-btn wc-btn-plain" href="/white-paper">
+                Read mapped paper 3.1
+              </Link>
+            ) : (
+              <Link className="wc-btn wc-btn-plain" href="/white-paper">
+                Read historical paper 3.0
+              </Link>
+            )}
             <a className="wc-btn wc-btn-plain" href="#episode">Watch an episode</a>
           </div>
         </div>

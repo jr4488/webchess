@@ -3,23 +3,58 @@ import { describe, expect, it } from 'vitest'
 import {
   configuredReleaseCommit,
   immutableReleaseSourceUrl,
+  parsePublicReleaseIdentity,
+  retainedReleaseArchivePath,
 } from './release-source'
 
 const SHA = '0123456789abcdef0123456789abcdef01234567'
 
+function identity(overrides: Record<string, unknown> = {}) {
+  return {
+    schema: 'webchess-release-identity/1',
+    status: 'resolved',
+    release: { version: '2.2.0-rc.1' },
+    source: {
+      repository: 'https://github.com/jr4488/webchess',
+      commit: SHA,
+      archive: {
+        downloadPath: `/downloads/webchess-source-${SHA}.zip`,
+        sha256: 'a'.repeat(64),
+      },
+    },
+    paper: {
+      candidate: {
+        edition: '3.1',
+        repositoryPath: 'docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md',
+        pdf: {
+          downloadPath: '/downloads/webchess-white-paper.pdf',
+          sha256: 'b'.repeat(64),
+        },
+      },
+    },
+    ...overrides,
+  }
+}
+
 describe('immutable release source identity', () => {
-  it('accepts a complete configured release commit', () => {
-    expect(configuredReleaseCommit({ WEBCHESS_RELEASE_SHA: SHA })).toBe(SHA)
-    expect(immutableReleaseSourceUrl({ WEBCHESS_RELEASE_SHA: SHA })).toBe(
+  it('requires the resolved manifest and explicit release commit to agree', () => {
+    const parsed = parsePublicReleaseIdentity(identity())
+    expect(parsed).not.toBeNull()
+    expect(configuredReleaseCommit({ WEBCHESS_RELEASE_SHA: SHA }, parsed)).toBe(SHA)
+    expect(immutableReleaseSourceUrl({ WEBCHESS_RELEASE_SHA: SHA }, parsed)).toBe(
       `https://github.com/jr4488/webchess/tree/${SHA}`,
+    )
+    expect(retainedReleaseArchivePath({ WEBCHESS_RELEASE_SHA: SHA }, parsed)).toBe(
+      `/downloads/webchess-source-${SHA}.zip`,
     )
   })
 
-  it('accepts matching explicit and deployment commits', () => {
+  it('accepts matching explicit, manifest, and deployment commits', () => {
+    const parsed = parsePublicReleaseIdentity(identity())
     expect(configuredReleaseCommit({
       WEBCHESS_RELEASE_SHA: SHA.toUpperCase(),
       VERCEL_GIT_COMMIT_SHA: SHA,
-    })).toBe(SHA)
+    }, parsed)).toBe(SHA)
   })
 
   it.each([
@@ -31,8 +66,40 @@ describe('immutable release source identity', () => {
       WEBCHESS_RELEASE_SHA: SHA,
       VERCEL_GIT_COMMIT_SHA: 'fedcba9876543210fedcba9876543210fedcba98',
     },
-  ])('fails closed for implicit, missing, mutable, abbreviated, or conflicting identity', (environment) => {
-    expect(configuredReleaseCommit(environment)).toBeNull()
-    expect(immutableReleaseSourceUrl(environment)).toBeNull()
+  ])('fails closed for implicit, missing, mutable, abbreviated, or conflicting environment identity', (environment) => {
+    const parsed = parsePublicReleaseIdentity(identity())
+    expect(configuredReleaseCommit(environment, parsed)).toBeNull()
+    expect(immutableReleaseSourceUrl(environment, parsed)).toBeNull()
+  })
+
+  it('does not allow environment metadata to replace a manifest', () => {
+    expect(configuredReleaseCommit({ WEBCHESS_RELEASE_SHA: SHA }, null)).toBeNull()
+    expect(immutableReleaseSourceUrl({ WEBCHESS_RELEASE_SHA: SHA }, null)).toBeNull()
+  })
+
+  it.each([
+    identity({ status: 'unresolved' }),
+    identity({
+      source: {
+        repository: 'https://github.com/someone/fork',
+        commit: SHA,
+        archive: {
+          downloadPath: `/downloads/webchess-source-${SHA}.zip`,
+          sha256: 'a'.repeat(64),
+        },
+      },
+    }),
+    identity({
+      source: {
+        repository: 'https://github.com/jr4488/webchess',
+        commit: SHA,
+        archive: {
+          downloadPath: '/downloads/webchess-source.zip',
+          sha256: 'a'.repeat(64),
+        },
+      },
+    }),
+  ])('rejects malformed, noncanonical, or unresolved manifests', (value) => {
+    expect(parsePublicReleaseIdentity(value)).toBeNull()
   })
 })

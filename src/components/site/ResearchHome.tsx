@@ -63,9 +63,13 @@ export function ResearchHome() {
                 3.1 is not presented as a public artifact.
               </p>
               {immutableSourceUrl ? (
-                <a href="/downloads/webchess-white-paper.pdf" download>
-                  Download mapped edition 3.1
-                </a>
+                <>
+                  <Link href="/white-paper">Read mapped edition 3.1</Link>
+                  {' · '}
+                  <a href="/downloads/webchess-white-paper.pdf" download>
+                    Download PDF
+                  </a>
+                </>
               ) : (
                 <span role="status">Edition 3.1 publication pending code freeze</span>
               )}
