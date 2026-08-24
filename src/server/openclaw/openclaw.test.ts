@@ -42,6 +42,7 @@ import {
   MAX_OPENCLAW_JSON_BODY_BYTES,
   readBoundedJson,
 } from './request-guard'
+import { OpenClawDatabaseReadinessError } from './services'
 
 const PROBLEM =
   'How should I choose a reversible next step while the available evidence is incomplete?'
@@ -573,7 +574,64 @@ describe('OpenClaw route handlers', () => {
     const response = await handleOpenClawStatusRequest(
       localRequest('/api/openclaw/status', { method: 'GET' }),
       {
-        ensureServices: async () => undefined,
+        ensureServices: async () => ({
+          available: true,
+          engine: 'PostgreSQL',
+          majorVersion: 17,
+          scope: 'dedicated-local',
+          serverVersion: '17.6',
+        }),
+        environment: DEV_ENVIRONMENT,
+        execute,
+      },
+    )
+
+    expect(response.status).toBe(503)
+    expect(await responseJson(response)).toEqual({
+      available: false,
+      database: {
+        available: true,
+        engine: 'PostgreSQL',
+        majorVersion: 17,
+        scope: 'dedicated-local',
+        serverVersion: '17.6',
+      },
+      lifecycle: 'webchess-2.0',
+      model: {
+        checked: 'configuration',
+        configurationReady: false,
+        message: 'Install OpenClaw locally or configure the plugin with its executable path.',
+        reason: 'cli-not-found',
+        transport: 'local',
+      },
+      search: {
+        available: null,
+        checked: false,
+        reason: 'not-probed',
+        requiredForLaunch: false,
+      },
+    })
+    expect(response.headers.get('cache-control')).toContain('no-store')
+  })
+
+  it('reports independently checked model configuration and PostgreSQL 17 readiness', async () => {
+    const execute = vi.fn<OpenClawExecutor>(async (args) => {
+      if (args.includes('--version')) return 'OpenClaw fixture\n'
+      return JSON.stringify({
+        auth: { missingProvidersInUse: [] },
+        resolvedDefault: { model: 'fixture-model', provider: 'fixture-provider' },
+      })
+    })
+    const response = await handleOpenClawStatusRequest(
+      localRequest('/api/openclaw/status', { method: 'GET' }),
+      {
+        ensureServices: async () => ({
+          available: true,
+          engine: 'PostgreSQL',
+          majorVersion: 17,
+          scope: 'dedicated-local',
+          serverVersion: '17.10',
+        }),
         environment: DEV_ENVIRONMENT,
         execute,
       },
@@ -581,18 +639,74 @@ describe('OpenClaw route handlers', () => {
 
     expect(response.status).toBe(200)
     expect(await responseJson(response)).toEqual({
-      available: false,
+      available: true,
       database: {
         available: true,
-        engine: 'PostgreSQL 17',
+        engine: 'PostgreSQL',
+        majorVersion: 17,
         scope: 'dedicated-local',
+        serverVersion: '17.10',
       },
       lifecycle: 'webchess-2.0',
-      message: 'Install OpenClaw locally or configure the plugin with its executable path.',
-      reason: 'cli-not-found',
-      transport: 'local',
+      model: {
+        checked: 'configuration',
+        configurationReady: true,
+        configuredModel: 'fixture-provider/fixture-model',
+        transport: 'local',
+        version: 'OpenClaw fixture',
+      },
+      search: {
+        available: null,
+        checked: false,
+        reason: 'not-probed',
+        requiredForLaunch: false,
+      },
     })
-    expect(response.headers.get('cache-control')).toContain('no-store')
+  })
+
+  it('reports an unsupported database without claiming model or search failure', async () => {
+    const execute = vi.fn<OpenClawExecutor>(async (args) => {
+      if (args.includes('--version')) return 'OpenClaw fixture\n'
+      return JSON.stringify({
+        auth: { missingProvidersInUse: [] },
+        resolvedDefault: { model: 'fixture-model', provider: 'fixture-provider' },
+      })
+    })
+    const response = await handleOpenClawStatusRequest(
+      localRequest('/api/openclaw/status', { method: 'GET' }),
+      {
+        ensureServices: async () => {
+          throw new OpenClawDatabaseReadinessError(
+            'unsupported-version',
+            'private database detail',
+            {
+              detectedMajorVersion: 16,
+              detectedServerVersion: '16.10',
+            },
+          )
+        },
+        environment: DEV_ENVIRONMENT,
+        execute,
+      },
+    )
+
+    expect(response.status).toBe(503)
+    expect(await responseJson(response)).toMatchObject({
+      available: false,
+      database: {
+        available: false,
+        detectedMajorVersion: 16,
+        detectedServerVersion: '16.10',
+        reason: 'unsupported-version',
+      },
+      model: {
+        configurationReady: true,
+      },
+      search: {
+        available: null,
+        checked: false,
+      },
+    })
   })
 
   it('rejects a cross-site status probe before launching OpenClaw', async () => {

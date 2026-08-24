@@ -10,7 +10,10 @@ import {
   isLocalHostedSignInAvailable,
   resolveLocalHostedUser,
 } from './local-session'
-import { resolveLocalOpenClawUser } from './openclaw'
+import {
+  isLocalOpenClawMarkedRequest,
+  resolveLocalOpenClawUser,
+} from './openclaw'
 import {
   authenticationUnavailableJson,
   unauthorizedJson,
@@ -40,9 +43,25 @@ export async function getRequestAuth(
   request?: Request,
 ): Promise<RequestAuth> {
   const resolvedRequest = request ?? (await requestFromCurrentHeaders())
+  const openClawUser = resolvedRequest
+    ? resolveLocalOpenClawUser(resolvedRequest)
+    : null
+
+  if (openClawUser) {
+    return {
+      status: 'authenticated',
+      user: openClawUser,
+    }
+  }
+
+  if (resolvedRequest && isLocalOpenClawMarkedRequest(resolvedRequest)) {
+    return {
+      status: 'unavailable',
+    }
+  }
+
   const localUser = resolvedRequest
-    ? resolveLocalOpenClawUser(resolvedRequest) ??
-      resolveLocalE2EUser(resolvedRequest) ??
+    ? resolveLocalE2EUser(resolvedRequest) ??
       resolveLocalHostedUser(resolvedRequest)
     : null
 

@@ -14,6 +14,16 @@ function isLoopbackHostname(value: string): boolean {
 }
 
 /**
+ * The marker is an exclusive routing decision, not an authentication hint.
+ * Once a request identifies itself as OpenClaw, it must never fall through to
+ * Clerk or either local development principal when the marker is malformed or
+ * local mode is unavailable.
+ */
+export function isLocalOpenClawMarkedRequest(request: Request): boolean {
+  return request.headers.has(LOCAL_OPENCLAW_AUTH_HEADER)
+}
+
+/**
  * Establishes one machine-local owner only inside the explicitly enabled,
  * loopback-bound OpenClaw runtime. Hosted and Vercel requests can never enter
  * this path.

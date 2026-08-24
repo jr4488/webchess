@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  isLocalOpenClawMarkedRequest,
   LOCAL_OPENCLAW_AUTH_HEADER,
   LOCAL_OPENCLAW_AUTH_VALUE,
   resolveLocalOpenClawUser,
@@ -24,6 +25,22 @@ function request(
 }
 
 describe('resolveLocalOpenClawUser', () => {
+  it('treats any header value as an exclusive OpenClaw routing marker', () => {
+    expect(isLocalOpenClawMarkedRequest(request())).toBe(true)
+    expect(isLocalOpenClawMarkedRequest(new Request(
+      'http://127.0.0.1:3210/api/games/current',
+      {
+        headers: {
+          host: '127.0.0.1:3210',
+          [LOCAL_OPENCLAW_AUTH_HEADER]: 'malformed',
+        },
+      },
+    ))).toBe(true)
+    expect(isLocalOpenClawMarkedRequest(new Request(
+      'http://127.0.0.1:3210/api/games/current',
+    ))).toBe(false)
+  })
+
   it.each([
     '/api/divide',
     '/api/division-intents/intent-1',

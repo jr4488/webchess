@@ -8,6 +8,7 @@ export {
   resolveLocalHostedUser,
 } from './local-session'
 export {
+  isLocalOpenClawMarkedRequest,
   LOCAL_OPENCLAW_AUTH_HEADER,
   LOCAL_OPENCLAW_AUTH_VALUE,
   resolveLocalOpenClawUser,

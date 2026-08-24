@@ -69,7 +69,7 @@ async function establishRequestScope(
 
   return {
     requestId,
-    services: dependencies?.services ?? (await getApiServices()),
+    services: dependencies?.services ?? (await getApiServices(user.source)),
     user,
   }
 }
@@ -577,7 +577,7 @@ export async function handleClerkWebhookRequest(
       throw new ApiError('BAD_REQUEST', 400, 'The webhook event identifier is invalid.')
     }
 
-    const services = dependencies?.services ?? (await getApiServices())
+    const services = dependencies?.services ?? (await getApiServices('clerk'))
     await services.handleClerkUserDeleted({
       clerkUserId: data.id,
       webhookEventId,

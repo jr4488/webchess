@@ -68,10 +68,20 @@ function migrationEntry(name: string, file = true) {
   }
 }
 
-function databaseWithRow(row: Record<string, unknown> | undefined) {
+function databaseWithRow(
+  row: Record<string, unknown> | undefined,
+  version: Record<string, unknown> | undefined = {
+    server_version: '17.6',
+    server_version_num: '170006',
+  },
+) {
   return {
     close: vi.fn().mockResolvedValue(undefined),
-    query: vi.fn().mockResolvedValue({ rows: row ? [row] : [] }),
+    query: vi.fn().mockImplementation(async (statement: { text: string }) => ({
+      rows: statement.text.includes("server_version_num")
+        ? (version ? [version] : [])
+        : (row ? [row] : []),
+    })),
   }
 }
 
@@ -154,6 +164,50 @@ describe('OpenClaw durable service bootstrap', () => {
     expect(harness.createPostgresSqlAdapter).not.toHaveBeenCalled()
   })
 
+  it('queries the real server version and rejects anything except PostgreSQL 17', async () => {
+    const unsupported = databaseWithRow({
+      has_migration_ledger: false,
+      relation_count: 0,
+      schema_name: 'public',
+      unexpected_relation: null,
+    }, {
+      server_version: '16.10',
+      server_version_num: '160010',
+    })
+    harness.createPostgresSqlAdapter.mockReturnValue(unsupported)
+    const { getOpenClawApiServices } = await loadServicesModule()
+
+    await expect(getOpenClawApiServices()).rejects.toMatchObject({
+      detectedMajorVersion: 16,
+      detectedServerVersion: '16.10',
+      reason: 'unsupported-version',
+    })
+    expect(unsupported.query).toHaveBeenCalledOnce()
+    expect(harness.runMigrations).not.toHaveBeenCalled()
+    expect(unsupported.close).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a malformed PostgreSQL version response before schema inspection', async () => {
+    const malformed = databaseWithRow({
+      has_migration_ledger: false,
+      relation_count: 0,
+      schema_name: 'public',
+      unexpected_relation: null,
+    }, {
+      server_version: '17.6',
+      server_version_num: 170006,
+    })
+    harness.createPostgresSqlAdapter.mockReturnValue(malformed)
+    const { getOpenClawApiServices } = await loadServicesModule()
+
+    await expect(getOpenClawApiServices()).rejects.toMatchObject({
+      reason: 'unavailable',
+    })
+    expect(malformed.query).toHaveBeenCalledOnce()
+    expect(harness.runMigrations).not.toHaveBeenCalled()
+    expect(malformed.close).toHaveBeenCalledOnce()
+  })
+
   it('fails closed for directories, unexpected names, and an empty migration set', async () => {
     const { getOpenClawApiServices } = await loadServicesModule()
 
@@ -215,10 +269,20 @@ describe('OpenClaw durable service bootstrap', () => {
     harness.createPostgresSqlAdapter.mockReturnValue(database)
     const services = { kind: 'webchess-services' }
     harness.createApiServices.mockReturnValue(services)
-    const { getOpenClawApiServices } = await loadServicesModule()
+    const {
+      getOpenClawApiServices,
+      getOpenClawDatabaseStatus,
+    } = await loadServicesModule()
 
     await expect(getOpenClawApiServices()).resolves.toBe(services)
     await expect(getOpenClawApiServices()).resolves.toBe(services)
+    await expect(getOpenClawDatabaseStatus()).resolves.toEqual({
+      available: true,
+      engine: 'PostgreSQL',
+      majorVersion: 17,
+      scope: 'dedicated-local',
+      serverVersion: '17.6',
+    })
 
     expect(harness.readFile).toHaveBeenCalledTimes(2)
     expect(harness.runMigrations).toHaveBeenCalledWith(database, [
@@ -233,6 +297,7 @@ describe('OpenClaw durable service bootstrap', () => {
       }),
     )
     expect(harness.createPostgresSqlAdapter).toHaveBeenCalledOnce()
+    expect(database.query).toHaveBeenCalledTimes(2)
     expect(database.close).not.toHaveBeenCalled()
   })
 

@@ -7,6 +7,10 @@ import {
   LOCAL_SESSION_SECRET_NAME,
   createLocalHostedSessionCookie,
 } from './local-session'
+import {
+  LOCAL_OPENCLAW_AUTH_HEADER,
+  LOCAL_OPENCLAW_AUTH_VALUE,
+} from './openclaw'
 import { getRequestAuth, requireApiUser } from './session'
 
 vi.mock('@clerk/nextjs/server', () => ({
@@ -25,6 +29,8 @@ const clerkKeys = [
   LOCAL_SESSION_SECRET_NAME,
   'VERCEL',
   'VERCEL_ENV',
+  'WEBCHESS_OPENCLAW_ENABLED',
+  'WEBCHESS_OPENCLAW_OWNER_ID',
 ] as const
 
 const originalValues = Object.fromEntries(
@@ -147,5 +153,58 @@ describe('request auth facade', () => {
         source: 'clerk',
       },
     })
+  })
+
+  it('never falls through from an OpenClaw-marked request to Clerk', async () => {
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = 'pk_test_example'
+    process.env.CLERK_SECRET_KEY = 'sk_test_example'
+    process.env.WEBCHESS_OPENCLAW_ENABLED = 'true'
+    process.env.WEBCHESS_OPENCLAW_OWNER_ID = 'openclaw_session_test'
+    authMock.mockResolvedValue({
+      userId: 'user_clerk_must_not_be_used',
+    } as Awaited<ReturnType<typeof auth>>)
+
+    for (const [path, value] of [
+      ['/api/games/current', 'malformed'],
+      ['/api/account/usage', LOCAL_OPENCLAW_AUTH_VALUE],
+    ] as const) {
+      const request = new Request(`http://127.0.0.1:3210${path}`, {
+        headers: {
+          host: '127.0.0.1:3210',
+          [LOCAL_OPENCLAW_AUTH_HEADER]: value,
+        },
+      })
+      await expect(getRequestAuth(request)).resolves.toEqual({
+        status: 'unavailable',
+      })
+    }
+    expect(authMock).not.toHaveBeenCalled()
+  })
+
+  it('returns only the bound OpenClaw principal for a valid marked API request', async () => {
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = 'pk_test_example'
+    process.env.CLERK_SECRET_KEY = 'sk_test_example'
+    process.env.WEBCHESS_OPENCLAW_ENABLED = 'true'
+    process.env.WEBCHESS_OPENCLAW_OWNER_ID = 'openclaw_session_test'
+    authMock.mockResolvedValue({
+      userId: 'user_clerk_must_not_be_used',
+    } as Awaited<ReturnType<typeof auth>>)
+
+    await expect(getRequestAuth(new Request(
+      'http://127.0.0.1:3210/api/games/current',
+      {
+        headers: {
+          host: '127.0.0.1:3210',
+          [LOCAL_OPENCLAW_AUTH_HEADER]: LOCAL_OPENCLAW_AUTH_VALUE,
+        },
+      },
+    ))).resolves.toEqual({
+      status: 'authenticated',
+      user: {
+        source: 'local-openclaw',
+        userId: 'openclaw_session_test',
+      },
+    })
+    expect(authMock).not.toHaveBeenCalled()
   })
 })

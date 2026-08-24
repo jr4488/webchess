@@ -20,6 +20,7 @@ import {
 } from '@/server/research'
 import { createUsageController, loadUsageConfig } from '@/server/usage'
 import { WEBCHESS_SOFTWARE_VERSION } from '@/lib/lifecycle/versions'
+import type { SqlAdapter } from '@/server/db'
 
 import { isLoopbackHostname } from './request-guard'
 import {
@@ -29,7 +30,43 @@ import {
   generateOpenClawPortiaV2,
 } from './v2-generation'
 
-let servicesPromise: Promise<WebChessApiServices> | null = null
+export interface OpenClawDatabaseStatus {
+  available: true
+  engine: 'PostgreSQL'
+  majorVersion: 17
+  scope: 'dedicated-local'
+  serverVersion: string
+}
+
+export class OpenClawDatabaseReadinessError extends Error {
+  readonly detectedMajorVersion?: number
+  readonly detectedServerVersion?: string
+  readonly reason: 'unavailable' | 'unsupported-version'
+
+  constructor(
+    reason: 'unavailable' | 'unsupported-version',
+    message: string,
+    options: {
+      cause?: unknown
+      detectedMajorVersion?: number
+      detectedServerVersion?: string
+    } = {},
+  ) {
+    super(message)
+    this.name = 'OpenClawDatabaseReadinessError'
+    this.reason = reason
+    if (options.cause !== undefined) this.cause = options.cause
+    this.detectedMajorVersion = options.detectedMajorVersion
+    this.detectedServerVersion = options.detectedServerVersion
+  }
+}
+
+interface OpenClawServiceState {
+  database: OpenClawDatabaseStatus
+  services: WebChessApiServices
+}
+
+let servicesPromise: Promise<OpenClawServiceState> | null = null
 
 function databaseUrl(): string {
   if (
@@ -64,17 +101,76 @@ function databaseUrl(): string {
   return value
 }
 
-async function createServices(): Promise<WebChessApiServices> {
+async function inspectPostgres17(
+  database: SqlAdapter,
+): Promise<OpenClawDatabaseStatus> {
+  let result
+  try {
+    result = await database.query({
+      text: `
+        SELECT
+          current_setting('server_version')::text AS server_version,
+          current_setting('server_version_num')::text AS server_version_num
+      `,
+    })
+  } catch (error) {
+    throw new OpenClawDatabaseReadinessError(
+      'unavailable',
+      'The local PostgreSQL version could not be inspected.',
+      { cause: error },
+    )
+  }
+
+  const row = result.rows[0]
+  const serverVersion = row?.server_version
+  const versionNumber = row?.server_version_num
+  if (
+    typeof serverVersion !== 'string' ||
+    serverVersion.length < 1 ||
+    serverVersion.length > 120 ||
+    /[\p{C}]/gu.test(serverVersion) ||
+    typeof versionNumber !== 'string' ||
+    !/^\d{6}$/u.test(versionNumber)
+  ) {
+    throw new OpenClawDatabaseReadinessError(
+      'unavailable',
+      'The local PostgreSQL version response was invalid.',
+    )
+  }
+
+  const majorVersion = Number(versionNumber.slice(0, 2))
+  if (majorVersion !== 17) {
+    throw new OpenClawDatabaseReadinessError(
+      'unsupported-version',
+      'The dedicated local database must run PostgreSQL 17.',
+      {
+        detectedMajorVersion: majorVersion,
+        detectedServerVersion: serverVersion,
+      },
+    )
+  }
+
+  return {
+    available: true,
+    engine: 'PostgreSQL',
+    majorVersion: 17,
+    scope: 'dedicated-local',
+    serverVersion,
+  }
+}
+
+async function createServices(): Promise<OpenClawServiceState> {
   const usageConfig = loadUsageConfig()
   const migrations = await loadCanonicalFilesystemMigrations()
   const database = createPostgresSqlAdapter(databaseUrl(), {
     applicationName: 'webchess-openclaw-v2',
   })
   try {
+    const databaseStatus = await inspectPostgres17(database)
     await assertDedicatedLocalSchema(database)
     await runMigrations(database, migrations)
     const researchRepository = new DurableResearchRepository(database)
-    return createApiServicesWithDependencies({
+    const services = createApiServicesWithDependencies({
       accountExportMaxBytes: 3_000_000,
       answerGenerator: generateOpenClawAnswerV2,
       charlotteGenerator: generateOpenClawCharlotteV2,
@@ -93,6 +189,10 @@ async function createServices(): Promise<WebChessApiServices> {
       wilburStorageRowLimit: 500,
       wilburStorageTextBytesLimit: 250_000,
     })
+    return {
+      database: databaseStatus,
+      services,
+    }
   } catch (error) {
     await database.close()
     throw error
@@ -102,7 +202,17 @@ async function createServices(): Promise<WebChessApiServices> {
 export async function getOpenClawApiServices(): Promise<WebChessApiServices> {
   servicesPromise ??= createServices()
   try {
-    return await servicesPromise
+    return (await servicesPromise).services
+  } catch (error) {
+    servicesPromise = null
+    throw error
+  }
+}
+
+export async function getOpenClawDatabaseStatus(): Promise<OpenClawDatabaseStatus> {
+  servicesPromise ??= createServices()
+  try {
+    return (await servicesPromise).database
   } catch (error) {
     servicesPromise = null
     throw error

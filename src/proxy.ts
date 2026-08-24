@@ -10,7 +10,13 @@ import {
 } from './server/auth/config'
 import { resolveLocalE2EUser } from './server/auth/e2e'
 import { resolveLocalHostedUser } from './server/auth/local-session'
+import {
+  isLocalOpenClawMarkedRequest,
+  resolveLocalOpenClawUser,
+} from './server/auth/openclaw'
 import { buildSignInPath } from './server/auth/return-url'
+import { isOpenClawLocalModeEnabled } from './server/openclaw/config'
+import { isLoopbackHostname } from './server/openclaw/request-guard'
 
 const configuredClerkProxy = clerkMiddleware(
   async (auth, request) => {
@@ -80,10 +86,65 @@ function hardenStrictContentSecurityPolicy(response: Response): void {
   }
 }
 
+function isOpenClawPagePath(pathname: string): boolean {
+  return pathname === '/openclaw' || pathname.startsWith('/openclaw/')
+}
+
+function isLoopbackOpenClawPageRequest(request: NextRequest): boolean {
+  const host = request.headers.get('host')
+  if (
+    !host ||
+    host.trim() !== host ||
+    host.includes('/') ||
+    host.includes('\\') ||
+    host.includes('@')
+  ) {
+    return false
+  }
+
+  try {
+    const hostUrl = new URL(`http://${host}`)
+    return (
+      isLoopbackHostname(request.nextUrl.hostname) &&
+      isLoopbackHostname(hostUrl.hostname) &&
+      request.nextUrl.port === hostUrl.port
+    )
+  } catch {
+    return false
+  }
+}
+
+function localOpenClawRejection(status: 403 | 404): NextResponse {
+  return new NextResponse(status === 404 ? 'Not Found' : 'Forbidden', {
+    status,
+    headers: {
+      'Cache-Control': 'private, no-store, max-age=0',
+      'Content-Type': 'text/plain; charset=utf-8',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  })
+}
+
 export default async function proxy(
   request: NextRequest,
   event: NextFetchEvent,
 ) {
+  if (isOpenClawPagePath(request.nextUrl.pathname)) {
+    if (
+      !isOpenClawLocalModeEnabled() ||
+      !isLoopbackOpenClawPageRequest(request)
+    ) {
+      return localOpenClawRejection(404)
+    }
+    return NextResponse.next()
+  }
+
+  if (isLocalOpenClawMarkedRequest(request)) {
+    return resolveLocalOpenClawUser(request)
+      ? NextResponse.next()
+      : localOpenClawRejection(403)
+  }
+
   if (
     resolveLocalE2EUser(request) ||
     resolveLocalHostedUser(request)

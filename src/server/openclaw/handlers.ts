@@ -24,6 +24,11 @@ import {
   assertOpenClawLocalRequest,
   readBoundedJson,
 } from './request-guard'
+import {
+  getOpenClawDatabaseStatus,
+  OpenClawDatabaseReadinessError,
+  type OpenClawDatabaseStatus,
+} from './services'
 
 const LOCAL_NO_STORE_HEADERS = {
   'Cache-Control': 'private, no-store, max-age=0',
@@ -35,14 +40,9 @@ const LOCAL_NO_STORE_HEADERS = {
 
 export interface OpenClawHandlerDependencies {
   environment?: OpenClawEnvironment
-  ensureServices?: () => Promise<unknown>
+  ensureServices?: () => Promise<OpenClawDatabaseStatus>
   execute?: OpenClawExecutor
   seed?: () => string
-}
-
-async function ensureOpenClawServices(): Promise<unknown> {
-  const { getOpenClawApiServices } = await import('./services')
-  return getOpenClawApiServices()
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -50,6 +50,29 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: LOCAL_NO_STORE_HEADERS,
   })
+}
+
+function unavailableDatabaseStatus(error: unknown) {
+  if (error instanceof OpenClawDatabaseReadinessError) {
+    return {
+      available: false as const,
+      ...(error.detectedMajorVersion === undefined
+        ? {}
+        : { detectedMajorVersion: error.detectedMajorVersion }),
+      ...(error.detectedServerVersion === undefined
+        ? {}
+        : { detectedServerVersion: error.detectedServerVersion }),
+      engine: 'PostgreSQL' as const,
+      reason: error.reason,
+      scope: 'dedicated-local' as const,
+    }
+  }
+  return {
+    available: false as const,
+    engine: 'PostgreSQL' as const,
+    reason: 'unavailable' as const,
+    scope: 'dedicated-local' as const,
+  }
 }
 
 function mapCliError(error: OpenClawCliError): OpenClawPublicError {
@@ -140,20 +163,40 @@ export async function handleOpenClawStatusRequest(
       environment: dependencies.environment,
     })
     const config = resolveOpenClawConfig(dependencies.environment)
-    const status = await getOpenClawStatus(config, {
-      execute: dependencies.execute,
-      signal: request.signal,
-    })
-    await (dependencies.ensureServices ?? ensureOpenClawServices)()
+    const [modelStatus, databaseResult] = await Promise.all([
+      getOpenClawStatus(config, {
+        execute: dependencies.execute,
+        signal: request.signal,
+      }),
+      (dependencies.ensureServices ?? getOpenClawDatabaseStatus)()
+        .then((database) => ({ database, error: null }))
+        .catch((error: unknown) => ({ database: null, error })),
+    ])
+    const database = databaseResult.database ??
+      unavailableDatabaseStatus(databaseResult.error)
+    const available = modelStatus.available && database.available
     return jsonResponse({
-      ...status,
-      database: {
-        available: true,
-        engine: 'PostgreSQL 17',
-        scope: 'dedicated-local',
-      },
+      available,
+      database,
       lifecycle: 'webchess-2.0',
-    })
+      model: {
+        checked: 'configuration',
+        configurationReady: modelStatus.available,
+        ...(modelStatus.message ? { message: modelStatus.message } : {}),
+        ...(modelStatus.model
+          ? { configuredModel: modelStatus.model }
+          : {}),
+        ...(modelStatus.reason ? { reason: modelStatus.reason } : {}),
+        transport: modelStatus.transport,
+        ...(modelStatus.version ? { version: modelStatus.version } : {}),
+      },
+      search: {
+        available: null,
+        checked: false,
+        reason: 'not-probed',
+        requiredForLaunch: false,
+      },
+    }, available ? 200 : 503)
   } catch (error) {
     return errorResponse(error)
   }

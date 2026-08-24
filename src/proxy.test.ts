@@ -9,6 +9,10 @@ import {
   LOCAL_SESSION_SECRET_NAME,
   createLocalHostedSessionCookie,
 } from './server/auth/local-session'
+import {
+  LOCAL_OPENCLAW_AUTH_HEADER,
+  LOCAL_OPENCLAW_AUTH_VALUE,
+} from './server/auth/openclaw'
 
 const environmentKeys = [
   'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY',
@@ -21,6 +25,8 @@ const environmentKeys = [
   LOCAL_SESSION_SECRET_NAME,
   'VERCEL',
   'VERCEL_ENV',
+  'WEBCHESS_OPENCLAW_ENABLED',
+  'WEBCHESS_OPENCLAW_OWNER_ID',
 ] as const
 const originalEnvironment = Object.fromEntries(
   environmentKeys.map((key) => [key, process.env[key]]),
@@ -73,6 +79,77 @@ describe('auth proxy', () => {
 
     expect(response.status).toBe(200)
     expect(response.headers.get('x-middleware-next')).toBe('1')
+  })
+
+  it('serves /openclaw only for an explicitly enabled loopback runtime', async () => {
+    clearAuthEnvironment()
+    const disabled = await runProxy(
+      new NextRequest('http://127.0.0.1:3210/openclaw', {
+        headers: { host: '127.0.0.1:3210' },
+      }),
+    )
+    expect(disabled.status).toBe(404)
+    expect(disabled.headers.get('cache-control')).toContain('no-store')
+
+    process.env.WEBCHESS_OPENCLAW_ENABLED = 'true'
+    const local = await runProxy(
+      new NextRequest('http://127.0.0.1:3210/openclaw', {
+        headers: { host: '127.0.0.1:3210' },
+      }),
+    )
+    expect(local.status).toBe(200)
+    expect(local.headers.get('x-middleware-next')).toBe('1')
+
+    const external = await runProxy(
+      new NextRequest('https://webchess.example/openclaw', {
+        headers: { host: 'webchess.example' },
+      }),
+    )
+    expect(external.status).toBe(404)
+  })
+
+  it('rejects malformed OpenClaw markers before Clerk can authenticate them', async () => {
+    clearAuthEnvironment()
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY =
+      'pk_test_ZXhhbXBsZS5jbGVyay5hY2NvdW50cy5kZXYk'
+    process.env.CLERK_SECRET_KEY = 'sk_test_example'
+    process.env.NEXT_PUBLIC_SITE_URL = 'http://127.0.0.1:3210'
+    process.env.WEBCHESS_OPENCLAW_ENABLED = 'true'
+    process.env.WEBCHESS_OPENCLAW_OWNER_ID = 'openclaw_proxy_test'
+
+    const malformed = await runProxy(new NextRequest(
+      'http://127.0.0.1:3210/api/games/current',
+      {
+        headers: {
+          host: '127.0.0.1:3210',
+          [LOCAL_OPENCLAW_AUTH_HEADER]: 'malformed',
+        },
+      },
+    ))
+    expect(malformed.status).toBe(403)
+
+    const disallowedRoute = await runProxy(new NextRequest(
+      'http://127.0.0.1:3210/api/account/usage',
+      {
+        headers: {
+          host: '127.0.0.1:3210',
+          [LOCAL_OPENCLAW_AUTH_HEADER]: LOCAL_OPENCLAW_AUTH_VALUE,
+        },
+      },
+    ))
+    expect(disallowedRoute.status).toBe(403)
+
+    const bound = await runProxy(new NextRequest(
+      'http://127.0.0.1:3210/api/games/current',
+      {
+        headers: {
+          host: '127.0.0.1:3210',
+          [LOCAL_OPENCLAW_AUTH_HEADER]: LOCAL_OPENCLAW_AUTH_VALUE,
+        },
+      },
+    ))
+    expect(bound.status).toBe(200)
+    expect(bound.headers.get('x-middleware-next')).toBe('1')
   })
 
   it('emits Clerk strict CSP without unsafe-inline script execution', async () => {
