@@ -7,6 +7,7 @@ import {
   getCurrentGame,
   getGameLifecycle,
   getOwnedGame,
+  getWebMemory,
   isWebChessApiError,
   recoverDivisionIntent,
   replayGame,
@@ -41,6 +42,61 @@ const ANSWER = {
   answer: 'Proceed deliberately.',
   model: 'gpt-5.6-sol',
   prompt: 'Canonical answer prompt',
+}
+
+const MEMORY_ACTION = {
+  id: 'a1000000-0000-4000-8000-000000000003',
+  lifecycleRunId: 'a1000000-0000-4000-8000-000000000004',
+  charlotteActionIndex: 0,
+  charlotteBindingVersion: 'webchess-charlotte-action-binding-v1',
+  actor: 'The accountable owner',
+  action: 'Run one limited observation without expanding the scope.',
+  testedAssumption: 'A reversible trial can produce a useful signal safely.',
+  expectedObservation: 'A measurable signal appears inside the review horizon.',
+  decisionThreshold: 'Continue only when the declared signal appears.',
+  reviewHorizon: 'Within fourteen days',
+  followUpAt: '2026-08-16T19:00:00.000Z',
+  status: 'completed',
+  revision: 2,
+  version: 'webchess-wilbur-v1',
+  createdAt: '2026-08-01T18:00:00.000Z',
+  updatedAt: '2026-08-16T18:00:00.000Z',
+}
+
+const MEMORY_OBSERVATION = {
+  id: 'a1000000-0000-4000-8000-000000000001',
+  actionId: MEMORY_ACTION.id,
+  observedAt: '2026-08-16T18:00:00.000Z',
+  observation: 'The signal improved while participants retained an opt-out.',
+  evidenceClassification: 'Measured result',
+  expectedEffect: 'A measurable signal appears inside the review horizon.',
+  unexpectedEffect: 'One participant needed a longer explanation.',
+  stakeholderResponse: 'Participants retained agency and reported no lasting harm.',
+  assumptionResult: 'supported',
+  nextDecision: 'Repeat once with broader stakeholder review before scaling.',
+  version: 'webchess-wilbur-v1',
+  createdAt: '2026-08-16T18:05:00.000Z',
+}
+
+const MEMORY_EVIDENCE = {
+  observationId: MEMORY_OBSERVATION.id,
+  sourceGameId: 'a1000000-0000-4000-8000-000000000002',
+  sourceActionId: MEMORY_ACTION.id,
+  sourceProblem: 'How can a bounded trial generate useful direct evidence?',
+  action: MEMORY_ACTION.action,
+  testedAssumption: MEMORY_ACTION.testedAssumption,
+  expectedObservation: MEMORY_ACTION.expectedObservation,
+  observedAt: MEMORY_OBSERVATION.observedAt,
+  observation: MEMORY_OBSERVATION.observation,
+  evidenceClassification: MEMORY_OBSERVATION.evidenceClassification,
+  expectedEffect: MEMORY_OBSERVATION.expectedEffect,
+  unexpectedEffect: MEMORY_OBSERVATION.unexpectedEffect,
+  stakeholderResponse: MEMORY_OBSERVATION.stakeholderResponse,
+  assumptionResult: MEMORY_OBSERVATION.assumptionResult,
+  nextDecision: MEMORY_OBSERVATION.nextDecision,
+  selectionOrdinal: 0,
+  consentVersion: 'webchess-web-memory-consent-v1',
+  attachedAt: '2026-08-17T18:00:00.000Z',
 }
 
 const FULL_GAME = {
@@ -109,6 +165,7 @@ const CHARLOTTE_UNAVAILABLE_LIFECYCLE = {
   charlotteRenderedAnswer: null,
   wilburActions: [],
   wilburObservations: [],
+  webMemoryEvidence: [],
   activities: [],
   research: [],
   versions: {},
@@ -231,6 +288,82 @@ describe('durable WebChess browser API', () => {
     expect(headers.get('Idempotency-Key')).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     )
+  })
+
+  it('sends only explicitly selected Web memory observation ids', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ game: GAME }))
+    vi.stubGlobal('fetch', fetchMock)
+    const observationId = 'a1000000-0000-4000-8000-000000000001'
+
+    await divideProblem('What deserves attention now?', {
+      memoryObservationIds: [observationId],
+    })
+
+    expect(requestBody(fetchMock, 0)).toEqual({
+      problem: 'What deserves attention now?',
+      memoryObservationIds: [observationId],
+    })
+  })
+
+  it('loads the durable owner-scoped Web memory index', async () => {
+    const memory = { cases: [], carriedObservationIds: [] }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ memory }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(getWebMemory()).resolves.toEqual(memory)
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/web-memory')
+    expect(requestInit(fetchMock, 0)).toMatchObject({
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+    })
+  })
+
+  it('validates nested owner-scoped Web memory records before exposing them', async () => {
+    const memory = {
+      cases: [{
+        gameId: MEMORY_EVIDENCE.sourceGameId,
+        problem: MEMORY_EVIDENCE.sourceProblem,
+        isCurrent: false,
+        createdAt: '2026-08-01T18:00:00.000Z',
+        updatedAt: '2026-08-16T18:05:00.000Z',
+        actions: [{
+          action: MEMORY_ACTION,
+          observations: [MEMORY_OBSERVATION],
+        }],
+      }],
+      carriedObservationIds: [MEMORY_OBSERVATION.id],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ memory })),
+    )
+
+    await expect(getWebMemory()).resolves.toEqual(memory)
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({
+        memory: {
+          ...memory,
+          cases: [{
+            ...memory.cases[0],
+            actions: [{
+              action: MEMORY_ACTION,
+              observations: [{
+                ...MEMORY_OBSERVATION,
+                actionId: 'a1000000-0000-4000-8000-000000000099',
+              }],
+            }],
+          }],
+        },
+      })),
+    )
+
+    await expect(getWebMemory()).rejects.toMatchObject({
+      kind: 'invalid-response',
+      message: 'Web memory observations contain a duplicate or mismatched action.',
+    })
   })
 
   it('loads the current game, an owned game, and a division intent without request bodies', async () => {
@@ -461,6 +594,72 @@ describe('durable WebChess browser API', () => {
     await expect(getGameLifecycle(GAME_ID)).resolves.toEqual(
       CHARLOTTE_UNAVAILABLE_LIFECYCLE,
     )
+  })
+
+  it('accepts deeply validated durable Wilbur and selected Web memory records', async () => {
+    const action = {
+      ...MEMORY_ACTION,
+      id: 'b1000000-0000-4000-8000-000000000001',
+      lifecycleRunId: CHARLOTTE_UNAVAILABLE_LIFECYCLE.id,
+    }
+    const observation = {
+      ...MEMORY_OBSERVATION,
+      id: 'b1000000-0000-4000-8000-000000000002',
+      actionId: action.id,
+    }
+    const lifecycle = {
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      wilburActions: [action],
+      wilburObservations: [observation],
+      webMemoryEvidence: [MEMORY_EVIDENCE],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ lifecycle })),
+    )
+
+    await expect(getGameLifecycle(GAME_ID)).resolves.toEqual(lifecycle)
+  })
+
+  it.each([
+    [
+      'missing evidence array',
+      { webMemoryEvidence: null },
+      'Lifecycle webMemoryEvidence must be an array.',
+    ],
+    [
+      'wrong consent version',
+      { webMemoryEvidence: [{
+        ...MEMORY_EVIDENCE,
+        consentVersion: 'obsolete-consent',
+      }] },
+      'Web memory consent version is invalid.',
+    ],
+    [
+      'detached evidence',
+      { webMemoryEvidence: [{ ...MEMORY_EVIDENCE, attachedAt: null }] },
+      'Lifecycle Web memory contains a current-game, detached, or duplicate observation.',
+    ],
+    [
+      'current-game source',
+      { webMemoryEvidence: [{ ...MEMORY_EVIDENCE, sourceGameId: GAME_ID }] },
+      'Lifecycle Web memory contains a current-game, detached, or duplicate observation.',
+    ],
+    [
+      'ordinal gap',
+      { webMemoryEvidence: [{ ...MEMORY_EVIDENCE, selectionOrdinal: 1 }] },
+      'Web memory selection order is invalid.',
+    ],
+  ])('rejects lifecycle Web memory with %s', async (_label, override, message) => {
+    const failure = await lifecycleFailure({
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      ...override,
+    })
+
+    expect(failure).toMatchObject({
+      kind: 'invalid-response',
+      message,
+    })
   })
 
   it('accepts the exact player-visible Answer prompt with Gate provenance', async () => {

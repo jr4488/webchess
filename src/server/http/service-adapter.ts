@@ -1096,6 +1096,7 @@ function boardAnswerPromptPlan(
       const evidence = researchPromptEvidence(record)
       return evidence ? [evidence] : []
     }),
+    lifecycle.webMemoryEvidence,
   )
   return {
     plan,
@@ -1909,6 +1910,16 @@ function accountExportStatements(
           UNION ALL
 
           SELECT greatest(
+            pg_column_size(memory_links)::bigint,
+            octet_length(to_jsonb(memory_links)::text)::bigint,
+            octet_length(jsonb_pretty(to_jsonb(memory_links)))::bigint
+          ) + 128
+          FROM web_memory_links AS memory_links
+          WHERE memory_links.clerk_user_id = $1::text
+
+          UNION ALL
+
+          SELECT greatest(
             pg_column_size(research)::bigint,
             octet_length(to_jsonb(research)::text)::bigint,
             octet_length(jsonb_pretty(to_jsonb(research)))::bigint
@@ -2256,10 +2267,25 @@ function accountExportStatements(
           tested_assumption AS "testedAssumption",
           expected_observation AS "expectedObservation",
           decision_threshold AS "decisionThreshold",
-          review_horizon AS "reviewHorizon", status, revision::text,
+          review_horizon AS "reviewHorizon",
+          follow_up_at AS "followUpAt", status, revision::text,
           record_version AS "recordVersion",
           created_at AS "createdAt", updated_at AS "updatedAt"
         FROM wilbur_actions CROSS JOIN export_gate
+        WHERE export_gate.allowed AND clerk_user_id = $1::text
+        ORDER BY created_at, id
+      `,
+      values: [ownerId],
+    },
+    {
+      text: `
+        ${exportGuard}
+        SELECT id::text, target_game_id::text AS "targetGameId",
+          source_observation_id::text AS "sourceObservationId",
+          selection_ordinal AS "selectionOrdinal",
+          consent_version AS "consentVersion",
+          created_at AS "createdAt"
+        FROM web_memory_links CROSS JOIN export_gate
         WHERE export_gate.allowed AND clerk_user_id = $1::text
         ORDER BY created_at, id
       `,
@@ -2301,6 +2327,7 @@ function accountExportStatements(
           result_entity_id::text AS "resultEntityId",
           result_revision::text AS "resultRevision",
           result_status AS "resultStatus",
+          result_follow_up_at AS "resultFollowUpAt",
           result_updated_at AS "resultUpdatedAt",
           created_at AS "createdAt",
           updated_at AS "updatedAt"
@@ -2792,10 +2819,14 @@ async function reconcileRunningLifecycleModel(
 export function createApiServicesWithDependencies(
   dependencies: ApiServiceAdapterDependencies,
 ): WebChessApiServices {
-  const divisionRequestHash = (problem: string) =>
+  const divisionRequestHash = (
+    problem: string,
+    memoryObservationIds: readonly string[],
+  ) =>
     canonicalHash({
-      operation: 'division/v1',
+      operation: 'division/v3-web-memory',
       problem,
+      memoryObservationIds,
       model: modelName(dependencies),
       promptVersion: DIVISION_PROMPT_VERSION,
       softwareVersion: dependencies.softwareVersion,
@@ -2805,6 +2836,16 @@ export function createApiServicesWithDependencies(
     divide(input) {
       return apiOperation(async () => {
         const problem = normalizeProblem(input.problem)
+        const memoryObservationIds = [...new Set(input.memoryObservationIds ?? [])]
+        const lifecycleRepository = memoryObservationIds.length > 0
+          ? requireLifecycleRepository(dependencies)
+          : null
+        const webMemoryEvidence = memoryObservationIds.length === 0
+          ? []
+          : await lifecycleRepository!.getWebMemoryEvidence(
+              input.ownerId,
+              memoryObservationIds,
+            )
         const apiKey = modelApiKey(dependencies)
         const reservation = await dependencies.usage.reserveModelRequest({
           requestId: input.requestId,
@@ -2812,7 +2853,7 @@ export function createApiServicesWithDependencies(
           userId: input.ownerId,
           operation: 'division',
           idempotencyKey: input.idempotencyKey,
-          requestSha256: divisionRequestHash(problem),
+          requestSha256: divisionRequestHash(problem, memoryObservationIds),
           provider: modelProvider(dependencies),
           model: modelName(dependencies),
           promptVersion: DIVISION_PROMPT_VERSION,
@@ -2834,6 +2875,14 @@ export function createApiServicesWithDependencies(
             gameId: reservation.requestId,
           })
           shell = division.game
+
+          if (memoryObservationIds.length > 0) {
+            await lifecycleRepository!.attachWebMemoryEvidence(
+              input.ownerId,
+              shell.id,
+              memoryObservationIds,
+            )
+          }
 
           const attached = await dependencies.usage.attachModelRequestGame({
             userId: input.ownerId,
@@ -2884,7 +2933,11 @@ export function createApiServicesWithDependencies(
 
           let generated: Awaited<ReturnType<typeof generateDivision>>
           try {
-            generated = await dependencies.divisionGenerator(problem, {
+            generated = await dependencies.divisionGenerator(
+              webMemoryEvidence.length > 0
+                ? { problem, webMemoryEvidence }
+                : problem,
+              {
               userId: input.ownerId,
               safetyHmacSecret: dependencies.hmacSecret,
               apiKey,
@@ -2895,7 +2948,8 @@ export function createApiServicesWithDependencies(
                 'division',
                 input.idempotencyKey,
               ),
-            })
+              },
+            )
           } catch (error) {
             const settled = await settleDefinitiveFailure(dependencies, {
               ownerId: input.ownerId,
@@ -3000,6 +3054,12 @@ export function createApiServicesWithDependencies(
           await reconcilePendingGame(dependencies, input.ownerId, snapshot),
         )
       })
+    },
+
+    getWebMemory(input) {
+      return apiOperation(() =>
+        requireLifecycleRepository(dependencies).listWebMemory(input.ownerId),
+      )
     },
 
     getGame(input) {
@@ -4137,6 +4197,13 @@ export function createApiServicesWithDependencies(
           input.ownerId,
           input.gameId,
         )
+        const inheritedWebMemory = await repository.getWebMemoryEvidenceForGame(
+          input.ownerId,
+          terminal.id,
+        )
+        const inheritedObservationIds = inheritedWebMemory.map(
+          (evidence) => evidence.observationId,
+        )
         if (terminal.revision !== input.expectedRevision) {
           throw new ApiError('CONFLICT', 409, 'The game revision changed before Retry began.')
         }
@@ -4214,6 +4281,7 @@ export function createApiServicesWithDependencies(
             operation: 'division/v2-field-retry',
             problem: terminal.problem,
             repairContext,
+            memoryObservationIds: inheritedObservationIds,
             sourceGameId: terminal.id,
             fieldGeneration: lifecycle.fieldGeneration + 1,
             model: modelName(dependencies),
@@ -4243,6 +4311,13 @@ export function createApiServicesWithDependencies(
             sourceGameId: terminal.id,
           })
           child = shellResult.game
+          if (inheritedObservationIds.length > 0) {
+            await repository.attachWebMemoryEvidence(
+              input.ownerId,
+              child.id,
+              inheritedObservationIds,
+            )
+          }
           const attached = await dependencies.usage.attachModelRequestGame({
             userId: input.ownerId,
             requestId: reservation.requestId,
@@ -4271,6 +4346,9 @@ export function createApiServicesWithDependencies(
               {
                 problem: terminal.problem,
                 repairContext,
+                ...(inheritedWebMemory.length > 0
+                  ? { webMemoryEvidence: inheritedWebMemory }
+                  : {}),
               },
               {
                 userId: input.ownerId,
@@ -4326,6 +4404,16 @@ export function createApiServicesWithDependencies(
             )
           }
         }
+        if (
+          decision.mode === 'replay_game'
+          && inheritedObservationIds.length > 0
+        ) {
+          await repository.attachWebMemoryEvidence(
+            input.ownerId,
+            child.id,
+            inheritedObservationIds,
+          )
+        }
         lifecycle = await repository.createRetryRun({
           ownerId: input.ownerId,
           parentGameId: terminal.id,
@@ -4366,7 +4454,7 @@ export function createApiServicesWithDependencies(
         }
         const suggestion = canonicalCharlotteActionForWilbur(lifecycle, input)
         const requestDigest = canonicalHash({
-          operation: 'wilbur-action/v2',
+          operation: 'wilbur-action/v3',
           gameId: input.gameId,
           charlotteActionIndex: input.charlotteActionIndex,
           actor: suggestion.actor,
@@ -4375,6 +4463,7 @@ export function createApiServicesWithDependencies(
           expectedObservation: suggestion.expectedObservation,
           decisionThreshold: suggestion.decisionThreshold,
           reviewHorizon: suggestion.reviewHorizon,
+          followUpAt: input.followUpAt ?? null,
         })
         const claimInput = {
           ownerId: input.ownerId,
@@ -4441,6 +4530,7 @@ export function createApiServicesWithDependencies(
           expectedObservation: suggestion.expectedObservation,
           decisionThreshold: suggestion.decisionThreshold,
           reviewHorizon: suggestion.reviewHorizon,
+          followUpAt: input.followUpAt ?? null,
           configurationDigest: canonicalHash(CURRENT_LIFECYCLE_VERSIONS),
           })
         } catch (error) {
@@ -4472,11 +4562,12 @@ export function createApiServicesWithDependencies(
           throw new ApiError('LIFECYCLE_NOT_FOUND', 404, 'Wilbur action not found.')
         }
         const requestDigest = canonicalHash({
-          operation: 'wilbur-action-status/v1',
+          operation: 'wilbur-action-status/v2',
           gameId: input.gameId,
           actionId: input.actionId,
           expectedRevision: input.expectedRevision,
           status: input.status,
+          followUpAt: input.followUpAt ?? null,
         })
         const claimInput = {
           ownerId: input.ownerId,
@@ -4526,6 +4617,7 @@ export function createApiServicesWithDependencies(
             requestDigest,
             expectedRevision: input.expectedRevision,
             status: input.status,
+            followUpAt: input.followUpAt ?? null,
             configurationDigest: canonicalHash(CURRENT_LIFECYCLE_VERSIONS),
           })
         } catch (error) {
@@ -4726,10 +4818,11 @@ export function createApiServicesWithDependencies(
           gateDecisions: rowsAt(results, 11),
           charlotteResults: rowsAt(results, 12),
           wilburActions: rowsAt(results, 13),
-          wilburObservations: rowsAt(results, 14),
-          wilburMutationRequests: rowsAt(results, 15),
-          lifecycleActivities: rowsAt(results, 16),
-          userRateBuckets: rowsAt(results, 17),
+          webMemoryLinks: rowsAt(results, 14),
+          wilburObservations: rowsAt(results, 15),
+          wilburMutationRequests: rowsAt(results, 16),
+          lifecycleActivities: rowsAt(results, 17),
+          userRateBuckets: rowsAt(results, 18),
         }
         if (
           new TextEncoder().encode(`${JSON.stringify(exported, null, 2)}\n`)

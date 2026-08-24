@@ -293,15 +293,17 @@ function completedLifecycle(): LifecycleAggregate {
     charlotteFailedAttemptCount: 0,
     charlotteFailureLimit: 3,
     wilburActions: [{
-      id: 'action-1',
+      id: '73000000-0000-4000-8000-000000000001',
       lifecycleRunId: '72000000-0000-4000-8000-000000000002',
       charlotteActionIndex: 0,
+      charlotteBindingVersion: 'webchess-charlotte-action-binding-v1',
       actor: actions[0].actor,
       action: actions[0].smallestAction,
       testedAssumption: actions[0].assumptionBeingTested,
       expectedObservation: actions[0].expectedObservation,
       decisionThreshold: actions[0].decisionThreshold,
       reviewHorizon: actions[0].reviewHorizon,
+      followUpAt: '2026-08-15T20:00:00.000Z',
       status: 'in_progress',
       revision: 1,
       version: 'webchess-wilbur-v1',
@@ -309,6 +311,7 @@ function completedLifecycle(): LifecycleAggregate {
       updatedAt: '2026-08-01T20:00:00.000Z',
     }],
     wilburObservations: [],
+    webMemoryEvidence: [],
     research: [],
     activities: [
       'anansi',
@@ -525,6 +528,13 @@ test.describe('complete durable play flow', () => {
         return
       }
 
+      if (request.method() === 'GET' && pathname === '/api/web-memory') {
+        await json(route, {
+          memory: { cases: [], carriedObservationIds: [] },
+        })
+        return
+      }
+
       if (
         request.method() === 'GET'
         && pathname === `/api/games/${gameId}/lifecycle`
@@ -686,7 +696,7 @@ test.describe('complete durable play flow', () => {
     await expectRootFitsViewport(page, 'restored answer stage')
     await expectReducedMotionApplied(page, 'restored answer stage')
 
-    expect(calls).toEqual([
+    expect(calls.filter((call) => call !== 'GET /api/web-memory')).toEqual([
       'GET /api/games/current',
       'POST /api/divide',
       `POST /api/games/${gameId}/start`,
@@ -697,6 +707,7 @@ test.describe('complete durable play flow', () => {
       'GET /api/games/current',
       `GET /api/games/${gameId}/lifecycle`,
     ])
+    expect(calls.filter((call) => call === 'GET /api/web-memory')).toHaveLength(2)
   })
 
   test('renders the complete seven-stage visible lifecycle as a responsive, accessible action record', async ({
@@ -729,6 +740,12 @@ test.describe('complete durable play flow', () => {
 
       if (request.method() === 'GET' && pathname === '/api/games/current') {
         await json(route, { game: currentGame })
+        return
+      }
+      if (request.method() === 'GET' && pathname === '/api/web-memory') {
+        await json(route, {
+          memory: { cases: [], carriedObservationIds: [] },
+        })
         return
       }
       if (
@@ -880,6 +897,13 @@ test.describe('complete durable play flow', () => {
 
       if (request.method() === 'GET' && pathname === '/api/games/current') {
         await json(route, { game: currentGame })
+        return
+      }
+
+      if (request.method() === 'GET' && pathname === '/api/web-memory') {
+        await json(route, {
+          memory: { cases: [], carriedObservationIds: [] },
+        })
         return
       }
 

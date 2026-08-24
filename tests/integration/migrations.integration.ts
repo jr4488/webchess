@@ -35,6 +35,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         '0011_extend_research_timeout_ceiling',
         '0012_unique_wilbur_charlotte_actions',
         '0013_wilbur_mutation_requests',
+        '0014_web_memory_feedback',
       ],
       alreadyApplied: [],
     })
@@ -54,6 +55,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         '0011_extend_research_timeout_ceiling',
         '0012_unique_wilbur_charlotte_actions',
         '0013_wilbur_mutation_requests',
+        '0014_web_memory_feedback',
       ],
     })
 
@@ -87,6 +89,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
       'research_sources',
       'usage_buckets',
       'user_controls',
+      'web_memory_links',
       'webchess_schema_migrations',
       'wilbur_actions',
       'wilbur_mutation_requests',
@@ -294,9 +297,16 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
   it('refreshes only unfinished Charlotte-capable runs while preserving terminal histories and artifacts', async () => {
     const upgrade = await createPostgresTestDatabase('charlotte_upgrade')
     try {
+      const boundedCharlotteIndex = durableWebChessMigrations.findIndex(
+        (migration) => migration.id === '0007_bounded_charlotte_attempts',
+      )
+      const priorMigrations = durableWebChessMigrations.slice(
+        0,
+        boundedCharlotteIndex,
+      )
       await runMigrations(
         upgrade.adapter,
-        durableWebChessMigrations.slice(0, -7),
+        priorMigrations,
       )
       const owner = 'user_charlotte_migration_upgrade'
       await upgrade.adapter.query({
@@ -413,10 +423,9 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
           '0011_extend_research_timeout_ceiling',
           '0012_unique_wilbur_charlotte_actions',
           '0013_wilbur_mutation_requests',
+          '0014_web_memory_feedback',
         ],
-        alreadyApplied: durableWebChessMigrations
-          .slice(0, -7)
-          .map((migration) => migration.id),
+        alreadyApplied: priorMigrations.map((migration) => migration.id),
       })
 
       const runs = await upgrade.adapter.query<SqlRow>({
@@ -568,6 +577,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         applied: [
           '0012_unique_wilbur_charlotte_actions',
           '0013_wilbur_mutation_requests',
+          '0014_web_memory_feedback',
         ],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })
@@ -990,6 +1000,380 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
         values: [owner],
       })
       expect(cascaded.rows).toEqual([{ mutation_count: 0 }])
+    } finally {
+      await upgrade.dispose()
+    }
+  })
+
+  it('upgrades exact 0013 state into owner-scoped Web memory with replay-safe follow-ups', async () => {
+    const upgrade = await createPostgresTestDatabase('web_memory_upgrade')
+    try {
+      const webMemoryMigrationIndex = durableWebChessMigrations.findIndex(
+        (migration) => migration.id === '0014_web_memory_feedback',
+      )
+      const priorMigrations = durableWebChessMigrations.slice(
+        0,
+        webMemoryMigrationIndex,
+      )
+      await runMigrations(upgrade.adapter, priorMigrations)
+
+      const owner = 'user_web_memory_upgrade'
+      const otherOwner = 'user_web_memory_upgrade_other'
+      const targetGameId = '73000000-0000-4000-8000-000000000001'
+      const sourceGameId = '73000000-0000-4000-8000-000000000002'
+      const otherGameId = '73000000-0000-4000-8000-000000000003'
+      const sourceRunId = '73000000-0000-4000-8000-000000000004'
+      const otherRunId = '73000000-0000-4000-8000-000000000005'
+      const sourceActionId = '73000000-0000-4000-8000-000000000006'
+      const otherActionId = '73000000-0000-4000-8000-000000000007'
+      const oldMutationKey = '73000000-0000-4000-8000-000000000008'
+      const newMutationKey = '73000000-0000-4000-8000-000000000009'
+      const followUpAt = '2026-09-15T19:00:00.000Z'
+
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO user_controls (clerk_user_id)
+          VALUES ($1::text), ($2::text)
+        `,
+        values: [owner, otherOwner],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO games (
+            id, clerk_user_id, is_current, status, problem, problem_sha256,
+            event_version, rules_version, engine_version, cast_version,
+            software_version
+          )
+          VALUES
+            ($1::uuid, $4::text, true, 'dividing',
+             'How should a later case use selected prior observations?',
+             repeat('a', 64), 1, 'rules-test', 'engine-test',
+             'cast-test', 'software-test'),
+            ($2::uuid, $4::text, false, 'dividing',
+             'How can one bounded trial generate useful direct evidence?',
+             repeat('b', 64), 1, 'rules-test', 'engine-test',
+             'cast-test', 'software-test'),
+            ($3::uuid, $5::text, true, 'dividing',
+             'How should another owner preserve a separate observation?',
+             repeat('c', 64), 1, 'rules-test', 'engine-test',
+             'cast-test', 'software-test')
+        `,
+        values: [
+          targetGameId,
+          sourceGameId,
+          otherGameId,
+          owner,
+          otherOwner,
+        ],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO lifecycle_runs (
+            id, clerk_user_id, game_id, root_run_id, state,
+            division_seed, cast_seed, trajectory_seed,
+            software_version, lifecycle_version, rules_version,
+            engine_version, cast_version, event_version,
+            portia_prompt_version, portia_contract_version,
+            gate_algorithm_version, retry_policy_version,
+            charlotte_prompt_version, charlotte_contract_version,
+            wilbur_record_version
+          )
+          VALUES
+            ($1::uuid, $3::text, $5::uuid, $1::uuid, 'wilbur_observed',
+             'division-seed', 'cast-seed', 'trajectory-seed',
+             'software-test', 'lifecycle-test', 'rules-test',
+             'engine-test', 'cast-test', 1,
+             'portia-test', 'portia-contract-test', 'gate-test',
+             'retry-test', 'charlotte-test', 'charlotte-contract-test',
+             'wilbur-record-test'),
+            ($2::uuid, $4::text, $6::uuid, $2::uuid, 'wilbur_observed',
+             'division-seed', 'cast-seed', 'trajectory-seed',
+             'software-test', 'lifecycle-test', 'rules-test',
+             'engine-test', 'cast-test', 1,
+             'portia-test', 'portia-contract-test', 'gate-test',
+             'retry-test', 'charlotte-test', 'charlotte-contract-test',
+             'wilbur-record-test')
+        `,
+        values: [
+          sourceRunId,
+          otherRunId,
+          owner,
+          otherOwner,
+          sourceGameId,
+          otherGameId,
+        ],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO wilbur_actions (
+            id, clerk_user_id, lifecycle_run_id, charlotte_action_index,
+            idempotency_key, request_digest, actor, action,
+            tested_assumption, expected_observation, decision_threshold,
+            review_horizon, status, record_version
+          )
+          VALUES
+            ($1::uuid, $3::text, $5::uuid, 0,
+             '73000000-0000-4000-8000-000000000010', repeat('d', 64),
+             'The accountable owner',
+             'Run one limited observation without expanding the scope.',
+             'A reversible trial can produce a useful signal safely.',
+             'A measurable signal appears inside the review horizon.',
+             'Continue only when the declared signal appears.',
+             'Within fourteen days', 'planned', 'wilbur-record-test'),
+            ($2::uuid, $4::text, $6::uuid, 0,
+             '73000000-0000-4000-8000-000000000011', repeat('e', 64),
+             'The other accountable owner',
+             'Run one separate observation for the other owner.',
+             'A separate trial can produce a useful private signal.',
+             'A separate measurable signal appears during the review.',
+             'Continue only when the separate declared signal appears.',
+             'Within fourteen days', 'planned', 'wilbur-record-test')
+        `,
+        values: [
+          sourceActionId,
+          otherActionId,
+          owner,
+          otherOwner,
+          sourceRunId,
+          otherRunId,
+        ],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO wilbur_observations (
+            id, clerk_user_id, action_id, idempotency_key, request_digest,
+            observed_at, observation, evidence_classification,
+            expected_effect, unexpected_effect, stakeholder_response,
+            assumption_result, next_decision, record_version
+          )
+          SELECT
+            ('74000000-0000-4000-8000-' || lpad(item::text, 12, '0'))::uuid,
+            $1::text, $2::uuid,
+            ('75000000-0000-4000-8000-' || lpad(item::text, 12, '0'))::uuid,
+            repeat('f', 64), now(),
+            'The bounded observation produced a direct useful signal.',
+            'Measured result',
+            'The expected signal appeared inside the review horizon.',
+            'One participant requested a clearer explanation.',
+            'Participants retained agency and reported no lasting harm.',
+            'supported',
+            'Repeat once with broader stakeholder review before scaling.',
+            'wilbur-record-test'
+          FROM generate_series(1, 9) AS item
+        `,
+        values: [owner, sourceActionId],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO wilbur_observations (
+            id, clerk_user_id, action_id, idempotency_key, request_digest,
+            observed_at, observation, evidence_classification,
+            expected_effect, unexpected_effect, stakeholder_response,
+            assumption_result, next_decision, record_version
+          )
+          VALUES (
+            '76000000-0000-4000-8000-000000000001', $1::text, $2::uuid,
+            '76000000-0000-4000-8000-000000000002', repeat('a', 64), now(),
+            'The other owner recorded a separate private observation.',
+            'Measured result', 'The other expected signal appeared.',
+            'No unexpected effect was reported.',
+            'The other stakeholders retained agency.', 'supported',
+            'Keep the other observation private.', 'wilbur-record-test'
+          )
+        `,
+        values: [otherOwner, otherActionId],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO wilbur_mutation_requests (
+            clerk_user_id, idempotency_key, operation, request_digest,
+            target_game_id, target_action_id, rate_kind,
+            reserved_future_rows, reserved_text_bytes
+          )
+          VALUES
+            ($1::text, $2::uuid, 'update_action', repeat('b', 64),
+             $4::uuid, $5::uuid, 'action', 1, 0),
+            ($1::text, $3::uuid, 'update_action', repeat('c', 64),
+             $4::uuid, $5::uuid, 'action', 1, 0)
+        `,
+        values: [
+          owner,
+          oldMutationKey,
+          newMutationKey,
+          sourceGameId,
+          sourceActionId,
+        ],
+      })
+      await upgrade.adapter.query({
+        text: `
+          UPDATE wilbur_mutation_requests
+          SET rate_admitted_at = now(), updated_at = now()
+          WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+        `,
+        values: [owner, oldMutationKey],
+      })
+      await upgrade.adapter.query({
+        text: `
+          UPDATE wilbur_mutation_requests
+          SET status = 'committed', result_entity_id = $3::uuid,
+            result_revision = 0, result_status = 'planned',
+            result_updated_at = now(), reserved_future_rows = 0,
+            updated_at = now()
+          WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+        `,
+        values: [owner, oldMutationKey, sourceActionId],
+      })
+
+      await expect(
+        runMigrations(upgrade.adapter, durableWebChessMigrations),
+      ).resolves.toEqual({
+        applied: ['0014_web_memory_feedback'],
+        alreadyApplied: priorMigrations.map((migration) => migration.id),
+      })
+
+      const legacySnapshot = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT result_follow_up_at
+          FROM wilbur_mutation_requests
+          WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+        `,
+        values: [owner, oldMutationKey],
+      })
+      expect(legacySnapshot.rows).toEqual([{ result_follow_up_at: null }])
+
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE wilbur_actions
+          SET follow_up_at = $2::timestamptz, revision = revision + 1,
+            updated_at = greatest(updated_at, now())
+          WHERE id = $1::uuid
+        `,
+        values: [sourceActionId, followUpAt],
+      })).resolves.toMatchObject({ rowCount: 1 })
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE wilbur_actions
+          SET action = 'Rewrite immutable historical action text.',
+            revision = revision + 1, updated_at = greatest(updated_at, now())
+          WHERE id = $1::uuid
+        `,
+        values: [sourceActionId],
+      })).rejects.toMatchObject({ code: '23514' })
+
+      await upgrade.adapter.query({
+        text: `
+          UPDATE wilbur_mutation_requests
+          SET rate_admitted_at = now(), updated_at = now()
+          WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+        `,
+        values: [owner, newMutationKey],
+      })
+      await upgrade.adapter.query({
+        text: `
+          UPDATE wilbur_mutation_requests
+          SET status = 'committed', result_entity_id = $3::uuid,
+            result_revision = 1, result_status = 'planned',
+            result_follow_up_at = $4::timestamptz,
+            result_updated_at = now(), reserved_future_rows = 0,
+            updated_at = now()
+          WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+        `,
+        values: [owner, newMutationKey, sourceActionId, followUpAt],
+      })
+      const currentSnapshot = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT result_revision, result_status,
+            to_char(
+              result_follow_up_at AT TIME ZONE 'UTC',
+              'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+            ) AS result_follow_up_at
+          FROM wilbur_mutation_requests
+          WHERE clerk_user_id = $1::text AND idempotency_key = $2::uuid
+        `,
+        values: [owner, newMutationKey],
+      })
+      expect(currentSnapshot.rows).toEqual([{
+        result_revision: '1',
+        result_status: 'planned',
+        result_follow_up_at: followUpAt,
+      }])
+
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO web_memory_links (
+            id, clerk_user_id, target_game_id, source_observation_id,
+            selection_ordinal, consent_version
+          )
+          SELECT gen_random_uuid(), $1::text, $2::uuid,
+            ('74000000-0000-4000-8000-' || lpad(item::text, 12, '0'))::uuid,
+            item - 1, 'webchess-web-memory-consent-v1'
+          FROM generate_series(1, 8) AS item
+        `,
+        values: [owner, targetGameId],
+      })
+      const linked = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT count(*)::integer AS link_count,
+            array_agg(selection_ordinal ORDER BY selection_ordinal) AS ordinals
+          FROM web_memory_links
+          WHERE target_game_id = $1::uuid
+        `,
+        values: [targetGameId],
+      })
+      expect(linked.rows).toEqual([{
+        link_count: 8,
+        ordinals: [0, 1, 2, 3, 4, 5, 6, 7],
+      }])
+
+      const linkAttempt = (
+        targetId: string,
+        observationId: string,
+        ordinal: number,
+      ) => upgrade.adapter.query({
+        text: `
+          INSERT INTO web_memory_links (
+            id, clerk_user_id, target_game_id, source_observation_id,
+            selection_ordinal, consent_version
+          )
+          VALUES (
+            gen_random_uuid(), $1::text, $2::uuid, $3::uuid, $4::smallint,
+            'webchess-web-memory-consent-v1'
+          )
+        `,
+        values: [owner, targetId, observationId, ordinal],
+      })
+      await expect(linkAttempt(
+        targetGameId,
+        '74000000-0000-4000-8000-000000000009',
+        8,
+      )).rejects.toMatchObject({
+        code: '23514',
+        constraint: 'web_memory_links_selection_ordinal_valid',
+      })
+      await expect(linkAttempt(
+        targetGameId,
+        '74000000-0000-4000-8000-000000000009',
+        7,
+      )).rejects.toMatchObject({
+        code: '23505',
+        constraint: 'web_memory_links_target_game_id_selection_ordinal_key',
+      })
+      await expect(linkAttempt(
+        sourceGameId,
+        '76000000-0000-4000-8000-000000000001',
+        0,
+      )).rejects.toMatchObject({
+        code: '23503',
+        constraint: 'web_memory_links_source_owner_fkey',
+      })
+      await expect(linkAttempt(
+        otherGameId,
+        '74000000-0000-4000-8000-000000000009',
+        0,
+      )).rejects.toMatchObject({
+        code: '23503',
+        constraint: 'web_memory_links_target_owner_fkey',
+      })
     } finally {
       await upgrade.dispose()
     }

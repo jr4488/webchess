@@ -19,6 +19,7 @@ import type {
   PortiaCandidateAssessment,
   PortiaReview,
   SurvivorCandidate,
+  WebMemoryEvidence,
 } from '../../lib/lifecycle'
 import { makeProblemFacets } from '../../test/fixtures'
 import type { CaptureRecord, GeneratedAnswer } from '../../types'
@@ -69,6 +70,30 @@ const SEED = REQUEST_ID
 const PARTS = composeProblemParts(FACETS, SEED)
 const PROMPT = 'Canonical server-side division prompt.'
 const NOW = new Date('2026-07-26T20:00:00.000Z')
+const WEB_MEMORY_OBSERVATION_ID = 'a1000000-0000-4000-8000-000000000001'
+
+function webMemoryEvidence(attachedAt: string | null): WebMemoryEvidence {
+  return {
+    observationId: WEB_MEMORY_OBSERVATION_ID,
+    sourceGameId: 'a1000000-0000-4000-8000-000000000002',
+    sourceActionId: 'a1000000-0000-4000-8000-000000000003',
+    sourceProblem: 'How can a bounded trial generate useful direct evidence?',
+    action: 'Run one limited observation without expanding the scope.',
+    testedAssumption: 'A reversible trial can produce a useful signal safely.',
+    expectedObservation: 'A measurable signal appears inside the review horizon.',
+    observedAt: NOW.toISOString(),
+    observation: 'The signal improved while participants retained an opt-out.',
+    evidenceClassification: 'Measured result',
+    expectedEffect: 'A measurable signal appears inside the review horizon.',
+    unexpectedEffect: 'One participant needed a longer explanation.',
+    stakeholderResponse: 'Participants retained agency and reported no lasting harm.',
+    assumptionResult: 'supported',
+    nextDecision: 'Repeat once with broader stakeholder review before scaling.',
+    selectionOrdinal: 0,
+    consentVersion: 'webchess-web-memory-consent-v1',
+    attachedAt,
+  }
+}
 
 const STORED_ANSWER: GeneratedAnswer = {
   answer:
@@ -679,6 +704,7 @@ function lifecycleAggregate(
     updatedAt: NOW.toISOString(),
     ...overrides,
     research: overrides.research ?? [],
+    webMemoryEvidence: overrides.webMemoryEvidence ?? [],
   }
 }
 
@@ -846,6 +872,7 @@ function createLifecycleRepository(
         expectedObservation: input.expectedObservation,
         decisionThreshold: input.decisionThreshold,
         reviewHorizon: input.reviewHorizon,
+        followUpAt: input.followUpAt ?? null,
         status: 'planned' as const,
         revision: 0,
         version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
@@ -867,6 +894,7 @@ function createLifecycleRepository(
       const action = {
         ...existing,
         status: input.status,
+        followUpAt: input.followUpAt ?? null,
         revision: input.expectedRevision + 1,
         updatedAt: NOW.toISOString(),
       }
@@ -902,6 +930,10 @@ function createLifecycleRepository(
       }
       return observation
     }),
+    listWebMemory: vi.fn(async () => ({ cases: [], carriedObservationIds: [] })),
+    getWebMemoryEvidence: vi.fn(async () => []),
+    getWebMemoryEvidenceForGame: vi.fn(async () => []),
+    attachWebMemoryEvidence: vi.fn(async () => undefined),
   }
   return repository
 }
@@ -1159,6 +1191,30 @@ describe('durable HTTP service adapter', () => {
         game: expect.objectContaining({ id: REQUEST_ID }),
         trajectorySeed: REQUEST_ID,
       }),
+    )
+  })
+
+  it('owner-checks, links, and supplies explicitly selected Web memory to Division', async () => {
+    dependencies = lifecycleDependencies()
+    const evidence = webMemoryEvidence(null)
+    vi.mocked(
+      dependencies.lifecycleRepository!.getWebMemoryEvidence,
+    ).mockResolvedValue([evidence])
+
+    await createApiServicesWithDependencies(dependencies).divide({
+      ...operationInput(),
+      memoryObservationIds: [WEB_MEMORY_OBSERVATION_ID],
+    })
+
+    expect(
+      dependencies.lifecycleRepository?.getWebMemoryEvidence,
+    ).toHaveBeenCalledWith(OWNER_ID, [WEB_MEMORY_OBSERVATION_ID])
+    expect(
+      dependencies.lifecycleRepository?.attachWebMemoryEvidence,
+    ).toHaveBeenCalledWith(OWNER_ID, REQUEST_ID, [WEB_MEMORY_OBSERVATION_ID])
+    expect(dependencies.divisionGenerator).toHaveBeenCalledWith(
+      { problem: PROBLEM, webMemoryEvidence: [evidence] },
+      expect.objectContaining({ userId: OWNER_ID }),
     )
   })
 
@@ -2130,6 +2186,7 @@ describe('durable HTTP service adapter', () => {
       sqlResult(),
       sqlResult(),
       sqlResult(),
+      sqlResult(),
       sqlResult([{
         idempotencyKey: IDEMPOTENCY_KEY,
         operation: 'create_action',
@@ -2224,10 +2281,13 @@ describe('durable HTTP service adapter', () => {
     const statements = vi.mocked(
       dependencies.database.transaction,
     ).mock.calls[0]?.[0]
-    expect(statements).toHaveLength(18)
+    expect(statements).toHaveLength(19)
     expect(statements?.[0]?.text).toContain('pg_column_size')
     expect(statements?.[0]?.text).toContain(
       'FROM wilbur_mutation_requests AS mutations',
+    )
+    expect(statements?.[0]?.text).toContain(
+      'FROM web_memory_links AS memory_links',
     )
     expect(statements?.[0]?.values).toEqual([
       OWNER_ID,
@@ -2240,11 +2300,21 @@ describe('durable HTTP service adapter', () => {
     expect(statements?.[7]?.text).toContain('FROM lifecycle_runs')
     expect(statements?.[8]?.text).toContain('FROM research_requests')
     expect(statements?.[9]?.text).toContain('FROM research_sources')
-    expect(statements?.[15]?.text).toContain('FROM wilbur_mutation_requests')
-    expect(statements?.[15]?.text).not.toMatch(
+    expect(statements?.[13]?.text).toContain('follow_up_at AS "followUpAt"')
+    expect(statements?.[14]?.text).toContain('FROM web_memory_links')
+    expect(statements?.[14]?.text).toContain(
+      'selection_ordinal AS "selectionOrdinal"',
+    )
+    expect(statements?.[14]?.text).toContain(
+      'consent_version AS "consentVersion"',
+    )
+    expect(statements?.[15]?.text).toContain('FROM wilbur_observations')
+    expect(statements?.[16]?.text).toContain('FROM wilbur_mutation_requests')
+    expect(statements?.[16]?.text).not.toMatch(
       /reserved_future_rows|reserved_text_bytes/u,
     )
-    expect(statements?.[16]?.text).toContain('FROM lifecycle_events')
+    expect(statements?.[16]?.text).toContain('result_follow_up_at')
+    expect(statements?.[17]?.text).toContain('FROM lifecycle_events')
     for (const alias of [
       'answerPromptDigest',
       'portiaCurrentCandidateId',
@@ -2259,10 +2329,10 @@ describe('durable HTTP service adapter', () => {
     ]) {
       expect(statements?.[7]?.text).toContain(`AS "${alias}"`)
     }
-    expect(statements?.[17]?.text).toContain('FROM rate_buckets')
-    expect(statements?.[17]?.text).toContain("key_type = 'user'")
-    expect(statements?.[17]?.text.match(/\bcount\b/gu)).toHaveLength(1)
-    expect(statements?.[17]?.values).toEqual([
+    expect(statements?.[18]?.text).toContain('FROM rate_buckets')
+    expect(statements?.[18]?.text).toContain("key_type = 'user'")
+    expect(statements?.[18]?.text.match(/\bcount\b/gu)).toHaveLength(1)
+    expect(statements?.[18]?.values).toEqual([
       hashUserRateKey(dependencies.hmacSecret, OWNER_ID),
     ])
     expect(
@@ -3413,6 +3483,17 @@ describe('durable HTTP service adapter', () => {
       portia: failedPortia,
       gate: failedGate,
     }))
+    const inheritedEvidence = webMemoryEvidence(NOW.toISOString())
+    vi.mocked(
+      dependencies.lifecycleRepository!.getWebMemoryEvidenceForGame,
+    ).mockResolvedValue([inheritedEvidence])
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      snapshot({
+        id: IDEMPOTENCY_KEY,
+        sourceGameId: GAME_ID,
+        status: 'mapped',
+      }),
+    )
     const replayed = await createApiServicesWithDependencies(
       dependencies,
     ).retryLifecycle({
@@ -3426,6 +3507,25 @@ describe('durable HTTP service adapter', () => {
       sameFieldRetryCount: 1,
     })
     expect(dependencies.usage.consumeReplayGameStart).toHaveBeenCalledOnce()
+    expect(
+      dependencies.lifecycleRepository?.getWebMemoryEvidenceForGame,
+    ).toHaveBeenCalledWith(OWNER_ID, GAME_ID)
+    expect(
+      dependencies.lifecycleRepository?.attachWebMemoryEvidence,
+    ).toHaveBeenCalledWith(
+      OWNER_ID,
+      IDEMPOTENCY_KEY,
+      [WEB_MEMORY_OBSERVATION_ID],
+    )
+    expect(
+      vi.mocked(
+        dependencies.lifecycleRepository!.attachWebMemoryEvidence,
+      ).mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(
+        dependencies.lifecycleRepository!.createRetryRun,
+      ).mock.invocationCallOrder[0]!,
+    )
 
     dependencies = lifecycleDependencies(lifecycleAggregate({
       state: 'gate_failed',
@@ -3466,6 +3566,10 @@ describe('durable HTTP service adapter', () => {
       portia: failedPortia,
       gate: failedGate,
     }))
+    const inheritedEvidence = webMemoryEvidence(NOW.toISOString())
+    vi.mocked(
+      dependencies.lifecycleRepository!.getWebMemoryEvidenceForGame,
+    ).mockResolvedValue([inheritedEvidence])
     const repairContext = normalizeDivisionRepairContext({
       priorFieldGeneration: 1,
       gateMissingRequirements: failedGate.missingRequirements,
@@ -3497,7 +3601,11 @@ describe('durable HTTP service adapter', () => {
       fieldRegenerationCount: 1,
     })
     expect(dependencies.divisionGenerator).toHaveBeenCalledWith(
-      { problem: PROBLEM, repairContext },
+      {
+        problem: PROBLEM,
+        repairContext,
+        webMemoryEvidence: [inheritedEvidence],
+      },
       expect.objectContaining({ userId: OWNER_ID }),
     )
     expect(dependencies.repository.getOrCreateDivision).toHaveBeenCalledWith(
@@ -3512,6 +3620,7 @@ describe('durable HTTP service adapter', () => {
           operation: 'division/v2-field-retry',
           problem: PROBLEM,
           repairContext,
+          memoryObservationIds: [WEB_MEMORY_OBSERVATION_ID],
           sourceGameId: GAME_ID,
           fieldGeneration: 2,
           model: OPENAI_MODEL,
@@ -3526,6 +3635,20 @@ describe('durable HTTP service adapter', () => {
         trajectorySeed: REQUEST_ID,
         mode: 'regenerate_field',
       }),
+    )
+    expect(
+      dependencies.lifecycleRepository?.attachWebMemoryEvidence,
+    ).toHaveBeenCalledWith(
+      OWNER_ID,
+      REQUEST_ID,
+      [WEB_MEMORY_OBSERVATION_ID],
+    )
+    expect(
+      vi.mocked(
+        dependencies.lifecycleRepository!.attachWebMemoryEvidence,
+      ).mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(dependencies.divisionGenerator).mock.invocationCallOrder[0]!,
     )
   })
 
@@ -3634,6 +3757,7 @@ describe('durable HTTP service adapter', () => {
       expectedObservation: suggestion.expectedObservation,
       decisionThreshold: suggestion.decisionThreshold,
       reviewHorizon: suggestion.reviewHorizon,
+      followUpAt: null,
       status: 'planned' as const,
       revision: 0,
       version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
@@ -3722,6 +3846,7 @@ describe('durable HTTP service adapter', () => {
         expectedObservation: suggestion.expectedObservation,
         decisionThreshold: suggestion.decisionThreshold,
         reviewHorizon: suggestion.reviewHorizon,
+        followUpAt: null,
         status: 'in_progress',
         revision: 1,
         version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
@@ -3766,6 +3891,7 @@ describe('durable HTTP service adapter', () => {
         expectedObservation: suggestion.expectedObservation,
         decisionThreshold: suggestion.decisionThreshold,
         reviewHorizon: suggestion.reviewHorizon,
+        followUpAt: null,
         status: 'planned',
         revision: 0,
         version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
@@ -4010,6 +4136,7 @@ describe('durable HTTP service adapter', () => {
       expectedObservation: suggestion.expectedObservation,
       decisionThreshold: suggestion.decisionThreshold,
       reviewHorizon: suggestion.reviewHorizon,
+      followUpAt: null,
       status: 'planned' as const,
       revision: 0,
       version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,

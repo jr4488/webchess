@@ -526,6 +526,7 @@ function makeWilburAction(
     createdAt: '2026-08-15T16:00:00.000Z',
     updatedAt: '2026-08-15T16:00:00.000Z',
     ...overrides,
+    followUpAt: overrides.followUpAt ?? null,
   }
 }
 
@@ -2078,8 +2079,16 @@ describe('durable WebChess client flow', () => {
     const nextOptions = apiHarness.updateWilburAction.mock.calls[1]?.[3] as {
       idempotencyKey: string
     }
-    expect(firstCommand).toEqual({ expectedRevision: 0, status: 'in_progress' })
-    expect(nextCommand).toEqual({ expectedRevision: 1, status: 'completed' })
+    expect(firstCommand).toEqual({
+      expectedRevision: 0,
+      status: 'in_progress',
+      followUpAt: null,
+    })
+    expect(nextCommand).toEqual({
+      expectedRevision: 1,
+      status: 'completed',
+      followUpAt: null,
+    })
     expect(nextOptions.idempotencyKey).not.toBe(firstOptions.idempotencyKey)
     expect(apiHarness.updateWilburAction).toHaveBeenCalledTimes(2)
     expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(3)

@@ -6,6 +6,7 @@ import type {
   WilburAction,
   WilburActionStatus,
   WilburObservation,
+  WebMemoryIndex,
 } from '../../lib/lifecycle'
 import type { GeneratedAnswer } from '../../types'
 
@@ -78,6 +79,7 @@ export interface CreateWilburActionCommand extends ApiOperationContext {
   expectedObservation: string
   decisionThreshold: string
   reviewHorizon: string
+  followUpAt?: string | null
 }
 
 export interface UpdateWilburActionCommand extends ApiOperationContext {
@@ -86,6 +88,7 @@ export interface UpdateWilburActionCommand extends ApiOperationContext {
   actionId: string
   expectedRevision: number
   status: WilburActionStatus
+  followUpAt?: string | null
 }
 
 export interface AppendWilburObservationCommand extends ApiOperationContext {
@@ -106,9 +109,12 @@ export interface WebChessApiServices {
   divide(input: {
     ownerId: string
     problem: string
+    memoryObservationIds?: readonly string[]
   } & ApiOperationContext): Promise<DurableGameDto>
 
   getCurrentGame(input: OwnerContext): Promise<DurableGameDto | null>
+
+  getWebMemory(input: OwnerContext): Promise<WebMemoryIndex>
 
   getGame(input: OwnerContext & {
     gameId: string

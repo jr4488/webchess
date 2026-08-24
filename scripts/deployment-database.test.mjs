@@ -103,6 +103,7 @@ describe('deployment database migration tooling', () => {
       '0011_extend_research_timeout_ceiling',
       '0012_unique_wilbur_charlotte_actions',
       '0013_wilbur_mutation_requests',
+      '0014_web_memory_feedback',
     ])
     expect(migrations[0].sql).toContain('CREATE TABLE IF NOT EXISTS games')
     const researchMigration = migrations.find(
@@ -123,6 +124,9 @@ describe('deployment database migration tooling', () => {
     const wilburMutationRequestsMigration = migrations.find(
       (migration) => migration.id === '0013_wilbur_mutation_requests',
     )
+    const webMemoryMigration = migrations.find(
+      (migration) => migration.id === '0014_web_memory_feedback',
+    )
     expect(researchMigration?.sql).toContain(
       'CREATE TABLE IF NOT EXISTS research_requests',
     )
@@ -133,6 +137,11 @@ describe('deployment database migration tooling', () => {
       'CHECK (timeout_ms BETWEEN 1000 AND 120000)',
     )
     expect(answerPromptMigration?.sql).toContain('answer_user_prompt_sha256')
+    expect(webMemoryMigration?.sql).toContain('CREATE TABLE web_memory_links')
+    expect(webMemoryMigration?.sql).toContain('ADD COLUMN follow_up_at')
+    expect(webMemoryMigration?.sql).toContain(
+      'CREATE OR REPLACE FUNCTION webchess_guard_wilbur_charlotte_binding()',
+    )
     expect(extendedTimeoutMigration?.sql).toContain(
       'CHECK (timeout_ms BETWEEN 1000 AND 150000)',
     )
@@ -203,6 +212,10 @@ describe('deployment database migration tooling', () => {
       'SELECT',
       'INSERT',
     ])
+    expect(allowedPrivileges('web_memory_links')).toEqual([
+      'SELECT',
+      'INSERT',
+    ])
 
     const gateUpdateColumns = columnPrivileges
       .filter(
@@ -224,6 +237,7 @@ describe('deployment database migration tooling', () => {
       'status',
       'revision',
       'updated_at',
+      'follow_up_at',
     ])
     const wilburMutationUpdateColumns = columnPrivileges
       .filter(
@@ -245,6 +259,7 @@ describe('deployment database migration tooling', () => {
       'result_status',
       'result_updated_at',
       'updated_at',
+      'result_follow_up_at',
     ])
 
     expect(indexes).toEqual(
@@ -275,6 +290,18 @@ describe('deployment database migration tooling', () => {
           index_name: 'wilbur_mutation_requests_pkey',
           table_name: 'wilbur_mutation_requests',
           key_columns: 'clerk_user_id,idempotency_key',
+          predicate: null,
+        }),
+        expect.objectContaining({
+          index_name: 'web_memory_links_target_game_id_source_observation_id_key',
+          table_name: 'web_memory_links',
+          key_columns: 'target_game_id,source_observation_id',
+          predicate: null,
+        }),
+        expect.objectContaining({
+          index_name: 'web_memory_links_target_game_id_selection_ordinal_key',
+          table_name: 'web_memory_links',
+          key_columns: 'target_game_id,selection_ordinal',
           predicate: null,
         }),
       ]),
@@ -330,7 +357,7 @@ describe('deployment database migration tooling', () => {
     ])
 
     for (const [index, filename] of [
-      [0, '0012_unique_wilbur_charlotte_actions.sql'],
+      [0, '0014_web_memory_feedback.sql'],
       [1, '0013_wilbur_mutation_requests.sql'],
     ]) {
       const functionBody = readFileSync(
@@ -344,7 +371,7 @@ describe('deployment database migration tooling', () => {
       expect(triggers[index].function_source).not.toBe('BEGIN RETURN NEW; END')
     }
 
-    expect(constraints).toHaveLength(18)
+    expect(constraints).toHaveLength(28)
     expect(constraints).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -361,9 +388,28 @@ describe('deployment database migration tooling', () => {
           constraint_name: 'wilbur_mutation_requests_reservation_shape',
           definition: expect.stringContaining('reserved_future_rows'),
         }),
+        expect.objectContaining({
+          constraint_name: 'web_memory_links_clerk_user_id_fkey',
+          definition: expect.stringContaining('ON DELETE CASCADE'),
+        }),
+        expect.objectContaining({
+          constraint_name: 'web_memory_links_source_owner_fkey',
+          definition: expect.stringContaining(
+            '(source_observation_id, clerk_user_id)',
+          ),
+        }),
+        expect.objectContaining({
+          constraint_name: 'web_memory_links_selection_ordinal_valid',
+          definition: expect.stringContaining('selection_ordinal'),
+        }),
+        expect.objectContaining({
+          constraint_name:
+            'web_memory_links_target_game_id_source_observation_id_key',
+          definition: 'UNIQUE (target_game_id, source_observation_id)',
+        }),
       ]),
     )
-    expect(defaults).toHaveLength(5)
+    expect(defaults).toHaveLength(6)
     expect(defaults).toEqual(
       expect.arrayContaining([
         {
@@ -375,6 +421,11 @@ describe('deployment database migration tooling', () => {
           table_name: 'wilbur_mutation_requests',
           column_name: 'status',
           definition: "'pending'::text",
+        },
+        {
+          table_name: 'web_memory_links',
+          column_name: 'created_at',
+          definition: 'now()',
         },
       ]),
     )

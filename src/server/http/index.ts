@@ -22,6 +22,7 @@ export {
   handleStartGameRequest,
   handleCreateWilburActionRequest,
   handleUpdateWilburActionRequest,
+  handleWebMemoryRequest,
 } from './handlers'
 export { ApiError } from './errors'
 export type {

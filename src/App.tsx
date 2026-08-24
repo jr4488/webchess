@@ -4,6 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 
 import { Header } from './components/Header'
+import {
+  countDueWebMemoryActions,
+  WebMemoryPanel,
+} from './components/WebMemoryPanel'
 import { LifecycleStage } from './components/stages/LifecycleStage'
 import { MappingStage } from './components/stages/MappingStage'
 import { PlayingStage } from './components/stages/PlayingStage'
@@ -28,6 +32,7 @@ import type {
 } from './lib/webchess-api'
 import type {
   LifecycleAggregate,
+  WebMemoryIndex,
   WilburAction,
   WilburObservation,
 } from './lib/lifecycle/contracts'
@@ -206,13 +211,23 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   const [lifecycleError, setLifecycleError] = useState('')
   const [actionPendingIndex, setActionPendingIndex] = useState<number | null>(null)
   const [wilburPending, setWilburPending] = useState(false)
+  const [webMemory, setWebMemory] = useState<WebMemoryIndex | null>(null)
+  const [webMemoryOpen, setWebMemoryOpen] = useState(false)
+  const [webMemoryBusy, setWebMemoryBusy] = useState(false)
+  const [webMemoryError, setWebMemoryError] = useState('')
+  const [selectedMemoryObservationIds, setSelectedMemoryObservationIds] = useState<string[]>([])
   const restoreRequestRef = useRef<ActiveRestoreRequest | null>(null)
   const restoreRequestGenerationRef = useRef(0)
   const divisionRequestRef = useRef<AbortController | null>(null)
   const answerRequestRef = useRef<AbortController | null>(null)
   const lifecycleRequestRef = useRef<AbortController | null>(null)
+  const webMemoryRequestRef = useRef<AbortController | null>(null)
   const movePendingRef = useRef(false)
-  const divisionIntentRef = useRef<{ problem: string; key: string } | null>(null)
+  const divisionIntentRef = useRef<{
+    problem: string
+    memoryKey: string
+    key: string
+  } | null>(null)
   const answerIntentRef = useRef<{ gameId: string; key: string } | null>(null)
   const replayIntentRef = useRef<{ gameId: string; key: string } | null>(null)
   const replayPendingRef = useRef(false)
@@ -325,6 +340,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     setLifecycleError('')
     setActionPendingIndex(null)
     setWilburPending(false)
+    setSelectedMemoryObservationIds([])
     setNotice('Choose a white piece. Its possible paths will appear.')
   }, [invalidateEngineRequest])
 
@@ -566,13 +582,45 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     runtime.signInPath,
   ])
 
+  const refreshWebMemory = useCallback(async () => {
+    webMemoryRequestRef.current?.abort()
+    const controller = new AbortController()
+    webMemoryRequestRef.current = controller
+    setWebMemoryBusy(true)
+    setWebMemoryError('')
+    try {
+      const memory = await runtime.api.getWebMemory({ signal: controller.signal })
+      if (controller.signal.aborted || webMemoryRequestRef.current !== controller) return
+      setWebMemory(memory)
+    } catch (error) {
+      if (controller.signal.aborted || webMemoryRequestRef.current !== controller) return
+      if (isWebChessApiError(error) && error.kind === 'authentication-required') {
+        if (runtime.signInPath) window.location.assign(runtime.signInPath)
+        return
+      }
+      setWebMemoryError(
+        error instanceof Error
+          ? error.message
+          : 'WebChess could not load the saved case memory.',
+      )
+    } finally {
+      if (webMemoryRequestRef.current === controller) {
+        webMemoryRequestRef.current = null
+        setWebMemoryBusy(false)
+      }
+    }
+  }, [runtime.api, runtime.signInPath])
+
   useEffect(() => {
     const restoreTimer = window.setTimeout(() => void restoreCurrentGame(), 0)
+    const memoryTimer = window.setTimeout(() => void refreshWebMemory(), 0)
     return () => {
       window.clearTimeout(restoreTimer)
+      window.clearTimeout(memoryTimer)
       invalidateRestoreRequest()
+      webMemoryRequestRef.current?.abort()
     }
-  }, [invalidateRestoreRequest, restoreCurrentGame])
+  }, [invalidateRestoreRequest, refreshWebMemory, restoreCurrentGame])
 
   useEffect(() => {
     if (game?.status !== 'dividing' || gameMutationMode !== null) return
@@ -649,6 +697,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     divisionRequestRef.current?.abort()
     answerRequestRef.current?.abort()
     lifecycleRequestRef.current?.abort()
+    webMemoryRequestRef.current?.abort()
   }, [invalidateRestoreRequest])
 
   useEffect(() => {
@@ -1315,9 +1364,16 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     const controller = new AbortController()
     divisionRequestRef.current = controller
     const existingIntent = divisionIntentRef.current
+    const memoryObservationIds = [...selectedMemoryObservationIds]
+    const memoryKey = memoryObservationIds.join(':')
     const intent = existingIntent?.problem === subject
+      && existingIntent.memoryKey === memoryKey
       ? existingIntent
-      : { problem: subject, key: runtime.api.createIdempotencyKey() }
+      : {
+          problem: subject,
+          memoryKey,
+          key: runtime.api.createIdempotencyKey(),
+        }
     divisionIntentRef.current = intent
     const activity = beginModelActivity('division')
 
@@ -1334,12 +1390,15 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     try {
       const divided = await runtime.api.divideProblem(subject, {
         idempotencyKey: intent.key,
+        memoryObservationIds,
         signal: controller.signal,
       })
       if (controller.signal.aborted || divisionRequestRef.current !== controller) return
 
       divisionIntentRef.current = null
+      setSelectedMemoryObservationIds([])
       applyDurableGame(divided, { animateMapping: true })
+      if (memoryObservationIds.length > 0) void refreshWebMemory()
     } catch (error) {
       if (controller.signal.aborted || divisionRequestRef.current !== controller) return
       if (
@@ -1368,9 +1427,11 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
           return
         }
 
+        setSelectedMemoryObservationIds([])
         applyDurableGame(recovered, {
           animateMapping: recovered.status === 'mapped',
         })
+        if (memoryObservationIds.length > 0) void refreshWebMemory()
         if (recovered.status === 'division_failed') {
           setDivisionError(errorMessage)
           setDivisionStatus('error')
@@ -1668,14 +1729,18 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     }
   }
 
-  const trackCharlotteAction = async (index: number) => {
+  const trackCharlotteAction = async (
+    index: number,
+    followUpAt: string | null,
+  ) => {
     const current = game
     const suggestion = lifecycle?.charlotte?.exactlyThreeNextActions[index]
     if (!current || !suggestion || actionPendingIndex !== null) return
 
     const existingIntent = wilburActionIntentRef.current
     const intent = existingIntent?.gameId === current.id &&
-      existingIntent.charlotteActionIndex === index
+      existingIntent.charlotteActionIndex === index &&
+      existingIntent.command.followUpAt === followUpAt
       ? existingIntent
       : {
           gameId: current.id,
@@ -1688,6 +1753,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
             expectedObservation: suggestion.expectedObservation,
             decisionThreshold: suggestion.decisionThreshold,
             reviewHorizon: suggestion.reviewHorizon,
+            followUpAt,
           },
           key: runtime.api.createIdempotencyKey(),
         }
@@ -1703,6 +1769,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
         wilburActionIntentRef.current = null
       }
       await refreshLifecycle()
+      await refreshWebMemory()
     } catch (error) {
       if (isAmbiguousWilburMutationFailure(error)) {
         await refreshLifecycle()
@@ -1723,6 +1790,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   const setWilburActionStatus = async (
     action: WilburAction,
     status: WilburAction['status'],
+    followUpAt: string | null,
   ) => {
     const current = game
     if (!current || wilburPending) return
@@ -1730,7 +1798,8 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     const existingIntent = wilburStatusIntentRef.current
     const intent = existingIntent?.gameId === current.id &&
       existingIntent.actionId === action.id &&
-      existingIntent.command.status === status
+      existingIntent.command.status === status &&
+      existingIntent.command.followUpAt === followUpAt
       ? existingIntent
       : {
           gameId: current.id,
@@ -1738,6 +1807,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
           command: {
             expectedRevision: action.revision,
             status,
+            followUpAt,
           },
           key: runtime.api.createIdempotencyKey(),
         }
@@ -1753,6 +1823,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
         wilburStatusIntentRef.current = null
       }
       await refreshLifecycle()
+      await refreshWebMemory()
     } catch (error) {
       if (isAmbiguousWilburMutationFailure(error)) {
         await refreshLifecycle()
@@ -1803,6 +1874,7 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
         wilburObservationIntentRef.current = null
       }
       await refreshLifecycle()
+      await refreshWebMemory()
       return true
     } catch (error) {
       if (isAmbiguousWilburMutationFailure(error)) {
@@ -1820,6 +1892,28 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
     } finally {
       setWilburPending(false)
     }
+  }
+
+  const toggleMemoryObservation = (observationId: string) => {
+    if (stage !== 'question') return
+    setSelectedMemoryObservationIds((current) => {
+      if (current.includes(observationId)) {
+        return current.filter((id) => id !== observationId)
+      }
+      return current.length < 8 ? [...current, observationId] : current
+    })
+  }
+
+  const useMemoryNextDecision = (observation: WilburObservation) => {
+    if (stage !== 'question') return
+    setProblem(observation.nextDecision.slice(0, 240))
+    setSelectedMemoryObservationIds((current) =>
+      current.includes(observation.id) || current.length >= 8
+        ? current
+        : [...current, observation.id],
+    )
+    setWebMemoryOpen(false)
+    window.requestAnimationFrame(() => document.getElementById('problem')?.focus())
   }
 
   const replayProblem = async () => {
@@ -2000,6 +2094,14 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
   }
 
   const visibleStage = stage
+  const webMemoryObservationCount = webMemory?.cases.reduce(
+    (count, item) => count + item.actions.reduce(
+      (actionCount, record) => actionCount + record.observations.length,
+      0,
+    ),
+    0,
+  ) ?? 0
+  const dueWebMemoryCount = countDueWebMemoryActions(webMemory)
   const sharedActionDisabled =
     gameMutationMode !== null ||
     replayPending ||
@@ -2031,10 +2133,36 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
         stage={visibleStage}
         resetDisabled={resetDisabled}
         onReset={reset}
+        onOpenMemory={() => setWebMemoryOpen(true)}
+        memoryCount={webMemoryObservationCount}
+        dueMemoryCount={dueWebMemoryCount}
         localMode={runtime.kind === 'openclaw'}
       />
 
+      <WebMemoryPanel
+        open={webMemoryOpen}
+        memory={webMemory}
+        busy={webMemoryBusy}
+        error={webMemoryError}
+        selectionEnabled={stage === 'question'}
+        selectedObservationIds={selectedMemoryObservationIds}
+        onClose={() => setWebMemoryOpen(false)}
+        onRefresh={() => void refreshWebMemory()}
+        onToggleObservation={toggleMemoryObservation}
+        onUseNextDecision={useMemoryNextDecision}
+      />
+
       <main className="main-content">
+        {dueWebMemoryCount > 0 && !webMemoryOpen ? (
+          <button
+            className="web-memory-reminder"
+            type="button"
+            onClick={() => setWebMemoryOpen(true)}
+          >
+            <span><strong>{dueWebMemoryCount}</strong> Wilbur follow-up{dueWebMemoryCount === 1 ? ' is' : 's are'} due</span>
+            <span>Open case memory and record what reality did.</span>
+          </button>
+        ) : null}
         {restoreError && (
           <div className="session-banner" role="alert">
             <span>{restoreError}</span>
@@ -2063,6 +2191,8 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
             provider={runtime.provider}
             setProblem={setProblem}
             onSubmit={beginMapping}
+            selectedMemoryCount={selectedMemoryObservationIds.length}
+            onOpenMemory={() => setWebMemoryOpen(true)}
           />
         ) : null}
 
@@ -2130,8 +2260,8 @@ function WebChessExperience({ runtime }: { runtime: WebChessRuntime }) {
             onRefresh={() => void refreshLifecycle()}
             onRetry={() => void retryLifecyclePath()}
             onRetryAnswer={() => void retryBoardAnswer()}
-            onCreateAction={(index) => void trackCharlotteAction(index)}
-            onUpdateAction={(action, status) => void setWilburActionStatus(action, status)}
+            onCreateAction={(index, followUpAt) => void trackCharlotteAction(index, followUpAt)}
+            onUpdateAction={(action, status, followUpAt) => void setWilburActionStatus(action, status, followUpAt)}
             onObserve={observeWilburAction}
           />
         )}

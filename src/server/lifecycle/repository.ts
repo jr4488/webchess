@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto'
 
+import { z } from 'zod'
+
 import {
   CURRENT_LIFECYCLE_VERSIONS,
+  CURRENT_WEB_MEMORY_CONSENT_VERSION,
   CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
   assertLifecycleTransition,
   canReopenInsufficientBasis,
@@ -20,6 +23,9 @@ import type {
   LifecycleState,
   PersistedPortiaReview,
   SurvivorCandidate,
+  WebMemoryCase,
+  WebMemoryEvidence,
+  WebMemoryIndex,
   WilburAction,
   WilburObservation,
 } from '../../lib/lifecycle'
@@ -183,6 +189,7 @@ const SELECT_ACTION_COLUMNS = `
   expected_observation,
   decision_threshold,
   review_horizon,
+  follow_up_at,
   status,
   revision,
   record_version,
@@ -206,6 +213,38 @@ const SELECT_OBSERVATION_COLUMNS = `
   next_decision,
   record_version,
   created_at
+`
+
+const SELECT_WEB_MEMORY_EVIDENCE_BASE_COLUMNS = `
+  observation.id AS observation_id,
+  source_game.id AS source_game_id,
+  action.id AS source_action_id,
+  source_game.problem AS source_problem,
+  action.action,
+  action.tested_assumption,
+  action.expected_observation,
+  observation.observed_at,
+  observation.observation,
+  observation.evidence_classification,
+  observation.expected_effect,
+  observation.unexpected_effect,
+  observation.stakeholder_response,
+  observation.assumption_result,
+  observation.next_decision
+`
+
+const SELECT_LINKED_WEB_MEMORY_EVIDENCE_COLUMNS = `
+  ${SELECT_WEB_MEMORY_EVIDENCE_BASE_COLUMNS},
+  link.selection_ordinal,
+  link.consent_version,
+  link.created_at AS attached_at
+`
+
+const SELECT_SELECTED_WEB_MEMORY_EVIDENCE_COLUMNS = `
+  ${SELECT_WEB_MEMORY_EVIDENCE_BASE_COLUMNS},
+  selected.selection_ordinal,
+  $3::text AS consent_version,
+  NULL::timestamptz AS attached_at
 `
 
 const SELECT_EVENT_COLUMNS = `
@@ -265,6 +304,18 @@ function assertRevision(value: number): number {
     )
   }
   return value
+}
+
+function optionalTimestamp(value: string | null, label: string): string | null {
+  if (value === null) return null
+  const timestamp = new Date(value)
+  if (Number.isNaN(timestamp.getTime())) {
+    throw new LifecycleRepositoryError(
+      'invalid-input',
+      `${label} must be an ISO timestamp.`,
+    )
+  }
+  return timestamp.toISOString()
 }
 
 function revisionNumber(value: bigint): number {
@@ -407,11 +458,82 @@ function actionFromRow(row: WilburActionRow): WilburAction {
     expectedObservation: row.expected_observation,
     decisionThreshold: row.decision_threshold,
     reviewHorizon: row.review_horizon,
+    followUpAt: row.follow_up_at?.toISOString() ?? null,
     status: row.status,
     revision: revisionNumber(row.revision),
     version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+  }
+}
+
+const webMemoryEvidenceRowSchema = z.object({
+  observation_id: z.string().uuid(),
+  source_game_id: z.string().uuid(),
+  source_action_id: z.string().uuid(),
+  source_problem: z.string().min(12).max(240),
+  action: z.string().min(8).max(2_000),
+  tested_assumption: z.string().min(8).max(1_000),
+  expected_observation: z.string().min(8).max(1_000),
+  observed_at: z.preprocess(
+    (value) => (typeof value === 'string' ? new Date(value) : value),
+    z.date(),
+  ),
+  observation: z.string().min(3).max(4_000),
+  evidence_classification: z.string().min(3).max(240),
+  expected_effect: z.string().min(1).max(2_000),
+  unexpected_effect: z.string().min(1).max(2_000),
+  stakeholder_response: z.string().min(1).max(2_000),
+  assumption_result: z.enum(['supported', 'rejected', 'unresolved']),
+  next_decision: z.string().min(3).max(2_000),
+  selection_ordinal: z.number().int().min(0).max(7),
+  consent_version: z.literal(CURRENT_WEB_MEMORY_CONSENT_VERSION),
+  attached_at: z.preprocess(
+    (value) => (typeof value === 'string' ? new Date(value) : value),
+    z.date().nullable(),
+  ),
+})
+
+type WebMemoryEvidenceRow = z.infer<typeof webMemoryEvidenceRowSchema>
+
+const webMemoryCaseRowSchema = z.object({
+  game_id: z.string().uuid(),
+  problem: z.string().min(12).max(240),
+  is_current: z.boolean(),
+  created_at: z.preprocess(
+    (value) => (typeof value === 'string' ? new Date(value) : value),
+    z.date(),
+  ),
+  updated_at: z.preprocess(
+    (value) => (typeof value === 'string' ? new Date(value) : value),
+    z.date(),
+  ),
+})
+
+const webMemoryActionRowSchema = wilburActionRowSchema.extend({
+  game_id: z.string().uuid(),
+})
+
+function webMemoryEvidenceFromRow(row: WebMemoryEvidenceRow): WebMemoryEvidence {
+  return {
+    observationId: row.observation_id,
+    sourceGameId: row.source_game_id,
+    sourceActionId: row.source_action_id,
+    sourceProblem: row.source_problem,
+    action: row.action,
+    testedAssumption: row.tested_assumption,
+    expectedObservation: row.expected_observation,
+    observedAt: row.observed_at.toISOString(),
+    observation: row.observation,
+    evidenceClassification: row.evidence_classification,
+    expectedEffect: row.expected_effect,
+    unexpectedEffect: row.unexpected_effect,
+    stakeholderResponse: row.stakeholder_response,
+    assumptionResult: row.assumption_result,
+    nextDecision: row.next_decision,
+    selectionOrdinal: row.selection_ordinal,
+    consentVersion: row.consent_version,
+    attachedAt: row.attached_at?.toISOString() ?? null,
   }
 }
 
@@ -463,6 +585,7 @@ function runFromRows(
   researchRequests: readonly ResearchRequestRow[],
   researchSources: readonly ResearchSourceRow[],
   activities: readonly LifecycleEventRow[],
+  webMemoryEvidence: readonly WebMemoryEvidenceRow[],
 ): LifecycleAggregate {
   const run: LifecycleRun = {
     id: row.id,
@@ -527,6 +650,7 @@ function runFromRows(
     ...run,
     activities: activities.map(activityFromRow),
     research: researchRecordsFromRows(researchRequests, researchSources),
+    webMemoryEvidence: webMemoryEvidence.map(webMemoryEvidenceFromRow),
   }
 }
 
@@ -665,6 +789,28 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
           text: `SELECT ${SELECT_EVENT_COLUMNS} FROM lifecycle_events WHERE clerk_user_id = $1::text AND lifecycle_run_id = (SELECT id FROM lifecycle_runs WHERE clerk_user_id = $1::text AND game_id = $2::uuid) ORDER BY sequence`,
           values: [owner, id],
         },
+        {
+          text: `
+            SELECT ${SELECT_LINKED_WEB_MEMORY_EVIDENCE_COLUMNS}
+            FROM web_memory_links AS link
+            JOIN wilbur_observations AS observation
+              ON observation.id = link.source_observation_id
+              AND observation.clerk_user_id = link.clerk_user_id
+            JOIN wilbur_actions AS action
+              ON action.id = observation.action_id
+              AND action.clerk_user_id = link.clerk_user_id
+            JOIN lifecycle_runs AS source_run
+              ON source_run.id = action.lifecycle_run_id
+              AND source_run.clerk_user_id = link.clerk_user_id
+            JOIN games AS source_game
+              ON source_game.id = source_run.game_id
+              AND source_game.clerk_user_id = link.clerk_user_id
+            WHERE link.clerk_user_id = $1::text
+              AND link.target_game_id = $2::uuid
+            ORDER BY link.selection_ordinal
+          `,
+          values: [owner, id],
+        },
       ],
       { isolationLevel: 'RepeatableRead', readOnly: true },
     )
@@ -681,6 +827,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         parseResultRows(results[6]!, researchRequestRowSchema),
         parseResultRows(results[7]!, researchSourceRowSchema),
         parseResultRows(results[8]!, lifecycleEventRowSchema),
+        parseResultRows(results[9]!, webMemoryEvidenceRowSchema),
       )
     } catch (error) {
       if (error instanceof LifecycleRepositoryError) throw error
@@ -688,6 +835,315 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         'integrity-error',
         'The lifecycle aggregate contains invalid persisted data.',
         { cause: error },
+      )
+    }
+  }
+
+  async listWebMemory(ownerId: string): Promise<WebMemoryIndex> {
+    const owner = assertOwner(ownerId)
+    const recentCases = `
+      WITH recent_cases AS (
+        SELECT game.id AS game_id, game.problem, game.is_current,
+          game.created_at, game.updated_at,
+          max(action.updated_at) AS memory_updated_at
+        FROM games AS game
+        JOIN lifecycle_runs AS run
+          ON run.game_id = game.id AND run.clerk_user_id = game.clerk_user_id
+        JOIN wilbur_actions AS action
+          ON action.lifecycle_run_id = run.id
+          AND action.clerk_user_id = game.clerk_user_id
+        WHERE game.clerk_user_id = $1::text
+        GROUP BY game.id, game.problem, game.is_current,
+          game.created_at, game.updated_at
+        ORDER BY max(action.updated_at) DESC, game.id
+        LIMIT 24
+      )
+    `
+    const results = await this.database.transaction([
+      {
+        text: `${recentCases}
+          SELECT game_id, problem, is_current, created_at, updated_at
+          FROM recent_cases
+          ORDER BY memory_updated_at DESC, game_id`,
+        values: [owner],
+      },
+      {
+        text: `${recentCases}
+          SELECT ${SELECT_ACTION_COLUMNS.replaceAll('\n  ', '\n  action.')},
+            recent_cases.game_id
+          FROM recent_cases
+          JOIN lifecycle_runs AS run ON run.game_id = recent_cases.game_id
+          JOIN wilbur_actions AS action
+            ON action.lifecycle_run_id = run.id
+            AND action.clerk_user_id = $1::text
+          ORDER BY recent_cases.memory_updated_at DESC, action.created_at, action.id`,
+        values: [owner],
+      },
+      {
+        text: `${recentCases}
+          SELECT ${SELECT_OBSERVATION_COLUMNS.replaceAll('\n  ', '\n  observation.')}
+          FROM recent_cases
+          JOIN lifecycle_runs AS run ON run.game_id = recent_cases.game_id
+          JOIN wilbur_actions AS action
+            ON action.lifecycle_run_id = run.id
+            AND action.clerk_user_id = $1::text
+          JOIN wilbur_observations AS observation
+            ON observation.action_id = action.id
+            AND observation.clerk_user_id = $1::text
+          ORDER BY observation.observed_at, observation.created_at, observation.id`,
+        values: [owner],
+      },
+      {
+        text: `
+          SELECT link.source_observation_id::text AS observation_id
+          FROM web_memory_links AS link
+          JOIN games AS game
+            ON game.id = link.target_game_id
+            AND game.clerk_user_id = link.clerk_user_id
+          WHERE link.clerk_user_id = $1::text AND game.is_current
+          ORDER BY link.selection_ordinal
+        `,
+        values: [owner],
+      },
+    ], { isolationLevel: 'RepeatableRead', readOnly: true })
+
+    try {
+      const caseRows = parseResultRows(results[0]!, webMemoryCaseRowSchema)
+      const actionRows = parseResultRows(results[1]!, webMemoryActionRowSchema)
+      const observationRows = parseResultRows(
+        results[2]!,
+        wilburObservationRowSchema,
+      )
+      const carriedRows = parseResultRows(
+        results[3]!,
+        z.object({ observation_id: z.string().uuid() }),
+      )
+      const observationsByAction = new Map<string, WilburObservation[]>()
+      for (const row of observationRows) {
+        const items = observationsByAction.get(row.action_id) ?? []
+        items.push(observationFromRow(row))
+        observationsByAction.set(row.action_id, items)
+      }
+      const actionsByGame = new Map<string, WebMemoryCase['actions'][number][]>()
+      for (const row of actionRows) {
+        const items = actionsByGame.get(row.game_id) ?? []
+        items.push({
+          action: actionFromRow(row),
+          observations: observationsByAction.get(row.id) ?? [],
+        })
+        actionsByGame.set(row.game_id, items)
+      }
+      return {
+        cases: caseRows.map((row) => ({
+          gameId: row.game_id,
+          problem: row.problem,
+          isCurrent: row.is_current,
+          createdAt: row.created_at.toISOString(),
+          updatedAt: row.updated_at.toISOString(),
+          actions: actionsByGame.get(row.game_id) ?? [],
+        })),
+        carriedObservationIds: carriedRows.map((row) => row.observation_id),
+      }
+    } catch (error) {
+      throw new LifecycleRepositoryError(
+        'integrity-error',
+        'The Web memory index contains invalid persisted data.',
+        { cause: error },
+      )
+    }
+  }
+
+  async getWebMemoryEvidence(
+    ownerId: string,
+    observationIds: readonly string[],
+  ): Promise<readonly WebMemoryEvidence[]> {
+    const owner = assertOwner(ownerId)
+    const ids = [...new Set(observationIds.map((id) =>
+      assertUuid(id, 'Web memory observation id')))]
+    if (ids.length > 8) {
+      throw new LifecycleRepositoryError(
+        'invalid-input',
+        'A game can carry at most eight prior Wilbur observations.',
+      )
+    }
+    if (ids.length === 0) return []
+    const result = await this.database.query({
+      text: `
+        WITH selected AS MATERIALIZED (
+          SELECT observation_id, (ordinality - 1)::smallint
+            AS selection_ordinal
+          FROM unnest($2::uuid[]) WITH ORDINALITY
+            AS requested(observation_id, ordinality)
+        )
+        SELECT ${SELECT_SELECTED_WEB_MEMORY_EVIDENCE_COLUMNS}
+        FROM selected
+        JOIN wilbur_observations AS observation
+          ON observation.id = selected.observation_id
+        JOIN wilbur_actions AS action
+          ON action.id = observation.action_id
+          AND action.clerk_user_id = observation.clerk_user_id
+        JOIN lifecycle_runs AS source_run
+          ON source_run.id = action.lifecycle_run_id
+          AND source_run.clerk_user_id = observation.clerk_user_id
+        JOIN games AS source_game
+          ON source_game.id = source_run.game_id
+          AND source_game.clerk_user_id = observation.clerk_user_id
+        WHERE observation.clerk_user_id = $1::text
+        ORDER BY selected.selection_ordinal
+      `,
+      values: [owner, ids, CURRENT_WEB_MEMORY_CONSENT_VERSION],
+    })
+    const rows = parseResultRows(result, webMemoryEvidenceRowSchema)
+    if (rows.length !== ids.length) {
+      throw new LifecycleRepositoryError(
+        'invalid-input',
+        'One or more selected Web memory observations are unavailable.',
+      )
+    }
+    return rows.map(webMemoryEvidenceFromRow)
+  }
+
+  async getWebMemoryEvidenceForGame(
+    ownerId: string,
+    gameId: string,
+  ): Promise<readonly WebMemoryEvidence[]> {
+    const owner = assertOwner(ownerId)
+    const id = assertUuid(gameId, 'Game id')
+    const result = await this.database.query({
+      text: `
+        SELECT ${SELECT_LINKED_WEB_MEMORY_EVIDENCE_COLUMNS}
+        FROM web_memory_links AS link
+        JOIN wilbur_observations AS observation
+          ON observation.id = link.source_observation_id
+          AND observation.clerk_user_id = link.clerk_user_id
+        JOIN wilbur_actions AS action
+          ON action.id = observation.action_id
+          AND action.clerk_user_id = link.clerk_user_id
+        JOIN lifecycle_runs AS source_run
+          ON source_run.id = action.lifecycle_run_id
+          AND source_run.clerk_user_id = link.clerk_user_id
+        JOIN games AS source_game
+          ON source_game.id = source_run.game_id
+          AND source_game.clerk_user_id = link.clerk_user_id
+        WHERE link.clerk_user_id = $1::text
+          AND link.target_game_id = $2::uuid
+        ORDER BY link.selection_ordinal
+      `,
+      values: [owner, id],
+    })
+    return parseResultRows(result, webMemoryEvidenceRowSchema)
+      .map(webMemoryEvidenceFromRow)
+  }
+
+  async attachWebMemoryEvidence(
+    ownerId: string,
+    gameId: string,
+    observationIds: readonly string[],
+  ): Promise<void> {
+    const owner = assertOwner(ownerId)
+    const targetGameId = assertUuid(gameId, 'Game id')
+    const ids = [...new Set(observationIds.map((id) =>
+      assertUuid(id, 'Web memory observation id')))]
+    if (ids.length > 8) {
+      throw new LifecycleRepositoryError(
+        'invalid-input',
+        'A game can carry at most eight prior Wilbur observations.',
+      )
+    }
+    if (ids.length === 0) return
+    const linkIds = ids.map(() => randomUUID())
+    const result = await this.database.query({
+      text: `
+        WITH owned_target AS MATERIALIZED (
+          SELECT target.id
+          FROM games AS target
+          WHERE target.id = $2::uuid
+            AND target.clerk_user_id = $1::text
+          FOR UPDATE
+        ),
+        requested AS MATERIALIZED (
+          SELECT selected.link_id, selected.observation_id,
+            (selected.ordinality - 1)::smallint AS selection_ordinal
+          FROM unnest($3::uuid[], $4::uuid[]) WITH ORDINALITY
+            AS selected(link_id, observation_id, ordinality)
+        ),
+        eligible AS MATERIALIZED (
+          SELECT requested.link_id, requested.observation_id,
+            requested.selection_ordinal
+          FROM requested
+          CROSS JOIN owned_target
+          JOIN wilbur_observations AS observation
+            ON observation.id = requested.observation_id
+            AND observation.clerk_user_id = $1::text
+          JOIN wilbur_actions AS action
+            ON action.id = observation.action_id
+            AND action.clerk_user_id = observation.clerk_user_id
+          JOIN lifecycle_runs AS source_run
+            ON source_run.id = action.lifecycle_run_id
+            AND source_run.clerk_user_id = observation.clerk_user_id
+          WHERE source_run.game_id <> owned_target.id
+        ),
+        existing AS MATERIALIZED (
+          SELECT link.source_observation_id, link.selection_ordinal,
+            link.consent_version
+          FROM web_memory_links AS link
+          CROSS JOIN owned_target
+          WHERE link.clerk_user_id = $1::text
+            AND link.target_game_id = owned_target.id
+        ),
+        inserted AS (
+          INSERT INTO web_memory_links (
+            id, clerk_user_id, target_game_id, source_observation_id,
+            selection_ordinal, consent_version
+          )
+          SELECT eligible.link_id, $1::text, $2::uuid,
+            eligible.observation_id, eligible.selection_ordinal, $5::text
+          FROM eligible
+          WHERE (SELECT count(*) FROM eligible) = $6::integer
+            AND NOT EXISTS (SELECT 1 FROM existing)
+          ORDER BY eligible.selection_ordinal
+          ON CONFLICT DO NOTHING
+          RETURNING source_observation_id, selection_ordinal, consent_version
+        ),
+        linked AS (
+          SELECT source_observation_id, selection_ordinal, consent_version
+          FROM existing
+          UNION ALL
+          SELECT source_observation_id, selection_ordinal, consent_version
+          FROM inserted
+        )
+        SELECT count(*)::integer AS linked_count,
+          coalesce(bool_and(
+            linked.source_observation_id =
+              ($4::uuid[])[linked.selection_ordinal + 1]
+            AND linked.consent_version = $5::text
+          ), false) AS selection_matches
+        FROM linked
+      `,
+      values: [
+        owner,
+        targetGameId,
+        linkIds,
+        ids,
+        CURRENT_WEB_MEMORY_CONSENT_VERSION,
+        ids.length,
+      ],
+    })
+    const row = parseOptionalResultRow(
+      result,
+      z.object({
+        linked_count: z.coerce.number().int().nonnegative(),
+        selection_matches: z.boolean(),
+      }),
+    )
+    if (
+      !row ||
+      row.linked_count !== ids.length ||
+      !row.selection_matches
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-input',
+        'The selected Web memory observations could not be attached safely.',
       )
     }
   }
@@ -1990,6 +2446,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
       result_entity_id: string | null
       result_revision: bigint | null
       result_status: string | null
+      result_follow_up_at: Date | null
       result_updated_at: Date | null
       reserved_future_rows: number | null
       reserved_text_bytes: bigint | null
@@ -2018,7 +2475,8 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
             requests.rate_kind,
             requests.status, requests.result_entity_id,
             requests.result_revision, requests.result_status,
-            requests.result_updated_at, requests.idempotency_key,
+            requests.result_follow_up_at, requests.result_updated_at,
+            requests.idempotency_key,
             requests.reserved_future_rows,
             requests.reserved_text_bytes
         ),
@@ -2027,7 +2485,8 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
             expired.target_game_id, expired.target_action_id,
             expired.rate_kind, expired.status,
             expired.result_entity_id, expired.result_revision,
-            expired.result_status, expired.result_updated_at,
+            expired.result_status, expired.result_follow_up_at,
+            expired.result_updated_at,
             expired.reserved_future_rows, expired.reserved_text_bytes
           FROM expired
           WHERE expired.idempotency_key = $4::uuid
@@ -2036,7 +2495,8 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
             requests.target_game_id, requests.target_action_id,
             requests.rate_kind, requests.status,
             requests.result_entity_id, requests.result_revision,
-            requests.result_status, requests.result_updated_at,
+            requests.result_status, requests.result_follow_up_at,
+            requests.result_updated_at,
             requests.reserved_future_rows, requests.reserved_text_bytes
           FROM wilbur_mutation_requests AS requests
           CROSS JOIN lock_gate
@@ -2146,7 +2606,8 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
           ON CONFLICT (clerk_user_id, idempotency_key) DO NOTHING
           RETURNING operation, request_digest, target_game_id,
             target_action_id, rate_kind, status, result_entity_id,
-            result_revision, result_status, result_updated_at,
+            result_revision, result_status, result_follow_up_at,
+            result_updated_at,
             reserved_future_rows, reserved_text_bytes
         )
         SELECT
@@ -2165,6 +2626,10 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
             AS result_revision,
           coalesce(existing.result_status, inserted.result_status)
             AS result_status,
+          coalesce(
+            existing.result_follow_up_at,
+            inserted.result_follow_up_at
+          ) AS result_follow_up_at,
           coalesce(existing.result_updated_at, inserted.result_updated_at)
             AS result_updated_at,
           coalesce(
@@ -2316,6 +2781,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         ...mapped,
         status: row.result_status as WilburAction['status'],
         revision: revisionNumber(row.result_revision),
+        followUpAt: row.result_follow_up_at?.toISOString() ?? null,
         updatedAt: row.result_updated_at.toISOString(),
       },
     }
@@ -2390,6 +2856,10 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     assertUuid(input.idempotencyKey, 'Idempotency key')
     assertDigest(input.requestDigest, 'Request digest')
     assertDigest(input.configurationDigest, 'Configuration digest')
+    const followUpAt = optionalTimestamp(
+      input.followUpAt ?? null,
+      'Follow-up time',
+    )
     const result = await this.database.query({
       text: `
         WITH mutation AS MATERIALIZED (
@@ -2435,12 +2905,12 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
             charlotte_binding_version, idempotency_key, request_digest,
             actor, action, tested_assumption,
             expected_observation, decision_threshold, review_horizon,
-            status, record_version
+            follow_up_at, status, record_version
           )
           SELECT $3::uuid, $1::text, eligible_run.id, $4::smallint,
-            $16::text, $5::uuid,
+            $17::text, $5::uuid,
             $6::char(64), $7::text, $8::text, $9::text, $10::text,
-            $11::text, $12::text, 'planned', $13::text
+            $11::text, $12::text, $13::timestamptz, 'planned', $14::text
           FROM eligible_run
           ON CONFLICT DO NOTHING
           RETURNING ${SELECT_ACTION_COLUMNS}
@@ -2476,7 +2946,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
             advanced.state_to, '[]'::jsonb,
             jsonb_build_array(inserted.id::text),
             jsonb_build_array('wilbur', 'player'),
-            $14::char(64), 'completed', $15::smallint
+            $15::char(64), 'completed', $16::smallint
           FROM advanced, inserted
           RETURNING lifecycle_run_id
         ),
@@ -2485,6 +2955,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
           SET status = 'committed', result_entity_id = inserted.id,
               result_revision = inserted.revision,
               result_status = inserted.status,
+              result_follow_up_at = inserted.follow_up_at,
               result_updated_at = inserted.updated_at,
               reserved_future_rows = 0,
               reserved_text_bytes = 0,
@@ -2511,6 +2982,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         input.expectedObservation,
         input.decisionThreshold,
         input.reviewHorizon,
+        followUpAt,
         CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
         input.configurationDigest,
         CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
@@ -2532,15 +3004,19 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     const idempotencyKey = assertUuid(input.idempotencyKey, 'Idempotency key')
     const requestDigest = assertDigest(input.requestDigest, 'Request digest')
     assertDigest(input.configurationDigest, 'Configuration digest')
+    const followUpAt = optionalTimestamp(
+      input.followUpAt ?? null,
+      'Follow-up time',
+    )
     const result = await this.database.query({
       text: `
         WITH mutation AS MATERIALIZED (
           SELECT requests.clerk_user_id, requests.idempotency_key
           FROM wilbur_mutation_requests AS requests
           WHERE requests.clerk_user_id = $1::text
-            AND requests.idempotency_key = $6::uuid
+            AND requests.idempotency_key = $7::uuid
             AND requests.operation = 'update_action'
-            AND requests.request_digest = $7::char(64)
+            AND requests.request_digest = $8::char(64)
             AND requests.target_game_id = $2::uuid
             AND requests.target_action_id = $3::uuid
             AND requests.rate_kind = 'action'
@@ -2565,6 +3041,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         changed AS (
           UPDATE wilbur_actions AS action
           SET status = $5::text,
+              follow_up_at = $6::timestamptz,
               revision = action.revision + 1,
               updated_at = now()
           FROM eligible_run
@@ -2606,7 +3083,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
             advanced.state_to, jsonb_build_array(changed.id::text),
             jsonb_build_array(changed.id::text),
             jsonb_build_array('wilbur', changed.actor),
-            $8::char(64), 'completed', $9::smallint
+            $9::char(64), 'completed', $10::smallint
           FROM advanced, changed
           RETURNING lifecycle_run_id
         ),
@@ -2615,13 +3092,14 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
           SET status = 'committed', result_entity_id = changed.id,
               result_revision = changed.revision,
               result_status = changed.status,
+              result_follow_up_at = changed.follow_up_at,
               result_updated_at = changed.updated_at,
               reserved_future_rows = 0,
               reserved_text_bytes = 0,
               updated_at = now()
           FROM changed, activity
           WHERE requests.clerk_user_id = $1::text
-            AND requests.idempotency_key = $6::uuid
+            AND requests.idempotency_key = $7::uuid
             AND requests.status = 'pending'
           RETURNING requests.idempotency_key
         )
@@ -2634,6 +3112,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         actionId,
         assertRevision(input.expectedRevision),
         input.status,
+        followUpAt,
         idempotencyKey,
         requestDigest,
         input.configurationDigest,

@@ -1,4 +1,4 @@
-import { BookOpen, RotateCcw } from 'lucide-react'
+import { BookOpen, Database, RotateCcw } from 'lucide-react'
 
 import type { Stage } from '../types'
 
@@ -13,6 +13,9 @@ interface HeaderProps {
   stage: Stage
   resetDisabled: boolean
   onReset: () => void
+  onOpenMemory: () => void
+  memoryCount: number
+  dueMemoryCount: number
   localMode?: boolean
 }
 
@@ -20,6 +23,9 @@ export function Header({
   stage,
   resetDisabled,
   onReset,
+  onOpenMemory,
+  memoryCount,
+  dueMemoryCount,
   localMode = false,
 }: HeaderProps) {
   const currentIndex = PHASES.findIndex((phase) => phase.stage === stage)
@@ -53,6 +59,20 @@ export function Header({
       </nav>
 
       <div className="header-actions">
+        <button
+          className="header-link header-memory-button"
+          type="button"
+          onClick={onOpenMemory}
+          aria-label={`Open case memory. ${memoryCount} observations; ${dueMemoryCount} follow-ups due.`}
+        >
+          <Database size={14} aria-hidden="true" />
+          <span>Case memory</span>
+          {dueMemoryCount > 0 ? (
+            <strong className="header-memory-badge" aria-hidden="true">{dueMemoryCount}</strong>
+          ) : memoryCount > 0 ? (
+            <strong className="header-memory-count" aria-hidden="true">{memoryCount}</strong>
+          ) : null}
+        </button>
         <a
           className="header-link"
           href={homeHref}

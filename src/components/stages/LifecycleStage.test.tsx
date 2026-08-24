@@ -805,6 +805,7 @@ describe('LifecycleStage terminal Gate experience', () => {
       expectedObservation: suggestions[0]!.expectedObservation,
       decisionThreshold: suggestions[0]!.decisionThreshold,
       reviewHorizon: suggestions[0]!.reviewHorizon,
+      followUpAt: null,
       status: 'planned',
       revision: 0,
       version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
@@ -854,8 +855,12 @@ describe('LifecycleStage terminal Gate experience', () => {
     fireEvent.click(record)
     fireEvent.click(track)
 
-    expect(onUpdateAction).toHaveBeenCalledWith(trackedAction, 'in_progress')
-    expect(onCreateAction).toHaveBeenCalledWith(1)
+    expect(onUpdateAction).toHaveBeenCalledWith(
+      trackedAction,
+      'in_progress',
+      null,
+    )
+    expect(onCreateAction).toHaveBeenCalledWith(1, expect.any(String))
     expect(screen.getByRole('textbox', { name: 'What did you observe?' }))
       .toBeInTheDocument()
   })

@@ -14,6 +14,7 @@ type WebChessApiClient = Pick<
   | 'divideProblem'
   | 'getCurrentGame'
   | 'getGameLifecycle'
+  | 'getWebMemory'
   | 'getOwnedGame'
   | 'recoverDivisionIntent'
   | 'replayGame'

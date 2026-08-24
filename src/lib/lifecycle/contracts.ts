@@ -464,6 +464,9 @@ export type AssumptionResult = (typeof ASSUMPTION_RESULTS)[number]
 export const CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION =
   'webchess-charlotte-action-binding-v1' as const
 
+export const CURRENT_WEB_MEMORY_CONSENT_VERSION =
+  'webchess-web-memory-consent-v1' as const
+
 export interface WilburAction {
   readonly id: string
   readonly lifecycleRunId: string
@@ -478,6 +481,8 @@ export interface WilburAction {
   readonly expectedObservation: string
   readonly decisionThreshold: string
   readonly reviewHorizon: string
+  /** Player-chosen calendar time for the next visible follow-up reminder. */
+  readonly followUpAt: string | null
   readonly status: WilburActionStatus
   readonly revision: number
   readonly version: typeof CURRENT_LIFECYCLE_VERSIONS.wilburRecord
@@ -498,6 +503,54 @@ export interface WilburObservation {
   readonly nextDecision: string
   readonly version: typeof CURRENT_LIFECYCLE_VERSIONS.wilburRecord
   readonly createdAt: string
+}
+
+/**
+ * A player-authored Wilbur observation that was explicitly selected for reuse.
+ * It remains untrusted historical context: it is not a verified fact, a causal
+ * result, or permission to repeat the prior action.
+ */
+export interface WebMemoryEvidence {
+  readonly observationId: string
+  readonly sourceGameId: string
+  readonly sourceActionId: string
+  readonly sourceProblem: string
+  readonly action: string
+  readonly testedAssumption: string
+  readonly expectedObservation: string
+  readonly observedAt: string
+  readonly observation: string
+  readonly evidenceClassification: string
+  readonly expectedEffect: string
+  readonly unexpectedEffect: string
+  readonly stakeholderResponse: string
+  readonly assumptionResult: AssumptionResult
+  readonly nextDecision: string
+  /** Stable player-selected order used by prompts, Retry, and export. */
+  readonly selectionOrdinal: number
+  readonly consentVersion: typeof CURRENT_WEB_MEMORY_CONSENT_VERSION
+  /** Null only while validating a selection before its durable attachment. */
+  readonly attachedAt: string | null
+}
+
+export interface WebMemoryActionRecord {
+  readonly action: WilburAction
+  readonly observations: readonly WilburObservation[]
+}
+
+export interface WebMemoryCase {
+  readonly gameId: string
+  readonly problem: string
+  readonly isCurrent: boolean
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly actions: readonly WebMemoryActionRecord[]
+}
+
+export interface WebMemoryIndex {
+  readonly cases: readonly WebMemoryCase[]
+  /** Observations already bound to the owner's current game, if one exists. */
+  readonly carriedObservationIds: readonly string[]
 }
 
 export interface LifecycleVersions {
@@ -590,4 +643,6 @@ export interface LifecycleAggregate extends LifecycleRun {
   readonly activities: readonly LifecycleActivity[]
   /** Player-visible research embedded within one of the seven lifecycle stages. */
   readonly research: readonly ResearchRecord[]
+  /** Explicitly consented prior Wilbur observations bound to this game. */
+  readonly webMemoryEvidence: readonly WebMemoryEvidence[]
 }

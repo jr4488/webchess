@@ -516,6 +516,7 @@ export const wilburActionRowSchema = z.object({
   expected_observation: z.string().min(8).max(1_000),
   decision_threshold: z.string().min(8).max(1_000),
   review_horizon: z.string().min(2).max(240),
+  follow_up_at: timestampSchema.nullable(),
   status: z.enum(WILBUR_ACTION_STATUSES),
   revision: nonnegativeBigintSchema,
   record_version: z.string().min(1).max(80),
@@ -568,6 +569,7 @@ export const wilburMutationRequestRowSchema = z.object({
   result_updated_at: timestampSchema.nullable(),
   created_at: timestampSchema,
   updated_at: timestampSchema,
+  result_follow_up_at: timestampSchema.nullable(),
 })
 
 export const lifecycleEventRowSchema = z.object({

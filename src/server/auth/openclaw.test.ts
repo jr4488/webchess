@@ -43,6 +43,7 @@ describe('resolveLocalOpenClawUser', () => {
 
   it.each([
     '/api/divide',
+    '/api/web-memory',
     '/api/division-intents/intent-1',
     '/api/games/current',
     '/api/games/game-1/lifecycle',

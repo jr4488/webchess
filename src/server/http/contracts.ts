@@ -13,6 +13,8 @@ export const divideBodySchema = z
       .string()
       .transform((value) => value.replace(/\s+/gu, ' ').trim())
       .pipe(z.string().min(12).max(240)),
+    memoryObservationIds: z.array(z.string().uuid()).max(8).default([])
+      .refine((ids) => new Set(ids).size === ids.length, 'Observation ids must be unique.'),
   })
   .strict()
 
@@ -57,6 +59,7 @@ export const createWilburActionBodySchema = z.strictObject({
   expectedObservation: exactLifecycleText(8, 1_000),
   decisionThreshold: exactLifecycleText(8, 1_000),
   reviewHorizon: exactLifecycleText(2, 240),
+  followUpAt: z.iso.datetime({ offset: true }).nullable(),
 })
 
 export const updateWilburActionBodySchema = z.strictObject({
@@ -68,6 +71,7 @@ export const updateWilburActionBodySchema = z.strictObject({
     'abandoned',
     'inconclusive',
   ]),
+  followUpAt: z.iso.datetime({ offset: true }).nullable(),
 })
 
 export const appendWilburObservationBodySchema = z.strictObject({

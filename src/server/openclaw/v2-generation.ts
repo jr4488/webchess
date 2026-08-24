@@ -209,9 +209,13 @@ export async function generateOpenClawDivisionV2(
   context: ModelRequestContext,
 ): Promise<ModelGeneration<{ facets: z.infer<typeof DivisionOutputSchema>['facets'] }>> {
   const input = normalizeDivisionGenerationInput(inputValue)
-  const normalizedInput = input.repairContext
-    ? { problem: input.problem, repairContext: input.repairContext }
-    : input.problem
+  const normalizedInput = {
+    problem: input.problem,
+    ...(input.repairContext ? { repairContext: input.repairContext } : {}),
+    ...(input.webMemoryEvidence.length > 0
+      ? { webMemoryEvidence: input.webMemoryEvidence }
+      : {}),
+  }
   const prompt = `${buildDivisionPrompt(normalizedInput)}\n\n${outputContract(DivisionOutputSchema)}`
   const generated = await generateStructured(
     'division',

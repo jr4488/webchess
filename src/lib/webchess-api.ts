@@ -1,13 +1,22 @@
 import type { GameView } from './game-contract'
-import { LIFECYCLE_STATES } from './lifecycle/contracts'
+import {
+  ASSUMPTION_RESULTS,
+  CURRENT_WEB_MEMORY_CONSENT_VERSION,
+  CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
+  LIFECYCLE_STATES,
+  WILBUR_ACTION_STATUSES,
+} from './lifecycle/contracts'
 import type {
   AssumptionResult,
   LifecycleActivity,
   LifecycleAggregate,
+  WebMemoryEvidence,
   WilburAction,
   WilburActionStatus,
   WilburObservation,
+  WebMemoryIndex,
 } from './lifecycle/contracts'
+import { CURRENT_LIFECYCLE_VERSIONS } from './lifecycle/versions'
 import {
   RESEARCH_STAGES,
   RESEARCH_STATUSES,
@@ -84,11 +93,18 @@ export interface CreateWilburActionCommand {
   expectedObservation: string
   decisionThreshold: string
   reviewHorizon: string
+  followUpAt: string | null
 }
 
 export interface UpdateWilburActionCommand {
   expectedRevision: number
   status: WilburActionStatus
+  followUpAt: string | null
+}
+
+export interface DivideProblemOptions extends MutationOptions {
+  /** Explicitly selected prior Wilbur observations; never inferred silently. */
+  memoryObservationIds?: readonly string[]
 }
 
 export interface AppendWilburObservationCommand {
@@ -188,11 +204,33 @@ function nonEmptyString(value: unknown, label: string): string {
   return value
 }
 
+function boundedString(
+  value: unknown,
+  label: string,
+  minimum: number,
+  maximum: number,
+): string {
+  const text = nonEmptyString(value, label)
+  if (text.length < minimum || text.length > maximum) {
+    throw invalidResponse(
+      `${label} must contain ${minimum} to ${maximum} characters.`,
+    )
+  }
+  return text
+}
+
 function nonnegativeInteger(value: unknown, label: string): number {
   if (!Number.isInteger(value) || Number(value) < 0) {
     throw invalidResponse(`${label} must be a non-negative integer.`)
   }
   return Number(value)
+}
+
+function uuidString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
+    throw invalidResponse(`${label} is invalid.`)
+  }
+  return value
 }
 
 function invalidResponse(message: string, cause?: unknown): WebChessApiError {
@@ -323,6 +361,179 @@ function timestampString(value: unknown, label: string): string {
     throw invalidResponse(`${label} is invalid.`)
   }
   return timestamp
+}
+
+function nullableTimestampString(value: unknown, label: string): string | null {
+  return value === null ? null : timestampString(value, label)
+}
+
+const WILBUR_ACTION_STATUS_SET = new Set<string>(WILBUR_ACTION_STATUSES)
+const ASSUMPTION_RESULT_SET = new Set<string>(ASSUMPTION_RESULTS)
+
+function parseWilburAction(value: unknown, label = 'Wilbur action'): WilburAction {
+  const action = recordOf(value, label)
+  uuidString(action.id, `${label} id`)
+  uuidString(action.lifecycleRunId, `${label} lifecycle run id`)
+  if (
+    action.charlotteActionIndex !== null &&
+    (
+      !Number.isInteger(action.charlotteActionIndex) ||
+      Number(action.charlotteActionIndex) < 0 ||
+      Number(action.charlotteActionIndex) > 2
+    )
+  ) {
+    throw invalidResponse(`${label} Charlotte action index is invalid.`)
+  }
+  if (
+    action.charlotteBindingVersion !== null &&
+    action.charlotteBindingVersion !== CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION
+  ) {
+    throw invalidResponse(`${label} Charlotte binding version is invalid.`)
+  }
+  if (
+    action.charlotteBindingVersion ===
+      CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION &&
+    action.charlotteActionIndex === null
+  ) {
+    throw invalidResponse(`${label} Charlotte binding is incomplete.`)
+  }
+  boundedString(action.actor, `${label} actor`, 2, 240)
+  boundedString(action.action, `${label} action`, 8, 2_000)
+  boundedString(
+    action.testedAssumption,
+    `${label} tested assumption`,
+    8,
+    1_000,
+  )
+  boundedString(
+    action.expectedObservation,
+    `${label} expected observation`,
+    8,
+    1_000,
+  )
+  boundedString(
+    action.decisionThreshold,
+    `${label} decision threshold`,
+    8,
+    1_000,
+  )
+  boundedString(action.reviewHorizon, `${label} review horizon`, 2, 240)
+  nullableTimestampString(action.followUpAt, `${label} follow-up time`)
+  const status = nonEmptyString(action.status, `${label} status`)
+  if (!WILBUR_ACTION_STATUS_SET.has(status)) {
+    throw invalidResponse(`${label} status is invalid.`)
+  }
+  nonnegativeInteger(action.revision, `${label} revision`)
+  if (action.version !== CURRENT_LIFECYCLE_VERSIONS.wilburRecord) {
+    throw invalidResponse(`${label} record version is invalid.`)
+  }
+  timestampString(action.createdAt, `${label} creation time`)
+  timestampString(action.updatedAt, `${label} update time`)
+  return action as unknown as WilburAction
+}
+
+function parseWilburObservation(
+  value: unknown,
+  label = 'Wilbur observation',
+): WilburObservation {
+  const observation = recordOf(value, label)
+  uuidString(observation.id, `${label} id`)
+  uuidString(observation.actionId, `${label} action id`)
+  timestampString(observation.observedAt, `${label} observation time`)
+  boundedString(observation.observation, `${label} observation`, 3, 4_000)
+  boundedString(
+    observation.evidenceClassification,
+    `${label} evidence classification`,
+    3,
+    240,
+  )
+  boundedString(observation.expectedEffect, `${label} expected effect`, 1, 2_000)
+  boundedString(
+    observation.unexpectedEffect,
+    `${label} unexpected effect`,
+    1,
+    2_000,
+  )
+  boundedString(
+    observation.stakeholderResponse,
+    `${label} stakeholder response`,
+    1,
+    2_000,
+  )
+  boundedString(observation.nextDecision, `${label} next decision`, 3, 2_000)
+  const assumptionResult = nonEmptyString(
+    observation.assumptionResult,
+    `${label} assumption result`,
+  )
+  if (!ASSUMPTION_RESULT_SET.has(assumptionResult)) {
+    throw invalidResponse(`${label} assumption result is invalid.`)
+  }
+  if (observation.version !== CURRENT_LIFECYCLE_VERSIONS.wilburRecord) {
+    throw invalidResponse(`${label} record version is invalid.`)
+  }
+  timestampString(observation.createdAt, `${label} creation time`)
+  return observation as unknown as WilburObservation
+}
+
+function parseWebMemoryEvidence(
+  value: unknown,
+  expectedOrdinal: number,
+): WebMemoryEvidence {
+  const evidence = recordOf(value, 'Lifecycle Web memory evidence')
+  uuidString(evidence.observationId, 'Web memory observation id')
+  uuidString(evidence.sourceGameId, 'Web memory source game id')
+  uuidString(evidence.sourceActionId, 'Web memory source action id')
+  boundedString(evidence.sourceProblem, 'Web memory source problem', 12, 240)
+  boundedString(evidence.action, 'Web memory action', 8, 2_000)
+  boundedString(
+    evidence.testedAssumption,
+    'Web memory tested assumption',
+    8,
+    1_000,
+  )
+  boundedString(
+    evidence.expectedObservation,
+    'Web memory expected observation',
+    8,
+    1_000,
+  )
+  boundedString(evidence.observation, 'Web memory observation', 3, 4_000)
+  boundedString(
+    evidence.evidenceClassification,
+    'Web memory evidence classification',
+    3,
+    240,
+  )
+  boundedString(evidence.expectedEffect, 'Web memory expected effect', 1, 2_000)
+  boundedString(
+    evidence.unexpectedEffect,
+    'Web memory unexpected effect',
+    1,
+    2_000,
+  )
+  boundedString(
+    evidence.stakeholderResponse,
+    'Web memory stakeholder response',
+    1,
+    2_000,
+  )
+  boundedString(evidence.nextDecision, 'Web memory next decision', 3, 2_000)
+  timestampString(evidence.observedAt, 'Web memory observation time')
+  const assumptionResult = nonEmptyString(
+    evidence.assumptionResult,
+    'Web memory assumption result',
+  )
+  if (!ASSUMPTION_RESULT_SET.has(assumptionResult)) {
+    throw invalidResponse('Web memory assumption result is invalid.')
+  }
+  if (evidence.selectionOrdinal !== expectedOrdinal) {
+    throw invalidResponse('Web memory selection order is invalid.')
+  }
+  if (evidence.consentVersion !== CURRENT_WEB_MEMORY_CONSENT_VERSION) {
+    throw invalidResponse('Web memory consent version is invalid.')
+  }
+  nullableTimestampString(evidence.attachedAt, 'Web memory attachment time')
+  return evidence as unknown as WebMemoryEvidence
 }
 
 function parseResearchRecord(value: unknown): ResearchRecord {
@@ -509,6 +720,7 @@ function parseLifecycle(value: unknown): LifecycleAggregate {
     ['wilburObservations', lifecycle.wilburObservations],
     ['activities', lifecycle.activities],
     ['research', lifecycle.research],
+    ['webMemoryEvidence', lifecycle.webMemoryEvidence],
   ] as const) {
     if (!Array.isArray(item)) {
       throw invalidResponse(`Lifecycle ${field} must be an array.`)
@@ -611,9 +823,9 @@ function parseLifecycle(value: unknown): LifecycleAggregate {
       'Lifecycle player-visible answer prompt was not authorized by the Gate.',
     )
   }
-  nonEmptyString(lifecycle.id, 'Lifecycle id')
-  nonEmptyString(lifecycle.rootRunId, 'Lifecycle root id')
-  nonEmptyString(lifecycle.gameId, 'Lifecycle game id')
+  const lifecycleId = uuidString(lifecycle.id, 'Lifecycle id')
+  uuidString(lifecycle.rootRunId, 'Lifecycle root id')
+  const lifecycleGameId = uuidString(lifecycle.gameId, 'Lifecycle game id')
   nonnegativeInteger(lifecycle.revision, 'Lifecycle revision')
   if (
     lifecycle.portiaActiveModelRequestId !== null &&
@@ -661,10 +873,70 @@ function parseLifecycle(value: unknown): LifecycleAggregate {
   }
   nonnegativeInteger(lifecycle.sameFieldRetryCount, 'Same-field retry count')
   nonnegativeInteger(lifecycle.fieldRegenerationCount, 'Field regeneration count')
+  const actionIds = new Set<string>()
+  const boundCharlotteActionIndexes = new Set<number>()
+  for (const actionValue of lifecycle.wilburActions as unknown[]) {
+    const action = parseWilburAction(actionValue)
+    if (
+      action.lifecycleRunId !== lifecycleId ||
+      actionIds.has(action.id)
+    ) {
+      throw invalidResponse(
+        'Lifecycle Wilbur actions contain a duplicate id or foreign run.',
+      )
+    }
+    actionIds.add(action.id)
+    if (
+      action.charlotteBindingVersion ===
+        CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION
+    ) {
+      const index = action.charlotteActionIndex!
+      if (boundCharlotteActionIndexes.has(index)) {
+        throw invalidResponse(
+          'Lifecycle Wilbur actions repeat a Charlotte action index.',
+        )
+      }
+      boundCharlotteActionIndexes.add(index)
+    }
+  }
+  const observationIds = new Set<string>()
+  for (const observationValue of lifecycle.wilburObservations as unknown[]) {
+    const observation = parseWilburObservation(observationValue)
+    if (
+      observationIds.has(observation.id) ||
+      !actionIds.has(observation.actionId)
+    ) {
+      throw invalidResponse(
+        'Lifecycle Wilbur observations contain a duplicate or unknown action.',
+      )
+    }
+    observationIds.add(observation.id)
+  }
+  const webMemoryEvidence = lifecycle.webMemoryEvidence as unknown[] | undefined
+  if ((webMemoryEvidence?.length ?? 0) > 8) {
+    throw invalidResponse('Lifecycle Web memory exceeds the eight-item limit.')
+  }
+  const webMemoryObservationIds = new Set<string>()
+  for (const [index, evidenceValue] of (webMemoryEvidence ?? []).entries()) {
+    const evidence = parseWebMemoryEvidence(evidenceValue, index)
+    if (
+      evidence.sourceGameId === lifecycleGameId ||
+      evidence.attachedAt === null ||
+      webMemoryObservationIds.has(evidence.observationId)
+    ) {
+      throw invalidResponse(
+        'Lifecycle Web memory contains a current-game, detached, or duplicate observation.',
+      )
+    }
+    webMemoryObservationIds.add(evidence.observationId)
+  }
   for (const research of lifecycle.research as unknown[]) {
     parseResearchRecord(research)
   }
-  return lifecycle as unknown as LifecycleAggregate
+  return {
+    ...lifecycle,
+    webMemoryEvidence: lifecycle.webMemoryEvidence,
+  } as unknown as LifecycleAggregate
 }
 
 function parseLifecycleEnvelope(value: unknown): LifecycleAggregate {
@@ -688,17 +960,97 @@ function parseProvenanceEnvelope(value: unknown): readonly LifecycleActivity[] {
 }
 
 function parseWilburActionEnvelope(value: unknown): WilburAction {
-  return recordOf(
-    recordOf(value, 'Response').action,
-    'Wilbur action',
-  ) as unknown as WilburAction
+  return parseWilburAction(recordOf(value, 'Response').action)
 }
 
 function parseWilburObservationEnvelope(value: unknown): WilburObservation {
-  return recordOf(
-    recordOf(value, 'Response').observation,
-    'Wilbur observation',
-  ) as unknown as WilburObservation
+  return parseWilburObservation(recordOf(value, 'Response').observation)
+}
+
+function parseWebMemoryEnvelope(value: unknown): WebMemoryIndex {
+  const memory = recordOf(recordOf(value, 'Response').memory, 'Web memory')
+  if (!Array.isArray(memory.cases) || !Array.isArray(memory.carriedObservationIds)) {
+    throw invalidResponse('Web memory must contain cases and carried observation ids.')
+  }
+  if (
+    memory.carriedObservationIds.length > 8 ||
+    memory.carriedObservationIds.some(
+      (id) => typeof id !== 'string' || !UUID_PATTERN.test(id),
+    ) ||
+    new Set(memory.carriedObservationIds).size !==
+      memory.carriedObservationIds.length
+  ) {
+    throw invalidResponse('Web memory carried observation ids are invalid.')
+  }
+  if (memory.cases.length > 24) {
+    throw invalidResponse('Web memory exceeds the recent-case limit.')
+  }
+  const caseIds = new Set<string>()
+  const actionIds = new Set<string>()
+  const boundCharlotteActionKeys = new Set<string>()
+  const observationIds = new Set<string>()
+  let currentCaseCount = 0
+  for (const caseValue of memory.cases) {
+    const memoryCase = recordOf(caseValue, 'Web memory case')
+    boundedString(memoryCase.problem, 'Web memory problem', 12, 240)
+    timestampString(memoryCase.createdAt, 'Web memory case creation time')
+    timestampString(memoryCase.updatedAt, 'Web memory case update time')
+    if (
+      typeof memoryCase.gameId !== 'string' ||
+      !UUID_PATTERN.test(memoryCase.gameId) ||
+      typeof memoryCase.isCurrent !== 'boolean' ||
+      !Array.isArray(memoryCase.actions)
+    ) {
+      throw invalidResponse('Web memory case shape is invalid.')
+    }
+    if (caseIds.has(memoryCase.gameId)) {
+      throw invalidResponse('Web memory contains a duplicate case.')
+    }
+    caseIds.add(memoryCase.gameId)
+    if (memoryCase.isCurrent) currentCaseCount += 1
+    for (const actionValue of memoryCase.actions) {
+      const record = recordOf(actionValue, 'Web memory action record')
+      const action = parseWilburAction(record.action, 'Web memory action')
+      if (actionIds.has(action.id)) {
+        throw invalidResponse('Web memory contains a duplicate action.')
+      }
+      actionIds.add(action.id)
+      if (
+        action.charlotteBindingVersion ===
+          CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION
+      ) {
+        const bindingKey = `${action.lifecycleRunId}:${action.charlotteActionIndex}`
+        if (boundCharlotteActionKeys.has(bindingKey)) {
+          throw invalidResponse(
+            'Web memory repeats a canonical Charlotte action binding.',
+          )
+        }
+        boundCharlotteActionKeys.add(bindingKey)
+      }
+      if (!Array.isArray(record.observations)) {
+        throw invalidResponse('Web memory observations must be an array.')
+      }
+      for (const observationValue of record.observations) {
+        const observation = parseWilburObservation(
+          observationValue,
+          'Web memory observation',
+        )
+        if (
+          observation.actionId !== action.id ||
+          observationIds.has(observation.id)
+        ) {
+          throw invalidResponse(
+            'Web memory observations contain a duplicate or mismatched action.',
+          )
+        }
+        observationIds.add(observation.id)
+      }
+    }
+  }
+  if (currentCaseCount > 1) {
+    throw invalidResponse('Web memory contains more than one current case.')
+  }
+  return memory as unknown as WebMemoryIndex
 }
 
 function apiErrorKind(status: number): WebChessApiErrorKind {
@@ -894,18 +1246,39 @@ export function createIdempotencyKey(): string {
 
 export function divideProblem(
   problem: string,
-  options: MutationOptions = {},
+  options: DivideProblemOptions = {},
 ): Promise<DurableGame> {
   if (typeof problem !== 'string') throw new TypeError('A problem is required.')
+  const memoryObservationIds = [...new Set(options.memoryObservationIds ?? [])]
+  if (
+    memoryObservationIds.length > 8 ||
+    memoryObservationIds.some((id) => !UUID_PATTERN.test(id))
+  ) {
+    throw new TypeError('Select no more than eight valid Web memory observations.')
+  }
   return requestJson(
     '/api/divide',
     {
       method: 'POST',
       headers: createMutationHeaders(options.idempotencyKey),
-      body: JSON.stringify({ problem }),
+      body: JSON.stringify(
+        memoryObservationIds.length > 0
+          ? { problem, memoryObservationIds }
+          : { problem },
+      ),
       signal: options.signal,
     },
     parseGameEnvelope,
+  )
+}
+
+export function getWebMemory(
+  options: RequestOptions = {},
+): Promise<WebMemoryIndex> {
+  return requestJson(
+    '/api/web-memory',
+    { method: 'GET', headers: getHeaders(), signal: options.signal },
+    parseWebMemoryEnvelope,
   )
 }
 

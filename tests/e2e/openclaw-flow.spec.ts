@@ -87,6 +87,13 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
       return
     }
 
+    if (request.method() === 'GET' && pathname === '/api/web-memory') {
+      await json(route, {
+        memory: { cases: [], carriedObservationIds: [] },
+      })
+      return
+    }
+
     if (request.method() === 'POST' && pathname === '/api/divide') {
       expect(request.postDataJSON()).toEqual({ problem })
       currentGame = game('mapped', 1, null)
@@ -152,12 +159,12 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
     .toHaveAttribute('href', '/openclaw')
 
   await page.getByLabel('What are you trying to understand?').fill(problem)
-  await page.getByRole('button', { name: /Divide the problem/i }).click()
+  await page.getByRole('button', { name: /Divide the problem/i }).press('Enter')
   const start = page.getByRole('button', {
     name: /Set the pieces in motion/i,
   })
   await expect(start).toBeEnabled({ timeout: 15_000 })
-  await start.click()
+  await start.press('Enter')
 
   await expect(
     page.getByRole('region', {
@@ -172,7 +179,7 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
   await expect(page.getByRole('button', { name: '3D world' })).toBeVisible()
 
   const workerPromise = page.waitForEvent('worker')
-  await page.getByRole('button', { name: /Play one turn/i }).click()
+  await page.getByRole('button', { name: /Play one turn/i }).press('Enter')
   await workerPromise
   await expect(page.locator('.turn-header .eyebrow')).toContainText(
     'Move 02',
@@ -204,11 +211,12 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
   await page.getByRole('button', { name: '2D board' }).press('Enter')
   await expect(page.locator('.turn-header .eyebrow')).toContainText('Move 02')
   await expect(page.getByRole('button', { name: destination })).toBeVisible()
-  expect(calls).toEqual([
+  expect(calls.filter((call) => call !== 'GET /api/web-memory')).toEqual([
     'GET /api/games/current',
     'POST /api/divide',
     `POST /api/games/${gameId}/start`,
     `POST /api/games/${gameId}/moves`,
     'GET /api/games/current',
   ])
+  expect(calls.filter((call) => call === 'GET /api/web-memory')).toHaveLength(2)
 })

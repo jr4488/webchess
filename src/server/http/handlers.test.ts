@@ -13,6 +13,7 @@ import {
   handleMoveRequest,
   handleReplayRequest,
   handleStartGameRequest,
+  handleWebMemoryRequest,
 } from './handlers'
 import { createWilburActionBodySchema } from './contracts'
 import { ApiError } from './errors'
@@ -68,6 +69,7 @@ function createServices(): WebChessApiServices {
   return {
     divide: vi.fn(async () => GAME),
     getCurrentGame: vi.fn(async () => GAME),
+    getWebMemory: vi.fn(async () => ({ cases: [], carriedObservationIds: [] })),
     getGame: vi.fn(async () => GAME),
     getDivisionIntent: vi.fn(async () => GAME),
     startGame: vi.fn(async () => GAME),
@@ -171,6 +173,24 @@ describe('authenticated API handlers', () => {
       }),
     )
     expect(response.headers.get('cache-control')).toContain('no-store')
+  })
+
+  it('forwards only bounded observation ids selected for explicit Web memory reuse', async () => {
+    const observationId = 'a1000000-0000-4000-8000-000000000001'
+    const response = await handleDivideRequest(
+      request('/api/divide', {
+        body: {
+          problem: 'Which prior observation is relevant to this new decision?',
+          memoryObservationIds: [observationId],
+        },
+      }),
+      dependencies,
+    )
+
+    expect(response.status).toBe(201)
+    expect(services.divide).toHaveBeenCalledWith(expect.objectContaining({
+      memoryObservationIds: [observationId],
+    }))
   })
 
   it('does not load or call services when authentication fails', async () => {
@@ -323,6 +343,7 @@ describe('authenticated API handlers', () => {
       expectedObservation: 'A direct signal appears inside the review horizon.',
       decisionThreshold: 'Continue only when the declared signal appears.',
       reviewHorizon: 'Within fourteen days',
+      followUpAt: null,
     })
 
     expect(parsed.action).toBe(
@@ -373,6 +394,22 @@ describe('authenticated API handlers', () => {
 
     expect(response.status).toBe(200)
     expect(await responseJson(response)).toEqual({ game: null })
+  })
+
+  it('returns the owner-scoped case memory through a read-only endpoint', async () => {
+    const memory = { cases: [], carriedObservationIds: [] }
+    services.getWebMemory = vi.fn(async () => memory)
+
+    const response = await handleWebMemoryRequest(
+      request('/api/web-memory', { method: 'GET' }),
+      dependencies,
+    )
+
+    expect(response.status).toBe(200)
+    expect(await responseJson(response)).toEqual({ memory })
+    expect(services.getWebMemory).toHaveBeenCalledWith(expect.objectContaining({
+      ownerId: 'user_test',
+    }))
   })
 
   it('returns 404 for malformed identifiers before an owner-scoped lookup', async () => {

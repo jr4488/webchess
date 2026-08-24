@@ -177,6 +177,7 @@ describe('deployment migration owner on PostgreSQL 17', () => {
           "${compatibilitySchema}".wilbur_actions,
           "${compatibilitySchema}".wilbur_observations,
           "${compatibilitySchema}".wilbur_mutation_requests,
+          "${compatibilitySchema}".web_memory_links,
           "${compatibilitySchema}".lifecycle_events,
           "${compatibilitySchema}".research_sources
         TO "${runtimeRole}"`,
@@ -187,7 +188,7 @@ describe('deployment migration owner on PostgreSQL 17', () => {
           TO "${runtimeRole}"`,
       )
       await administrator.query(
-        `GRANT UPDATE (status, revision, updated_at)
+        `GRANT UPDATE (follow_up_at, status, revision, updated_at)
           ON TABLE "${compatibilitySchema}".wilbur_actions
           TO "${runtimeRole}"`,
       )
@@ -196,7 +197,7 @@ describe('deployment migration owner on PostgreSQL 17', () => {
             rate_admitted_at, denial_code, retry_at,
             reserved_future_rows, reserved_text_bytes, status,
             result_entity_id, result_revision, result_status,
-            result_updated_at, updated_at
+            result_updated_at, result_follow_up_at, updated_at
           )
           ON TABLE "${compatibilitySchema}".wilbur_mutation_requests
           TO "${runtimeRole}"`,
@@ -225,11 +226,21 @@ describe('deployment migration owner on PostgreSQL 17', () => {
           ),
         ).resolves.toMatchObject({ rowCount: 0 })
         await expect(
+          runtime.query(
+            'UPDATE wilbur_actions SET follow_up_at = follow_up_at WHERE false',
+          ),
+        ).resolves.toMatchObject({ rowCount: 0 })
+        await expect(
           runtime.query('UPDATE wilbur_actions SET actor = actor WHERE false'),
         ).rejects.toMatchObject({ code: '42501' })
         await expect(
           runtime.query(
             'UPDATE wilbur_mutation_requests SET status = status WHERE false',
+          ),
+        ).resolves.toMatchObject({ rowCount: 0 })
+        await expect(
+          runtime.query(
+            'UPDATE wilbur_mutation_requests SET result_follow_up_at = result_follow_up_at WHERE false',
           ),
         ).resolves.toMatchObject({ rowCount: 0 })
         await expect(

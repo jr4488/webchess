@@ -322,6 +322,7 @@ function makeLifecycle(
     }],
     research: [makeResearch()],
     ...overrides,
+    webMemoryEvidence: overrides.webMemoryEvidence ?? [],
   }
 }
 

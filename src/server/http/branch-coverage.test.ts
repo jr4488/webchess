@@ -74,6 +74,7 @@ function createServices(): WebChessApiServices {
   return {
     divide: vi.fn(async () => GAME),
     getCurrentGame: vi.fn(async () => GAME),
+    getWebMemory: vi.fn(async () => ({ cases: [], carriedObservationIds: [] })),
     getGame: vi.fn(async () => GAME),
     getDivisionIntent: vi.fn(async () => GAME),
     startGame: vi.fn(async () => GAME),

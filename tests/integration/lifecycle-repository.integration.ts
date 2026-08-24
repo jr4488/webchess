@@ -930,6 +930,7 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       expectedObservation: charlotte.exactlyThreeNextActions[0].expectedObservation,
       decisionThreshold: charlotte.exactlyThreeNextActions[0].decisionThreshold,
       reviewHorizon: charlotte.exactlyThreeNextActions[0].reviewHorizon,
+      followUpAt: '2026-08-09T20:00:00.000Z',
       configurationDigest: 'd'.repeat(64),
     })
     expect(action.charlotteBindingVersion).toBe(
@@ -1074,9 +1075,14 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       requestDigest: '8'.repeat(64),
       expectedRevision: action.revision,
       status: 'in_progress',
+      followUpAt: '2026-08-10T20:00:00.000Z',
       configurationDigest: 'd'.repeat(64),
     })
-    expect(started).toMatchObject({ status: 'in_progress', revision: 1 })
+    expect(started).toMatchObject({
+      status: 'in_progress',
+      revision: 1,
+      followUpAt: '2026-08-10T20:00:00.000Z',
+    })
     await expect(repository.claimWilburMutation({
       ownerId: OWNER,
       gameId: GAME_ID,
@@ -1319,6 +1325,73 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       storageRowLimit: 500,
       storageTextBytesLimit: exactOccupiedTextBytes,
     })).rejects.toMatchObject({ code: 'storage-limit' })
+
+    const memory = await repository.listWebMemory(OWNER)
+    expect(memory.carriedObservationIds).toEqual([])
+    expect(memory.cases).toHaveLength(1)
+    expect(memory.cases[0]).toMatchObject({
+      gameId: GAME_ID,
+      problem: PROBLEM,
+      actions: [{
+        action: { id: action.id, followUpAt: null },
+        observations: expect.any(Array),
+      }],
+    })
+    expect(memory.cases[0]!.actions[0]!.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: observation.id }),
+      ]),
+    )
+    const evidence = await repository.getWebMemoryEvidence(
+      OWNER,
+      [observation.id],
+    )
+    expect(evidence).toEqual([expect.objectContaining({
+      observationId: observation.id,
+      sourceGameId: GAME_ID,
+      sourceActionId: action.id,
+      sourceProblem: PROBLEM,
+      action: action.action,
+      observation: observation.observation,
+      expectedEffect: observation.expectedEffect,
+      assumptionResult: 'supported',
+      selectionOrdinal: 0,
+      consentVersion: 'webchess-web-memory-consent-v1',
+      attachedAt: null,
+    })])
+
+    const target = await insertMappedRetryGame(
+      '62000000-0000-4000-8000-000000000009',
+      null,
+      'web-memory-target-field',
+      OWNER,
+    )
+    await repository.attachWebMemoryEvidence(OWNER, target.id, [observation.id])
+    await expect(
+      repository.getWebMemoryEvidenceForGame(OWNER, target.id),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        ...evidence[0],
+        attachedAt: expect.any(String),
+      }),
+    ])
+    await expect(
+      repository.attachWebMemoryEvidence(OWNER, target.id, [observation.id]),
+    ).resolves.toBeUndefined()
+    await expect(
+      repository.attachWebMemoryEvidence(
+        OWNER,
+        target.id,
+        ['62000000-0000-4000-8000-000000000020'],
+      ),
+    ).rejects.toMatchObject({ code: 'invalid-input' })
+    await expect(
+      repository.attachWebMemoryEvidence(
+        'user_wrong_owner',
+        target.id,
+        [observation.id],
+      ),
+    ).rejects.toMatchObject({ code: 'invalid-input' })
   })
 
   it('keeps the Wilbur row envelope exact under concurrent updates and stale-key floods', async () => {
@@ -1666,6 +1739,7 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       { status: 'committed', row_count: 1 },
       { status: 'denied', row_count: 2 },
     ])
+
   })
 
   it('preserves bounded Retry counters across a complete root lineage', async () => {

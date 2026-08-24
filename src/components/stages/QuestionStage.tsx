@@ -1,5 +1,5 @@
 import type { FormEvent } from 'react'
-import { ArrowRight, ChevronRight, Eye, Layers, Target } from 'lucide-react'
+import { ArrowRight, ChevronRight, Database, Eye, Layers, Target } from 'lucide-react'
 
 import type { HostedProvider } from '../../lib/hosted-provider'
 import { normalizeProblemInput } from '../../lib/problem'
@@ -16,6 +16,8 @@ interface QuestionStageProps {
   provider: HostedProvider
   setProblem: (value: string) => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
+  selectedMemoryCount?: number
+  onOpenMemory?: () => void
 }
 
 export function QuestionStage({
@@ -23,6 +25,8 @@ export function QuestionStage({
   provider,
   setProblem,
   onSubmit,
+  selectedMemoryCount = 0,
+  onOpenMemory,
 }: QuestionStageProps) {
   const normalizedLength = normalizeProblemInput(problem).length
   const canBegin = normalizedLength >= 12 && normalizedLength <= 240
@@ -69,6 +73,18 @@ export function QuestionStage({
               ? 'Add a little more detail so the board has something to work with. Use 12–240 characters.'
               : 'Use 12–240 characters.'}
           </p>
+          {onOpenMemory ? (
+            <button
+              className={`question-memory-selection${selectedMemoryCount > 0 ? ' is-active' : ''}`}
+              type="button"
+              onClick={onOpenMemory}
+            >
+              <Database size={15} aria-hidden="true" />
+              {selectedMemoryCount > 0
+                ? `${selectedMemoryCount} prior observation${selectedMemoryCount === 1 ? '' : 's'} will enter this game`
+                : 'Bring a prior Wilbur observation into this game'}
+            </button>
+          ) : null}
           <p className="form-data-note" id="problem-data-note">
             {provider.kind === 'openclaw' ? (
               <>

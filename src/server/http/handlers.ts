@@ -124,9 +124,27 @@ export function handleDivideRequest(
       const game = await scope.services.divide({
         ...operationContext(scope, request),
         problem: body.problem,
+        memoryObservationIds: body.memoryObservationIds,
       })
 
       return jsonResponse({ game }, { status: 201 })
+    },
+    dependencies,
+  )
+}
+
+export function handleWebMemoryRequest(
+  request: Request,
+  dependencies?: HandlerDependencies,
+): Promise<Response> {
+  return runAuthenticated(
+    request,
+    false,
+    async (scope) => {
+      const memory = await scope.services.getWebMemory(
+        ownerContext(scope, request),
+      )
+      return jsonResponse({ memory })
     },
     dependencies,
   )

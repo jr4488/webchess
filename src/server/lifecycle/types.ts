@@ -10,6 +10,8 @@ import type {
   WilburAction,
   WilburActionStatus,
   WilburObservation,
+  WebMemoryEvidence,
+  WebMemoryIndex,
 } from '../../lib/lifecycle'
 import type { AssumptionResult } from '../../lib/lifecycle/contracts'
 import type { DurableGameSnapshot } from '../games'
@@ -148,6 +150,7 @@ export interface CreateWilburActionInput {
   readonly expectedObservation: string
   readonly decisionThreshold: string
   readonly reviewHorizon: string
+  readonly followUpAt?: string | null
   readonly configurationDigest: string
 }
 
@@ -196,6 +199,7 @@ export interface UpdateWilburActionInput {
   readonly requestDigest: string
   readonly expectedRevision: number
   readonly status: WilburActionStatus
+  readonly followUpAt?: string | null
   readonly configurationDigest: string
 }
 
@@ -247,4 +251,18 @@ export interface LifecycleRepositoryPort {
   appendWilburObservation(
     input: AppendWilburObservationInput,
   ): Promise<WilburObservation>
+  listWebMemory(ownerId: string): Promise<WebMemoryIndex>
+  getWebMemoryEvidence(
+    ownerId: string,
+    observationIds: readonly string[],
+  ): Promise<readonly WebMemoryEvidence[]>
+  getWebMemoryEvidenceForGame(
+    ownerId: string,
+    gameId: string,
+  ): Promise<readonly WebMemoryEvidence[]>
+  attachWebMemoryEvidence(
+    ownerId: string,
+    gameId: string,
+    observationIds: readonly string[],
+  ): Promise<void>
 }

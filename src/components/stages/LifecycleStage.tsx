@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 import {
   ArrowRight,
   Bug,
+  CalendarClock,
   ChevronDown,
   CircleAlert,
   Copy,
@@ -73,8 +74,12 @@ interface LifecycleStageProps {
   onRefresh: () => void
   onRetry: () => void
   onRetryAnswer: () => void
-  onCreateAction: (index: number) => void
-  onUpdateAction: (action: WilburAction, status: WilburActionStatus) => void
+  onCreateAction: (index: number, followUpAt: string | null) => void
+  onUpdateAction: (
+    action: WilburAction,
+    status: WilburActionStatus,
+    followUpAt: string | null,
+  ) => void
   onObserve: (
     action: WilburAction,
     observation: AppendWilburObservationCommand,
@@ -185,16 +190,19 @@ function ObservationForm({
   const [observation, setObservation] = useState('')
   const [nextDecision, setNextDecision] = useState('')
   const [assumptionResult, setAssumptionResult] = useState<AssumptionResult>('unresolved')
+  const [evidenceClassification, setEvidenceClassification] = useState('Direct observation')
+  const [unexpectedEffect, setUnexpectedEffect] = useState('None observed')
+  const [stakeholderResponse, setStakeholderResponse] = useState('No stakeholder response observed')
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const accepted = await onObserve(action, {
       observedAt: new Date().toISOString(),
       observation,
-      evidenceClassification: 'Direct observation recorded by the player',
+      evidenceClassification,
       expectedEffect: action.expectedObservation,
-      unexpectedEffect: 'No unexpected effect recorded yet.',
-      stakeholderResponse: 'No stakeholder response recorded yet.',
+      unexpectedEffect,
+      stakeholderResponse,
       assumptionResult,
       nextDecision,
     })
@@ -202,6 +210,9 @@ function ObservationForm({
       setObservation('')
       setNextDecision('')
       setAssumptionResult('unresolved')
+      setEvidenceClassification('Direct observation')
+      setUnexpectedEffect('None observed')
+      setStakeholderResponse('No stakeholder response observed')
       setOpen(false)
     }
   }
@@ -232,6 +243,19 @@ function ObservationForm({
         />
       </label>
       <label>
+        What kind of evidence is this?
+        <select
+          value={evidenceClassification}
+          onChange={(event) => setEvidenceClassification(event.target.value)}
+        >
+          <option>Direct observation</option>
+          <option>Measured result</option>
+          <option>Stakeholder report</option>
+          <option>Documented external evidence</option>
+          <option>Interpretation or inference</option>
+        </select>
+      </label>
+      <label>
         What should happen next?
         <textarea
           value={nextDecision}
@@ -239,6 +263,26 @@ function ObservationForm({
           maxLength={2_000}
           required
           onChange={(event) => setNextDecision(event.target.value)}
+        />
+      </label>
+      <label>
+        What happened that you did not expect?
+        <textarea
+          value={unexpectedEffect}
+          minLength={1}
+          maxLength={2_000}
+          required
+          onChange={(event) => setUnexpectedEffect(event.target.value)}
+        />
+      </label>
+      <label>
+        How did affected people respond?
+        <textarea
+          value={stakeholderResponse}
+          minLength={1}
+          maxLength={2_000}
+          required
+          onChange={(event) => setStakeholderResponse(event.target.value)}
         />
       </label>
       <label>
@@ -261,6 +305,69 @@ function ObservationForm({
         </button>
       </div>
     </form>
+  )
+}
+
+function localDateInputValue(date: Date): string {
+  const year = String(date.getFullYear()).padStart(4, '0')
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function defaultFollowUpDate(): string {
+  const date = new Date()
+  date.setDate(date.getDate() + 7)
+  return localDateInputValue(date)
+}
+
+function dateInputValue(value: string | null): string {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : localDateInputValue(date)
+}
+
+function followUpTimestamp(value: string): string | null {
+  if (!value) return null
+  const date = new Date(`${value}T12:00:00`)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
+function TrackActionControl({
+  index,
+  actionLabel,
+  pending,
+  onCreate,
+}: {
+  index: number
+  actionLabel: string
+  pending: boolean
+  onCreate: LifecycleStageProps['onCreateAction']
+}) {
+  const [followUpDate, setFollowUpDate] = useState(defaultFollowUpDate)
+
+  return (
+    <div className="wilbur-track-control">
+      <label>
+        <CalendarClock size={14} aria-hidden="true" /> Follow up on
+        <input
+          type="date"
+          aria-label={`Follow-up date for ${actionLabel}`}
+          value={followUpDate}
+          min={localDateInputValue(new Date())}
+          onChange={(event) => setFollowUpDate(event.target.value)}
+        />
+      </label>
+      <button
+        className="secondary-button"
+        type="button"
+        aria-label={`Track ${actionLabel} with Wilbur`}
+        disabled={pending || !followUpDate}
+        onClick={() => onCreate(index, followUpTimestamp(followUpDate))}
+      >
+        {pending ? 'Adding…' : 'Track with Wilbur'}
+      </button>
+    </div>
   )
 }
 
@@ -318,6 +425,16 @@ export function LifecycleStage({
     ),
     [lifecycle?.wilburActions],
   )
+  const observationsByAction = useMemo(() => {
+    const grouped = new Map<string, NonNullable<typeof lifecycle>['wilburObservations']>()
+    for (const observation of lifecycle?.wilburObservations ?? []) {
+      grouped.set(observation.actionId, [
+        ...(grouped.get(observation.actionId) ?? []),
+        observation,
+      ])
+    }
+    return grouped
+  }, [lifecycle])
   const charlotteQualificationUnavailable = Boolean(
     lifecycle?.state === 'charlotte_unavailable',
   )
@@ -1062,41 +1179,80 @@ export function LifecycleStage({
                       <p>{suggestion.smallestAction}</p>
                       <dl><dt>Watch for</dt><dd>{suggestion.expectedObservation}</dd></dl>
                       {!action ? (
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          aria-label={`Track ${actionLabel} with Wilbur`}
-                          disabled={actionPendingIndex !== null}
-                          onClick={() => onCreateAction(index)}
-                        >
-                          {actionPendingIndex === index ? 'Adding…' : 'Track with Wilbur'}
-                        </button>
+                        <TrackActionControl
+                          index={index}
+                          actionLabel={actionLabel}
+                          pending={actionPendingIndex !== null}
+                          onCreate={onCreateAction}
+                        />
                       ) : (
                         <div className="wilbur-tracked">
-                          <label className="wilbur-status-control">
-                            Status
-                            <select
-                              value={action.status}
-                              aria-label={`Status for ${actionLabel}`}
-                              disabled={wilburPending}
-                              onChange={(event) => onUpdateAction(
-                                action,
-                                event.target.value as WilburActionStatus,
-                              )}
-                            >
-                              <option value="planned">Planned</option>
-                              <option value="in_progress">In progress</option>
-                              <option value="completed">Completed</option>
-                              <option value="inconclusive">Inconclusive</option>
-                              <option value="abandoned">Abandoned</option>
-                            </select>
-                          </label>
+                          <div className="wilbur-record-controls">
+                            <label className="wilbur-status-control">
+                              Status
+                              <select
+                                value={action.status}
+                                aria-label={`Status for ${actionLabel}`}
+                                disabled={wilburPending}
+                                onChange={(event) => onUpdateAction(
+                                  action,
+                                  event.target.value as WilburActionStatus,
+                                  action.followUpAt,
+                                )}
+                              >
+                                <option value="planned">Planned</option>
+                                <option value="in_progress">In progress</option>
+                                <option value="completed">Completed</option>
+                                <option value="inconclusive">Inconclusive</option>
+                                <option value="abandoned">Abandoned</option>
+                              </select>
+                            </label>
+                            <label className="wilbur-status-control">
+                              Follow up on
+                              <input
+                                type="date"
+                                aria-label={`Follow-up date for ${actionLabel}`}
+                                value={dateInputValue(action.followUpAt)}
+                                disabled={wilburPending}
+                                onChange={(event) => onUpdateAction(
+                                  action,
+                                  action.status,
+                                  followUpTimestamp(event.target.value),
+                                )}
+                              />
+                            </label>
+                          </div>
                           <ObservationForm
                             action={action}
                             actionLabel={actionLabel}
                             pending={wilburPending}
                             onObserve={onObserve}
                           />
+                          {(observationsByAction.get(action.id) ?? []).length > 0 ? (
+                            <ol className="wilbur-observation-timeline" aria-label={`Observations for ${suggestion.title}`}>
+                              {(observationsByAction.get(action.id) ?? []).map((observation) => (
+                                <li key={observation.id}>
+                                  <span aria-hidden="true" />
+                                  <div>
+                                    <small>
+                                      {new Intl.DateTimeFormat(undefined, {
+                                        dateStyle: 'medium',
+                                        timeStyle: 'short',
+                                      }).format(new Date(observation.observedAt))}
+                                      {' · '}{observation.evidenceClassification}
+                                    </small>
+                                    <h4>{observation.observation}</h4>
+                                    <dl>
+                                      <div><dt>Assumption</dt><dd>{observation.assumptionResult}</dd></div>
+                                      <div><dt>Unexpected</dt><dd>{observation.unexpectedEffect}</dd></div>
+                                      <div><dt>Stakeholders</dt><dd>{observation.stakeholderResponse}</dd></div>
+                                      <div><dt>Next decision</dt><dd>{observation.nextDecision}</dd></div>
+                                    </dl>
+                                  </div>
+                                </li>
+                              ))}
+                            </ol>
+                          ) : null}
                         </div>
                       )}
                     </article>
@@ -1119,6 +1275,7 @@ export function LifecycleStage({
                             onChange={(event) => onUpdateAction(
                               action,
                               event.target.value as WilburActionStatus,
+                              action.followUpAt,
                             )}
                           >
                             <option value="planned">Planned</option>

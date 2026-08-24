@@ -53,6 +53,7 @@ const INSPECT_MIGRATION_LEDGER_SQL = `
           'wilbur_actions',
           'wilbur_observations',
           'wilbur_mutation_requests',
+          'web_memory_links',
           'lifecycle_events',
           'research_requests',
           'research_sources'
@@ -90,6 +91,7 @@ const RUNTIME_TABLE_PRIVILEGE_CONTRACT = {
   wilbur_actions: ['SELECT', 'INSERT'],
   wilbur_observations: ['SELECT', 'INSERT'],
   wilbur_mutation_requests: ['SELECT', 'INSERT'],
+  web_memory_links: ['SELECT', 'INSERT'],
   lifecycle_events: ['SELECT', 'INSERT'],
   research_requests: ['SELECT', 'INSERT', 'UPDATE'],
   research_sources: ['SELECT', 'INSERT'],
@@ -97,7 +99,12 @@ const RUNTIME_TABLE_PRIVILEGE_CONTRACT = {
 
 const RUNTIME_COLUMN_UPDATE_CONTRACT = {
   gate_decisions: new Set(['answer_user_prompt', 'answer_user_prompt_sha256']),
-  wilbur_actions: new Set(['status', 'revision', 'updated_at']),
+  wilbur_actions: new Set([
+    'follow_up_at',
+    'status',
+    'revision',
+    'updated_at',
+  ]),
   wilbur_mutation_requests: new Set([
     'rate_admitted_at',
     'denial_code',
@@ -109,6 +116,7 @@ const RUNTIME_COLUMN_UPDATE_CONTRACT = {
     'result_revision',
     'result_status',
     'result_updated_at',
+    'result_follow_up_at',
     'updated_at',
   ]),
 }
@@ -349,6 +357,7 @@ const RUNTIME_COLUMN_CONTRACT = {
     ['created_at', 'timestamp with time zone', true],
     ['updated_at', 'timestamp with time zone', true],
     ['charlotte_binding_version', 'text', false],
+    ['follow_up_at', 'timestamp with time zone', false],
   ],
   wilbur_observations: [
     ['id', 'uuid', true],
@@ -387,6 +396,16 @@ const RUNTIME_COLUMN_CONTRACT = {
     ['result_updated_at', 'timestamp with time zone', false],
     ['created_at', 'timestamp with time zone', true],
     ['updated_at', 'timestamp with time zone', true],
+    ['result_follow_up_at', 'timestamp with time zone', false],
+  ],
+  web_memory_links: [
+    ['id', 'uuid', true],
+    ['clerk_user_id', 'text', true],
+    ['target_game_id', 'uuid', true],
+    ['source_observation_id', 'uuid', true],
+    ['selection_ordinal', 'smallint', true],
+    ['consent_version', 'text', true],
+    ['created_at', 'timestamp with time zone', true],
   ],
   lifecycle_events: [
     ['id', 'uuid', true],
@@ -456,6 +475,12 @@ const RUNTIME_COLUMN_CONTRACT = {
 
 const RUNTIME_INDEX_CONTRACT = [
   {
+    index_name: 'games_id_clerk_user_id_key',
+    table_name: 'games',
+    key_columns: 'id,clerk_user_id',
+    predicate: null,
+  },
+  {
     index_name: 'games_one_current_per_user',
     table_name: 'games',
     key_columns: 'clerk_user_id',
@@ -502,6 +527,24 @@ const RUNTIME_INDEX_CONTRACT = [
     index_name: 'research_sources_research_request_id_url_key',
     table_name: 'research_sources',
     key_columns: 'research_request_id,url',
+    predicate: null,
+  },
+  {
+    index_name: 'web_memory_links_target_game_id_source_observation_id_key',
+    table_name: 'web_memory_links',
+    key_columns: 'target_game_id,source_observation_id',
+    predicate: null,
+  },
+  {
+    index_name: 'web_memory_links_target_game_id_selection_ordinal_key',
+    table_name: 'web_memory_links',
+    key_columns: 'target_game_id,selection_ordinal',
+    predicate: null,
+  },
+  {
+    index_name: 'wilbur_observations_id_clerk_user_id_key',
+    table_name: 'wilbur_observations',
+    key_columns: 'id,clerk_user_id',
     predicate: null,
   },
 ]
@@ -558,13 +601,13 @@ const WILBUR_CHARLOTTE_BINDING_FUNCTION_SOURCE = normalizeFunctionSource(`
         OR NEW.created_at IS DISTINCT FROM OLD.created_at
       THEN
         RAISE EXCEPTION
-          'A Wilbur action can only change status, revision, and updated_at.'
+          'A Wilbur action can only change status, revision, follow_up_at, and updated_at.'
           USING ERRCODE = '23514';
       END IF;
 
       IF NEW.revision <> OLD.revision + 1 THEN
         RAISE EXCEPTION
-          'A Wilbur action status update must advance revision by one.'
+          'A Wilbur action update must advance revision by one.'
           USING ERRCODE = '23514';
       END IF;
 
@@ -841,7 +884,7 @@ const RUNTIME_CONSTRAINT_CONTRACT = [
     deferrable: false,
     initially_deferred: false,
     definition:
-      "CHECK (status = 'pending'::text AND denial_code IS NULL AND retry_at IS NULL AND result_entity_id IS NULL AND result_revision IS NULL AND result_status IS NULL AND result_updated_at IS NULL OR status = 'denied'::text AND denial_code IS NOT NULL AND result_entity_id IS NULL AND result_revision IS NULL AND result_status IS NULL AND result_updated_at IS NULL OR status = 'committed'::text AND rate_admitted_at IS NOT NULL AND denial_code IS NULL AND retry_at IS NULL AND result_entity_id IS NOT NULL AND ((operation = ANY (ARRAY['create_action'::text, 'update_action'::text])) AND result_revision IS NOT NULL AND result_status IS NOT NULL AND result_updated_at IS NOT NULL OR operation = 'append_observation'::text AND result_revision IS NULL AND result_status IS NULL AND result_updated_at IS NULL))",
+      "CHECK (status = 'pending'::text AND denial_code IS NULL AND retry_at IS NULL AND result_entity_id IS NULL AND result_revision IS NULL AND result_status IS NULL AND result_follow_up_at IS NULL AND result_updated_at IS NULL OR status = 'denied'::text AND denial_code IS NOT NULL AND result_entity_id IS NULL AND result_revision IS NULL AND result_status IS NULL AND result_follow_up_at IS NULL AND result_updated_at IS NULL OR status = 'committed'::text AND rate_admitted_at IS NOT NULL AND denial_code IS NULL AND retry_at IS NULL AND result_entity_id IS NOT NULL AND ((operation = ANY (ARRAY['create_action'::text, 'update_action'::text])) AND result_revision IS NOT NULL AND result_status IS NOT NULL AND result_updated_at IS NOT NULL OR operation = 'append_observation'::text AND result_revision IS NULL AND result_status IS NULL AND result_follow_up_at IS NULL AND result_updated_at IS NULL))",
   },
   {
     table_name: 'wilbur_mutation_requests',
@@ -883,6 +926,101 @@ const RUNTIME_CONSTRAINT_CONTRACT = [
     definition:
       "CHECK (operation = 'create_action'::text AND target_action_id IS NULL OR (operation = ANY (ARRAY['update_action'::text, 'append_observation'::text])) AND target_action_id IS NOT NULL)",
   },
+  {
+    table_name: 'games',
+    constraint_name: 'games_id_clerk_user_id_key',
+    constraint_type: 'u',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition: 'UNIQUE (id, clerk_user_id)',
+  },
+  {
+    table_name: 'wilbur_observations',
+    constraint_name: 'wilbur_observations_id_clerk_user_id_key',
+    constraint_type: 'u',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition: 'UNIQUE (id, clerk_user_id)',
+  },
+  {
+    table_name: 'web_memory_links',
+    constraint_name: 'web_memory_links_clerk_user_id_fkey',
+    constraint_type: 'f',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      'FOREIGN KEY (clerk_user_id) REFERENCES user_controls(clerk_user_id) ON DELETE CASCADE',
+  },
+  {
+    table_name: 'web_memory_links',
+    constraint_name: 'web_memory_links_pkey',
+    constraint_type: 'p',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition: 'PRIMARY KEY (id)',
+  },
+  {
+    table_name: 'web_memory_links',
+    constraint_name: 'web_memory_links_consent_version_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (consent_version = 'webchess-web-memory-consent-v1'::text)",
+  },
+  {
+    table_name: 'web_memory_links',
+    constraint_name: 'web_memory_links_selection_ordinal_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      'CHECK (selection_ordinal >= 0 AND selection_ordinal <= 7)',
+  },
+  {
+    table_name: 'web_memory_links',
+    constraint_name: 'web_memory_links_source_owner_fkey',
+    constraint_type: 'f',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      'FOREIGN KEY (source_observation_id, clerk_user_id) REFERENCES wilbur_observations(id, clerk_user_id) ON DELETE CASCADE',
+  },
+  {
+    table_name: 'web_memory_links',
+    constraint_name: 'web_memory_links_target_owner_fkey',
+    constraint_type: 'f',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      'FOREIGN KEY (target_game_id, clerk_user_id) REFERENCES games(id, clerk_user_id) ON DELETE CASCADE',
+  },
+  {
+    table_name: 'web_memory_links',
+    constraint_name: 'web_memory_links_target_game_id_source_observation_id_key',
+    constraint_type: 'u',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition: 'UNIQUE (target_game_id, source_observation_id)',
+  },
+  {
+    table_name: 'web_memory_links',
+    constraint_name: 'web_memory_links_target_game_id_selection_ordinal_key',
+    constraint_type: 'u',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition: 'UNIQUE (target_game_id, selection_ordinal)',
+  },
 ]
 
 const RUNTIME_DEFAULT_CONTRACT = [
@@ -909,6 +1047,11 @@ const RUNTIME_DEFAULT_CONTRACT = [
   {
     table_name: 'wilbur_mutation_requests',
     column_name: 'updated_at',
+    definition: 'now()',
+  },
+  {
+    table_name: 'web_memory_links',
+    column_name: 'created_at',
     definition: 'now()',
   },
 ]
@@ -1235,9 +1378,15 @@ const RUNTIME_COMPATIBILITY_SQL = `
       ON table_namespace.oid = table_relation.relnamespace
     INNER JOIN active_schema
       ON active_schema.schema_name = table_namespace.nspname
-    WHERE table_relation.relname = 'wilbur_mutation_requests'
-      OR constraint_catalog.conname =
-        'wilbur_actions_charlotte_binding_version_valid'
+    WHERE table_relation.relname IN (
+      'wilbur_mutation_requests',
+      'web_memory_links'
+    )
+      OR constraint_catalog.conname IN (
+        'games_id_clerk_user_id_key',
+        'wilbur_actions_charlotte_binding_version_valid',
+        'wilbur_observations_id_clerk_user_id_key'
+      )
   ),
   expected_defaults AS (
     SELECT *
@@ -1266,7 +1415,10 @@ const RUNTIME_COMPATIBILITY_SQL = `
     INNER JOIN pg_catalog.pg_attribute AS attribute
       ON attribute.attrelid = table_relation.oid
       AND attribute.attnum = default_catalog.adnum
-    WHERE table_relation.relname = 'wilbur_mutation_requests'
+    WHERE table_relation.relname IN (
+      'wilbur_mutation_requests',
+      'web_memory_links'
+    )
   )
   SELECT
     active_schema.schema_name IS NOT NULL AS schema_resolved,

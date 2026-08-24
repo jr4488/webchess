@@ -396,6 +396,7 @@ describe('database row validators', () => {
       expected_observation: 'The trial completes within the window.',
       decision_threshold: 'Continue only if the trial meets the threshold.',
       review_horizon: 'One week',
+      follow_up_at: null,
       status: 'planned',
       revision: '0',
       record_version: 'wilbur-v1',
@@ -433,6 +434,7 @@ describe('database row validators', () => {
       result_revision: null,
       result_status: null,
       result_updated_at: null,
+      result_follow_up_at: null,
       created_at: NOW,
       updated_at: NOW,
     })
