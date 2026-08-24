@@ -20,9 +20,10 @@ import {
   OPENAI_MODEL_READINESS_PROMPT,
   startWebChessBridge,
   type CodexPackageAttestor,
+  type CodexPluginRecordResolver,
   type OpenClawAgentAuthRuntime,
   type OpenClawBridgeApi,
-  type OpenClawPluginRegistryRuntime,
+  type OpenClawWebSearchProvider,
   type SimpleCompletionRuntime,
   type WebChessBridge,
 } from './bridge.js'
@@ -170,8 +171,7 @@ async function runtimeRoot(): Promise<string> {
 function fakeApi(
   webSearch: OpenClawBridgeApi['runtime']['webSearch']['search'] = vi.fn(),
 ): OpenClawBridgeApi {
-  const provider = {
-    createTool: vi.fn(() => ({
+  const provider = officialCodexProvider(vi.fn(() => ({
       execute: vi.fn(async ({ query }, executionContext) => {
         if (query === CODEX_SEARCH_READINESS_QUERY) {
           return {
@@ -199,13 +199,7 @@ function fakeApi(
         })
         return response.result
       }),
-    })),
-    envVars: [] as string[],
-    id: 'codex',
-    onboardingScopes: ['text-inference'],
-    pluginId: 'codex',
-    requiresCredential: false,
-  }
+    })))
   const api = {
     config: {
       auth: { order: { openai: ['openai:account'] } },
@@ -236,6 +230,9 @@ function fakeApi(
           source: 'profile:openai:account',
         })),
       },
+      state: {
+        resolveStateDir: vi.fn(() => '/official/openclaw-state'),
+      },
       webSearch: {
         listProviders: vi.fn(() => [provider]),
         search: webSearch,
@@ -244,6 +241,52 @@ function fakeApi(
   } satisfies OpenClawBridgeApi
   api.runtime.config.current.mockImplementation(() => api.config)
   return api
+}
+
+function officialCodexProvider(
+  createTool: OpenClawWebSearchProvider['createTool'] =
+    vi.fn(() => ({ execute: vi.fn() })),
+): OpenClawWebSearchProvider {
+  return {
+    applySelectionConfig: vi.fn((config) => config),
+    autoDetectOrder: 900,
+    createTool,
+    credentialPath: '',
+    docsUrl: 'https://docs.openclaw.ai/tools/web',
+    envVars: [],
+    getCredentialValue: vi.fn(() => undefined),
+    hint: 'Grounded answers through your Codex app-server account',
+    id: 'codex',
+    inactiveSecretPaths: [],
+    label: 'Codex Hosted Search',
+    onboardingScopes: ['text-inference'],
+    placeholder: '(uses Codex sign-in)',
+    pluginId: 'codex',
+    requiresCredential: false,
+    runSetup: vi.fn(async (context) => context),
+    setCredentialValue: vi.fn(() => undefined),
+    signupUrl: 'https://chatgpt.com/codex',
+  }
+}
+
+function officialCodexRecord() {
+  const rootDir = '/official/@openclaw/codex'
+  return {
+    enabled: true,
+    id: 'codex',
+    origin: 'global',
+    packageName: '@openclaw/codex',
+    rootDir,
+    source: `${rootDir}/dist/index.js`,
+    status: 'loaded',
+    trustedOfficialInstall: true,
+    version: '2026.7.1-1',
+    webSearchProviderIds: ['codex'],
+  }
+}
+
+function codexPluginRecordResolver(): CodexPluginRecordResolver {
+  return vi.fn(async () => officialCodexRecord())
 }
 
 function simpleRuntime(
@@ -319,50 +362,6 @@ function mutableAgentAuthRuntime(
   return runtime
 }
 
-function pluginRegistryRuntime(
-  api: OpenClawBridgeApi,
-): OpenClawPluginRegistryRuntime {
-  let listed: ReturnType<OpenClawBridgeApi['runtime']['webSearch']['listProviders']>
-  try {
-    listed = api.runtime.webSearch.listProviders()
-  } catch {
-    listed = []
-  }
-  const provider = listed[0] ?? {
-    createTool: vi.fn(() => null),
-    envVars: [],
-    id: 'codex',
-    onboardingScopes: ['text-inference'],
-    pluginId: 'codex',
-    requiresCredential: false,
-  }
-  vi.mocked(api.runtime.webSearch.listProviders).mockClear()
-  const source = '/official/@openclaw/codex/dist/index.js'
-  const rootDir = '/official/@openclaw/codex'
-  const record = {
-    enabled: true,
-    id: 'codex',
-    origin: 'global',
-    packageName: '@openclaw/codex',
-    rootDir,
-    source,
-    status: 'loaded',
-    trustedOfficialInstall: true,
-    version: '2026.7.1-1',
-    webSearchProviderIds: ['codex'],
-  }
-  const registry = {
-    plugins: [record],
-    webSearchProviders: [{
-      pluginId: 'codex',
-      provider,
-      rootDir,
-      source,
-    }],
-  }
-  return { getGlobalPluginRegistry: vi.fn(() => registry) }
-}
-
 function codexPackageAttestor(api: OpenClawBridgeApi): CodexPackageAttestor {
   return vi.fn(async () => ({
     async executeSearch(
@@ -391,8 +390,8 @@ async function start(
   return startWebChessBridge(api, await runtimeRoot(), {
     agentAuthRuntime: agentAuthRuntime(),
     codexPackageAttestor: codexPackageAttestor(api),
+    codexPluginRecordResolver: codexPluginRecordResolver(),
     environment: TEST_ENVIRONMENT,
-    pluginRegistryRuntime: pluginRegistryRuntime(api),
     preparedAuthAccountInspector: preparedAuthInspector(),
     token: TOKEN,
     simpleCompletionRuntime: simpleRuntime(),
@@ -580,43 +579,90 @@ describe('OpenClaw plugin runtime bridge', () => {
     })
   })
 
-  it('binds the Codex provider from the registry activated by enumeration', async () => {
+  it('binds shallow provider clones to the independently attested install', async () => {
     const api = fakeApi()
     const provider = api.runtime.webSearch.listProviders()[0]
     expect(provider).toBeDefined()
-    const activeRuntime = pluginRegistryRuntime(api)
-    const activeRegistry = activeRuntime.getGlobalPluginRegistry()
-    expect(activeRegistry).not.toBeNull()
-    let registry = {
-      plugins: [],
-      webSearchProviders: [],
-    } as NonNullable<typeof activeRegistry>
-    const registryRuntime: OpenClawPluginRegistryRuntime = {
-      getGlobalPluginRegistry: vi.fn(() => registry),
-    }
-    api.runtime.webSearch.listProviders = vi.fn(() => {
-      registry = activeRegistry!
-      return [provider!]
-    })
+    api.runtime.webSearch.listProviders = vi.fn(() => [{ ...provider! }])
+    const recordResolver = codexPluginRecordResolver()
 
-    const bridge = await start(api, { pluginRegistryRuntime: registryRuntime })
+    const bridge = await start(api, {
+      codexPluginRecordResolver: recordResolver,
+    })
 
     expect(api.runtime.webSearch.listProviders).toHaveBeenCalledWith({
       config: expect.any(Object),
     })
-    expect(registryRuntime.getGlobalPluginRegistry).toHaveBeenCalled()
+    expect(recordResolver).toHaveBeenCalledWith(
+      TEST_ENVIRONMENT,
+      '/official/openclaw-state',
+      AGENT_WORKSPACE_DIR,
+      expect.arrayContaining([
+        'OPENAI_API_KEY',
+        'OPENCLAW_LOAD_SHELL_ENV',
+      ]),
+    )
+    expect(recordResolver).toHaveBeenCalledTimes(1)
+    const listProviders = vi.mocked(api.runtime.webSearch.listProviders)
+    expect(listProviders.mock.results[0]?.value[0])
+      .not.toBe(listProviders.mock.results[1]?.value[0])
     await bridge.close()
+  })
+
+  it('rejects a shallow clone whose provider function identity changes', async () => {
+    const api = fakeApi()
+    const provider = api.runtime.webSearch.listProviders()[0]
+    expect(provider).toBeDefined()
+    let calls = 0
+    api.runtime.webSearch.listProviders = vi.fn(() => {
+      calls += 1
+      return [{
+        ...provider!,
+        ...(calls > 1
+          ? {
+              createTool: vi.fn((context) =>
+                provider!.createTool(context)),
+            }
+          : {}),
+      }]
+    })
+
+    const failure = await captureStartFailure(api)
+
+    expect(failure.message).toMatch(/exact official @openclaw\/codex/u)
+  })
+
+  it('rejects a listed provider with extra contract fields', async () => {
+    const api = fakeApi()
+    const provider = api.runtime.webSearch.listProviders()[0]
+    api.runtime.webSearch.listProviders = vi.fn(() => [{
+      ...provider!,
+      unreviewedCredentialFallback: true,
+    }] as unknown as OpenClawWebSearchProvider[])
+
+    const failure = await captureStartFailure(api)
+
+    expect(failure.message).toMatch(/exact official @openclaw\/codex/u)
+  })
+
+  it('rejects duplicate exact Codex provider candidates', async () => {
+    const api = fakeApi()
+    const provider = api.runtime.webSearch.listProviders()[0]
+    api.runtime.webSearch.listProviders = vi.fn(() => [
+      { ...provider! },
+      { ...provider! },
+    ])
+
+    const failure = await captureStartFailure(api)
+
+    expect(failure.message).toMatch(/exact official @openclaw\/codex/u)
   })
 
   it('rejects a codex-named Hosted Search provider owned by another plugin', async () => {
     const api = fakeApi()
     api.runtime.webSearch.listProviders = vi.fn(() => [{
-      createTool: vi.fn(() => ({ execute: vi.fn() })),
-      envVars: [],
-      id: 'codex',
-      onboardingScopes: ['text-inference'],
+      ...officialCodexProvider(),
       pluginId: 'third-party-lookalike',
-      requiresCredential: false,
     }])
 
     const failure = await captureStartFailure(api)
@@ -626,20 +672,21 @@ describe('OpenClaw plugin runtime bridge', () => {
 
   it('rejects a same-id fake plugin record before package use', async () => {
     const api = fakeApi()
-    const registryRuntime = pluginRegistryRuntime(api)
-    const registry = registryRuntime.getGlobalPluginRegistry()
-    expect(registry).not.toBeNull()
-    registry!.plugins[0]!.origin = 'workspace'
-    registry!.plugins[0]!.trustedOfficialInstall = false
+    const recordResolver: CodexPluginRecordResolver = vi.fn(async () => ({
+      ...officialCodexRecord(),
+      origin: 'workspace',
+      trustedOfficialInstall: false,
+    }))
     const attestor = codexPackageAttestor(api)
 
     const failure = await captureStartFailure(api, {
       codexPackageAttestor: attestor,
-      pluginRegistryRuntime: registryRuntime,
+      codexPluginRecordResolver: recordResolver,
     })
 
     expect(failure.message).toMatch(/exact official @openclaw\/codex/u)
     expect(attestor).not.toHaveBeenCalled()
+    expect(api.runtime.webSearch.listProviders).not.toHaveBeenCalled()
   })
 
   it('rejects a provider when its executable attestation fails', async () => {
@@ -699,14 +746,9 @@ describe('OpenClaw plugin runtime bridge', () => {
       searches: [{ query }],
       tookMs: 1,
     }))
-    const provider = {
-      createTool: vi.fn(() => ({ execute })),
-      envVars: [] as string[],
-      id: 'codex',
-      onboardingScopes: ['text-inference'],
-      pluginId: 'codex',
-      requiresCredential: false,
-    }
+    const provider = officialCodexProvider(
+      vi.fn(() => ({ execute })),
+    )
     api.runtime.webSearch.listProviders = vi.fn(() => [provider])
 
     const bridge = await start(api)
@@ -1059,6 +1101,19 @@ describe('OpenClaw plugin runtime bridge', () => {
     await bridge.close()
   })
 
+  it.each([
+    ['direct values', { PRIVATE_VALUE: 'not-accepted' }],
+    ['login shell loading', { shellEnv: { enabled: true } }],
+  ])('rejects top-level OpenClaw config env: %s', async (_label, env) => {
+    const api = fakeApi()
+    api.config.env = env
+
+    const failure = await captureStartFailure(api)
+
+    expect(failure.message).toMatch(/canonical OpenAI account endpoint/u)
+    expect(api.runtime.webSearch.listProviders).not.toHaveBeenCalled()
+  })
+
   it('accepts the pinned Codex plugin schema defaults', async () => {
     const api = fakeApi()
     api.config.plugins = {
@@ -1237,6 +1292,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     ['OPENCLAW_DEBUG_PROXY_CERT_DIR', '/private/certificates'],
     ['OPENCLAW_DEBUG_PROXY_SESSION_ID', 'private-session'],
     ['OPENCLAW_ENABLE_PRIVATE_QA_CLI', '1'],
+    ['OPENCLAW_LOAD_SHELL_ENV', '1'],
     ['OPENCLAW_BUILD_PRIVATE_QA', '1'],
     ['OPENCLAW_QA_FORCE_RUNTIME', 'codex'],
     ['OPENCLAW_DEBUG_MODEL_PAYLOAD', '1'],
@@ -1423,6 +1479,7 @@ describe('OpenClaw plugin runtime bridge', () => {
         'OPENCLAW_DEBUG_MODEL_PAYLOAD',
         'OPENCLAW_DEBUG_SSE',
         'OPENCLAW_GATEWAY_TOKEN',
+        'OPENCLAW_LOAD_SHELL_ENV',
         'OPENCLAW_MCP_TOKEN',
         'OPENCLAW_CONFIG_PATH',
         'OPENCLAW_OAUTH_DIR',

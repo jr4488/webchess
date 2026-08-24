@@ -16,6 +16,7 @@ import {
   attestPinnedOpenClawPreparedAuthAccountInspector,
   attestOfficialCodexPackage,
   isOfficialCodexPluginRecord,
+  resolveRuntimeSelectedOfficialCodexPluginRecord,
   snapshotOAuthCredentialIdentity,
   type CodexPackageAttestation,
   type CodexPluginRecordForAttestation,
@@ -177,6 +178,7 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
   'OPENCLAW_ENABLE_PRIVATE_QA_CLI',
   'OPENCLAW_GATEWAY_PASSWORD',
   'OPENCLAW_GATEWAY_TOKEN',
+  'OPENCLAW_LOAD_SHELL_ENV',
   'OPENCLAW_LOG_LEVEL',
   'OPENCLAW_MCP_TOKEN',
   OPENCLAW_AUTO_CA_MARKER,
@@ -399,20 +401,36 @@ export interface OpenClawWebSearchTool {
 }
 
 export interface OpenClawWebSearchProvider {
+  applySelectionConfig(config: OpenClawRuntimeConfig): OpenClawRuntimeConfig
+  autoDetectOrder: number
   createTool(context: {
     agentDir?: string
     config: OpenClawRuntimeConfig
     runtimeMetadata?: unknown
     searchConfig?: OpenClawWebSearchConfig
   }): OpenClawWebSearchTool | null
+  credentialPath: string
+  docsUrl: string
   envVars: readonly string[]
+  getCredentialValue(searchConfig?: Record<string, unknown>): unknown
+  hint: string
   id: string
+  inactiveSecretPaths: readonly string[]
+  label: string
   onboardingScopes?: readonly string[]
+  placeholder: string
   pluginId: string
   requiresCredential?: boolean
+  runSetup(context: unknown): Promise<unknown>
+  setCredentialValue(
+    searchConfigTarget: Record<string, unknown>,
+    value: unknown,
+  ): void
+  signupUrl: string
 }
 
 interface OpenClawRuntimeConfig {
+  env?: unknown
   auth?: {
     profiles?: Record<string, {
       mode?: unknown
@@ -507,6 +525,9 @@ export interface OpenClawBridgeApi {
         workspaceDir?: string
       }): Promise<OpenClawResolvedProviderAuth>
     }
+    state: {
+      resolveStateDir(environment?: NodeJS.ProcessEnv): string
+    }
     webSearch: {
       listProviders(params?: {
         config?: OpenClawRuntimeConfig
@@ -530,34 +551,22 @@ export interface OpenClawBridgeApi {
   }
 }
 
-interface OpenClawCodexProviderRegistration {
-  pluginId: string
-  provider: OpenClawWebSearchProvider
-  rootDir?: string
-  source: string
-}
-
-interface OpenClawPluginRegistry {
-  plugins: CodexPluginRecordForAttestation[]
-  webSearchProviders: OpenClawCodexProviderRegistration[]
-}
-
 interface BoundCodexSearchProvider {
   attestation: CodexPackageAttestation
   pluginRecord: CodexPluginRecordForAttestation
   provider: OpenClawWebSearchProvider
-  registration: OpenClawCodexProviderRegistration
-  registry: OpenClawPluginRegistry
-  registryRuntime: OpenClawPluginRegistryRuntime
-}
-
-export interface OpenClawPluginRegistryRuntime {
-  getGlobalPluginRegistry(): OpenClawPluginRegistry | null
 }
 
 export type CodexPackageAttestor = (
   record: CodexPluginRecordForAttestation,
 ) => Promise<CodexPackageAttestation | null>
+
+export type CodexPluginRecordResolver = (
+  environment: NodeJS.ProcessEnv,
+  stateDir: string,
+  workspaceDir: string,
+  emptyEnvironmentNames: readonly string[],
+) => Promise<CodexPluginRecordForAttestation | null>
 
 export interface WebChessBridge {
   close(): Promise<void>
@@ -568,13 +577,13 @@ export interface WebChessBridge {
 export interface WebChessBridgeOptions {
   agentAuthRuntime?: OpenClawAgentAuthRuntime
   codexPackageAttestor?: CodexPackageAttestor
+  codexPluginRecordResolver?: CodexPluginRecordResolver
   environment?: NodeJS.ProcessEnv
   host?: string
   maxConcurrentRuns?: number
   maxRequestBytes?: number
   maxResponseBytes?: number
   readinessProbeTimeoutMs?: number
-  pluginRegistryRuntime?: OpenClawPluginRegistryRuntime
   preparedAuthAccountInspector?: PreparedAuthAccountInspector
   simpleCompletionRuntime?: SimpleCompletionRuntime
   token?: string
@@ -1125,6 +1134,7 @@ const UNSAFE_PROVIDER_TRANSPORT_ENVIRONMENT_NAMES = new Set([
     'OPENCLAW_DEBUG_PROXY_URL',
     'OPENCLAW_DEBUG_SSE',
     'OPENCLAW_ENABLE_PRIVATE_QA_CLI',
+    'OPENCLAW_LOAD_SHELL_ENV',
     'OPENCLAW_LOG_LEVEL',
     'OPENCLAW_QA_FORCE_RUNTIME',
     'OPENSSL_CONF',
@@ -1198,7 +1208,10 @@ function snapshotRuntimeConfig(
 function codexAppServerClearEnv(
   environment: NodeJS.ProcessEnv,
 ): string[] {
-  const names = new Set<string>(CODEX_APP_SERVER_ALWAYS_CLEAR_ENV)
+  const names = new Set<string>([
+    ...CODEX_APP_SERVER_ALWAYS_CLEAR_ENV,
+    ...PROVIDER_CREDENTIAL_ENVIRONMENT_EXACT_NAMES,
+  ])
   for (const rawName of Object.keys(environment)) {
     const exactName = rawName.trim()
     const name = exactName.toUpperCase()
@@ -1318,20 +1331,81 @@ function installRuntimeConfigGuard(
   }
 }
 
-function isCompatibleCodexProvider(
+const CODEX_PROVIDER_CONTRACT_KEYS = Object.freeze([
+  'applySelectionConfig',
+  'autoDetectOrder',
+  'createTool',
+  'credentialPath',
+  'docsUrl',
+  'envVars',
+  'getCredentialValue',
+  'hint',
+  'id',
+  'inactiveSecretPaths',
+  'label',
+  'onboardingScopes',
+  'placeholder',
+  'pluginId',
+  'requiresCredential',
+  'runSetup',
+  'setCredentialValue',
+  'signupUrl',
+] as const)
+
+const CODEX_PROVIDER_FUNCTION_KEYS = new Set<string>([
+  'applySelectionConfig',
+  'createTool',
+  'getCredentialValue',
+  'runSetup',
+  'setCredentialValue',
+])
+
+function isExactCodexProviderContract(
   provider: OpenClawWebSearchProvider,
 ): boolean {
+  const descriptors = Object.getOwnPropertyDescriptors(provider)
+  if (Object.getPrototypeOf(provider) !== Object.prototype ||
+    Reflect.ownKeys(provider).some((key) => typeof key !== 'string') ||
+    !isDeepStrictEqual(
+      Object.keys(provider).sort(),
+      [...CODEX_PROVIDER_CONTRACT_KEYS].sort(),
+    ) || !CODEX_PROVIDER_CONTRACT_KEYS.every((key) => {
+      const descriptor = descriptors[key]
+      return descriptor !== undefined && 'value' in descriptor &&
+        descriptor.configurable === true &&
+        descriptor.enumerable === true && descriptor.writable === true
+    })) return false
   return provider.id === 'codex' &&
     provider.pluginId === 'codex' &&
+    provider.label === 'Codex Hosted Search' &&
+    provider.hint ===
+      'Grounded answers through your Codex app-server account' &&
     provider.requiresCredential === false &&
-    provider.envVars.length === 0 &&
-    provider.onboardingScopes?.includes('text-inference') === true
+    isDeepStrictEqual(provider.envVars, []) &&
+    isDeepStrictEqual(provider.onboardingScopes, ['text-inference']) &&
+    provider.placeholder === '(uses Codex sign-in)' &&
+    provider.signupUrl === 'https://chatgpt.com/codex' &&
+    provider.docsUrl === 'https://docs.openclaw.ai/tools/web' &&
+    provider.autoDetectOrder === 900 &&
+    provider.credentialPath === '' &&
+    isDeepStrictEqual(provider.inactiveSecretPaths, []) &&
+    [...CODEX_PROVIDER_FUNCTION_KEYS].every((key) =>
+      typeof (provider as unknown as Record<string, unknown>)[key] ===
+        'function')
 }
 
-async function loadPluginRegistryRuntime(): Promise<OpenClawPluginRegistryRuntime> {
-  return await import(
-    'openclaw/plugin-sdk/plugin-runtime'
-  ) as unknown as OpenClawPluginRegistryRuntime
+function hasSameCodexProviderContract(
+  initial: OpenClawWebSearchProvider,
+  current: OpenClawWebSearchProvider,
+): boolean {
+  if (!isExactCodexProviderContract(initial) ||
+    !isExactCodexProviderContract(current)) return false
+  const left = initial as unknown as Record<string, unknown>
+  const right = current as unknown as Record<string, unknown>
+  return CODEX_PROVIDER_CONTRACT_KEYS.every((key) =>
+    CODEX_PROVIDER_FUNCTION_KEYS.has(key)
+      ? left[key] === right[key]
+      : isDeepStrictEqual(left[key], right[key]))
 }
 
 type BoundCodexResolution = {
@@ -1345,40 +1419,43 @@ type BoundCodexResolution = {
 async function resolveBoundCodexSearchProvider(
   api: OpenClawBridgeApi,
   config: OpenClawRuntimeConfig,
-  registryRuntime: OpenClawPluginRegistryRuntime,
   attestor: CodexPackageAttestor,
+  recordResolver: CodexPluginRecordResolver,
+  environment: NodeJS.ProcessEnv,
+  stateDir: string,
+  workspaceDir: string,
+  emptyEnvironmentNames: readonly string[],
 ): Promise<BoundCodexResolution> {
   try {
-    // Provider enumeration is the pinned runtime's supported lazy-activation
-    // seam. Read the global registry only after enumeration so the record and
-    // registration belong to the same activated registry as the provider.
-    const listed = api.runtime.webSearch.listProviders({ config })
-      .filter((provider) => provider.id === 'codex')
-    const registry = registryRuntime.getGlobalPluginRegistry()
-    if (!registry) return { bound: null, error: CODEX_SEARCH_PROVIDER_ERROR }
-    const records = registry.plugins.filter((record) => record.id === 'codex')
-    const registrations = registry.webSearchProviders.filter((entry) =>
-      entry.pluginId === 'codex' && entry.provider.id === 'codex')
-    if (records.length === 0 || registrations.length === 0 || listed.length === 0) {
-      return { bound: null, error: CODEX_SEARCH_PROVIDER_ERROR }
-    }
-    if (records.length !== 1 || registrations.length !== 1 ||
-      listed.length !== 1) {
-      return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
-    }
-    const [record] = records
-    const [registration] = registrations
-    const [provider] = listed
-    if (!record || !registration || !provider ||
-      !isOfficialCodexPluginRecord(record) ||
-      !isCompatibleCodexProvider(provider) ||
-      registration.provider !== provider ||
-      registration.source !== record.source ||
-      registration.rootDir !== record.rootDir) {
+    // The pinned runtime cold-loads provider plugins with activate:false and
+    // returns shallow clones. It intentionally does not commit that registry
+    // globally, so source provenance comes from the exact pinned OpenClaw
+    // static/runtime inspection of the selected, fully attested install. Run
+    // that proof before provider enumeration can import code in this process.
+    const record = await recordResolver(
+      environment,
+      stateDir,
+      workspaceDir,
+      emptyEnvironmentNames,
+    )
+    if (!record || !isOfficialCodexPluginRecord(record)) {
       return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
     }
     const attestation = await attestor(record)
     if (!attestation || !await attestation.revalidate()) {
+      return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
+    }
+    const listed = api.runtime.webSearch.listProviders({ config })
+      .filter((provider) => provider.id === 'codex')
+    if (listed.length === 0) {
+      return { bound: null, error: CODEX_SEARCH_PROVIDER_ERROR }
+    }
+    if (listed.length !== 1) {
+      return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
+    }
+    const [provider] = listed
+    if (!provider || !isExactCodexProviderContract(provider) ||
+      !await attestation.revalidate()) {
       return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
     }
     return {
@@ -1386,9 +1463,6 @@ async function resolveBoundCodexSearchProvider(
         attestation,
         pluginRecord: record,
         provider,
-        registration,
-        registry,
-        registryRuntime,
       },
       error: null,
     }
@@ -1403,24 +1477,13 @@ async function revalidateBoundCodexSearchProvider(
   bound: BoundCodexSearchProvider,
 ): Promise<boolean> {
   try {
-    const registry = bound.registryRuntime.getGlobalPluginRegistry()
-    if (registry !== bound.registry ||
-      registry.plugins.filter((record) => record.id === 'codex').length !== 1 ||
-      registry.plugins.find((record) => record.id === 'codex') !==
-        bound.pluginRecord ||
-      registry.webSearchProviders.filter((entry) =>
-        entry.pluginId === 'codex' && entry.provider.id === 'codex').length !== 1 ||
-      registry.webSearchProviders.find((entry) =>
-        entry.pluginId === 'codex' && entry.provider.id === 'codex') !==
-        bound.registration ||
-      bound.registration.provider !== bound.provider ||
-      bound.registration.source !== bound.pluginRecord.source ||
-      bound.registration.rootDir !== bound.pluginRecord.rootDir ||
-      !isOfficialCodexPluginRecord(bound.pluginRecord) ||
-      !isCompatibleCodexProvider(bound.provider)) return false
+    if (!isOfficialCodexPluginRecord(bound.pluginRecord) ||
+      !isExactCodexProviderContract(bound.provider) ||
+      !await bound.attestation.revalidate()) return false
     const listed = api.runtime.webSearch.listProviders({ config })
       .filter((provider) => provider.id === 'codex')
-    return listed.length === 1 && listed[0] === bound.provider &&
+    return listed.length === 1 && Boolean(listed[0]) &&
+      hasSameCodexProviderContract(bound.provider, listed[0]!) &&
       await bound.attestation.revalidate()
   } catch {
     return false
@@ -1602,6 +1665,9 @@ function staticReadinessFailure(
 ): string | null {
   if (api.runtime.version !== PINNED_OPENCLAW_RUNTIME_VERSION) {
     return OPENCLAW_RUNTIME_VERSION_ERROR
+  }
+  if (Object.prototype.hasOwnProperty.call(config, 'env')) {
+    return OPENAI_ACCOUNT_TRANSPORT_ERROR
   }
   if (hasProviderSecretEnvironment(environment)) {
     return PROVIDER_SECRET_ENV_ERROR
@@ -2025,18 +2091,22 @@ export async function startWebChessBridge(
   }
 
   try {
-    let pluginRegistryRuntime: OpenClawPluginRegistryRuntime
+    let stateDir: string
     try {
-      pluginRegistryRuntime = options.pluginRegistryRuntime ??
-        await loadPluginRegistryRuntime()
+      stateDir = api.runtime.state.resolveStateDir(environment)
     } catch {
       throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
     }
     const boundResolution = await resolveBoundCodexSearchProvider(
       api,
       runtimeConfigGuard.executionConfig,
-      pluginRegistryRuntime,
       options.codexPackageAttestor ?? attestOfficialCodexPackage,
+      options.codexPluginRecordResolver ??
+        resolveRuntimeSelectedOfficialCodexPluginRecord,
+      environment,
+      stateDir,
+      agentWorkspaceDir,
+      clearEnv,
     )
     if (!boundResolution.bound) throw new Error(boundResolution.error)
     const boundCodexProvider = boundResolution.bound

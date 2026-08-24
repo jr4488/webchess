@@ -1,6 +1,7 @@
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, open, readFile, readdir, realpath, } from 'node:fs/promises';
+import { lstat, open, readFile, readlink, readdir, realpath, } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -11,6 +12,9 @@ const PINNED_CODEX_PLUGIN_INTEGRITY = 'sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUW
 const PINNED_CODEX_PLUGIN_FILE_COUNT = 40;
 const PINNED_CODEX_PLUGIN_TREE_SHA256 = 'acab7aeeb630e5ce713d6066a78264d2a905cfd3d036314ce2f9aeb304f5797f';
 const PINNED_CODEX_PLUGIN_ENTRY_SHA256 = 'ade01b0285488ab9c9cb2c963c85210cf97720d7188b772ecf9ce423f82c7ca5';
+const PINNED_CODEX_COMPLETE_TREE_FILE_COUNT = 2_155;
+const PINNED_CODEX_COMPLETE_TREE_SYMLINK_COUNT = 2;
+const PINNED_CODEX_COMPLETE_TREE_SHA256 = '3308c95e1ee222be84c077164236114bd910e62bf6d602afb7b8d6609a5aab05';
 const PINNED_OPENAI_CODEX_VERSION = '0.144.3';
 const PINNED_OPENAI_CODEX_INTEGRITY = 'sha512-8Re3wp5CdYiM7nsF4StFa5js6IT11N7srhxfvwtol7ENHDht05C+HS4e1CTmYjqkhgsUzl2R1gB27iN2pdbVnA==';
 const PINNED_OPENAI_CODEX_WRAPPER_SHA256 = '134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477';
@@ -19,6 +23,11 @@ const PINNED_SEARCH_RUNTIME_SHA256 = 'bca538ce49c71b6aaa85595568a7ec07219f119448
 const PINNED_SHARED_CLIENT_RUNTIME = 'shared-client-4ICy3U6d.js';
 const PINNED_SHARED_CLIENT_RUNTIME_SHA256 = 'bff60f1bb2cb73ad44c7f9c9d779576a2ffd9836b22ecba0bd5b6046e7ce9103';
 const PINNED_OPENCLAW_VERSION = '2026.7.1-2';
+const PINNED_OPENCLAW_CLI_SHA256 = 'f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188';
+const PINNED_OPENCLAW_ENTRY_SHA256 = '88418e5ae14225ab43aed3991218f1834064fae5068a11d8a8aa0efd893ea42c';
+const PINNED_OPENCLAW_PACKAGE_FILE_COUNT = 31_938;
+const PINNED_OPENCLAW_PACKAGE_SYMLINK_COUNT = 17;
+const PINNED_OPENCLAW_PACKAGE_TREE_SHA256 = '2a88ee5fc27a5957865b87992eaf7a9305ab67bcaf5c5ba7aeede3bb8835f1ae';
 const PINNED_OPENCLAW_SENTINEL_RUNTIME = 'sentinel-zNFsFsCB.js';
 const PINNED_OPENCLAW_SENTINEL_IMPORT_CLOSURE = Object.freeze({
     'ansi-D1GK_odF.js': '8a1b7fa9ab24413102440a9e22cee2f0da808fbbd32849af3e23e1f7e16d8494',
@@ -38,6 +47,10 @@ const PINNED_OPENCLAW_SENTINEL_JSON5_VERSION = '2.2.3';
 const PINNED_OPENCLAW_SENTINEL_JSON5_FILE_COUNT = 20;
 const PINNED_OPENCLAW_SENTINEL_JSON5_TREE_SHA256 = '9510bc00ee8ff303fcb2d772a029b2b1335830aba579932989264be280fb202f';
 const OPENCLAW_SECRET_SENTINEL_PATTERN = /^oc-sent-v1-[0-9a-f]{24}$/u;
+const CODEX_PLUGIN_SHASUM = '49c96d1e714d71b0032cca38ea60677a77e6e604';
+const PLUGIN_INSPECT_STDOUT_LIMIT = 128 * 1024;
+const PLUGIN_INSPECT_STDERR_LIMIT = 16 * 1024;
+const PLUGIN_INSPECT_TIMEOUT_MS = 30_000;
 // The public researcher path is currently tested and supported on Linux x64.
 // Other architectures fail closed until their exact native payload digest is
 // reviewed and added alongside an end-to-end platform run.
@@ -123,6 +136,24 @@ async function readJsonRecord(filename) {
     catch {
         return null;
     }
+}
+function containsOwnConfigInclude(value) {
+    const pending = [value];
+    while (pending.length > 0) {
+        const current = pending.pop();
+        if (Array.isArray(current)) {
+            for (const nested of current)
+                pending.push(nested);
+            continue;
+        }
+        if (!isRecord(current))
+            continue;
+        if (Object.prototype.hasOwnProperty.call(current, '$include'))
+            return true;
+        for (const nested of Object.values(current))
+            pending.push(nested);
+    }
+    return false;
 }
 async function hashAndSealRegularFile(filename, executable = false) {
     let handle;
@@ -251,6 +282,118 @@ export async function digestOwnedPackageTree(root) {
     }
     return { fileCount: files.length, sha256: tree.digest('hex') };
 }
+async function collectCompletePackageTreeEntries(root, directory, entries, allowedExternalSymlinks, externalSymlinksSeen) {
+    try {
+        for (const entry of await readdir(directory, { withFileTypes: true })) {
+            const filename = path.join(directory, entry.name);
+            const relative = path.relative(root, filename).split(path.sep).join('/');
+            const metadata = await lstat(filename);
+            if (entry.isDirectory() && metadata.isDirectory()) {
+                if (!await collectCompletePackageTreeEntries(root, filename, entries, allowedExternalSymlinks, externalSymlinksSeen))
+                    return false;
+                continue;
+            }
+            if (entry.isFile() && metadata.isFile()) {
+                if (metadata.nlink !== 1)
+                    return false;
+                entries.push({
+                    kind: 'file',
+                    path: relative,
+                    value: createHash('sha256')
+                        .update(await readFile(filename))
+                        .digest('hex'),
+                });
+                continue;
+            }
+            if (entry.isSymbolicLink() && metadata.isSymbolicLink()) {
+                const target = await readlink(filename);
+                if (!target)
+                    return false;
+                const resolvedTarget = await realpath(filename);
+                const targetMetadata = await lstat(resolvedTarget);
+                if (pathIsInside(root, resolvedTarget)) {
+                    if (path.isAbsolute(target) || !targetMetadata.isFile())
+                        return false;
+                    entries.push({ kind: 'symlink', path: relative, value: target });
+                    continue;
+                }
+                const allowed = allowedExternalSymlinks[relative];
+                if (!allowed || !path.isAbsolute(target) ||
+                    target !== allowed.target ||
+                    resolvedTarget !== allowed.target ||
+                    !targetMetadata.isDirectory() ||
+                    externalSymlinksSeen.has(relative))
+                    return false;
+                externalSymlinksSeen.add(relative);
+                entries.push({
+                    kind: 'symlink',
+                    path: relative,
+                    value: `external:${allowed.identity}`,
+                });
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/** Digest every owned file and safe in-tree symlink, including node_modules. */
+export async function digestCompletePackageTree(root, options = {}) {
+    try {
+        const canonicalRoot = await realpath(root);
+        const rootMetadata = await lstat(root);
+        if (canonicalRoot !== path.resolve(root) ||
+            !rootMetadata.isDirectory() || rootMetadata.isSymbolicLink())
+            return null;
+        const entries = [];
+        const allowedExternalSymlinks = options.allowedExternalSymlinks ?? {};
+        const normalizedAllowedExternalSymlinks = {};
+        for (const [relative, allowed] of Object.entries(allowedExternalSymlinks)) {
+            if (!relative || relative.startsWith('/') || relative.includes('\\') ||
+                relative.split('/').some((segment) => !segment || segment === '.' ||
+                    segment === '..') || !allowed.identity ||
+                allowed.identity.trim() !== allowed.identity ||
+                !path.isAbsolute(allowed.target))
+                return null;
+            const target = await realpath(allowed.target);
+            if (target !== allowed.target)
+                return null;
+            normalizedAllowedExternalSymlinks[relative] = { ...allowed, target };
+        }
+        const externalSymlinksSeen = new Set();
+        if (!await collectCompletePackageTreeEntries(root, root, entries, normalizedAllowedExternalSymlinks, externalSymlinksSeen) || externalSymlinksSeen.size !==
+            Object.keys(normalizedAllowedExternalSymlinks).length) {
+            return null;
+        }
+        entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+        const tree = createHash('sha256');
+        for (const entry of entries) {
+            tree.update(JSON.stringify([entry.kind, entry.path, entry.value]), 'utf8');
+            tree.update('\n', 'ascii');
+        }
+        return {
+            fileCount: entries.filter((entry) => entry.kind === 'file').length,
+            sha256: tree.digest('hex'),
+            symlinkCount: entries.filter((entry) => entry.kind === 'symlink').length,
+        };
+    }
+    catch {
+        return null;
+    }
+}
+export async function attestCompletePackageTree(root, expected, options = {}) {
+    const initial = await digestCompletePackageTree(root, options);
+    if (!isDeepStrictEqual(initial, expected))
+        return null;
+    return {
+        async revalidate() {
+            return isDeepStrictEqual(await digestCompletePackageTree(root, options), expected);
+        },
+    };
+}
 function packageEntry(lock, packagePath) {
     const packages = lock.packages;
     if (!isRecord(packages))
@@ -370,6 +513,428 @@ export function isOfficialCodexPluginRecord(record) {
         Array.isArray(record.webSearchProviderIds) &&
         record.webSearchProviderIds.length === 1 &&
         record.webSearchProviderIds[0] === 'codex';
+}
+/**
+ * Resolve the one Codex plugin installed in OpenClaw's npm project store.
+ *
+ * Runtime web-provider enumeration deliberately cold-loads plugins and returns
+ * shallow provider clones without committing that registry globally. This
+ * state-store lookup is only a uniqueness and canonical-path cross-check; it
+ * does not assert that OpenClaw selected, trusted, enabled, or imported the
+ * package. The supported static/runtime inspect seam proves those properties.
+ */
+export async function resolveInstalledOfficialCodexPluginRecord(stateDir) {
+    if (!stateDir || stateDir.trim() !== stateDir ||
+        !path.isAbsolute(stateDir))
+        return null;
+    try {
+        const stateRoot = await realpath(stateDir);
+        if (stateRoot !== path.resolve(stateDir))
+            return null;
+        const projectsRoot = path.join(stateRoot, 'npm', 'projects');
+        if (await realpath(projectsRoot) !== projectsRoot)
+            return null;
+        const pluginRoots = [];
+        for (const entry of await readdir(projectsRoot, { withFileTypes: true })) {
+            if (entry.isSymbolicLink())
+                return null;
+            if (!entry.isDirectory())
+                continue;
+            const projectRoot = path.join(projectsRoot, entry.name);
+            if (await realpath(projectRoot) !== projectRoot)
+                return null;
+            const pluginRoot = path.join(projectRoot, 'node_modules', '@openclaw', 'codex');
+            let pluginStat;
+            try {
+                pluginStat = await lstat(pluginRoot);
+            }
+            catch (error) {
+                if (isRecord(error) && error.code === 'ENOENT')
+                    continue;
+                return null;
+            }
+            if (!pluginStat.isDirectory() || pluginStat.isSymbolicLink() ||
+                await realpath(pluginRoot) !== pluginRoot)
+                return null;
+            pluginRoots.push(pluginRoot);
+        }
+        if (pluginRoots.length !== 1)
+            return null;
+        const [rootDir] = pluginRoots;
+        if (!rootDir)
+            return null;
+        return {
+            enabled: true,
+            id: 'codex',
+            origin: 'global',
+            packageName: PINNED_CODEX_PLUGIN_NAME,
+            rootDir,
+            source: path.join(rootDir, 'dist', 'index.js'),
+            status: 'loaded',
+            trustedOfficialInstall: true,
+            version: PINNED_CODEX_PLUGIN_VERSION,
+            webSearchProviderIds: ['codex'],
+        };
+    }
+    catch {
+        return null;
+    }
+}
+const EXPECTED_CODEX_CONTRACTS = Object.freeze({
+    mediaUnderstandingProviders: ['codex'],
+    migrationProviders: ['codex'],
+    tools: ['codex_threads'],
+    webSearchProviders: ['codex'],
+});
+const EXPECTED_STATIC_CODEX_CAPABILITIES = Object.freeze([
+    { ids: ['codex'], kind: 'text-inference' },
+    { ids: ['codex'], kind: 'media-understanding' },
+    { ids: ['codex'], kind: 'web-search' },
+]);
+const EXPECTED_RUNTIME_CODEX_CAPABILITIES = Object.freeze([
+    ...EXPECTED_STATIC_CODEX_CAPABILITIES,
+    { ids: ['codex'], kind: 'agent-harness' },
+]);
+const CODEX_INSTALL_KEYS = Object.freeze([
+    'installPath',
+    'installedAt',
+    'integrity',
+    'resolvedAt',
+    'resolvedName',
+    'resolvedSpec',
+    'resolvedVersion',
+    'shasum',
+    'source',
+    'spec',
+    'version',
+]);
+function isCanonicalIsoTimestamp(value) {
+    if (typeof value !== 'string')
+        return false;
+    const milliseconds = Date.parse(value);
+    return Number.isFinite(milliseconds) &&
+        new Date(milliseconds).toISOString() === value;
+}
+function recordFromInspection(value) {
+    const record = {
+        enabled: value.enabled,
+        id: value.id,
+        origin: value.origin,
+        packageName: value.packageName,
+        rootDir: value.rootDir,
+        source: value.source,
+        status: value.status,
+        trustedOfficialInstall: value.trustedOfficialInstall,
+        version: value.version,
+        webSearchProviderIds: value.webSearchProviderIds,
+    };
+    return isOfficialCodexPluginRecord(record) ? record : null;
+}
+/** Validate the bounded JSON returned by the pinned supported inspect command. */
+export function parseOfficialCodexRuntimeInspection(stdout, expectedRecord, runtime, expectedWorkspaceDir) {
+    if (!stdout || Buffer.byteLength(stdout, 'utf8') >
+        PLUGIN_INSPECT_STDOUT_LIMIT)
+        return null;
+    try {
+        const value = JSON.parse(stdout);
+        if (!isRecord(value) || !isRecord(value.plugin) ||
+            !isRecord(value.install) || value.shape !== 'hybrid-capability' ||
+            value.capabilityMode !== 'hybrid' ||
+            value.capabilityCount !== (runtime ? 4 : 3) ||
+            !isDeepStrictEqual(value.capabilities, runtime
+                ? EXPECTED_RUNTIME_CODEX_CAPABILITIES
+                : EXPECTED_STATIC_CODEX_CAPABILITIES) || !isDeepStrictEqual(value.diagnostics, []) ||
+            !isDeepStrictEqual(value.compatibility, []) ||
+            !isDeepStrictEqual(value.bundleCapabilities, []) ||
+            !isRecord(value.policy) ||
+            !isDeepStrictEqual(value.policy.allowedModels, []) ||
+            value.policy.hasAllowedModelsConfig !== false ||
+            (expectedWorkspaceDir !== undefined &&
+                value.workspaceDir !== expectedWorkspaceDir))
+            return null;
+        const plugin = value.plugin;
+        const record = recordFromInspection(plugin);
+        if (!record || !isDeepStrictEqual(record, expectedRecord) ||
+            plugin.imported !== runtime || plugin.activated !== true ||
+            plugin.explicitlyEnabled !== true ||
+            plugin.activationSource !== 'explicit' ||
+            plugin.activationReason !== 'enabled in config' ||
+            plugin.format !== 'openclaw' ||
+            !isDeepStrictEqual(plugin.contracts, EXPECTED_CODEX_CONTRACTS) ||
+            !isDeepStrictEqual(plugin.providerIds, ['codex']) ||
+            !isDeepStrictEqual(plugin.agentHarnessIds, runtime ? ['codex'] : []) || !isDeepStrictEqual(plugin.toolNames, runtime ? ['codex_threads'] : []) || !isDeepStrictEqual(plugin.mediaUnderstandingProviderIds, ['codex']) || !isDeepStrictEqual(plugin.migrationProviderIds, ['codex']) ||
+            !isDeepStrictEqual(plugin.syntheticAuthRefs, ['codex']))
+            return null;
+        const install = value.install;
+        if (!isDeepStrictEqual(Object.keys(install).sort(), [...CODEX_INSTALL_KEYS].sort()) || install.source !== 'npm' ||
+            install.spec !== `${PINNED_CODEX_PLUGIN_NAME}@${PINNED_CODEX_PLUGIN_VERSION}` ||
+            install.installPath !== record.rootDir ||
+            install.version !== PINNED_CODEX_PLUGIN_VERSION ||
+            install.resolvedName !== PINNED_CODEX_PLUGIN_NAME ||
+            install.resolvedVersion !== PINNED_CODEX_PLUGIN_VERSION ||
+            install.resolvedSpec !==
+                `${PINNED_CODEX_PLUGIN_NAME}@${PINNED_CODEX_PLUGIN_VERSION}` ||
+            install.integrity !== PINNED_CODEX_PLUGIN_INTEGRITY ||
+            install.shasum !== CODEX_PLUGIN_SHASUM ||
+            !isCanonicalIsoTimestamp(install.resolvedAt) ||
+            !isCanonicalIsoTimestamp(install.installedAt))
+            return null;
+        return record;
+    }
+    catch {
+        return null;
+    }
+}
+async function resolvePinnedInspectCommand(argvEntry = process.argv[1]) {
+    if (!argvEntry)
+        return null;
+    try {
+        const cliPath = await realpath(argvEntry);
+        const packageRoot = path.dirname(cliPath);
+        if (cliPath !== path.join(packageRoot, 'openclaw.mjs'))
+            return null;
+        const packageJsonPath = path.join(packageRoot, 'package.json');
+        const entryPath = path.join(packageRoot, 'dist', 'entry.js');
+        const packageTreeAttestation = await attestCompletePackageTree(packageRoot, {
+            fileCount: PINNED_OPENCLAW_PACKAGE_FILE_COUNT,
+            sha256: PINNED_OPENCLAW_PACKAGE_TREE_SHA256,
+            symlinkCount: PINNED_OPENCLAW_PACKAGE_SYMLINK_COUNT,
+        });
+        if (!exactPackageJson(await readJsonRecord(packageJsonPath), 'openclaw', PINNED_OPENCLAW_VERSION) || await realpath(packageJsonPath) !== packageJsonPath ||
+            await realpath(entryPath) !== entryPath ||
+            !packageTreeAttestation)
+            return null;
+        const [cliAttestation, entryAttestation] = await Promise.all([
+            attestRegularExecutable(cliPath, PINNED_OPENCLAW_CLI_SHA256),
+            attestRegularFile(entryPath, PINNED_OPENCLAW_ENTRY_SHA256),
+        ]);
+        if (!cliAttestation || !entryAttestation)
+            return null;
+        return {
+            cliPath,
+            packageRoot,
+            async revalidate() {
+                try {
+                    const [cliIntact, entryIntact, packageTreeIntact, currentPackageJson, currentPackageJsonPath, currentEntryPath] = await Promise.all([
+                        cliAttestation.revalidate(),
+                        entryAttestation.revalidate(),
+                        packageTreeAttestation.revalidate(),
+                        readJsonRecord(packageJsonPath),
+                        realpath(packageJsonPath),
+                        realpath(entryPath),
+                    ]);
+                    return cliIntact && entryIntact &&
+                        currentPackageJsonPath === packageJsonPath &&
+                        currentEntryPath === entryPath &&
+                        exactPackageJson(currentPackageJson, 'openclaw', PINNED_OPENCLAW_VERSION) && packageTreeIntact;
+                }
+                catch {
+                    return false;
+                }
+            },
+        };
+    }
+    catch {
+        return null;
+    }
+}
+const REQUIRED_PINNED_INSPECT_EMPTY_ENVIRONMENT_NAMES = Object.freeze([
+    'ALL_PROXY',
+    'CODEX_API_KEY',
+    'CODEX_CA_CERTIFICATE',
+    'CODEX_SANDBOX',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'NODE_EXTRA_CA_CERTS',
+    'NODE_OPTIONS',
+    'NODE_PATH',
+    'OPENAI_API_BASE',
+    'OPENAI_API_KEY',
+    'OPENAI_BASE_URL',
+    'OPENAI_CUSTOM_HEADERS',
+    'OPENCLAW_DEBUG_MODEL_PAYLOAD',
+    'OPENCLAW_DEBUG_PROXY_ENABLED',
+    'OPENCLAW_DEBUG_PROXY_URL',
+    'OPENCLAW_LOAD_SHELL_ENV',
+    'OPENCLAW_PROFILE',
+]);
+export function buildPinnedInspectEnvironment(environment, stateDir, workspaceDir, emptyEnvironmentNames) {
+    const home = environment.HOME;
+    if (!home || home.trim() !== home || !path.isAbsolute(home) ||
+        !stateDir || stateDir.trim() !== stateDir || !path.isAbsolute(stateDir) ||
+        path.resolve(stateDir) !== stateDir ||
+        stateDir === path.join(path.resolve(home), '.openclaw') ||
+        !workspaceDir || workspaceDir.trim() !== workspaceDir ||
+        !path.isAbsolute(workspaceDir))
+        return null;
+    const configPath = path.join(stateDir, 'openclaw.json');
+    if (environment.OPENCLAW_CONFIG_PATH !== undefined &&
+        environment.OPENCLAW_CONFIG_PATH !== '' &&
+        environment.OPENCLAW_CONFIG_PATH !== configPath)
+        return null;
+    const uniqueEmptyNames = new Set(emptyEnvironmentNames);
+    if (!REQUIRED_PINNED_INSPECT_EMPTY_ENVIRONMENT_NAMES.every((name) => uniqueEmptyNames.has(name)) || [...uniqueEmptyNames].some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)))
+        return null;
+    const result = Object.fromEntries([...uniqueEmptyNames].map((name) => [name, '']));
+    Object.assign(result, {
+        HOME: home,
+        LANG: 'C.UTF-8',
+        NODE_DISABLE_COMPILE_CACHE: '1',
+        NODE_ENV: 'production',
+        OPENCLAW_NODE_OPTIONS_READY: '1',
+        OPENCLAW_CONFIG_PATH: configPath,
+        OPENCLAW_STATE_DIR: stateDir,
+        OPENCLAW_WORKSPACE_DIR: workspaceDir,
+        PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
+    });
+    return result;
+}
+export async function inspectDotenvFilesAreAbsent(stateDir, workspaceDir) {
+    const dotenvPaths = new Set([
+        path.join(stateDir, '.env'),
+        path.join(workspaceDir, '.env'),
+    ]);
+    try {
+        for (const dotenvPath of dotenvPaths) {
+            try {
+                await lstat(dotenvPath);
+                return false;
+            }
+            catch (error) {
+                if (!isRecord(error) || error.code !== 'ENOENT')
+                    return false;
+            }
+        }
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+export async function attestInspectConfigWithoutEnv(configPath) {
+    const config = await readJsonRecord(configPath);
+    const initial = await hashAndSealRegularFile(configPath);
+    if (!config || Object.prototype.hasOwnProperty.call(config, 'env') ||
+        containsOwnConfigInclude(config) ||
+        !initial)
+        return null;
+    return {
+        async revalidate() {
+            const currentConfig = await readJsonRecord(configPath);
+            const current = await hashAndSealRegularFile(configPath);
+            return Boolean(currentConfig) &&
+                !Object.prototype.hasOwnProperty.call(currentConfig, 'env') &&
+                !containsOwnConfigInclude(currentConfig) &&
+                current?.sha256 === initial.sha256 &&
+                sealMatches(current.seal, initial.seal);
+        },
+    };
+}
+function runPinnedInspect(cliPath, runtime, environment, workspaceDir) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [
+            cliPath,
+            'plugins',
+            'inspect',
+            'codex',
+            ...(runtime ? ['--runtime'] : []),
+            '--json',
+        ], {
+            detached: process.platform !== 'win32',
+            cwd: workspaceDir,
+            env: environment,
+            shell: false,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+        });
+        const stdout = [];
+        let stdoutBytes = 0;
+        let stderrBytes = 0;
+        let exceeded = false;
+        const terminate = () => {
+            exceeded = true;
+            try {
+                if (process.platform !== 'win32' && child.pid) {
+                    process.kill(-child.pid, 'SIGKILL');
+                }
+                else {
+                    child.kill('SIGKILL');
+                }
+            }
+            catch {
+                // Failure is reported through the single sanitized rejection below.
+            }
+        };
+        child.stdout.on('data', (chunk) => {
+            stdoutBytes += chunk.byteLength;
+            if (stdoutBytes > PLUGIN_INSPECT_STDOUT_LIMIT)
+                terminate();
+            else
+                stdout.push(chunk);
+        });
+        child.stderr.on('data', (chunk) => {
+            stderrBytes += chunk.byteLength;
+            if (stderrBytes > PLUGIN_INSPECT_STDERR_LIMIT)
+                terminate();
+        });
+        const timeout = setTimeout(() => {
+            terminate();
+        }, PLUGIN_INSPECT_TIMEOUT_MS);
+        child.once('error', () => {
+            clearTimeout(timeout);
+            reject(new Error('Pinned OpenClaw inspection failed.'));
+        });
+        child.once('close', (code) => {
+            clearTimeout(timeout);
+            if (exceeded || code !== 0 || stderrBytes !== 0) {
+                reject(new Error('Pinned OpenClaw inspection failed.'));
+                return;
+            }
+            resolve(Buffer.concat(stdout).toString('utf8'));
+        });
+    });
+}
+/**
+ * Resolve the runtime-selected Codex plugin through OpenClaw's supported CLI.
+ * Static inspection binds the selected install, package attestation seals its
+ * bytes, and runtime inspection proves the same record actually imports and
+ * exposes the reviewed capability set.
+ */
+export async function resolveRuntimeSelectedOfficialCodexPluginRecord(environment, stateDir, workspaceDir, emptyEnvironmentNames, argvEntry = process.argv[1]) {
+    try {
+        const installedRecord = await resolveInstalledOfficialCodexPluginRecord(stateDir);
+        const command = await resolvePinnedInspectCommand(argvEntry);
+        const inspectEnvironment = buildPinnedInspectEnvironment(environment, stateDir, workspaceDir, emptyEnvironmentNames);
+        if (!installedRecord || !command || !inspectEnvironment)
+            return null;
+        if (await realpath(workspaceDir) !== workspaceDir ||
+            !await inspectDotenvFilesAreAbsent(stateDir, workspaceDir))
+            return null;
+        const configAttestation = await attestInspectConfigWithoutEnv(inspectEnvironment.OPENCLAW_CONFIG_PATH);
+        if (!configAttestation || !await configAttestation.revalidate())
+            return null;
+        const staticRecord = parseOfficialCodexRuntimeInspection(await runPinnedInspect(command.cliPath, false, inspectEnvironment, workspaceDir), installedRecord, false, workspaceDir);
+        if (!staticRecord ||
+            !await inspectDotenvFilesAreAbsent(stateDir, workspaceDir) ||
+            !await configAttestation.revalidate())
+            return null;
+        const packageAttestation = await attestOfficialCodexPackage(staticRecord, process.platform, process.arch, command.packageRoot);
+        if (!packageAttestation || !await packageAttestation.revalidate() ||
+            !await inspectDotenvFilesAreAbsent(stateDir, workspaceDir) ||
+            !await configAttestation.revalidate() ||
+            !await command.revalidate())
+            return null;
+        const runtimeRecord = parseOfficialCodexRuntimeInspection(await runPinnedInspect(command.cliPath, true, inspectEnvironment, workspaceDir), staticRecord, true, workspaceDir);
+        if (!runtimeRecord || !await packageAttestation.revalidate() ||
+            !await command.revalidate() ||
+            !await inspectDotenvFilesAreAbsent(stateDir, workspaceDir) ||
+            !await configAttestation.revalidate())
+            return null;
+        return { ...runtimeRecord, openclawRootDir: command.packageRoot };
+    }
+    catch {
+        return null;
+    }
 }
 function isSingletonOAuthStore(store, profileId) {
     const profiles = store.profiles;
@@ -519,15 +1084,18 @@ function expectedPrivateStartClearEnv(config) {
  * pinned here and checked against both lock layers, while extracted source and
  * executable bytes are checked against reviewed SHA-256 values.
  */
-export async function attestOfficialCodexPackage(record, platform = process.platform, architecture = process.arch) {
-    if (!isOfficialCodexPluginRecord(record) || !record.rootDir)
+export async function attestOfficialCodexPackage(record, platform = process.platform, architecture = process.arch, openclawRootDir = record.openclawRootDir) {
+    if (!isOfficialCodexPluginRecord(record) || !record.rootDir ||
+        !openclawRootDir || !path.isAbsolute(openclawRootDir))
         return null;
     const platformExpectation = PLATFORM_EXECUTABLES[`${platform}-${architecture}`];
     if (!platformExpectation)
         return null;
     try {
         const pluginRoot = await realpath(record.rootDir);
-        if (path.resolve(record.rootDir) !== pluginRoot)
+        const openclawRoot = await realpath(openclawRootDir);
+        if (path.resolve(record.rootDir) !== pluginRoot ||
+            path.resolve(openclawRootDir) !== openclawRoot)
             return null;
         const expectedEntry = path.join(pluginRoot, 'dist', 'index.js');
         const pluginEntry = await realpath(record.source);
@@ -536,18 +1104,39 @@ export async function attestOfficialCodexPackage(record, platform = process.plat
             return null;
         const pluginPackageJsonPath = path.join(pluginRoot, 'package.json');
         const shrinkwrapPath = path.join(pluginRoot, 'npm-shrinkwrap.json');
-        const [pluginPackageJson, shrinkwrap, tree, entryFile] = await Promise.all([
+        const openclawPackageJsonPath = path.join(openclawRoot, 'package.json');
+        const completeTreeOptions = {
+            allowedExternalSymlinks: {
+                'node_modules/openclaw': {
+                    identity: 'pinned-openclaw-root',
+                    target: openclawRoot,
+                },
+            },
+        };
+        const [pluginPackageJson, shrinkwrap, tree, entryFile, completeTreeAttestation, openclawPackageJson, openclawTreeAttestation] = await Promise.all([
             readJsonRecord(pluginPackageJsonPath),
             readJsonRecord(shrinkwrapPath),
             digestOwnedPackageTree(pluginRoot),
             hashAndSealRegularFile(pluginEntry),
+            attestCompletePackageTree(pluginRoot, {
+                fileCount: PINNED_CODEX_COMPLETE_TREE_FILE_COUNT,
+                sha256: PINNED_CODEX_COMPLETE_TREE_SHA256,
+                symlinkCount: PINNED_CODEX_COMPLETE_TREE_SYMLINK_COUNT,
+            }, completeTreeOptions),
+            readJsonRecord(openclawPackageJsonPath),
+            attestCompletePackageTree(openclawRoot, {
+                fileCount: PINNED_OPENCLAW_PACKAGE_FILE_COUNT,
+                sha256: PINNED_OPENCLAW_PACKAGE_TREE_SHA256,
+                symlinkCount: PINNED_OPENCLAW_PACKAGE_SYMLINK_COUNT,
+            }),
         ]);
         if (!exactPackageJson(pluginPackageJson, PINNED_CODEX_PLUGIN_NAME, PINNED_CODEX_PLUGIN_VERSION) || !shrinkwrap ||
             shrinkwrap.name !== PINNED_CODEX_PLUGIN_NAME ||
             shrinkwrap.version !== PINNED_CODEX_PLUGIN_VERSION ||
             tree?.fileCount !== PINNED_CODEX_PLUGIN_FILE_COUNT ||
             tree.sha256 !== PINNED_CODEX_PLUGIN_TREE_SHA256 ||
-            entryFile?.sha256 !== PINNED_CODEX_PLUGIN_ENTRY_SHA256)
+            entryFile?.sha256 !== PINNED_CODEX_PLUGIN_ENTRY_SHA256 ||
+            !completeTreeAttestation || !exactPackageJson(openclawPackageJson, 'openclaw', PINNED_OPENCLAW_VERSION) || !openclawTreeAttestation)
             return null;
         const projectRoot = path.resolve(pluginRoot, '..', '..', '..');
         const projectLock = await readJsonRecord(path.join(projectRoot, 'package-lock.json'));
@@ -612,7 +1201,15 @@ export async function attestOfficialCodexPackage(record, platform = process.plat
                     realpath(searchRuntimePath),
                     realpath(sharedClientRuntimePath),
                 ]);
-                return currentTree?.fileCount === PINNED_CODEX_PLUGIN_FILE_COUNT &&
+                const [completeTreeIntact, openclawTreeIntact, currentOpenClawPackage, currentOpenClawPeer] = await Promise.all([
+                    completeTreeAttestation.revalidate(),
+                    openclawTreeAttestation.revalidate(),
+                    readJsonRecord(openclawPackageJsonPath),
+                    realpath(path.join(pluginRoot, 'node_modules', 'openclaw')),
+                ]);
+                return completeTreeIntact && openclawTreeIntact &&
+                    currentOpenClawPeer === openclawRoot &&
+                    exactPackageJson(currentOpenClawPackage, 'openclaw', PINNED_OPENCLAW_VERSION) && currentTree?.fileCount === PINNED_CODEX_PLUGIN_FILE_COUNT &&
                     currentTree.sha256 === PINNED_CODEX_PLUGIN_TREE_SHA256 &&
                     currentEntry?.sha256 === PINNED_CODEX_PLUGIN_ENTRY_SHA256 &&
                     currentWrapper?.sha256 === PINNED_OPENAI_CODEX_WRAPPER_SHA256 &&
