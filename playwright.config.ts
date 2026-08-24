@@ -44,6 +44,8 @@ export default defineConfig({
           WEBCHESS_E2E_AUTH: localE2EAuthActivation,
           WEBCHESS_E2E_USER_ID:
             process.env.WEBCHESS_E2E_USER_ID ?? 'e2e_playwright',
+          WEBCHESS_OPENCLAW_ENABLED: 'true',
+          WEBCHESS_OPENCLAW_OWNER_ID: 'openclaw_e2e_playwright',
         },
       },
   projects: [
