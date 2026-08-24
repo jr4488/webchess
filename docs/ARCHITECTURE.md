@@ -62,8 +62,9 @@ Foreground Next.js process bound to 127.0.0.1
   +--> dedicated loopback PostgreSQL 17
   |      +--> games, events, usage ledger, lifecycle, actions, observations
   |
-  +--> `openclaw infer model run --local --json --thinking medium`
-         +--> user's configured default provider, model, and authentication
+  +--> authenticated, ephemeral 127.0.0.1 JSON bridge
+         +--> pinned OpenClaw simple-completion runtime
+                +--> user's configured default provider, model, and authentication
 ```
 
 The plugin is the install and launch boundary; it includes the complete
@@ -77,6 +78,13 @@ foreground until Ctrl-C. For a managed install, it
 stages the bundled application code in an operating-system temporary directory,
 links the installed dependency tree, and removes that working directory on
 exit. Persistent game and lifecycle data remains in the local database.
+
+The launcher gives the Next.js child only a random bearer and the exact bridge
+origin. The bridge accepts versioned structured JSON from the loopback peer,
+enforces the exact `Host` and bearer plus byte, prompt, response, timeout, and
+concurrency bounds, and passes the complete prompt into OpenClaw's pinned
+simple-completion runtime. Prompts are not carried in `argv` and are not
+silently truncated. Provider credentials remain inside OpenClaw.
 
 The browser animates shared, server-accepted moves but cannot make arbitrary
 saved state authoritative. The shared service recomposes the cast from its
@@ -168,8 +176,8 @@ remote branch; both checks must identify the same commit. Direct invocation of
 the underlying migration script is unsupported. The owner applies pending
 files atomically under an advisory lock and records their normalized checksums.
 Both the owner runner and the local runtime reject any existing ledger that is
-not an exact checksum-matching prefix of the 13 canonical migrations from
-`0001_durable_webchess` through `0013_wilbur_mutation_requests`.
+not an exact checksum-matching prefix of the 15 canonical migrations from
+`0001_durable_webchess` through `0015_direct_page_research_evidence`.
 
 Migration `0012` is upgrade-safe without a duplicate-data audit. It preserves
 all pre-`0012` rows with a null `charlotte_binding_version`, including duplicate
@@ -181,7 +189,12 @@ move update time backward. Migration `0013` adds the durable Wilbur mutation
 ledger. Its guard requires pending/unadmitted insertion, freezes claim identity
 and pending reservations, orders admission before settlement, prevents update
 time from moving backward, and makes admission timestamps and terminal rows
-immutable. Neither migration deletes or chooses among legacy rows.
+immutable. Migration `0014` adds follow-up scheduling and owner-bound,
+explicitly selected Web-memory links; at most eight observations can be carried
+into a later game and no observation is silently reused. Migration `0015`
+persists versioned research consent and bounded direct-page facts/failures,
+while conservatively treating historical rows as not consented. These
+migrations do not reinterpret missing consent as permission.
 
 After `0001_durable_webchess.sql` is first applied to a durable database, that
 file is immutable. Later changes are append-only, monotonically ordered
@@ -197,21 +210,22 @@ runtime allowlist after each migration. The runtime role has database
 `CONNECT`, schema `USAGE`, ledger `SELECT`, and only the table operations used
 by the application. Column-scoped `UPDATE` is limited to
 `gate_decisions.answer_user_prompt`,
-`gate_decisions.answer_user_prompt_sha256`, and `wilbur_actions.status`,
-`wilbur_actions.revision`, and `wilbur_actions.updated_at`. The mutation ledger
-has column-scoped `UPDATE` only on `rate_admitted_at`, `denial_code`, `retry_at`,
+`gate_decisions.answer_user_prompt_sha256`, and `wilbur_actions.follow_up_at`,
+`wilbur_actions.status`, `wilbur_actions.revision`, and
+`wilbur_actions.updated_at`. The mutation ledger has column-scoped `UPDATE`
+only on `rate_admitted_at`, `denial_code`, `retry_at`,
 `reserved_future_rows`, `reserved_text_bytes`, `status`, `result_entity_id`,
-`result_revision`, `result_status`, `result_updated_at`, and `updated_at`. It has
-no schema `CREATE`, object ownership, owner-role membership, or sequence
-privileges.
+`result_revision`, `result_status`, `result_follow_up_at`,
+`result_updated_at`, and `updated_at`. It has no schema `CREATE`, object
+ownership, owner-role membership, or sequence privileges.
 
 Every configured Vercel build checks the runtime connection in a
 repeatable-read, read-only transaction. The check requires exact migration IDs
-and checksums; exactly 19 application tables plus the migration ledger—20 total—
+and checksums; exactly 20 application tables plus the migration ledger—21 total—
 and their column names, types, and nullability; valid and ready definitions for
-all eight contract unique indexes; exactly two origin-enabled, unfiltered
-`BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur trigger/function pairs, 18
-critical Wilbur constraints, and all five `0013` defaults; and the exact
+all 12 contract indexes; exactly two origin-enabled, unfiltered
+`BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur trigger/function pairs, all 35
+reviewed constraints, and all 11 reviewed defaults; and the exact
 effective schema/table privilege allowlist, including access inherited through
 memberships or `PUBLIC`. The indexes cover the current game, succeeded
 operation, one run per game, one current-bound Wilbur action per Charlotte
@@ -477,15 +491,19 @@ instantaneous and recorded spend can slightly exceed the configured amount.
 
 ## Automatic research boundary
 
-Only the OpenClaw composition injects the durable research broker. Immediately
-before Portia, deterministic policy may authorize one local Codex Search
-invocation with at most five result links, five stored citation candidates, a
-150-second WebChess ceiling, and a 12,000-character synthesis ceiling. The
-broker never fetches a cited page directly; stored links and search synthesis
-are untrusted candidate material, not proof that WebChess read or verified the
-page. The search is outside the model-operation quota ledger and is governed by
-its own one-invocation bound. Hosted and local source-checkout compositions do
-not provide this broker.
+Only the OpenClaw composition injects the durable research broker, and it stays
+off without case-scoped, versioned consent. Immediately before Portia,
+deterministic policy may authorize one local Codex Search invocation with at
+most five result links, five stored citation candidates, a 150-second WebChess
+ceiling, and a 12,000-character synthesis ceiling. WebChess may then attempt at
+most three public-HTTPS pages selected from those sources. Each request is
+bounded and rejects credentialed URLs, non-global DNS/connected addresses,
+unsafe redirects, oversized or unsupported responses, and guarded injection
+signals. Accepted excerpts and visible failures remain separately attributed.
+Search synthesis and accepted page text are both untrusted candidate material,
+not proof that a page or claim is true. Search remains outside the model-
+operation quota ledger and is governed by its own one-invocation bound. Hosted
+and local source-checkout compositions do not provide this broker.
 
 ## Transactional recovery and disaster recovery
 

@@ -321,10 +321,14 @@ printf '%s  %s\n' "$WEBCHESS_PAPER_SHA256" public/downloads/webchess-white-paper
 cmp --silent ../webchess-paper-3.1.pdf public/downloads/webchess-white-paper.pdf
 npm run release:identity:check
 npm run release:identity:check-public
-npm pack --dry-run
-npm pack
-test -f webchess-2.2.0-rc.1.tgz
-openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install npm-pack:./webchess-2.2.0-rc.1.tgz
+npm pack --dry-run --pack-destination ..
+npm pack --pack-destination ..
+test -f ../webchess-2.2.0-rc.1.tgz
+npm run pack:verify -- ../webchess-2.2.0-rc.1.tgz
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install npm-pack:../webchess-2.2.0-rc.1.tgz
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set plugins.allow '["webchess"]' --strict-json
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config validate
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect webchess --runtime --json
 ```
 
@@ -406,10 +410,20 @@ Follow the visible interface through the whole case:
    lifecycle.
 7. Select **Export case** and retain its redaction summary and digest.
 8. Select **Import & verify case** for that file. Confirm schema
-   `webchess-case-bundle/1`, artifact digests, event-log replay, terminal board,
-   and recorded provenance.
+   `webchess-case-bundle/1`, internal section digests and integrity root,
+   event-log replay, terminal board, and recorded provenance. This browser
+   check does not compare the bundle with local checkout, runtime-payload, or
+   migration bytes.
 9. Use **Start another game on this field** only to create a new game
    trajectory. It is not imported replay verification.
+
+After the browser check, run the checkout-aware verifier against the exported
+file. Packing into `..` above keeps the checkout clean so an exact commit match
+can be reported instead of a dirty-tree warning:
+
+```bash
+npm run case:verify -- /path/to/webchess-case-....json
+```
 
 For `S` terminal survivors, the nominal accepted path uses `S + 4` model
 generations: Division, `S` Portia candidates, one Portia summary, Answer, and

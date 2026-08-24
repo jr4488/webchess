@@ -56,23 +56,34 @@ plugin's installed dependencies, and remove the directory at shutdown; game
 data remains in the dedicated local PostgreSQL database. Local model routes are
 disabled on Vercel, reject non-loopback Host/URL pairs, require an exact
 same-origin `Origin` on mutations, enforce bounded JSON bodies, and return
-no-store responses. The launcher always uses OpenClaw's local inference
-transport.
+no-store responses. The launcher starts an ephemeral bridge on `127.0.0.1`,
+gives the Next.js child only its URL and random bearer, and closes the bridge
+when the foreground runtime stops. The bridge requires the exact loopback peer
+and `Host`, compares the bearer in constant time, accepts only versioned
+`application/json`, and applies request, prompt, response, timeout, and
+concurrency ceilings.
 
-OpenClaw is invoked with an argument array through `execFile` and
-`shell: false`; prompts are not interpreted as shell text. Calls have bounded
-output, a configurable bounded timeout, and TERM-to-KILL cleanup. The plugin
-does not select a provider or model and does not read, copy, return, or place
-provider credentials in the browser. OpenClaw resolves its own configured
-default model and authentication. That provider may be remote and may process
-the question or final game-derived prompt under its own data controls.
+Prompts cross that authenticated loopback bridge as structured JSON request
+bodies, not shell text or one `argv` value. The plugin passes the complete user
+message directly to the pinned OpenClaw simple-completion runtime and records
+its exact UTF-8 byte count and SHA-256; it does not silently truncate evidence.
+OpenClaw resolves its own configured default model and authentication. The
+plugin does not read, copy, return, or place provider credentials in the
+browser, bridge payload, or Next.js child environment. The selected provider
+may be remote and may process the question or final game-derived prompt under
+its own data controls.
 
-Only this OpenClaw composition provides automatic external research. Its
-deterministic pre-Portia policy invokes local Codex Search at most once, accepts
-at most five result links and five stored citation candidates, and uses a
-150-second WebChess envelope. It does not fetch candidate pages. Search output,
-titles, and URLs remain untrusted model data and cannot authorize a mutation,
-provider selection, or Gate pass.
+Only this OpenClaw composition provides automatic external research. It is off
+without case-scoped, versioned consent. Its deterministic pre-Portia policy
+invokes local Codex Search at most once, accepts at most five result links and
+five stored citation candidates, and uses a 150-second WebChess envelope. The
+local broker may then attempt at most three consented public-HTTPS pages in
+total. It rejects credentials, non-global DNS results and connected addresses,
+unsafe redirects, unsupported content, oversized bodies, and page text with
+guarded injection signals; accepted excerpts and every failure remain bounded
+and separately attributed. Search synthesis, titles, URLs, page text, and
+failure labels remain untrusted evidence candidates and cannot authorize a
+mutation, provider selection, or Gate pass.
 
 The dedicated local PostgreSQL database is the persistence boundary, while the
 shared server handlers and append-only event log remain authoritative.
@@ -173,8 +184,8 @@ migration bytes and again before opening the owner connection. Direct
 invocation of the underlying migration script is forbidden.
 
 Hosted and local migration runners require the existing ledger to be an exact,
-checksum-matching prefix of the 13 canonical migrations through
-`0013_wilbur_mutation_requests`. Migration `0012` is upgrade-safe without a
+checksum-matching prefix of the 15 canonical migrations through
+`0015_direct_page_research_evidence`. Migration `0012` is upgrade-safe without a
 duplicate-data audit: pre-`0012` actions retain a null binding version,
 including duplicate suggestion indexes, while a trigger stamps current inserts
 before the partial unique constraint and makes their identity, canonical
@@ -184,7 +195,12 @@ backward. Migration `0013` adds the durable Wilbur mutation ledger. Its state
 guard requires pending/unadmitted insertion, freezes claim identity and pending
 reservations, orders admission before settlement, prevents update time from
 moving backward, and makes admission timestamps and terminal rows immutable.
-Neither migration deletes or chooses among legacy rows.
+Migration `0014` adds owner-bound, explicitly selected Web-memory links and
+follow-up scheduling without silently reusing an observation. Migration `0015`
+records the versioned research-consent decision and bounded direct-page facts
+or failures; historical rows are conservatively backfilled as not consented.
+These migrations are append-only and do not reinterpret missing consent as
+permission.
 
 `db/migrations/0001_durable_webchess.sql` becomes immutable at its first
 durable application. Never edit, rename, reorder, or delete an applied
@@ -202,20 +218,22 @@ must not own or be able to assume an owner of any application table, and must
 have only ledger `SELECT` and the required operations on each named application
 table. Column-scoped `UPDATE` is limited to
 `gate_decisions.answer_user_prompt`,
-`gate_decisions.answer_user_prompt_sha256`, and `wilbur_actions.status`,
-`wilbur_actions.revision`, and `wilbur_actions.updated_at`. The mutation ledger
-can update only `rate_admitted_at`, `denial_code`, `retry_at`,
+`gate_decisions.answer_user_prompt_sha256`, and `wilbur_actions.follow_up_at`,
+`wilbur_actions.status`, `wilbur_actions.revision`, and
+`wilbur_actions.updated_at`. The mutation ledger can update only
+`rate_admitted_at`, `denial_code`, `retry_at`,
 `reserved_future_rows`, `reserved_text_bytes`, `status`, `result_entity_id`,
-`result_revision`, `result_status`, `result_updated_at`, and `updated_at`.
+`result_revision`, `result_status`, `result_follow_up_at`,
+`result_updated_at`, and `updated_at`.
 Mutation access to any other Gate, Wilbur action, or ledger column fails the
 compatibility check.
 
 The Vercel build uses only the least-privileged runtime `DATABASE_URL` for a
-repeatable-read, read-only check of the exact migration ledger; 19 application
-tables plus the ledger—20 total; all eight contract unique indexes; exactly two
+repeatable-read, read-only check of the exact migration ledger; 20 application
+tables plus the ledger—21 total; all 12 contract indexes; exactly two
 origin-enabled, unfiltered `BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur
-trigger/function pairs; 18 critical Wilbur constraints; all five `0013`
-defaults; and effective schema/table privileges obtained directly, through role
+trigger/function pairs; all 35 reviewed constraints; all 11 reviewed defaults;
+and effective schema/table privileges obtained directly, through role
 membership, or through `PUBLIC`. Missing or unexpected tables or columns, an
 invalid index, trigger, constraint, or default, under-privilege, or over-
 privilege fails closed without printing credentials or database identities.

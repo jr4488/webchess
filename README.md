@@ -15,9 +15,11 @@ financial, or emergency-decision system.
 
 This tree is being prepared as **WebChess `2.2.0-rc.1`**. It is not a published
 release, deployed-service claim, DOI claim, or evidence that a credentialed
-OpenAI lifecycle has passed. Publication is blocked until the release identity
-generator is given the exact code-freeze commit and artifact digests and the
-public site and paper expose that same immutable mapping.
+OpenAI lifecycle in connected Chrome has passed. Candidate identity is
+manifest-dependent: it is resolved only when the generated release identity
+names the exact code-freeze commit and digest-matched source ZIP and edition 3.1
+PDF. A locally resolved manifest still does not prove that DNS, GitHub, or those
+bytes are publicly available.
 
 Do not substitute `main`, `main.zip`, a short SHA, or an unverified mirror for
 the source named by the paper. If the public identity manifest or exact GitHub
@@ -26,8 +28,10 @@ closed.
 
 The latest verified released baseline before this candidate is `v2.1.0` at
 `9980328581ba3e6fed6f2c4fc99b555fec4773bc`. The historical V3 manuscript in
-this tree records the prior local `2.2.0` audit; it is preserved as audit
-evidence and is not silently relabeled as the still-unfrozen paper edition 3.1.
+this tree records the prior local `2.2.0` audit and remains audit evidence. The
+tracked [Arachne Method 3.1 candidate paper](docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md)
+is a separate candidate artifact; its immutable software/PDF mapping exists
+only when the generated release identity is resolved and passes its byte checks.
 
 ## Names that are easy to confuse
 
@@ -65,7 +69,9 @@ mistake salience for evidence.
 9. **Wilbur and the Web** let the person own an action, record observation, and
    preserve the case genealogy for export and later verification.
 
-See [Architecture](docs/ARCHITECTURE.md) for the implementation boundaries and
+See [Architecture](docs/ARCHITECTURE.md) for the implementation boundaries,
+[The Arachne Method 3.1 candidate paper](docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md)
+for the current replication companion, and
 [The First Answer Is Not Enough](docs/WEBCHESS_WHITE_PAPER_V3.md) for the
 historical V3 manuscript and falsifiable research program.
 
@@ -226,9 +232,14 @@ printf '%s  %s\n' "$WEBCHESS_PAPER_SHA256" public/downloads/webchess-white-paper
 cmp --silent ../webchess-paper-3.1.pdf public/downloads/webchess-white-paper.pdf
 npm run release:identity:check
 npm run release:identity:check-public
-npm pack --dry-run
-npm pack
-openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install npm-pack:./webchess-2.2.0-rc.1.tgz
+npm pack --dry-run --pack-destination ..
+npm pack --pack-destination ..
+test -f ../webchess-2.2.0-rc.1.tgz
+npm run pack:verify -- ../webchess-2.2.0-rc.1.tgz
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install npm-pack:../webchess-2.2.0-rc.1.tgz
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set plugins.allow '["webchess"]' --strict-json
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config validate
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect webchess --runtime --json
 test -n "${WEBCHESS_POSTGRES_PASSWORD:-}"
 export WEBCHESS_OPENCLAW_DATABASE_URL="postgresql://webchess:${WEBCHESS_POSTGRES_PASSWORD}@127.0.0.1:55432/webchess"
@@ -259,8 +270,11 @@ Use the visible interface, not a hidden endpoint:
    PostgreSQL;
 9. select **Export case** and retain the local redaction summary and digest;
 10. select **Import & verify case** for that file and confirm schema
-    `webchess-case-bundle/1`, artifact digests, event-log replay, terminal
-    position, and provenance verification all pass; and
+    `webchess-case-bundle/1`, internal section digests and integrity root,
+    event-log replay, terminal position, and provenance checks all pass; then
+    run `npm run case:verify -- /path/to/the-bundle.json` from this still-clean
+    checkout for exact local source, runtime-payload, and migration equality;
+    and
 11. use **Start another game on this field** only when you intend a new game
     trajectory. That is not the same operation as verifying an imported replay.
 
@@ -367,8 +381,8 @@ reruns must not be added together as if they were new tests.
 | Released software baseline | `v2.1.0` / `9980328581ba3e6fed6f2c4fc99b555fec4773bc` | Historical released baseline |
 | Audited Linux 2.2 candidate | `7a3749cf7f2c4e4c5ebfeb9b9aa870a11843f3a2` | Historical audit input, not this final RC |
 | Historical V3 manuscript/software snapshot | paper 3.0 / `0384978b2ba709da4c9824f2821c8623d3f84364` | Preserved audit evidence |
-| Integrated candidate | WebChess `2.2.0-rc.1` / full SHA in generated release identity | Unresolved until code freeze |
-| Public paper mapped to integrated candidate | Arachne paper edition 3.1 / SHA-256 in generated release identity | Unresolved until the artifact exists |
+| Integrated candidate | WebChess `2.2.0-rc.1` / full SHA and archive digest in generated release identity | Resolved only when the manifest says `resolved` and its local byte checks pass; that alone is not publication |
+| Candidate paper mapped to integrated candidate | [Arachne paper edition 3.1](docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md) / PDF SHA-256 in generated release identity | Manifest-dependent; resolved only when the candidate PDF and source mapping pass together |
 | Provider harness | OpenClaw `2026.7.1-2` / `0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c` | Pinned external dependency |
 
 No DOI or archive identifier is claimed for an artifact that does not exist.
@@ -425,6 +439,7 @@ candidate URL.
 - [Privacy and data flow](docs/PRIVACY.md)
 - [Research and evaluation](docs/RESEARCH.md)
 - [Case export and offline replay verification](docs/CASE_BUNDLES.md)
+- [Arachne Method 3.1 candidate paper](docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md)
 - [Historical V3 white paper](docs/WEBCHESS_WHITE_PAPER_V3.md)
 - [Archived WebChess 2.0 white paper](docs/WEBCHESS_WHITE_PAPER_V2.md)
 - [Archived WebChess 1.3 white paper](docs/archive/WEBCHESS_WHITE_PAPER_V1.3.md)

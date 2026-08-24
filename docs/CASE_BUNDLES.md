@@ -48,8 +48,12 @@ The local OpenClaw interface also offers **Import & verify case** for files up
 to the default 3,000,000-byte local export ceiling. The browser sends the file
 only to the authenticated loopback WebChess process, which verifies it in
 memory without persistence or provider calls. That convenience check does not
-receive checkout, runtime-payload, or migration context. Use the CLI below for
-those local equality checks and for a larger deliberately configured export.
+receive checkout, runtime-payload, or migration context. It verifies the
+bundle's canonical section digests and integrity root for internal
+self-consistency, not equality with the installed bytes. Because those internal
+digests are recomputable, that result is neither authorship proof nor a local
+artifact match. Use the CLI below for exact local source, runtime-payload, and
+migration equality checks and for a larger deliberately configured export.
 
 From a WebChess checkout with `npm ci` completed, run:
 
@@ -81,6 +85,9 @@ checks:
 The CLI reports a matching Git commit as exact local source evidence only when
 the checkout is clean, including untracked files. A dirty checkout receives a
 warning because matching `HEAD` alone does not describe the files being run.
+When building the packed plugin from this checkout, use
+`npm pack --pack-destination ..` so the resulting `.tgz` does not itself make
+the checkout dirty before this CLI comparison.
 
 Redacted profiles use deterministic neutral 64-square problem parts. That
 preserves canonical chess geometry and move legality, but it cannot verify the
