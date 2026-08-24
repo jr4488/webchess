@@ -127,8 +127,12 @@ completed publication.
 
 ```bash
 set -euo pipefail
+export WEBCHESS_INSTALL_WORKSPACE="${PWD}/webchess-2.2.0-rc.1-install"
+test ! -e "$WEBCHESS_INSTALL_WORKSPACE"
+mkdir -- "$WEBCHESS_INSTALL_WORKSPACE"
+cd -- "$WEBCHESS_INSTALL_WORKSPACE"
 export WEBCHESS_IDENTITY_URL='https://webchess.anansiportia.com/downloads/webchess-release-identity.json'
-curl --fail --location --output webchess-release-identity.json "$WEBCHESS_IDENTITY_URL"
+curl --fail --location --remove-on-error --output webchess-release-identity.json "$WEBCHESS_IDENTITY_URL"
 node -e 'const m=require("./webchess-release-identity.json"); if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved") process.exit(1)'
 export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.source.commit ?? "")')"
 test "${#WEBCHESS_RELEASE_SHA}" -eq 40
@@ -139,11 +143,11 @@ Verify the bytes published beside the manifest as well as the Git object:
 ```bash
 export WEBCHESS_SOURCE_ARCHIVE_URL="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(new URL(m.source.archive.downloadPath, process.env.WEBCHESS_IDENTITY_URL).href)')"
 export WEBCHESS_SOURCE_ARCHIVE_SHA256="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.source.archive.sha256)')"
-curl --fail --location --output webchess-source.zip "$WEBCHESS_SOURCE_ARCHIVE_URL"
+curl --fail --location --remove-on-error --output webchess-source.zip "$WEBCHESS_SOURCE_ARCHIVE_URL"
 printf '%s  %s\n' "$WEBCHESS_SOURCE_ARCHIVE_SHA256" webchess-source.zip | sha256sum --check
 export WEBCHESS_PAPER_URL="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(new URL(m.paper.candidate.pdf.downloadPath, process.env.WEBCHESS_IDENTITY_URL).href)')"
 export WEBCHESS_PAPER_SHA256="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.paper.candidate.pdf.sha256)')"
-curl --fail --location --output webchess-paper-3.1.pdf "$WEBCHESS_PAPER_URL"
+curl --fail --location --remove-on-error --output webchess-paper-3.1.pdf "$WEBCHESS_PAPER_URL"
 printf '%s  %s\n' "$WEBCHESS_PAPER_SHA256" webchess-paper-3.1.pdf | sha256sum --check
 ```
 
@@ -192,17 +196,26 @@ npm install --prefix "$WEBCHESS_OPENCLAW_RUNTIME" --save-exact openclaw@2026.7.1
 export PATH="$WEBCHESS_OPENCLAW_RUNTIME/node_modules/.bin:$PATH"
 test "$(command -v openclaw)" = "$WEBCHESS_OPENCLAW_RUNTIME/node_modules/.bin/openclaw"
 webchess_assert_account_oauth_only() {
-  local webchess_env_name
+  local webchess_env_name webchess_env_name_normalized webchess_env_value
   local -a webchess_forbidden_provider_env=()
   while IFS= read -r webchess_env_name; do
-    case "$webchess_env_name" in
-      *_API_KEY|*_API_KEYS|*_API_KEY_*|*_API_TOKEN|*_ACCESS_TOKEN|*_AUTH_TOKEN|*_OAUTH_TOKEN|OPENCLAW_LIVE_*_KEY|OPENCLAW_LIVE_*_KEYS|ANTHROPIC_ADMIN_KEY|AWS_ACCESS_KEY_ID|AWS_BEARER_TOKEN_BEDROCK|AWS_CONFIG_FILE|AWS_CONTAINER_AUTHORIZATION_TOKEN|AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE|AWS_CONTAINER_CREDENTIALS_FULL_URI|AWS_CONTAINER_CREDENTIALS_RELATIVE_URI|AWS_PROFILE|AWS_SECURITY_TOKEN|AWS_SECRET_ACCESS_KEY|AWS_SHARED_CREDENTIALS_FILE|AWS_SESSION_TOKEN|AWS_WEB_IDENTITY_TOKEN_FILE|AZURE_CLIENT_SECRET|AZURE_SPEECH_KEY|CODEX_TOKEN|COPILOT_GITHUB_TOKEN|FAL_KEY|GH_TOKEN|GITHUB_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|HF_TOKEN|HUGGINGFACE_HUB_TOKEN|MINIMAX_CODE_PLAN_KEY|OPENAI_ADMIN_KEY|OPENAI_TOKEN|OPENAI_WEBHOOK_SECRET|RUNWAYML_API_SECRET|SPEECH_KEY|VOLCENGINE_TTS_TOKEN|OPENAI_BASE_URL|OPENAI_API_BASE|OPENAI_CUSTOM_HEADERS|OPENAI_LOG|OPENAI_ORG_ID|OPENAI_PROJECT_ID|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|http_proxy|https_proxy|all_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|OPENCLAW_BUILD_PRIVATE_QA|OPENCLAW_QA_FORCE_RUNTIME|OPENCLAW_DEBUG_PROXY_ENABLED|OPENCLAW_DEBUG_PROXY_REQUIRE|OPENCLAW_DEBUG_PROXY_URL|OPENCLAW_DEBUG_PROXY_DB_PATH|OPENCLAW_DEBUG_PROXY_BLOB_DIR)
-        if [[ -n "${!webchess_env_name}" ]]; then
-          webchess_forbidden_provider_env+=("$webchess_env_name")
-        fi
+    webchess_env_name_normalized="${webchess_env_name^^}"
+    webchess_env_value="${!webchess_env_name}"
+    test -n "$webchess_env_value" || continue
+    case "$webchess_env_name_normalized" in
+      CLERK_PUBLISHABLE_KEY|NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY|OPENCLAW_VAPID_PUBLIC_KEY|TELNYX_PUBLIC_KEY|WEBCHESS_OPENCLAW_BRIDGE_TOKEN)
+        continue
+        ;;
+    esac
+    case "$webchess_env_name_normalized" in
+      *_API_KEY|*_API_KEYS|*_API_KEY_*|*_API_TOKEN|*_ACCESS_TOKEN|*_AUTH_TOKEN|*_OAUTH_TOKEN|OPENCLAW_LIVE_*_KEY|OPENCLAW_LIVE_*_KEYS|AMQP_URL|ANTHROPIC_ADMIN_KEY|AWS_ACCESS_KEY_ID|AWS_BEARER_TOKEN_BEDROCK|AWS_CONFIG_FILE|AWS_CONTAINER_AUTHORIZATION_TOKEN|AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE|AWS_CONTAINER_CREDENTIALS_FULL_URI|AWS_CONTAINER_CREDENTIALS_RELATIVE_URI|AWS_PROFILE|AWS_SECURITY_TOKEN|AWS_SECRET_ACCESS_KEY|AWS_SHARED_CREDENTIALS_FILE|AWS_SESSION_TOKEN|AWS_WEB_IDENTITY_TOKEN_FILE|AZURE_AUTH_LOCATION|AZURE_CLIENT_SECRET|AZURE_SPEECH_KEY|CODEX_TOKEN|CODEX_INTERNAL_ORIGINATOR_OVERRIDE|CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID|CODEX_ROLLOUT_TRACE_ROOT|CODEX_SANDBOX|COPILOT_GITHUB_TOKEN|FAL_KEY|GH_TOKEN|GITHUB_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|HF_TOKEN|HUGGINGFACE_HUB_TOKEN|KUBECONFIG|MINIMAX_CODE_PLAN_KEY|MONGODB_URI|OPENAI_ADMIN_KEY|OPENAI_TOKEN|OPENAI_WEBHOOK_SECRET|REDIS_URL|RUNWAYML_API_SECRET|SPEECH_KEY|SYNOLOGY_CHAT_INCOMING_URL|VOLCENGINE_TTS_TOKEN|OPENAI_BASE_URL|OPENAI_API_BASE|OPENAI_CUSTOM_HEADERS|OPENAI_LOG|OPENAI_ORGANIZATION|OPENAI_ORG_ID|OPENAI_PROJECT|OPENAI_PROJECT_ID|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|http_proxy|https_proxy|all_proxy|BUN_OPTIONS|CODEX_CA_CERTIFICATE|DYLD_INSERT_LIBRARIES|LD_PRELOAD|NODE_DEBUG|NODE_DEBUG_NATIVE|NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|OPENCLAW_CONFIG_PATH|OPENCLAW_NODE_EXTRA_CA_CERTS_READY|OPENCLAW_OAUTH_DIR|OPENCLAW_SECRET_SENTINELS|OPENCLAW_STATE_DIR|OPENSSL_CONF|SSLKEYLOGFILE|SSL_CERT_FILE|SSL_CERT_DIR|OPENCLAW_BUILD_PRIVATE_QA|OPENCLAW_ENABLE_PRIVATE_QA_CLI|OPENCLAW_QA_FORCE_RUNTIME|OPENCLAW_DEBUG_MODEL_PAYLOAD|OPENCLAW_DEBUG_PROXY_ENABLED|OPENCLAW_DEBUG_PROXY_REQUIRE|OPENCLAW_DEBUG_PROXY_URL|OPENCLAW_DEBUG_PROXY_DB_PATH|OPENCLAW_DEBUG_PROXY_BLOB_DIR|OPENCLAW_DEBUG_SSE|WEBCHESS_OPENCLAW_OWNER_ID)
+        webchess_forbidden_provider_env+=("$webchess_env_name")
+        ;;
+      *_KEY|*_KEYS|*_ACCESS_TOKENS|*_API_TOKENS|*_AUTH_TOKENS|*_BEARER_TOKEN|*_BEARER_TOKENS|*_BOT_TOKEN|*_BOT_TOKENS|*_OAUTH_TOKENS|*_TOKEN|*_TOKENS|*_AUTHTOKEN|*_SESSION_KEY|*_SESSION_KEYS|*_TOKEN_FILE|*_TOKEN_PATH|*_TOKEN_FILE_DESCRIPTOR|*_TOKEN_FD|*_TOKENS_FILE|*_TOKENS_PATH|*_TOKENS_FILE_DESCRIPTOR|*_TOKENS_FD|*_COOKIE|*_COOKIES|*_CREDENTIAL|*_CREDENTIALS|*_CREDENTIAL_FILE|*_CREDENTIALS_FILE|*_KEY_FILE|*_PRIVATE_KEY_PATH|*_PRIVATE_KEY_FILE|*_PRIVATE_KEY_FILE_DESCRIPTOR|*_PRIVATE_KEY_FD|*_PRIVATE_KEY_P8|*_PRIVATE_KEY_PEM|*_PRIVATE_KEY_P12|*_PRIVATE_KEY_PFX|*_PRIVATE_KEY_B64|*_PRIVATE_KEY_BASE64|*_PRIVATE_KEY_JSON|*_CERTIFICATE_PATH|*_CERTIFICATE_FILE|*_CERTIFICATE_FILE_DESCRIPTOR|*_CERTIFICATE_FD|*_CERTIFICATE_P8|*_CERTIFICATE_PEM|*_CERTIFICATE_P12|*_CERTIFICATE_PFX|*_CERTIFICATE_B64|*_CERTIFICATE_BASE64|*_CERTIFICATE_JSON|*_PASSWORD|*_PRIVATE_KEY|*_SECRET|*_SECRETS|NODE_USE_ENV_PROXY|NODE_USE_SYSTEM_CA|NODE_USE_OPENSSL_CA|NODE_USE_BUNDLED_CA|NO_PROXY|YARN_HTTP_PROXY|YARN_NO_PROXY|NPM_CONFIG_HTTP_PROXY|NPM_CONFIG_HTTPS_PROXY|NPM_CONFIG_PROXY|NPM_CONFIG_NOPROXY|BUNDLE_HTTP_PROXY|BUNDLE_HTTPS_PROXY|BUNDLE_NO_PROXY|PIP_PROXY|DOCKER_HTTP_PROXY|DOCKER_HTTPS_PROXY|WSS_PROXY|FTP_PROXY|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|GIT_SSL_CAINFO|BUNDLE_SSL_CA_CERT|NPM_CONFIG_CAFILE|ELECTRON_GET_USE_PROXY|__CODEX_SNAPSHOT_OVERRIDE|__CODEX_SNAPSHOT_PROXY_OVERRIDE|CODEX_NETWORK_ALLOW_LOCAL_BINDING|CODEX_NETWORK_PROXY_*|OPENCLAW_CODEX_APP_SERVER_BIN|OPENCLAW_CODEX_APP_SERVER_ARGS|OPENCLAW_DEBUG_PROXY_*|OPENCLAW_QA_*)
+        webchess_forbidden_provider_env+=("$webchess_env_name")
         ;;
       NODE_TLS_REJECT_UNAUTHORIZED)
-        if [[ "${!webchess_env_name}" = '0' ]]; then
+        if [[ "$webchess_env_value" != '1' ]]; then
           webchess_forbidden_provider_env+=("$webchess_env_name")
         fi
         ;;
@@ -223,6 +236,7 @@ test "$(openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config get agents.defaul
 test -z "$(openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models fallbacks list --plain)"
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config validate
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" doctor
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth list
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models auth list --provider openai
 read -r -p 'Eligible OpenAI OAuth profile ID: ' WEBCHESS_OPENAI_PROFILE_ID
 test -n "$WEBCHESS_OPENAI_PROFILE_ID"
@@ -237,8 +251,14 @@ openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" models status --probe --probe-pr
 
 `--force` removes earlier OpenAI auth profiles only inside this newly dedicated
 WebChess profile; never point this command at a general-purpose OpenClaw profile.
-Confirm that the dedicated profile reports an eligible `openai` OAuth profile
-and no API-key profile, both the effective per-agent order and the
+Confirm that the first, unfiltered credential listing reports exactly one
+profile total and that the provider-filtered listing identifies the same
+eligible `openai` OAuth profile, with no API-key or additional provider
+profile. The pinned listing displays neither the credential's account ID nor
+its stable OAuth subject. The bridge binds the exact private account ID and a
+domain-separated SHA-256 digest of that stable subject, validates both against
+the access token before any readiness or case call, and does not print, return,
+persist in a case, or export either binding value. Both the effective per-agent order and the
 `auth.order.openai` config override name only the OAuth profile ID you selected,
 the primary is the explicit `openai/*` reference in `WEBCHESS_OPENAI_MODEL`,
 the fallback list is empty, the exact selected model appears in the provider
@@ -248,21 +268,32 @@ profile is a different auth and billing path and does not satisfy this
 candidate's OpenAI-account acceptance criterion.
 Pinned OpenClaw gives the per-agent stored order precedence; both order commands
 above must therefore show the same one-element OAuth profile list.
+The bridge freezes the selected profile's exact account ID and stable OAuth
+subject digest for its whole lifetime and checks both before and after
+readiness, status, inference, and search calls. Every current access token must
+resolve to that same account ID and subject digest. Same-identity access,
+refresh, and expiry fields may rotate normally; a missing, malformed, or
+differently bound token fails closed before a call result is accepted.
 
 The Bash gate examines the environment inherited by each subsequent OpenClaw
-process. It prints only offending variable names, never credential values. All
-matching singular, plural, or embedded API-key variables, OpenClaw live-test
-key variables, API-token, access-token, auth-token, and OAuth-token variables,
-plus every exact provider, cloud-profile, service-account, and administrative
-credential name enumerated in the function, must be empty or unset. The exact OpenAI
-endpoint, custom-header, organization/project, webhook, and SDK logging
-overrides, ambient proxy/TLS overrides, and OpenClaw debug-proxy
-variables named there must also be empty or unset so account OAuth cannot be
-redirected or wrapped by an unreviewed transport. The two OpenClaw private-QA
-runtime overrides must be empty or unset, and
-`NODE_TLS_REJECT_UNAUTHORIZED=0` is rejected because it disables TLS
-verification. Rerun the gate immediately
+process. It normalizes names to uppercase, treats every nonempty value
+(including whitespace) as configured, and prints only offending variable
+names, never values. Every matching key, token,
+cookie, password, secret, private-key, certificate pointer, credential file,
+cloud profile, custom Codex command, loader/debug option, endpoint/header,
+proxy, or QA override must be empty or unset, except for the explicit public
+and WebChess-local allowlist in the function. `CODEX_CA_CERTIFICATE` and any
+user-supplied custom CA are forbidden. Pinned OpenClaw may internally add
+`OPENCLAW_NODE_EXTRA_CA_CERTS_READY=1` with exactly the first readable pinned
+Linux system CA path; the bridge attests that pair and rejects any other
+marker/path combination. A nonempty `NODE_TLS_REJECT_UNAUTHORIZED` value is
+accepted only when it is exactly `1`; `0` disables TLS verification. Rerun the gate immediately
 before plugin inspection and launch.
+In particular, `OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`, and
+`OPENCLAW_OAUTH_DIR` must be unset before the first command so `--profile`
+selects the dedicated profile rather than ambient OpenClaw state. Local owner
+and HMAC identity values are generated and persisted privately by the launcher;
+ambient overrides for them are rejected.
 A nonempty variable, any API-key auth profile, or an auth-order entry other than
 the chosen OAuth profile is a failed readiness result, not permission to
 continue with a fallback.
@@ -274,7 +305,9 @@ available `openai/<model-id>` (the pinned OpenClaw docs name
 `openai/gpt-5.5` as the recovery choice), rerun `models set`, `models fallbacks
 clear`, and both assertions above, then probe that exact model. Do not use an
 alias, another provider, or any fallback. OpenClaw does not silently downgrade.
-A live probe can consume account allowance.
+The profile-specific `models status --probe` command above is one additional
+prelaunch provider request and allowance event, separate from the packed
+bridge's two per-launch readiness requests described below.
 
 Official references:
 
@@ -295,6 +328,11 @@ Use the exact Docker commands in [Installation](INSTALL.md#3-create-the-dedicate
 They bind only `127.0.0.1:55432`, use a WebChess-specific container and volume,
 and include health, migration, backup, restore, and teardown checks. Never point
 the plugin at production, Neon, or an unrelated local database.
+The local URL must use `postgres` or `postgresql`, numeric `127.0.0.1` or `::1`,
+an explicit username, password, port, and exactly one database path, with no
+surrounding whitespace, control characters, query, or fragment. The launcher
+removes inherited `PG*`/Postgres transport variables and passes reviewed
+connection fields explicitly; an override is a startup failure.
 
 ### 4. Pack, inspect, install, and launch this exact source
 
@@ -313,6 +351,7 @@ printf '%s  %s\n' "$WEBCHESS_PAPER_SHA256" public/downloads/webchess-white-paper
 cmp --silent ../webchess-paper-3.1.pdf public/downloads/webchess-white-paper.pdf
 npm run release:identity:check
 npm run release:identity:check-public
+test ! -e ../webchess-2.2.0-rc.1.tgz
 npm pack --dry-run --pack-destination ..
 npm pack --pack-destination ..
 test -f ../webchess-2.2.0-rc.1.tgz
@@ -329,8 +368,7 @@ openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config validate
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect codex --runtime --json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect webchess --runtime --json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" capability web providers --json
-test -n "${WEBCHESS_POSTGRES_PASSWORD:-}"
-export WEBCHESS_OPENCLAW_DATABASE_URL="postgresql://webchess:${WEBCHESS_POSTGRES_PASSWORD}@127.0.0.1:55432/webchess"
+test -n "${WEBCHESS_OPENCLAW_DATABASE_URL:-}"
 export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("../webchess-release-identity.json"); process.stdout.write(m.source.commit)')"
 webchess_assert_account_oauth_only
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" webchess --no-open
@@ -342,6 +380,9 @@ history, the account-OAuth-only credential boundary, or local mode is not
 ready. A provider-key variable or API-key profile is a startup failure. The
 launcher must not fall through to Clerk, Neon, Vercel, a hosted WebChess
 provider, an alternate model/search provider, or a repository `.env` secret.
+“Connected Chrome” below names the maintainer's interactive acceptance harness;
+ordinary researchers use normal supported Chrome with JavaScript, cookies/local
+storage, and access to this loopback URL.
 
 The provider inventory is a no-query setup check. Before launch, its `search`
 array must include an available, selected `codex` entry, and both plugin
@@ -353,13 +394,20 @@ account/OAuth profile. Neither may use a WebChess-side, Codex, OpenAI, or other
 provider API key/token; a missing account capability must fail visibly rather
 than select a substitute.
 
-At launch and before each search boundary, the packed plugin attests the exact
+At launch and around each status, model, and search boundary, the packed plugin
+attests the exact
 official global Codex plugin record, package/lock integrity, reviewed runtime
 module bytes, wrapper, and Linux x86_64 native executable. It also binds search
 to a private client constructed from the one selected OAuth profile. Missing,
 changed, symlink-substituted, differently ordered, or unsupported-platform
 components are startup/request failures, not permission to use another binary,
-credential, provider, or transport.
+credential, provider, or transport. It freezes live OpenClaw configuration and
+accepts only one explicit `openai/*` model with empty fallbacks, the `codex`
+search provider, `plugins.allow` containing exactly `codex` and `webchess`, no
+custom plugin path or extra plugin entry, and the private agent-scoped stdio
+Codex app-server contract. Before native Codex starts, database/PG, SSH, HMAC,
+bridge, profile, provider, and other secret-bearing variables are cleared; any
+live configuration drift fails the request.
 
 ### 5. Complete and inspect one case
 
@@ -390,6 +438,29 @@ Use the visible interface, not a hidden endpoint:
 The case bundle is a redaction-aware research artifact, not a database backup,
 not an OpenAI subject-access export, and not proof that its answer is correct.
 
+The release acceptance path is deliberately stricter than the ordinary manual,
+guided, or autoplay choices above. In connected Chrome, start a fresh canonical
+32-piece case using the non-secret question **“What is the current stable
+PostgreSQL 17 minor release today?”** and **Allow bounded research**. Click the
+visible **Auto-play to the end** control exactly once; do not use an API,
+fixture, injected event, or repeated one-turn control, and let the browser loop
+reach a real terminal state without interruption. Complete visible Portia,
+Gate, Retry if invoked, Answer, Charlotte, and one Wilbur action/observation.
+The saved research record must be `completed` with provider `codex`, transport
+`local`, at least one executed query, source provenance, synthesis/evidence,
+and visible direct-page outcomes. Reload and confirm the case, lifecycle, and
+research return from PostgreSQL. Before starting a child trajectory, download a
+locally retained `private-full-v1` bundle, import and verify it in the UI, and
+run `npm run case:verify -- /path/to/the-bundle.json`. Then select **Start
+another game on this field**, reload, and confirm that the same mapped 64-cell
+field persists. The UI does not display the replay's source identifier, so the
+maintainer must also inspect the successful replay POST response without
+modifying it and confirm that the returned game's
+`sourceGameId` equals the prior game ID. This ordinary replay action does not
+create Retry parent/root lifecycle lineage. A release report must state
+separately whether this credentialed Chrome path passed; the deterministic
+suite is not a substitute.
+
 ## Research-search disclosure and opt-out
 
 Search is separate from model generation and local storage. It is **off until
@@ -415,6 +486,12 @@ injection filtering and provenance do not make a source true. The interface
 must show unavailable, filtered, rejected, redirected, and omitted sources
 rather than quietly pretending they were read.
 
+A bounded Retry child inherits the saved consent decision. It can therefore
+repeat one lifecycle search and its bounded direct-page transmissions; a fresh
+field Retry also repeats Division. The interface and case export retain that
+child's own consent, query, provider, evidence, and lineage rather than treating
+the parent's search as proof for the child.
+
 Model/auth status and provider inventory alone do **not** prove live account
 readiness. Once per launcher process, before accepting a game, the packed bridge
 runs two bounded requests through the same selected OpenAI account/OAuth
@@ -429,8 +506,8 @@ allowance apply. Launch fails closed unless both bounded results validate. If
 either transmission is unacceptable, do not launch; case-scoped search consent
 does not disable these readiness gates.
 
-The launch probe proves only that the reviewed authenticated search route
-worked at that moment. A consented lifecycle search remains a separate request
+The launch probes prove only that the reviewed authenticated model and search
+routes worked at that moment. A consented lifecycle search remains a separate request
 and can still fail. At execution time the packed bridge accepts only capability
 `web.search`, provider `codex`, local transport, and an empty fallback-attempt
 array. Durable case research records retain the provider, transport, bounded
@@ -440,23 +517,33 @@ a later WebChess-local step.
 
 ## Model-call, time, context, and allowance implications
 
-For `S` terminal survivors (`1 <= S <= 32`), the nominal accepted lifecycle
-uses **`S + 4` model generations**:
+Each launcher process first makes one authenticated model readiness request and
+one authenticated Hosted Search readiness request. For `S` terminal survivors
+(`1 <= S <= 32`), an accepted initial or fresh-field game then uses
+**`S + 4` model generations**:
 
 - one Division call;
 - `S` Portia candidate calls plus one Portia summary call;
 - one Answer call; and
 - one Charlotte call.
 
-That is 5 to 36 model generations, plus at most one separately disclosed
-research-search invocation when consented and material. Portia's 13 attacks are
+That is 5 to 36 model generations for an accepted initial/fresh-field game. An
+accepted same-field child reuses Division and uses `S + 3` (4 to 35). If Gate
+refuses the candidate, Answer and Charlotte are not called: a same-field path
+can stop at `S + 1`, and an initial/fresh-field path at `S + 2`. Each game can
+also make up to one separately disclosed lifecycle-search invocation when
+consented and material, in addition to the two per-launch readiness requests.
+The explicit profile-specific `models status --probe` in the installation
+preflight is a separate, additional provider request and allowance event.
+Portia's 13 attacks are
 evaluated within each candidate call; they are not 13 separate calls per
 candidate.
 
 If the first Answer turn returns content that violates the strict structured
 contract, WebChess may issue exactly one bounded corrective Answer turn using
-the same approved evidence. A successful corrected path therefore uses
-`S + 5` generations (6 to 37). Provider failures, transport failures, and
+the same approved evidence. A successful corrected initial/fresh-field path
+therefore uses `S + 5` generations (6 to 37), while a same-field path uses
+`S + 4`. Provider failures, transport failures, and
 cancellation do not earn a corrective turn, and invalid provider output is not
 copied into the corrective prompt.
 
@@ -466,7 +553,8 @@ Failures and Gate decisions can amplify that cost:
 - completed Portia candidates are persisted so a recoverable retry resumes,
   but a late failure can repeat the summary;
 - Gate may authorize two additional games on the same field and one fresh field,
-  so chess, Portia, and later stages can run again; and
+  so chess, Portia, and later stages can run again; each child inherits consent
+  and can repeat its own bounded search/page transmission; and
 - a fresh field requires another Division call.
 
 Large valid prompts can approach the selected model's context budget. The
