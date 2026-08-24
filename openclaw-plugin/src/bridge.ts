@@ -359,6 +359,7 @@ export interface SimpleCompletionRuntime {
   prepareSimpleCompletionModelForAgent(params: {
     agentId: string
     agentDir?: string
+    allowBundledStaticCatalogFallback: true
     cfg: OpenClawRuntimeConfig
     skipAgentDiscovery: true
   }): Promise<PreparedSimpleCompletionModel | { error: string }>
@@ -1716,6 +1717,7 @@ async function prepareOpenAiAccountModel(
     prepared = await simpleCompletion.prepareSimpleCompletionModelForAgent({
       agentId,
       agentDir,
+      allowBundledStaticCatalogFallback: true,
       cfg: config,
       skipAgentDiscovery: true,
     })

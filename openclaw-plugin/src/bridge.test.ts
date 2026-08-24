@@ -550,6 +550,36 @@ describe('OpenClaw plugin runtime bridge', () => {
     })).rejects.toThrow(/OpenAI account OAuth profile/u)
   })
 
+  it('enables the pinned bundled model catalog without agent discovery', async () => {
+    const runtime = simpleRuntime()
+    const prepare = runtime.prepareSimpleCompletionModelForAgent
+    runtime.prepareSimpleCompletionModelForAgent = vi.fn(async (params) => {
+      if (!params.allowBundledStaticCatalogFallback ||
+        !params.skipAgentDiscovery) {
+        return { error: 'Unknown model: openai/gpt-5.6-sol' }
+      }
+      return prepare(params)
+    })
+
+    const bridge = await start(fakeApi(), {
+      simpleCompletionRuntime: runtime,
+    })
+    try {
+      expect(runtime.prepareSimpleCompletionModelForAgent)
+        .toHaveBeenCalled()
+      for (const [params] of vi.mocked(
+        runtime.prepareSimpleCompletionModelForAgent,
+      ).mock.calls) {
+        expect(params).toMatchObject({
+          allowBundledStaticCatalogFallback: true,
+          skipAgentDiscovery: true,
+        })
+      }
+    } finally {
+      await bridge.close()
+    }
+  })
+
   it('sanitizes rejected model and authentication preparation', async () => {
     const runtime = simpleRuntime()
     runtime.prepareSimpleCompletionModelForAgent = vi.fn(async () => {
@@ -1954,6 +1984,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const canonical = await runtime.prepareSimpleCompletionModelForAgent({
       agentId: AGENT_ID,
       agentDir: AGENT_DIR,
+      allowBundledStaticCatalogFallback: true,
       cfg: fakeApi().config,
       skipAgentDiscovery: true,
     })
@@ -2072,6 +2103,7 @@ describe('OpenClaw plugin runtime bridge', () => {
         .toHaveBeenCalledWith({
           agentDir: AGENT_DIR,
           agentId: 'researcher',
+          allowBundledStaticCatalogFallback: true,
           cfg: expect.any(Object),
           skipAgentDiscovery: true,
         })

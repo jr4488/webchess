@@ -1162,6 +1162,7 @@ async function prepareOpenAiAccountModel(simpleCompletion, preparedAuthAccountIn
         prepared = await simpleCompletion.prepareSimpleCompletionModelForAgent({
             agentId,
             agentDir,
+            allowBundledStaticCatalogFallback: true,
             cfg: config,
             skipAgentDiscovery: true,
         });
