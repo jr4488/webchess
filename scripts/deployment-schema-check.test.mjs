@@ -79,6 +79,32 @@ describe('Vercel schema compatibility command', () => {
     ).toThrow('DATABASE_URL is required')
   })
 
+  it('rejects sslmode=disable for a remote runtime database without echoing it', () => {
+    const databaseUrl =
+      'postgresql://runtime:do-not-print@runtime.example/webchess?sslmode=disable'
+
+    let message = ''
+    try {
+      runtimeDatabaseUrl({ DATABASE_URL: databaseUrl })
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(message).toContain(
+      'DATABASE_URL must not set sslmode=disable for a non-loopback database',
+    )
+    expect(message).not.toContain(databaseUrl)
+    expect(schemaCheckFailureMessage(new Error(message))).toBe(message)
+  })
+
+  it.each([
+    'postgresql://runtime@localhost/webchess?sslmode=disable',
+    'postgresql://runtime@127.0.0.1/webchess?sslmode=disable',
+    'postgresql://runtime@[::1]/webchess?sslmode=disable',
+  ])('allows sslmode=disable for a loopback runtime database: %s', (databaseUrl) => {
+    expect(runtimeDatabaseUrl({ DATABASE_URL: databaseUrl })).toBe(databaseUrl)
+  })
+
   it('checks the runtime database without reading the owner URL', async () => {
     const runtimeUrl = 'postgresql://runtime.example/webchess'
     const client = new FakeSchemaClient([

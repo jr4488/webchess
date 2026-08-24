@@ -11,6 +11,7 @@ import {
   ReleaseSourceError,
   verifyReleaseSource,
 } from './deployment-source-check.mjs'
+import { assertSafeDatabaseTlsMode } from './deployment-preflight.mjs'
 
 function nonBlank(value) {
   return typeof value === 'string' && value.trim().length > 0
@@ -28,6 +29,7 @@ export function migrationOwnerDatabaseUrl(environment = process.env) {
       'MIGRATION_DATABASE_URL must not contain surrounding whitespace.',
     )
   }
+  assertSafeDatabaseTlsMode(connectionString, 'MIGRATION_DATABASE_URL')
   return connectionString
 }
 
@@ -86,6 +88,9 @@ export function migrationFailureMessage(error) {
       error.message.startsWith('MIGRATION_DATABASE_URL is required') ||
       error.message.startsWith(
         'MIGRATION_DATABASE_URL must not contain',
+      ) ||
+      error.message.startsWith(
+        'MIGRATION_DATABASE_URL must not set sslmode=disable',
       )
     )
   ) {

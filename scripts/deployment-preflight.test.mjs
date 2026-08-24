@@ -10,7 +10,6 @@ const previewEnvironment = () => ({
   WEBCHESS_EXPECTED_VERCEL_PROJECT_ID: 'prj_webchess_example',
   VERCEL_GIT_COMMIT_SHA: '1'.repeat(40),
   DATABASE_URL: 'postgresql://runtime.example/webchess',
-  OPENAI_API_KEY: 'openai-secret-value',
   CLERK_SECRET_KEY: 'sk_test_example',
   CLERK_WEBHOOK_SIGNING_SECRET: 'whsec_test_example',
   WEBCHESS_HMAC_SECRET: 'a'.repeat(32),
@@ -18,8 +17,8 @@ const previewEnvironment = () => ({
   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk_test_example',
   NEXT_PUBLIC_CLERK_SIGN_IN_URL: '/sign-in',
   NEXT_PUBLIC_CLERK_SIGN_UP_URL: '/sign-up',
-  NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL: '/play',
-  NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL: '/play',
+  NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL: '/account',
+  NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL: '/account',
 })
 
 describe('validateDeploymentEnvironment', () => {
@@ -44,6 +43,159 @@ describe('validateDeploymentEnvironment', () => {
 
   it('derives the preview origin from VERCEL_URL', () => {
     expect(validateDeploymentEnvironment(previewEnvironment())).toEqual({
+      target: 'preview',
+      siteOrigin: 'https://webchess-preview-abc.vercel.app',
+    })
+  })
+
+  it.each([
+    'ANTHROPIC_AUTH_TOKEN',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_BEARER_TOKEN_BEDROCK',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_SESSION_TOKEN',
+    'CODEX_API_KEY',
+    'CODEX_TOKEN',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'HF_TOKEN',
+    'OPENAI_ACCESS_TOKEN',
+    'OPENAI_ADMIN_KEY',
+    'OPENAI_API_KEY',
+    'OPENAI_API_KEYS',
+    'OPENAI_API_KEY_',
+    'OPENAI_API_KEY_PRIMARY',
+    'OPENAI_API_TOKEN',
+    'OPENAI_OAUTH_TOKEN',
+    'OPENAI_TOKEN',
+    'OPENCLAW_LIVE_OPENAI_KEY',
+    'OPENCLAW_LIVE_OPENAI_KEYS',
+    'THIRD_PARTY_API_KEY',
+  ])('rejects a nonempty provider credential by name: %s', (variableName) => {
+    const environment = previewEnvironment()
+    const secretValue = `do-not-print-${variableName.toLowerCase()}`
+    environment[variableName] = secretValue
+
+    let message = ''
+    try {
+      validateDeploymentEnvironment(environment)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(message).toContain(variableName)
+    expect(message).toContain('only OpenAI account OAuth through OpenClaw')
+    expect(message).not.toContain(secretValue)
+  })
+
+  it('allows empty provider credential variables', () => {
+    const environment = previewEnvironment()
+    environment.OPENAI_API_KEY = '   '
+    environment.HF_TOKEN = ''
+
+    expect(validateDeploymentEnvironment(environment)).toEqual({
+      target: 'preview',
+      siteOrigin: 'https://webchess-preview-abc.vercel.app',
+    })
+  })
+
+  it('reports every forbidden provider credential name without values', () => {
+    const environment = previewEnvironment()
+    environment.OPENAI_API_KEY = 'first-secret-value'
+    environment.CODEX_TOKEN = 'second-secret-value'
+
+    let message = ''
+    try {
+      validateDeploymentEnvironment(environment)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(message).toMatch(/CODEX_TOKEN[\s\S]*OPENAI_API_KEY/u)
+    expect(message).not.toContain(environment.OPENAI_API_KEY)
+    expect(message).not.toContain(environment.CODEX_TOKEN)
+  })
+
+  it.each([
+    ['OPENAI_BASE_URL', 'https://custom-provider.invalid/v1'],
+    ['OPENAI_API_BASE', 'https://custom-provider.invalid/v1'],
+    ['OPENAI_CUSTOM_HEADERS', '{"x-custom":"secret"}'],
+    ['OPENAI_LOG', 'debug'],
+    ['OPENAI_ORG_ID', 'org-do-not-print'],
+    ['OPENAI_PROJECT_ID', 'project-do-not-print'],
+    ['HTTP_PROXY', 'http://proxy.invalid'],
+    ['https_proxy', 'http://proxy.invalid'],
+    ['ALL_PROXY', 'socks5://proxy.invalid'],
+    ['NODE_EXTRA_CA_CERTS', '/private/custom-ca.pem'],
+    ['OPENCLAW_NODE_EXTRA_CA_CERTS_READY', '1'],
+    ['SSL_CERT_FILE', '/private/custom-ca.pem'],
+    ['SSL_CERT_DIR', '/private/custom-ca-directory'],
+    ['OPENCLAW_BUILD_PRIVATE_QA', '1'],
+    ['OPENCLAW_QA_FORCE_RUNTIME', '1'],
+    ['OPENCLAW_DEBUG_PROXY_ENABLED', '1'],
+    ['OPENCLAW_DEBUG_PROXY_REQUIRE', '1'],
+    ['OPENCLAW_DEBUG_PROXY_URL', 'http://proxy.invalid'],
+    ['OPENCLAW_DEBUG_PROXY_DB_PATH', '/private/proxy.sqlite'],
+    ['OPENCLAW_DEBUG_PROXY_BLOB_DIR', '/private/proxy-blobs'],
+    ['NODE_TLS_REJECT_UNAUTHORIZED', '0'],
+  ])(
+    'rejects unsafe provider transport configuration without values: %s',
+    (variableName, unsafeValue) => {
+      const environment = previewEnvironment()
+      environment[variableName] = unsafeValue
+
+      let message = ''
+      try {
+        validateDeploymentEnvironment(environment)
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error)
+      }
+
+      expect(message).toContain(variableName.toUpperCase())
+      expect(message).toContain('custom provider endpoints')
+      expect(message).not.toContain(unsafeValue)
+    },
+  )
+
+  it('allows empty transport variables and an enabled TLS verifier', () => {
+    const environment = previewEnvironment()
+    environment.OPENAI_BASE_URL = '   '
+    environment.HTTP_PROXY = ''
+    environment.NODE_EXTRA_CA_CERTS = ''
+    environment.NODE_TLS_REJECT_UNAUTHORIZED = '1'
+
+    expect(validateDeploymentEnvironment(environment)).toEqual({
+      target: 'preview',
+      siteOrigin: 'https://webchess-preview-abc.vercel.app',
+    })
+  })
+
+  it('rejects sslmode=disable for a remote database without echoing the URL', () => {
+    const environment = previewEnvironment()
+    environment.DATABASE_URL =
+      'postgresql://runtime:do-not-print@runtime.example/webchess?sslmode=disable'
+
+    let message = ''
+    try {
+      validateDeploymentEnvironment(environment)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(message).toContain(
+      'DATABASE_URL must not set sslmode=disable for a non-loopback database',
+    )
+    expect(message).not.toContain(environment.DATABASE_URL)
+  })
+
+  it.each([
+    'postgresql://runtime@localhost/webchess?sslmode=disable',
+    'postgresql://runtime@127.0.0.1/webchess?sslmode=disable',
+    'postgresql://runtime@[::1]/webchess?sslmode=disable',
+  ])('allows sslmode=disable only for a loopback database: %s', (databaseUrl) => {
+    const environment = previewEnvironment()
+    environment.DATABASE_URL = databaseUrl
+
+    expect(validateDeploymentEnvironment(environment)).toEqual({
       target: 'preview',
       siteOrigin: 'https://webchess-preview-abc.vercel.app',
     })

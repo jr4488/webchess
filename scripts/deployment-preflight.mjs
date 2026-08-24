@@ -4,7 +4,6 @@ const PRODUCTION_SITE_ORIGIN = 'https://webchess.anansiportia.com'
 
 const REQUIRED_VALUES = [
   'DATABASE_URL',
-  'OPENAI_API_KEY',
   'CLERK_SECRET_KEY',
   'CLERK_WEBHOOK_SIGNING_SECRET',
   'WEBCHESS_HMAC_SECRET',
@@ -12,20 +11,144 @@ const REQUIRED_VALUES = [
   'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY',
 ]
 
+const EXACT_PROVIDER_CREDENTIAL_NAMES = new Set([
+  'ANTHROPIC_ADMIN_KEY',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_BEARER_TOKEN_BEDROCK',
+  'AWS_CONFIG_FILE',
+  'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+  'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE',
+  'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+  'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+  'AWS_PROFILE',
+  'AWS_SECURITY_TOKEN',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SHARED_CREDENTIALS_FILE',
+  'AWS_SESSION_TOKEN',
+  'AWS_WEB_IDENTITY_TOKEN_FILE',
+  'AZURE_CLIENT_SECRET',
+  'AZURE_SPEECH_KEY',
+  'CODEX_TOKEN',
+  'COPILOT_GITHUB_TOKEN',
+  'FAL_KEY',
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'HF_TOKEN',
+  'HUGGINGFACE_HUB_TOKEN',
+  'MINIMAX_CODE_PLAN_KEY',
+  'OPENAI_ADMIN_KEY',
+  'OPENAI_TOKEN',
+  'OPENAI_WEBHOOK_SECRET',
+  'RUNWAYML_API_SECRET',
+  'SPEECH_KEY',
+  'VOLCENGINE_TTS_TOKEN',
+])
+
+const PROVIDER_CREDENTIAL_PATTERNS = [
+  /(?:^|_)(?:API_(?:KEY|TOKEN)|ACCESS_TOKEN|AUTH_TOKEN|OAUTH_TOKEN)$/u,
+  /(?:^|_)API_KEYS$/u,
+  /(?:^|_)API_KEY_.*$/u,
+  /^OPENCLAW_LIVE_.+_KEYS?$/u,
+]
+
+const EXACT_UNSAFE_PROVIDER_TRANSPORT_NAMES = new Set([
+  'ALL_PROXY',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NODE_EXTRA_CA_CERTS',
+  'OPENAI_API_BASE',
+  'OPENAI_BASE_URL',
+  'OPENAI_CUSTOM_HEADERS',
+  'OPENAI_LOG',
+  'OPENAI_ORG_ID',
+  'OPENAI_PROJECT_ID',
+  'OPENCLAW_BUILD_PRIVATE_QA',
+  'OPENCLAW_DEBUG_PROXY_BLOB_DIR',
+  'OPENCLAW_DEBUG_PROXY_DB_PATH',
+  'OPENCLAW_DEBUG_PROXY_ENABLED',
+  'OPENCLAW_DEBUG_PROXY_REQUIRE',
+  'OPENCLAW_DEBUG_PROXY_URL',
+  'OPENCLAW_NODE_EXTRA_CA_CERTS_READY',
+  'OPENCLAW_QA_FORCE_RUNTIME',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE',
+])
+
+const LOOPBACK_DATABASE_HOSTS = new Set([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+])
+
 const EXPECTED_VERCEL_PROJECT_ID_VARIABLE =
   'WEBCHESS_EXPECTED_VERCEL_PROJECT_ID'
 
 const REQUIRED_CLERK_ROUTES = {
   NEXT_PUBLIC_CLERK_SIGN_IN_URL: '/sign-in',
   NEXT_PUBLIC_CLERK_SIGN_UP_URL: '/sign-up',
-  NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL: '/play',
-  NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL: '/play',
+  NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL: '/account',
+  NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL: '/account',
 }
 
 const GIT_COMMIT_PATTERN = /^[a-f0-9]{40}$/i
 
 const nonBlank = (value) =>
   typeof value === 'string' && value.trim().length > 0
+
+function providerCredentialEnvironmentNames(environment) {
+  return [...new Set(Object.entries(environment)
+    .filter(([, value]) => nonBlank(value))
+    .map(([rawName]) => rawName.trim().toUpperCase())
+    .filter((name) =>
+      PROVIDER_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(name)) ||
+      EXACT_PROVIDER_CREDENTIAL_NAMES.has(name),
+    ))]
+    .sort()
+}
+
+function unsafeProviderTransportEnvironmentNames(environment) {
+  return [...new Set(Object.entries(environment)
+    .filter(([, value]) => nonBlank(value))
+    .filter(([rawName, rawValue]) => {
+      const name = rawName.trim().toUpperCase()
+      return EXACT_UNSAFE_PROVIDER_TRANSPORT_NAMES.has(name) ||
+        (
+          name === 'NODE_TLS_REJECT_UNAUTHORIZED' &&
+          rawValue.trim() === '0'
+        )
+    })
+    .map(([rawName]) => rawName.trim().toUpperCase()))]
+    .sort()
+}
+
+export function assertSafeDatabaseTlsMode(
+  connectionString,
+  variableName = 'DATABASE_URL',
+) {
+  if (!nonBlank(connectionString)) return
+
+  let parsed
+  try {
+    parsed = new URL(connectionString)
+  } catch {
+    return
+  }
+
+  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) return
+
+  const disablesTls = [...parsed.searchParams.entries()].some(
+    ([rawName, rawValue]) =>
+      rawName.toLowerCase() === 'sslmode' &&
+      rawValue.trim().toLowerCase() === 'disable',
+  )
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/gu, '')
+  if (disablesTls && !LOOPBACK_DATABASE_HOSTS.has(hostname)) {
+    throw new Error(
+      `${variableName} must not set sslmode=disable for a non-loopback database.`,
+    )
+  }
+}
 
 export const hasVercelMarker = (environment) =>
   [
@@ -160,10 +283,32 @@ export function validateDeploymentEnvironment(environment = process.env) {
       'MIGRATION_DATABASE_URL must not be configured in a Vercel deployment',
     )
   }
+  for (const variableName of providerCredentialEnvironmentNames(environment)) {
+    errors.push(
+      `${variableName} must not be configured; WebChess accepts only OpenAI account OAuth through OpenClaw`,
+    )
+  }
+  for (
+    const variableName of
+      unsafeProviderTransportEnvironmentNames(environment)
+  ) {
+    errors.push(
+      `${variableName} must not be configured; custom provider endpoints, proxies, TLS bypasses, and custom CA settings are forbidden`,
+    )
+  }
   for (const variableName of REQUIRED_VALUES) {
     if (!nonBlank(environment[variableName])) {
       errors.push(`${variableName} is required`)
     }
+  }
+  try {
+    assertSafeDatabaseTlsMode(environment.DATABASE_URL)
+  } catch (error) {
+    errors.push(
+      error instanceof Error
+        ? error.message
+        : 'DATABASE_URL uses an unsafe TLS mode',
+    )
   }
 
   let target = null

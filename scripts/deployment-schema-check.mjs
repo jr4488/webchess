@@ -7,7 +7,10 @@ import {
   checkCanonicalMigrationsReadOnly,
   loadCanonicalMigrations,
 } from './deployment-database.mjs'
-import { hasVercelMarker } from './deployment-preflight.mjs'
+import {
+  assertSafeDatabaseTlsMode,
+  hasVercelMarker,
+} from './deployment-preflight.mjs'
 
 function nonBlank(value) {
   return typeof value === 'string' && value.trim().length > 0
@@ -25,6 +28,7 @@ export function runtimeDatabaseUrl(environment = process.env) {
       'DATABASE_URL must not contain surrounding whitespace.',
     )
   }
+  assertSafeDatabaseTlsMode(connectionString)
   return connectionString
 }
 
@@ -94,6 +98,9 @@ export function schemaCheckFailureMessage(error) {
       ) ||
       error.message.startsWith(
         'DATABASE_URL must not contain surrounding',
+      ) ||
+      error.message.startsWith(
+        'DATABASE_URL must not set sslmode=disable',
       )
     )
   ) {

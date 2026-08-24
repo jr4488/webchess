@@ -64,6 +64,34 @@ describe('migration-owner deployment command', () => {
     ).toBe('postgresql://migration-owner.example/webchess')
   })
 
+  it('rejects sslmode=disable for a remote owner database without echoing it', () => {
+    const databaseUrl =
+      'postgresql://owner:do-not-print@owner.example/webchess?sslmode=disable'
+
+    let message = ''
+    try {
+      migrationOwnerDatabaseUrl({ MIGRATION_DATABASE_URL: databaseUrl })
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(message).toContain(
+      'MIGRATION_DATABASE_URL must not set sslmode=disable for a non-loopback database',
+    )
+    expect(message).not.toContain(databaseUrl)
+    expect(migrationFailureMessage(new Error(message))).toBe(message)
+  })
+
+  it.each([
+    'postgresql://owner@localhost/webchess?sslmode=disable',
+    'postgresql://owner@127.0.0.1/webchess?sslmode=disable',
+    'postgresql://owner@[::1]/webchess?sslmode=disable',
+  ])('allows sslmode=disable for a loopback owner database: %s', (databaseUrl) => {
+    expect(
+      migrationOwnerDatabaseUrl({ MIGRATION_DATABASE_URL: databaseUrl }),
+    ).toBe(databaseUrl)
+  })
+
   it('applies canonical migrations through only the owner connection', async () => {
     const client = new FakeMigrationClient()
     const order = []
