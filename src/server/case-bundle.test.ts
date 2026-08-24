@@ -29,6 +29,7 @@ const PRIVATE_SENTINEL = 'PRIVATE_CASE_TEXT_MUST_BE_REDACTED'
 const parts = makeProblemParts(PRIVATE_SENTINEL)
 
 let cachedTerminal: ReplayState | null = null
+let cachedKingCaptureTerminal: ReplayState | null = null
 
 function terminalState(): ReplayState {
   if (cachedTerminal) return cachedTerminal
@@ -52,6 +53,32 @@ function terminalState(): ReplayState {
     }, parts).state
   }
   cachedTerminal = state
+  return state
+}
+
+function kingCaptureTerminalState(): ReplayState {
+  if (cachedKingCaptureTerminal) return cachedKingCaptureTerminal
+  let state = createReplayState()
+  const commands = [
+    ['white-knight-1', 5, 2],
+    ['black-pawn-1', 3, 0],
+    ['white-knight-1', 3, 3],
+    ['black-pawn-2', 3, 1],
+    ['white-knight-1', 2, 5],
+    ['black-pawn-3', 3, 2],
+    ['white-knight-1', 0, 4],
+  ] as const
+  for (const [pieceId, ring, sector] of commands) {
+    state = acceptMoveCommand(state, {
+      expectedPly: state.completedPlies + 1,
+      pieceId,
+      to: { ring, sector },
+    }, parts).state
+  }
+  if (state.outcome?.reason !== 'king-captured' || !state.outcome.terminalCapture) {
+    throw new Error('The king-capture case fixture did not preserve its terminal capture.')
+  }
+  cachedKingCaptureTerminal = state
   return state
 }
 
@@ -1249,6 +1276,29 @@ describe('webchess-case-bundle/1', () => {
     expect(result.ok).toBe(false)
     expect(result.errors).toContain(
       'A terminal replay is missing its stored terminal summary.',
+    )
+  })
+
+  it('verifies a private king-capture outcome and rejects terminal-capture tampering', () => {
+    const state = kingCaptureTerminalState()
+    const created = bundle('private-full-v1', {
+      game: gameRow(state),
+      events: eventRows(state.events),
+      lifecycleRun: lifecycleRow(state),
+    })
+
+    expect(verifyCaseBundle(created).errors).toEqual([])
+
+    const tampered = structuredClone(created) as unknown as MutableBundle
+    const game = tampered.data.game as Record<string, CanonicalJson>
+    const record = game.record as Record<string, CanonicalJson>
+    const outcome = record.outcome as Record<string, CanonicalJson>
+    const terminalCapture = outcome.terminalCapture as Record<string, CanonicalJson>
+    terminalCapture.turn = 8
+    rebuildManifest(tampered)
+
+    expect(verifyCaseBundle(tampered).errors).toContain(
+      'The private game outcome does not match the replayed terminal outcome.',
     )
   })
 

@@ -3504,9 +3504,9 @@ export function verifyCaseBundle(
     }
     if (
       Object.hasOwn(game, 'outcome') &&
-      !sameCanonicalJson(game.outcome, summary)
+      !sameCanonicalJson(game.outcome, state.outcome)
     ) {
-      errors.push('The private game outcome does not match the terminal summary.')
+      errors.push('The private game outcome does not match the replayed terminal outcome.')
     }
     if (errors.length === replayErrorCount) {
       verified.push(

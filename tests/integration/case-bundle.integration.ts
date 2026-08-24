@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getLegalMoves } from '../../src/lib/game'
 import { CURRENT_LIFECYCLE_VERSIONS } from '../../src/lib/lifecycle'
 import {
   RESEARCH_CONSENT_VERSION,
@@ -505,26 +504,32 @@ describe('single-lifecycle case export against PostgreSQL', () => {
       expectedRevision: game.revision,
       ...context('74000000-0000-4000-8000-000000000002'),
     })
-    let moveIndex = 0
-    while (!stateOf(game).outcome) {
-      const state = stateOf(game)
-      const piece = state.pieces.find((candidate) =>
-        candidate.side === state.turn && getLegalMoves(candidate, state.pieces).length > 0)
-      if (!piece) throw new Error('Integration case has no legal piece.')
-      const to = getLegalMoves(piece, state.pieces)[0]
-      if (!to) throw new Error('Integration case has no legal destination.')
+    const kingCaptureMoves = [
+      ['white-knight-1', 5, 2],
+      ['black-pawn-1', 3, 0],
+      ['white-knight-1', 3, 3],
+      ['black-pawn-2', 3, 1],
+      ['white-knight-1', 2, 5],
+      ['black-pawn-3', 3, 2],
+      ['white-knight-1', 0, 4],
+    ] as const
+    for (const [moveIndex, [pieceId, ring, sector]] of kingCaptureMoves.entries()) {
       game = await api.move({
         ownerId: OWNER,
         gameId: game.id,
         expectedRevision: game.revision,
-        pieceId: piece.id,
-        to,
+        pieceId,
+        to: { ring, sector },
         ...context(
           `74000000-0000-4000-8000-${String(100 + moveIndex).padStart(12, '0')}`,
         ),
       })
-      moveIndex += 1
     }
+    expect(stateOf(game).outcome).toMatchObject({
+      reason: 'king-captured',
+      completedTurn: kingCaptureMoves.length,
+      terminalCapture: { captured: { kind: 'king' } },
+    })
     await persistDirectPageFetchFailure(game)
     await persistCompletedLifecycle(game.id)
     const providerCallsBeforeExport = vi.mocked(divisionGenerator).mock.calls.length
