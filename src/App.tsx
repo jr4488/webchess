@@ -389,7 +389,12 @@ function WebChessExperience({
     const hasCompletedDivision = division?.parts.length === 64
     const animateMapping = Boolean(options.animateMapping && hasCompletedDivision)
 
-    invalidateEngineRequest(true)
+    // The request has already settled before a saved ply reaches this path.
+    // Clear stale generation state without terminating the idle worker: rapid
+    // autoplay otherwise rebuilds one module worker per ply until the renderer
+    // exhausts browser resources. Explicit pause/reset/unmount paths still
+    // retire the worker immediately.
+    invalidateEngineRequest()
     if (!options.preserveAutoPlay) setAutoPlaying(false)
     setSelectedPieceId(null)
     setGame(nextGame)

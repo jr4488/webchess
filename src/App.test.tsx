@@ -1280,7 +1280,20 @@ describe('durable WebChess client flow', () => {
     expect(options).toEqual({ idempotencyKey: expect.any(String) })
     expect(document.querySelector('.turn-header .eyebrow')).toHaveTextContent('Move 02')
 
+    // A saved ply leaves the engine request idle. Keep the same worker alive
+    // for the next turn instead of terminating and rebuilding it every 320 ms.
+    expect(engineHarness.reset).not.toHaveBeenCalled()
+
+    await act(() => vi.advanceTimersByTimeAsync(321))
+    await flushAsyncWork()
+
+    expect(engineHarness.chooseMove).toHaveBeenCalledTimes(2)
+    expect(apiHarness.submitMove).toHaveBeenCalledTimes(2)
+    expect(engineHarness.reset).not.toHaveBeenCalled()
+    expect(document.querySelector('.turn-header .eyebrow')).toHaveTextContent('Move 03')
+
     fireEvent.click(screen.getByRole('button', { name: /pause auto-play/i }))
+    expect(engineHarness.reset).toHaveBeenCalledOnce()
   })
 
   it('keeps reset disabled while a move compare-and-swap is pending', async () => {
