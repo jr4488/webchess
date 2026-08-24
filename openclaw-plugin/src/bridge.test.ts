@@ -31,6 +31,54 @@ const AGENT_WORKSPACE_DIR = '/openclaw/workspaces/researcher'
 const OPENAI_ACCOUNT_MODEL_BASE_URL =
   'https://chatgpt.com/backend-api/codex'
 const TEST_ENVIRONMENT: NodeJS.ProcessEnv = { NODE_ENV: 'test' }
+const ADDITIONAL_CODEX_PROXY_CA_ENVIRONMENT_NAMES = [
+  'ALL_PROXY',
+  'all_proxy',
+  'BUNDLE_HTTP_PROXY',
+  'BUNDLE_HTTPS_PROXY',
+  'BUNDLE_NO_PROXY',
+  'BUNDLE_SSL_CA_CERT',
+  'CODEX_NETWORK_ALLOW_LOCAL_BINDING',
+  'CODEX_NETWORK_PROXY_ACTIVE',
+  'CODEX_NETWORK_PROXY_ATTRIBUTION',
+  'CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS',
+  'CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE',
+  'CURL_CA_BUNDLE',
+  'DOCKER_HTTP_PROXY',
+  'DOCKER_HTTPS_PROXY',
+  'ELECTRON_GET_USE_PROXY',
+  'FTP_PROXY',
+  'ftp_proxy',
+  'GIT_SSL_CAINFO',
+  'HTTP_PROXY',
+  'http_proxy',
+  'HTTPS_PROXY',
+  'https_proxy',
+  'NODE_USE_BUNDLED_CA',
+  'NODE_USE_ENV_PROXY',
+  'NODE_USE_OPENSSL_CA',
+  'NODE_USE_SYSTEM_CA',
+  'NO_PROXY',
+  'no_proxy',
+  'NPM_CONFIG_CAFILE',
+  'NPM_CONFIG_HTTP_PROXY',
+  'NPM_CONFIG_HTTPS_PROXY',
+  'NPM_CONFIG_NOPROXY',
+  'NPM_CONFIG_PROXY',
+  'npm_config_cafile',
+  'npm_config_http_proxy',
+  'npm_config_https_proxy',
+  'npm_config_noproxy',
+  'npm_config_proxy',
+  'PIP_PROXY',
+  'REQUESTS_CA_BUNDLE',
+  'WSS_PROXY',
+  'wss_proxy',
+  'YARN_HTTP_PROXY',
+  'YARN_NO_PROXY',
+  '__CODEX_SNAPSHOT_OVERRIDE',
+  '__CODEX_SNAPSHOT_PROXY_OVERRIDE',
+] as const
 
 function digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
@@ -998,13 +1046,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     ['OPENAI_ORG_ID', 'private-org'],
     ['OPENAI_PROJECT_ID', 'private-project'],
     ['OPENAI_LOG', 'private-log-level'],
-    ['HTTP_PROXY', 'http://private-proxy.invalid'],
-    ['HTTPS_PROXY', 'http://private-proxy.invalid'],
-    ['ALL_PROXY', 'socks5://private-proxy.invalid'],
     ['CODEX_CA_CERTIFICATE', '/private/codex-ca.pem'],
-    ['http_proxy', 'http://private-proxy.invalid'],
-    ['https_proxy', 'http://private-proxy.invalid'],
-    ['all_proxy', 'socks5://private-proxy.invalid'],
     ['NODE_EXTRA_CA_CERTS', '/private/ca.pem'],
     ['NODE_TLS_REJECT_UNAUTHORIZED', '0'],
     ['SSL_CERT_FILE', '/private/ca.pem'],
@@ -1019,20 +1061,30 @@ describe('OpenClaw plugin runtime bridge', () => {
     ['OPENCLAW_ENABLE_PRIVATE_QA_CLI', '1'],
     ['OPENCLAW_BUILD_PRIVATE_QA', '1'],
     ['OPENCLAW_QA_FORCE_RUNTIME', 'codex'],
-  ])('rejects an ambient provider transport override: %s', async (
-    name,
-    value,
-  ) => {
-    const api = fakeApi()
+    ...ADDITIONAL_CODEX_PROXY_CA_ENVIRONMENT_NAMES.map((name) => [
+      name,
+      'private-transport-override',
+    ] as const),
+    ['CODEX_NETWORK_PROXY_FUTURE_OVERRIDE', '1'],
+    ['NoDe_UsE_EnV_PrOxY', '1'],
+  ] as ReadonlyArray<readonly [string, string]>)(
+    'rejects an ambient provider transport override: %s',
+    async (name, value) => {
+      const api = fakeApi()
 
-    const failure = await captureStartFailure(api, {
-      environment: { NODE_ENV: 'test', [name]: value },
-    })
+      const failure = await captureStartFailure(api, {
+        environment: { NODE_ENV: 'test', [name]: value },
+      })
 
-    expect(failure.message).toMatch(/canonical OpenAI account endpoint/u)
-    expect(failure.message).not.toContain(value)
-    expect(api.runtime.webSearch.listProviders).not.toHaveBeenCalled()
-  })
+      if (name === 'CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS') {
+        expect(failure.message).toMatch(/refuses provider credential/u)
+      } else {
+        expect(failure.message).toMatch(/canonical OpenAI account endpoint/u)
+      }
+      expect(failure.message).not.toContain(value)
+      expect(api.runtime.webSearch.listProviders).not.toHaveBeenCalled()
+    },
+  )
 
   it('accepts blank provider variables and enabled TLS verification', async () => {
     const bridge = await start(fakeApi(), {
@@ -1095,6 +1147,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const originalCurrent = api.runtime.config.current
     const bridge = await start(api, {
       environment: {
+        CODEX_NETWORK_PROXY_FUTURE_OVERRIDE: '',
         DATABASE_URL: 'postgresql://local-only',
         NODE_ENV: 'test',
         SSH_AUTH_SOCK: '/run/user/test/ssh-agent',
@@ -1108,6 +1161,7 @@ describe('OpenClaw plugin runtime bridge', () => {
       expect(Object.isFrozen(guarded)).toBe(true)
       expect(Object.isFrozen(clearEnv)).toBe(true)
       expect(clearEnv).toEqual(expect.arrayContaining([
+        ...ADDITIONAL_CODEX_PROXY_CA_ENVIRONMENT_NAMES,
         'AMQP_URL',
         'AZURE_AUTH_LOCATION',
         'CLAUDE_AI_SESSION_KEY',
@@ -1117,6 +1171,7 @@ describe('OpenClaw plugin runtime bridge', () => {
         'CLAUDE_WEB_SESSION_KEY',
         'CODEX_API_KEY',
         'CODEX_CA_CERTIFICATE',
+        'CODEX_NETWORK_PROXY_FUTURE_OVERRIDE',
         'DATABASE_URL',
         'DISCORD_BOT_TOKEN',
         'LINE_CHANNEL_ACCESS_TOKEN',

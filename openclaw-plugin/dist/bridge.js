@@ -39,8 +39,14 @@ const LINUX_SYSTEM_CA_PATHS = [
     '/etc/ssl/ca-bundle.pem',
 ];
 const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
+    'ALL_PROXY',
+    'all_proxy',
     'AMQP_URL',
     'AZURE_AUTH_LOCATION',
+    'BUNDLE_HTTP_PROXY',
+    'BUNDLE_HTTPS_PROXY',
+    'BUNDLE_NO_PROXY',
+    'BUNDLE_SSL_CA_CERT',
     'CLAUDE_AI_SESSION_KEY',
     'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
     'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
@@ -50,18 +56,50 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
     'CLERK_WEBHOOK_SIGNING_SECRET',
     'CODEX_API_KEY',
     'CODEX_CA_CERTIFICATE',
+    'CODEX_NETWORK_ALLOW_LOCAL_BINDING',
+    'CODEX_NETWORK_PROXY_ACTIVE',
+    'CODEX_NETWORK_PROXY_ATTRIBUTION',
+    'CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS',
+    'CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE',
+    'CURL_CA_BUNDLE',
     'DATABASE_URL',
     'DIRECT_URL',
     'DISCORD_BOT_TOKEN',
+    'DOCKER_HTTP_PROXY',
+    'DOCKER_HTTPS_PROXY',
+    'ELECTRON_GET_USE_PROXY',
+    'FTP_PROXY',
+    'ftp_proxy',
+    'GIT_SSL_CAINFO',
     'GIT_SSH_COMMAND',
     'GIT_SSH_VARIANT',
+    'HTTP_PROXY',
+    'http_proxy',
+    'HTTPS_PROXY',
+    'https_proxy',
     'LINE_CHANNEL_ACCESS_TOKEN',
     'KUBECONFIG',
     'MIGRATION_DATABASE_URL',
     'MSTEAMS_CERTIFICATE_PATH',
     'MONGODB_URI',
     'NGROK_AUTHTOKEN',
+    'NODE_USE_BUNDLED_CA',
+    'NODE_USE_ENV_PROXY',
+    'NODE_USE_OPENSSL_CA',
+    'NODE_USE_SYSTEM_CA',
+    'NO_PROXY',
+    'no_proxy',
     'NOSTR_PRIVATE_KEY',
+    'NPM_CONFIG_CAFILE',
+    'NPM_CONFIG_HTTP_PROXY',
+    'NPM_CONFIG_HTTPS_PROXY',
+    'NPM_CONFIG_NOPROXY',
+    'NPM_CONFIG_PROXY',
+    'npm_config_cafile',
+    'npm_config_http_proxy',
+    'npm_config_https_proxy',
+    'npm_config_noproxy',
+    'npm_config_proxy',
     'OPENAI_API_KEY',
     'OPENCLAW_APNS_PRIVATE_KEY',
     'OPENCLAW_APNS_PRIVATE_KEY_P8',
@@ -86,7 +124,9 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
     'POSTGRES_PASSWORD',
     'POSTGRES_PRISMA_URL',
     'POSTGRES_URL',
+    'PIP_PROXY',
     'REDIS_URL',
+    'REQUESTS_CA_BUNDLE',
     'SSH_AGENT_PID',
     'SSH_AUTH_SOCK',
     'SSH_CLIENT',
@@ -99,6 +139,12 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
     'WEBCHESS_OPENCLAW_BRIDGE_TOKEN',
     'WEBCHESS_OPENCLAW_BRIDGE_URL',
     'WEBCHESS_OPENCLAW_DATABASE_URL',
+    'WSS_PROXY',
+    'wss_proxy',
+    'YARN_HTTP_PROXY',
+    'YARN_NO_PROXY',
+    '__CODEX_SNAPSHOT_OVERRIDE',
+    '__CODEX_SNAPSHOT_PROXY_OVERRIDE',
 ];
 const PROVIDER_CREDENTIAL_ENVIRONMENT_ALLOWLIST = new Set([
     // These reviewed names carry public metadata or WebChess-local service/IPC
@@ -504,9 +550,21 @@ function hasUnsafeProviderTransportEnvironment(environment) {
     const autoCaAccepted = hasAttestedOpenClawSystemCa(environment);
     const exactNames = new Set([
         'ALL_PROXY',
+        'BUNDLE_HTTP_PROXY',
+        'BUNDLE_HTTPS_PROXY',
+        'BUNDLE_NO_PROXY',
+        'BUNDLE_SSL_CA_CERT',
         'BUN_OPTIONS',
         'CODEX_CA_CERTIFICATE',
+        'CODEX_NETWORK_ALLOW_LOCAL_BINDING',
+        'CODEX_NETWORK_PROXY_ACTIVE',
+        'CURL_CA_BUNDLE',
+        'DOCKER_HTTP_PROXY',
+        'DOCKER_HTTPS_PROXY',
         'DYLD_INSERT_LIBRARIES',
+        'ELECTRON_GET_USE_PROXY',
+        'FTP_PROXY',
+        'GIT_SSL_CAINFO',
         'HTTP_PROXY',
         'HTTPS_PROXY',
         'LD_PRELOAD',
@@ -514,6 +572,16 @@ function hasUnsafeProviderTransportEnvironment(environment) {
         'NODE_DEBUG_NATIVE',
         'NODE_OPTIONS',
         'NODE_PATH',
+        'NODE_USE_BUNDLED_CA',
+        'NODE_USE_ENV_PROXY',
+        'NODE_USE_OPENSSL_CA',
+        'NODE_USE_SYSTEM_CA',
+        'NO_PROXY',
+        'NPM_CONFIG_CAFILE',
+        'NPM_CONFIG_HTTP_PROXY',
+        'NPM_CONFIG_HTTPS_PROXY',
+        'NPM_CONFIG_NOPROXY',
+        'NPM_CONFIG_PROXY',
         'OPENAI_API_BASE',
         'OPENAI_BASE_URL',
         'OPENAI_CUSTOM_HEADERS',
@@ -529,9 +597,16 @@ function hasUnsafeProviderTransportEnvironment(environment) {
         'OPENCLAW_ENABLE_PRIVATE_QA_CLI',
         'OPENCLAW_QA_FORCE_RUNTIME',
         'OPENSSL_CONF',
+        'PIP_PROXY',
+        'REQUESTS_CA_BUNDLE',
         'SSL_CERT_DIR',
         'SSL_CERT_FILE',
         'SSLKEYLOGFILE',
+        'WSS_PROXY',
+        'YARN_HTTP_PROXY',
+        'YARN_NO_PROXY',
+        '__CODEX_SNAPSHOT_OVERRIDE',
+        '__CODEX_SNAPSHOT_PROXY_OVERRIDE',
     ]);
     return Object.entries(environment).some(([rawName, rawValue]) => {
         if (!rawValue?.trim())
@@ -541,6 +616,7 @@ function hasUnsafeProviderTransportEnvironment(environment) {
             return !autoCaAccepted;
         }
         return exactNames.has(name) ||
+            name.startsWith('CODEX_NETWORK_PROXY_') ||
             name.startsWith('OPENCLAW_DEBUG_PROXY_') ||
             name.startsWith('OPENCLAW_QA_') ||
             (name === 'NODE_TLS_REJECT_UNAUTHORIZED' && rawValue.trim() === '0');
@@ -576,14 +652,17 @@ function snapshotRuntimeConfig(config) {
 function codexAppServerClearEnv(environment) {
     const names = new Set(CODEX_APP_SERVER_ALWAYS_CLEAR_ENV);
     for (const rawName of Object.keys(environment)) {
-        const name = rawName.trim().toUpperCase();
+        const exactName = rawName.trim();
+        const name = exactName.toUpperCase();
         if (!name || name === 'CODEX_HOME')
             continue;
         if (isProviderCredentialEnvironmentName(name) ||
+            name.startsWith('CODEX_NETWORK_PROXY_') ||
             /^(?:PG|POSTGRES|SSH_)/u.test(name) ||
             /(?:^|_)(?:BRIDGE|DATABASE|HMAC)(?:_|$)/u.test(name) ||
             /(?:^|_)(?:PASSWORD|PRIVATE_KEY|SECRET)(?:_|$)/u.test(name)) {
             names.add(name);
+            names.add(exactName);
         }
     }
     return [...names].sort();
