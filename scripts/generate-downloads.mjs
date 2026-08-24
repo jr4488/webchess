@@ -492,13 +492,13 @@ function markdownImageReferences(markdown) {
   return [...references]
 }
 
-function localImagePath(href) {
+function localImagePath(href, sourcePath) {
   if (!href || /^(?:data:|https?:|#)/iu.test(href)) {
     return null
   }
 
   const cleanHref = href.split(/[?#]/u, 1)[0]
-  const absolutePath = resolve(dirname(sourcePaths.whitePaper), decodeURI(cleanHref))
+  const absolutePath = resolve(dirname(sourcePath), decodeURI(cleanHref))
   const repositoryRelativePath = relative(repositoryRoot, absolutePath)
   if (
     !repositoryRelativePath ||
@@ -560,11 +560,11 @@ function jpegDimensions(buffer) {
   throw new Error('Could not read JPEG dimensions')
 }
 
-async function loadWhitePaperImages(markdown) {
+async function loadWhitePaperImages(markdown, sourcePath) {
   const images = new Map()
 
   for (const href of markdownImageReferences(markdown)) {
-    const path = localImagePath(href)
+    const path = localImagePath(href, sourcePath)
     if (!path) {
       continue
     }
@@ -1156,8 +1156,14 @@ async function main() {
   }
 
   const [candidateImages, historicalImages] = await Promise.all([
-    loadWhitePaperImages(candidateWhitePaper),
-    loadWhitePaperImages(historicalWhitePaper),
+    loadWhitePaperImages(
+      candidateWhitePaper,
+      sourcePaths.candidateWhitePaper,
+    ),
+    loadWhitePaperImages(
+      historicalWhitePaper,
+      sourcePaths.historicalWhitePaper,
+    ),
   ])
   const candidateWhitePaperHtml = renderWhitePaperHtml(
     candidateWhitePaper,
