@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import type { CSSProperties, ElementType } from 'react'
+import type { CSSProperties } from 'react'
+import type { LucideIcon } from 'lucide-react'
 import {
   Blend,
   Bot,
@@ -45,7 +46,7 @@ type ProcessStyle = CSSProperties & {
   '--progress'?: number
 }
 
-const MODE_ICONS: Record<ProcessGraphicMode, ElementType> = {
+const MODE_ICONS: Record<ProcessGraphicMode, LucideIcon> = {
   analyzing: BrainCircuit,
   'facets-received': Sparkles,
   'facets-permuted': Shuffle,

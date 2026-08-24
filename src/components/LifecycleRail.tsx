@@ -8,8 +8,9 @@ import {
   Target,
   Webhook,
 } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import { useEffect, useRef } from 'react'
-import type { CSSProperties, ElementType } from 'react'
+import type { CSSProperties } from 'react'
 
 import type {
   LifecycleAggregate,
@@ -24,7 +25,7 @@ interface LifecycleStageDefinition {
   key: string
   label: string
   detail: string
-  icon: ElementType
+  icon: LucideIcon
 }
 
 const STAGES: readonly LifecycleStageDefinition[] = [

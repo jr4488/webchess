@@ -452,6 +452,10 @@ export function LifecycleStage({
       currentLabel: currentPortiaCandidate
         ? `${currentPortiaCandidate.facet.title}: ${currentPortiaCandidate.facet.focus}`
         : null,
+      currentIndex: currentPortiaCandidate
+        ? lifecycle.portiaProgress.completedCandidateIds.length + 1
+        : lifecycle.portiaProgress.completedCandidateIds.length,
+      totalCount: lifecycle.survivors.length,
       reviewedCellKeys: portiaReviewedCellKeys,
       announcement: lifecycle.state === 'portia_unavailable'
         ? `Portia could not complete prompt validation after ${lifecycle.portiaFailedAttemptCount} provider attempts. ${lifecycle.portiaProgress.completedCandidateIds.length} of ${lifecycle.survivors.length} board signals have saved reviews; no answer was generated.`
@@ -506,6 +510,7 @@ export function LifecycleStage({
               stage="reading"
               capturedCellKeys={captureKeys}
               highlightedCellKeys={EMPTY_SET}
+              latestCapture={captures.at(-1) ?? null}
               portiaActivity={portiaActivity}
               lastMove={lastMove}
               revealParts

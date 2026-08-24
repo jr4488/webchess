@@ -267,6 +267,7 @@ export function ReadingStage({
             stage="reading"
             capturedCellKeys={captureKeys}
             highlightedCellKeys={strongestKey}
+            latestCapture={captures.at(-1) ?? null}
             lastMove={lastMove}
             revealParts
             disabled

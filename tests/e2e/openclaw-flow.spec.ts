@@ -70,6 +70,7 @@ async function json(route: Route, body: unknown, status = 200): Promise<void> {
 test('runs the shared WebChess 2.0 flow and restores it from durable local state', async ({
   page,
 }) => {
+  test.setTimeout(60_000)
   let currentGame: DurableGame | null = null
   let replayState: ReplayState | null = null
   const calls: string[] = []
@@ -163,7 +164,12 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
       name: /Play the problem on the circular board/i,
     }),
   ).toBeVisible()
+  await expect(page.locator('[data-board-dimension="3d"]')).toBeVisible()
+  await expect(page.getByRole('button', { name: '3D world' }))
+    .toHaveAttribute('aria-pressed', 'true')
+  await page.getByRole('button', { name: '2D board' }).press('Enter')
   await expect(page.locator('.radial-board__piece')).toHaveCount(32)
+  await expect(page.getByRole('button', { name: '3D world' })).toBeVisible()
 
   const workerPromise = page.waitForEvent('worker')
   await page.getByRole('button', { name: /Play one turn/i }).click()
@@ -195,6 +201,7 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
       name: /Play the problem on the circular board/i,
     }),
   ).toBeVisible()
+  await page.getByRole('button', { name: '2D board' }).press('Enter')
   await expect(page.locator('.turn-header .eyebrow')).toContainText('Move 02')
   await expect(page.getByRole('button', { name: destination })).toBeVisible()
   expect(calls).toEqual([

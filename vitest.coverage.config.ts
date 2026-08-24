@@ -73,6 +73,9 @@ export default defineConfig({
         'src/components/site/AmbientWeb.tsx',
         'src/components/site/EpisodePlayer.tsx',
         'src/components/site/PublicEffects.tsx',
+        // WebGL scene behavior is exercised in real Chromium; pure radial
+        // geometry and motion remain covered by board3d unit tests.
+        'src/components/board3d/WebChessBoard3D.tsx',
       ],
       reporter: ['text', 'html', 'json'],
       reportsDirectory: 'coverage',

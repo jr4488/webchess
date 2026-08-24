@@ -1,10 +1,11 @@
 'use client'
 
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, KeyboardEvent } from 'react'
+import dynamic from 'next/dynamic'
+import { Component, useEffect, useId, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
 
 import { cellKey } from '../lib/board'
-import type { CellCoord, LastMove, Piece, ProblemPart, Side, Stage } from '../types'
+import type { CaptureRecord, CellCoord, LastMove, Piece, ProblemPart, Side, Stage } from '../types'
 
 export interface RadialBoardProps {
   parts: readonly ProblemPart[]
@@ -17,10 +18,13 @@ export interface RadialBoardProps {
   legalMoves?: readonly CellCoord[]
   capturedCellKeys?: ReadonlySet<string> | readonly string[]
   highlightedCellKeys?: ReadonlySet<string> | readonly string[]
+  latestCapture?: CaptureRecord | null
   portiaActivity?: {
     status: 'waiting' | 'running' | 'summarizing' | 'complete' | 'unavailable'
     currentCell: CellCoord | null
     currentLabel: string | null
+    currentIndex?: number
+    totalCount?: number
     reviewedCellKeys: ReadonlySet<string> | readonly string[]
     announcement: string
   }
@@ -29,6 +33,58 @@ export interface RadialBoardProps {
   onPieceSelect?: (pieceId: string) => void
   onCellSelect?: (cell: CellCoord) => void
   className?: string
+}
+
+type WebChessBoard3DProps = RadialBoardProps & {
+  reducedMotion: boolean
+  onContextLost: () => void
+}
+
+const WebChessBoard3D = dynamic<WebChessBoard3DProps>(
+  () => import('./board3d/WebChessBoard3D').then((module) => module.WebChessBoard3D),
+  {
+    ssr: false,
+    loading: () => (
+      <div
+        className="radial-board radial-board--3d radial-board--3d-loading"
+        aria-label="Preparing the three-dimensional WebChess board"
+      >
+        <div className="radial-board-3d__loading-web" aria-hidden="true"><i /><i /><i /></div>
+        <p>Weaving the three-dimensional board…</p>
+      </div>
+    ),
+  },
+)
+
+class Board3DErrorBoundary extends Component<{
+  children: ReactNode
+  onError: () => void
+}, { failed: boolean }> {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  componentDidCatch() {
+    this.props.onError()
+  }
+
+  render() {
+    return this.state.failed ? null : this.props.children
+  }
+}
+
+function supportsWebGL() {
+  try {
+    const canvas = document.createElement('canvas')
+    return Boolean(
+      window.WebGLRenderingContext
+      && (canvas.getContext('webgl2') || canvas.getContext('webgl')),
+    )
+  } catch {
+    return false
+  }
 }
 
 const BOARD_SIZE = 800
@@ -164,7 +220,7 @@ function keyboardDestination(
   }
 }
 
-export function RadialBoard({
+function RadialBoard2D({
   parts,
   pieces,
   stage = 'playing',
@@ -534,5 +590,95 @@ export function RadialBoard({
         </p>
       ) : null}
     </section>
+  )
+}
+
+export function RadialBoard(props: RadialBoardProps) {
+  const [supports3D, setSupports3D] = useState(false)
+  const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d')
+  const [reducedMotion, setReducedMotion] = useState(false)
+  const [fallbackNotice, setFallbackNotice] = useState('')
+
+  useEffect(() => {
+    const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)')
+    const frame = window.requestAnimationFrame(() => {
+      const prefersReducedMotion = motionQuery?.matches ?? false
+      const available = supportsWebGL()
+      setReducedMotion(prefersReducedMotion)
+      setSupports3D(available)
+      if (available && !prefersReducedMotion) setViewMode('3d')
+    })
+
+    const handleMotionChange = (event: MediaQueryListEvent) => {
+      setReducedMotion(event.matches)
+      if (event.matches) {
+        setViewMode('2d')
+        setFallbackNotice(
+          'Reduced motion is on, so WebChess changed to the stable two-dimensional board.',
+        )
+      }
+    }
+    motionQuery?.addEventListener?.('change', handleMotionChange)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      motionQuery?.removeEventListener?.('change', handleMotionChange)
+    }
+  }, [])
+
+  const returnTo2D = () => {
+    setViewMode('2d')
+    setSupports3D(false)
+    setFallbackNotice(
+      'The three-dimensional scene became unavailable. The complete two-dimensional board is still playable.',
+    )
+  }
+
+  return (
+    <div className="board-dimension-shell" data-board-view={viewMode}>
+      {supports3D ? (
+        <div className="board-dimension-controls" aria-label="Board view">
+          <span aria-hidden="true"><i /> Immersive board</span>
+          <div role="group" aria-label="Choose board dimension">
+            <button
+              type="button"
+              className={viewMode === '3d' ? 'is-active' : ''}
+              aria-pressed={viewMode === '3d'}
+              onClick={() => {
+                setViewMode('3d')
+                setFallbackNotice('Three-dimensional board enabled.')
+              }}
+            >
+              3D world
+            </button>
+            <button
+              type="button"
+              className={viewMode === '2d' ? 'is-active' : ''}
+              aria-pressed={viewMode === '2d'}
+              onClick={() => {
+                setViewMode('2d')
+                setFallbackNotice('Accessible two-dimensional board enabled.')
+              }}
+            >
+              2D board
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {viewMode === '3d' && supports3D ? (
+        <Board3DErrorBoundary onError={returnTo2D}>
+          <WebChessBoard3D
+            {...props}
+            reducedMotion={reducedMotion}
+            onContextLost={returnTo2D}
+          />
+        </Board3DErrorBoundary>
+      ) : (
+        <RadialBoard2D {...props} />
+      )}
+      {fallbackNotice ? (
+        <p className="sr-only" role="status" aria-live="polite">{fallbackNotice}</p>
+      ) : null}
+    </div>
   )
 }

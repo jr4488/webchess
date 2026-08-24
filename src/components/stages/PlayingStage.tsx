@@ -106,6 +106,7 @@ export function PlayingStage({
             legalMoves={legalMoves}
             capturedCellKeys={captureKeys}
             highlightedCellKeys={focusedKeys}
+            latestCapture={captures.at(-1) ?? null}
             lastMove={lastMove}
             revealParts
             disabled={autoPlaying || gameFinishing || thinking}

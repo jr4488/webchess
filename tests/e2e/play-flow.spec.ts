@@ -618,6 +618,10 @@ test.describe('complete durable play flow', () => {
     await expectAccessibleDynamicStage(page, 'mapped play stage')
     await expect(page.locator('[data-stage-root]')).toBeFocused()
     await page.keyboard.press('Tab')
+    await expect(page.getByRole('button', { name: '3D world' })).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(page.getByRole('button', { name: '2D board' })).toBeFocused()
+    await page.keyboard.press('Tab')
     await expect(startButton).toBeFocused()
     await startButton.press('Enter')
 
