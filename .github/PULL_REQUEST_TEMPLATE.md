@@ -11,7 +11,7 @@ Why is this the smallest useful change?
 - [ ] `npm run lint`
 - [ ] `npm run typecheck`
 - [ ] `npm run plugin:build`
-- [ ] `git diff --exit-code -- openclaw-plugin/dist`
+- [ ] `npm run plugin:verify`
 - [ ] `npm run test:coverage`
 - [ ] `DATABASE_URL=<disposable PostgreSQL 17 URL> npm run test:integration`
 - [ ] `npm run build`

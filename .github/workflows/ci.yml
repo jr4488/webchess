@@ -72,8 +72,8 @@ jobs:
       - name: Build the OpenClaw plugin entry
         run: npm run plugin:build
 
-      - name: Verify the committed plugin build
-        run: git diff --exit-code -- openclaw-plugin/dist
+      - name: Verify exact committed plugin source/dist parity
+        run: npm run plugin:verify
 
       - name: Unit and PostgreSQL integration coverage
         env:

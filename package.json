@@ -39,7 +39,7 @@
   "type": "module",
   "packageManager": "npm@11.14.1",
   "peerDependencies": {
-    "openclaw": ">=2026.7.1"
+    "openclaw": "2026.7.1-2"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -54,8 +54,8 @@
       "./openclaw-plugin/dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.7.1",
-      "minGatewayVersion": "2026.7.1"
+      "pluginApi": "2026.7.1-2",
+      "minGatewayVersion": "2026.7.1-2"
     }
   },
   "engines": {
@@ -69,16 +69,15 @@
     "release:identity:check": "node scripts/release-identity.mjs check",
     "release:identity:check-public": "node scripts/release-identity.mjs check-public",
     "case:verify": "node scripts/verify-case-bundle.mjs",
-    "prepack": "npm run plugin:build && node scripts/generate-build-identity.mjs && node scripts/packed-shrinkwrap.mjs",
+    "prepack": "npm run plugin:build && npm run plugin:verify && npm run downloads:verify && node scripts/generate-build-identity.mjs && node scripts/packed-shrinkwrap.mjs",
     "postpack": "node scripts/generate-build-identity.mjs --clean && node scripts/packed-shrinkwrap.mjs --clean",
     "pack:verify": "node scripts/verify-packed-artifact.mjs",
     "plugin:build": "tsc -p openclaw-plugin/tsconfig.json",
+    "plugin:verify": "node scripts/verify-plugin-build.mjs",
+    "downloads:verify": "node scripts/verify-generated-downloads.mjs",
     "db:migrate": "node scripts/deployment-migrate.mjs",
     "db:schema:check": "node scripts/deployment-schema-check.mjs",
     "release:verify-source": "node scripts/deployment-source-check.mjs",
-    "local:setup": "node scripts/local-hosted.mjs setup",
-    "local:dev": "node scripts/local-hosted.mjs dev",
-    "local:down": "node scripts/local-hosted.mjs down",
     "predev": "npm run downloads:generate",
     "dev": "next dev",
     "prebuild": "node scripts/deployment-preflight.mjs && npm run db:schema:check -- --vercel-only && npm run downloads:generate && node scripts/release-identity.mjs check-public-if-configured",
@@ -92,8 +91,8 @@
     "test:a11y": "playwright test tests/e2e/accessibility.spec.ts",
     "test:e2e": "playwright test",
     "test:links": "playwright test --project=links",
-    "verify:openclaw": "npm run lint && npm run typecheck && npm run plugin:build && npm run test && npm run build && npm run test:a11y && npm run test:e2e && npm audit --omit=dev --audit-level=high && npm audit --audit-level=high",
-    "verify": "npm run lint && npm run typecheck && npm run plugin:build && npm run test:coverage && npm run test:integration && npm run build && npm run test:a11y && npm run test:e2e && npm audit --omit=dev --audit-level=high && npm audit --audit-level=high"
+    "verify:openclaw": "npm run lint && npm run typecheck && npm run plugin:build && npm run plugin:verify && npm run test && npm run build && npm run test:a11y && npm run test:e2e && npm audit --omit=dev --audit-level=high && npm audit --audit-level=high",
+    "verify": "npm run lint && npm run typecheck && npm run plugin:build && npm run plugin:verify && npm run test:coverage && npm run test:integration && npm run build && npm run test:a11y && npm run test:e2e && npm audit --omit=dev --audit-level=high && npm audit --audit-level=high"
   },
   "dependencies": {
     "@clerk/nextjs": "7.6.1",
