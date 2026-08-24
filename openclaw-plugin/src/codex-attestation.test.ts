@@ -9,24 +9,37 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   attestRegularExecutable,
+  createPreparedAuthAccountInspector,
   digestOwnedPackageTree,
   guardOAuthProfileStoreAccountBinding,
   isOfficialCodexPluginRecord,
   resolveOpenAiCodexAccessTokenAccountId,
+  resolveOpenAiCodexAccessTokenIdentity,
   snapshotOAuthCredentialIdentity,
 } from './codex-attestation.js'
 
 const roots: string[] = []
 const OPENAI_CODEX_AUTH_CLAIM = 'https://api.openai.com/auth'
 
-function oauthAccessJwt(accountId: string, rotation: string): string {
+function oauthAccessJwt(
+  accountId: string,
+  rotation: string,
+  subject: string | null = 'user-one',
+  subjectClaims: Record<string, unknown> = {},
+  payloadClaims: Record<string, unknown> = {},
+): string {
   const encode = (value: unknown) =>
     Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
   return [
     encode({ alg: 'RS256', typ: 'JWT' }),
     encode({
-      [OPENAI_CODEX_AUTH_CLAIM]: { chatgpt_account_id: accountId },
+      [OPENAI_CODEX_AUTH_CLAIM]: {
+        chatgpt_account_id: accountId,
+        ...(subject === null ? {} : { chatgpt_account_user_id: subject }),
+        ...subjectClaims,
+      },
       jti: rotation,
+      ...payloadClaims,
     }),
     // Synthetic signature bytes are sufficient because the reviewed local
     // decoder extracts routing metadata; OpenAI validates real token signatures.
@@ -103,6 +116,74 @@ describe('official Codex package attestation primitives', () => {
     expect(resolveOpenAiCodexAccessTokenAccountId(
       oauthAccessJwt('', 'missing-account'),
     )).toBeNull()
+    expect(resolveOpenAiCodexAccessTokenIdentity(
+      oauthAccessJwt('account-one', 'missing-subject', null),
+    )).toBeNull()
+  })
+
+  it('matches pinned stable-subject precedence including sub-only fallback', () => {
+    const preferred = resolveOpenAiCodexAccessTokenIdentity(oauthAccessJwt(
+      'account-one',
+      'preferred',
+      'stable-user',
+      { chatgpt_user_id: 'lower-precedence-user', user_id: 'legacy-user' },
+      { iss: 'issuer', sub: 'oidc-user' },
+    ))
+    const chatgptUser = resolveOpenAiCodexAccessTokenIdentity(oauthAccessJwt(
+      'account-one',
+      'chatgpt-user',
+      null,
+      { chatgpt_user_id: 'stable-user' },
+    ))
+    const legacyUser = resolveOpenAiCodexAccessTokenIdentity(oauthAccessJwt(
+      'account-one',
+      'legacy-user',
+      null,
+      { user_id: 'stable-user' },
+    ))
+    const issuerSubject = resolveOpenAiCodexAccessTokenIdentity(oauthAccessJwt(
+      'account-one',
+      'issuer-subject',
+      'issuer|stable-user',
+    ))
+    const issuerFallback = resolveOpenAiCodexAccessTokenIdentity(oauthAccessJwt(
+      'account-one',
+      'issuer-fallback',
+      null,
+      {},
+      { iss: 'issuer', sub: 'stable-user' },
+    ))
+    const subOnly = resolveOpenAiCodexAccessTokenIdentity(oauthAccessJwt(
+      'account-one',
+      'sub-only',
+      null,
+      {},
+      { sub: 'stable-user' },
+    ))
+
+    expect(chatgptUser).toEqual(preferred)
+    expect(legacyUser).toEqual(preferred)
+    expect(issuerFallback).toEqual(issuerSubject)
+    expect(subOnly).toEqual(preferred)
+  })
+
+  it('resolves the pinned sentinel shape without exposing the access token', async () => {
+    const sentinel = `oc-sent-v1-${'a'.repeat(24)}`
+    const token = oauthAccessJwt('account-one', 'sentinel-backed')
+    const resolveSentinel = vi.fn((value: string) =>
+      value === sentinel ? token : undefined)
+    const inspector = createPreparedAuthAccountInspector(
+      resolveSentinel,
+      vi.fn(async () => true),
+    )
+
+    expect(await inspector.resolveIdentity(sentinel)).toEqual(
+      resolveOpenAiCodexAccessTokenIdentity(token),
+    )
+    expect(await inspector.resolveIdentity(
+      `oc-sent-v1-${'b'.repeat(24)}`,
+    )).toBeNull()
+    expect(resolveSentinel).toHaveBeenCalledWith(sentinel)
   })
 
   it('permits same-account token refresh but detects token account drift', () => {
@@ -131,6 +212,15 @@ describe('official Codex package attestation primitives', () => {
     store.profiles[profileId].refresh = 'refreshed-refresh'
 
     expect(snapshotOAuthCredentialIdentity(store, profileId)).toEqual(initial)
+
+    store.profiles[profileId].access = oauthAccessJwt(
+      'account-one',
+      'different-user',
+      'user-two',
+    )
+    expect(snapshotOAuthCredentialIdentity(store, profileId)).not.toEqual(
+      initial,
+    )
 
     store.profiles[profileId].access = oauthAccessJwt(
       'account-two',
@@ -200,6 +290,30 @@ describe('official Codex package attestation primitives', () => {
     expect(guarded.isIntact()).toBe(true)
   })
 
+  it('refuses refresh material in an isolated search store', () => {
+    const profileId = 'openai:account'
+    const source = {
+      order: { openai: [profileId] },
+      profiles: {
+        [profileId]: {
+          access: oauthAccessJwt('account-one', 'initial'),
+          accountId: 'account-one',
+          provider: 'openai',
+          refresh: 'must-remain-authoritative',
+          type: 'oauth',
+        },
+      },
+      version: 1,
+    }
+    const identity = snapshotOAuthCredentialIdentity(source, profileId)!
+
+    expect(guardOAuthProfileStoreAccountBinding(
+      source,
+      profileId,
+      identity,
+    )).toBeNull()
+  })
+
   it('blocks a client token rebind synchronously before query dispatch', () => {
     const profileId = 'openai:account'
     const source = {
@@ -232,6 +346,45 @@ describe('official Codex package attestation primitives', () => {
     }
 
     expect(startClientThenQuery).toThrow(/OAuth binding changed/u)
+    expect(providerQuery).not.toHaveBeenCalled()
+    expect(guarded.isIntact()).toBe(false)
+  })
+
+  it('blocks a same-account different-user rebind before query dispatch', () => {
+    const profileId = 'openai:account'
+    const source = {
+      order: { openai: [profileId] },
+      profiles: {
+        [profileId]: {
+          access: oauthAccessJwt('account-one', 'initial', 'user-one'),
+          accountId: 'account-one',
+          provider: 'openai',
+          type: 'oauth',
+        },
+      },
+      version: 1,
+    }
+    const identity = snapshotOAuthCredentialIdentity(source, profileId)!
+    const guarded = guardOAuthProfileStoreAccountBinding(
+      source,
+      profileId,
+      identity,
+    )!
+    const profiles = guarded.store.profiles as
+      Record<string, Record<string, unknown>>
+    const providerQuery = vi.fn()
+
+    expect(() => {
+      profiles[profileId] = {
+        ...profiles[profileId],
+        access: oauthAccessJwt(
+          'account-one',
+          'different-user',
+          'user-two',
+        ),
+      }
+      providerQuery()
+    }).toThrow(/OAuth binding changed/u)
     expect(providerQuery).not.toHaveBeenCalled()
     expect(guarded.isIntact()).toBe(false)
   })

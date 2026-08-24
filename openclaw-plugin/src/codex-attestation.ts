@@ -32,6 +32,39 @@ const PINNED_SEARCH_RUNTIME_SHA256 =
 const PINNED_SHARED_CLIENT_RUNTIME = 'shared-client-4ICy3U6d.js'
 const PINNED_SHARED_CLIENT_RUNTIME_SHA256 =
   'bff60f1bb2cb73ad44c7f9c9d779576a2ffd9836b22ecba0bd5b6046e7ce9103'
+const PINNED_OPENCLAW_VERSION = '2026.7.1-2'
+const PINNED_OPENCLAW_SENTINEL_RUNTIME = 'sentinel-zNFsFsCB.js'
+const PINNED_OPENCLAW_SENTINEL_IMPORT_CLOSURE = Object.freeze({
+  'ansi-D1GK_odF.js':
+    '8a1b7fa9ab24413102440a9e22cee2f0da808fbbd32849af3e23e1f7e16d8494',
+  'argv-APLDYHWW.js':
+    'e12b19cbdf8cb54af168470f8916ab00917ef833e0d09e23b38e7558df81fd15',
+  'home-dir-CJKEsOtx.js':
+    '656ea8c4e0c8142be3902dde41b5b247c70d34f9460a7e5406b48ef30b4c59cf',
+  'number-coercion-CJQ8TR--.js':
+    'd58226dd163a693e2adecb7db42c196987b3591c2959bdbb4fe3ed852dd01ce8',
+  'openclaw-root-_Kkan8Lf.js':
+    'b38ffc9ed9d1de4b79213bf9aab474985ae62127ba5f148b14433d8cbb51b7b9',
+  'parse-finite-number-Z7n6tXLk.js':
+    'b6a1f2b882930dd2efd69d048981e76107bacb97ce8f0a9cd24e0dcbf7411af7',
+  'paths-BMBAvkNf.js':
+    '099ff305aa7662710b2b0f1f925c99b203f30d283ab6b2ada34233a8188fab77',
+  'record-coerce-DHZ4bFlT.js':
+    '527fd444d23026ace9ad3c9ed664ad366e82c2ba41020a3cd2f2116a0100e89f',
+  'redact-B9QQ4Wyz.js':
+    'd31364326b71b82ad6e20ccc93203591eb7848ff2b165e333437b32ae8f0b5b3',
+  [PINNED_OPENCLAW_SENTINEL_RUNTIME]:
+    'a5e0c163a42ea5ce921941dc7dd0735a2a810bcd05c439eaaa561c2f667219bb',
+  'string-coerce-DW4mBlAt.js':
+    '41b0b673667f6e8f1a4b0674b4b940144e9f84ef9d20b1afc8196c11cbe2c320',
+  'tcp-port-DPgvEEt3.js':
+    'dc593e43663553b72eaed8f7c95de33e754882fa6baf11c06b9d0727980e5297',
+})
+const PINNED_OPENCLAW_SENTINEL_JSON5_VERSION = '2.2.3'
+const PINNED_OPENCLAW_SENTINEL_JSON5_FILE_COUNT = 20
+const PINNED_OPENCLAW_SENTINEL_JSON5_TREE_SHA256 =
+  '9510bc00ee8ff303fcb2d772a029b2b1335830aba579932989264be280fb202f'
+const OPENCLAW_SECRET_SENTINEL_PATTERN = /^oc-sent-v1-[0-9a-f]{24}$/u
 
 interface PlatformExecutableExpectation {
   integrity: string
@@ -99,6 +132,8 @@ interface FileSeal {
 type JsonRecord = Record<string, unknown>
 
 const OPENAI_CODEX_AUTH_CLAIM = 'https://api.openai.com/auth'
+const OPENAI_OAUTH_SUBJECT_HASH_DOMAIN =
+  'webchess-openai-oauth-subject-v1\0'
 
 function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -117,6 +152,28 @@ function isRecord(value: unknown): value is JsonRecord {
 export function resolveOpenAiCodexAccessTokenAccountId(
   accessToken: unknown,
 ): string | null {
+  return resolveOpenAiCodexAccessTokenIdentity(accessToken)?.accountId ?? null
+}
+
+export interface OpenAiCodexAccessTokenIdentity {
+  accountId: string
+  subjectSha256: string
+}
+
+function trimmedNonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+/**
+ * Match the stable-subject precedence reviewed in pinned OpenClaw 2026.7.1-2:
+ * account-scoped user id, ChatGPT user id, legacy user id, then issuer+subject.
+ * Only a domain-separated digest is retained in WebChess identity snapshots.
+ */
+export function resolveOpenAiCodexAccessTokenIdentity(
+  accessToken: unknown,
+): OpenAiCodexAccessTokenIdentity | null {
   if (typeof accessToken !== 'string') return null
   const token = accessToken.trim()
   const parts = token.split('.')
@@ -128,10 +185,24 @@ export function resolveOpenAiCodexAccessTokenAccountId(
     const auth = payload[OPENAI_CODEX_AUTH_CLAIM]
     if (!isRecord(auth)) return null
     const accountId = auth.chatgpt_account_id
-    return typeof accountId === 'string' && accountId.length > 0 &&
-      accountId === accountId.trim()
-      ? accountId
-      : null
+    if (typeof accountId !== 'string' || accountId.length === 0 ||
+      accountId !== accountId.trim()) return null
+    const stableSubject = trimmedNonEmptyString(
+      auth.chatgpt_account_user_id,
+    ) ?? trimmedNonEmptyString(auth.chatgpt_user_id) ??
+      trimmedNonEmptyString(auth.user_id) ?? (() => {
+        const issuer = trimmedNonEmptyString(payload.iss)
+        const subject = trimmedNonEmptyString(payload.sub)
+        return issuer && subject ? `${issuer}|${subject}` : subject
+      })()
+    if (!stableSubject) return null
+    return {
+      accountId,
+      subjectSha256: createHash('sha256').update(
+        OPENAI_OAUTH_SUBJECT_HASH_DOMAIN,
+        'utf8',
+      ).update(stableSubject, 'utf8').digest('hex'),
+    }
   } catch {
     return null
   }
@@ -215,19 +286,27 @@ function sealMatches(current: FileSeal, expected: FileSeal): boolean {
     current.size === expected.size
 }
 
-export async function attestRegularExecutable(
+export async function attestRegularFile(
   filename: string,
   expectedSha256: string,
+  executable = false,
 ): Promise<{ revalidate(): Promise<boolean> } | null> {
-  const initial = await hashAndSealRegularFile(filename, true)
+  const initial = await hashAndSealRegularFile(filename, executable)
   if (!initial || initial.sha256 !== expectedSha256) return null
   return {
     async revalidate() {
-      const current = await hashAndSealRegularFile(filename, true)
+      const current = await hashAndSealRegularFile(filename, executable)
       return current?.sha256 === expectedSha256 &&
         sealMatches(current.seal, initial.seal)
     },
   }
+}
+
+export async function attestRegularExecutable(
+  filename: string,
+  expectedSha256: string,
+): Promise<{ revalidate(): Promise<boolean> } | null> {
+  return await attestRegularFile(filename, expectedSha256, true)
 }
 
 async function listOwnedPackageFiles(
@@ -318,6 +397,111 @@ function pathIsInside(parent: string, child: string): boolean {
     !path.isAbsolute(relative)
 }
 
+export interface PreparedAuthAccountInspector {
+  resolveIdentity(
+    preparedAuthValue: unknown,
+  ): Promise<OpenAiCodexAccessTokenIdentity | null>
+}
+
+export function createPreparedAuthAccountInspector(
+  resolvePreparedAuthSentinel: (value: string) => string | undefined,
+  revalidate: () => Promise<boolean>,
+): PreparedAuthAccountInspector {
+  return {
+    async resolveIdentity(preparedAuthValue) {
+      if (typeof preparedAuthValue !== 'string' ||
+        !await revalidate()) return null
+      let accessToken = preparedAuthValue
+      try {
+        if (OPENCLAW_SECRET_SENTINEL_PATTERN.test(preparedAuthValue)) {
+          accessToken = resolvePreparedAuthSentinel(preparedAuthValue) ?? ''
+        }
+      } catch {
+        return null
+      }
+      const identity = resolveOpenAiCodexAccessTokenIdentity(accessToken)
+      return identity && await revalidate() ? identity : null
+    },
+  }
+}
+
+export async function attestPinnedOpenClawPreparedAuthAccountInspector():
+Promise<PreparedAuthAccountInspector | null> {
+  try {
+    const requireFromPlugin = createRequire(import.meta.url)
+    const entryPath = await realpath(requireFromPlugin.resolve('openclaw'))
+    const packageRoot = path.dirname(path.dirname(entryPath))
+    const packageJsonPath = await realpath(path.join(packageRoot, 'package.json'))
+    if (!pathIsInside(packageRoot, entryPath)) return null
+    const packageJson = await readJsonRecord(packageJsonPath)
+    if (!exactPackageJson(
+      packageJson,
+      'openclaw',
+      PINNED_OPENCLAW_VERSION,
+    )) return null
+
+    const runtimeAttestations = await Promise.all(Object.entries(
+      PINNED_OPENCLAW_SENTINEL_IMPORT_CLOSURE,
+    ).map(async ([filename, sha256]) => {
+      const expectedPath = path.join(packageRoot, 'dist', filename)
+      const runtimePath = await realpath(expectedPath)
+      if (runtimePath !== expectedPath ||
+        !pathIsInside(packageRoot, runtimePath)) return null
+      return await attestRegularFile(runtimePath, sha256)
+    }))
+    if (runtimeAttestations.some((attestation) => !attestation)) return null
+
+    const sentinelPath = path.join(
+      packageRoot,
+      'dist',
+      PINNED_OPENCLAW_SENTINEL_RUNTIME,
+    )
+    const requireFromSentinel = createRequire(sentinelPath)
+    const json5PackageJsonPath = await realpath(
+      requireFromSentinel.resolve('json5/package.json'),
+    )
+    const json5Root = path.dirname(json5PackageJsonPath)
+    if (!pathIsInside(packageRoot, json5Root) ||
+      !exactPackageJson(
+        await readJsonRecord(json5PackageJsonPath),
+        'json5',
+        PINNED_OPENCLAW_SENTINEL_JSON5_VERSION,
+      )) return null
+    const json5Tree = await digestOwnedPackageTree(json5Root)
+    if (json5Tree?.fileCount !==
+        PINNED_OPENCLAW_SENTINEL_JSON5_FILE_COUNT ||
+      json5Tree.sha256 !== PINNED_OPENCLAW_SENTINEL_JSON5_TREE_SHA256) {
+      return null
+    }
+
+    const revalidateImportClosure = async (): Promise<boolean> => {
+      const [filesIntact, currentJson5Tree] = await Promise.all([
+        Promise.all(runtimeAttestations.map(async (attestation) =>
+          await attestation!.revalidate(),
+        )),
+        digestOwnedPackageTree(json5Root),
+      ])
+      return filesIntact.every(Boolean) &&
+        currentJson5Tree?.fileCount ===
+          PINNED_OPENCLAW_SENTINEL_JSON5_FILE_COUNT &&
+        currentJson5Tree.sha256 ===
+          PINNED_OPENCLAW_SENTINEL_JSON5_TREE_SHA256
+    }
+
+    const runtime = await import(pathToFileURL(sentinelPath).href) as unknown
+    if (!isRecord(runtime) || typeof runtime.i !== 'function' ||
+      !await revalidateImportClosure()) return null
+    const resolvePreparedAuthSentinel = runtime.i as
+      (value: string) => string | undefined
+    return createPreparedAuthAccountInspector(
+      resolvePreparedAuthSentinel,
+      revalidateImportClosure,
+    )
+  } catch {
+    return null
+  }
+}
+
 async function resolvePinnedPackagePath(
   requireFromPlugin: NodeRequire,
   packageId: string,
@@ -367,14 +551,14 @@ export function snapshotOAuthCredentialIdentity(
   if (!isSingletonOAuthStore(store, profileId)) return null
   const profiles = store.profiles as JsonRecord
   const credential = profiles[profileId] as JsonRecord
-  const tokenAccountId = resolveOpenAiCodexAccessTokenAccountId(
+  const tokenIdentity = resolveOpenAiCodexAccessTokenIdentity(
     credential.access,
   )
-  if (!tokenAccountId) return null
+  if (!tokenIdentity) return null
   const storedAccountId = credential.accountId
   if (typeof storedAccountId !== 'string' || !storedAccountId ||
     storedAccountId !== storedAccountId.trim() ||
-    storedAccountId !== tokenAccountId) return null
+    storedAccountId !== tokenIdentity.accountId) return null
   const mutableTokenFields = new Set([
     'access',
     'accessToken',
@@ -390,7 +574,8 @@ export function snapshotOAuthCredentialIdentity(
         Object.entries(credential).filter(([key]) =>
           !mutableTokenFields.has(key)),
       ),
-      accountId: tokenAccountId,
+      accountId: tokenIdentity.accountId,
+      oauthSubjectSha256: tokenIdentity.subjectSha256,
     }) as JsonRecord
   } catch {
     return null
@@ -400,6 +585,13 @@ export function snapshotOAuthCredentialIdentity(
 export interface GuardedOAuthProfileStore {
   isIntact(): boolean
   store: Record<string, unknown>
+}
+
+function hasOAuthRefreshMaterial(credential: JsonRecord): boolean {
+  return (typeof credential.refresh === 'string' &&
+      credential.refresh.length > 0) ||
+    (typeof credential.refreshToken === 'string' &&
+      credential.refreshToken.length > 0)
 }
 
 /**
@@ -413,14 +605,22 @@ export function guardOAuthProfileStoreAccountBinding(
   profileId: string,
   expectedIdentity: Readonly<JsonRecord>,
 ): GuardedOAuthProfileStore | null {
+  const sourceProfiles = sourceStore.profiles
+  const sourceCredential = isRecord(sourceProfiles)
+    ? sourceProfiles[profileId]
+    : null
+  // Search receives an isolated, access-only credential. A disposable scoped
+  // refresh could consume a single-use authoritative refresh token and discard
+  // its replacement; refuse any such material before the pinned client runs.
+  if (!isRecord(sourceCredential) ||
+    hasOAuthRefreshMaterial(sourceCredential)) return null
   if (!isDeepStrictEqual(
     snapshotOAuthCredentialIdentity(sourceStore, profileId),
     expectedIdentity,
   )) return null
 
   try {
-    const sourceProfiles = sourceStore.profiles as JsonRecord
-    const initialCredential = sourceProfiles[profileId]
+    const initialCredential = sourceCredential
     if (!isRecord(initialCredential)) return null
     const baseStore = structuredClone(sourceStore) as JsonRecord
     const frozenCredential = Object.freeze(
@@ -437,7 +637,8 @@ export function guardOAuthProfileStoreAccountBinding(
       defineProperty: rejectMutation,
       deleteProperty: rejectMutation,
       set(target, property, value) {
-        if (property !== profileId || !isRecord(value)) rejectMutation()
+        if (property !== profileId || !isRecord(value) ||
+          hasOAuthRefreshMaterial(value)) rejectMutation()
         const candidateStore = {
           ...baseStore,
           profiles: { [profileId]: value },

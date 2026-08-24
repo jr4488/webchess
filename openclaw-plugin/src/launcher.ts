@@ -91,6 +91,9 @@ export interface SpawnedServer {
 export interface LauncherDependencies {
   environment: NodeJS.ProcessEnv
   fetch: typeof globalThis.fetch
+  loadRuntimeIdentity: (
+    environment: RuntimeEnvironment,
+  ) => Promise<LocalRuntimeIdentity>
   openBrowser: (url: string) => void
   removeRuntime: (root: string) => Promise<void>
   resolveBuildIdentity: (sourceRoot: string) => Promise<WebChessBuildIdentity>
@@ -382,27 +385,18 @@ function validatedSecret(value: string, name: string): string {
   return secret
 }
 
-function configuredRuntimeIdentity(
+function assertNoRuntimeIdentityOverrides(
   environment: RuntimeEnvironment,
-): Partial<LocalRuntimeIdentity> {
-  const ownerId = environment.WEBCHESS_OPENCLAW_OWNER_ID
-  const hmacSecret = environment.WEBCHESS_HMAC_SECRET
-  const deletionHmacSecret = environment.WEBCHESS_DELETION_HMAC_SECRET
-  return {
-    ...(ownerId?.trim()
-      ? { ownerId: validatedOwnerId(ownerId, 'WEBCHESS_OPENCLAW_OWNER_ID') }
-      : {}),
-    ...(hmacSecret?.trim()
-      ? { hmacSecret: validatedSecret(hmacSecret, 'WEBCHESS_HMAC_SECRET') }
-      : {}),
-    ...(deletionHmacSecret?.trim()
-      ? {
-          deletionHmacSecret: validatedSecret(
-            deletionHmacSecret,
-            'WEBCHESS_DELETION_HMAC_SECRET',
-          ),
-        }
-      : {}),
+): void {
+  const configured = [
+    'WEBCHESS_DELETION_HMAC_SECRET',
+    'WEBCHESS_HMAC_SECRET',
+    'WEBCHESS_OPENCLAW_OWNER_ID',
+  ].filter((name) => environment[name] !== undefined && environment[name] !== '')
+  if (configured.length > 0) {
+    throw new Error(
+      `WebChess local identity overrides are not accepted: ${configured.join(', ')}. Remove them so the launcher can use its dedicated private identity file.`,
+    )
   }
 }
 
@@ -586,14 +580,7 @@ async function createStoredRuntimeIdentity(
 export async function loadOrCreateRuntimeIdentity(
   environment: RuntimeEnvironment = process.env,
 ): Promise<LocalRuntimeIdentity> {
-  const configured = configuredRuntimeIdentity(environment)
-  if (
-    configured.ownerId &&
-    configured.hmacSecret &&
-    configured.deletionHmacSecret
-  ) {
-    return configured as LocalRuntimeIdentity
-  }
+  assertNoRuntimeIdentityOverrides(environment)
 
   const filename = resolveRuntimeIdentityPath(environment)
   const directory = path.dirname(filename)
@@ -613,12 +600,7 @@ export async function loadOrCreateRuntimeIdentity(
     }
   }
 
-  return {
-    deletionHmacSecret:
-      configured.deletionHmacSecret ?? stored.deletionHmacSecret,
-    hmacSecret: configured.hmacSecret ?? stored.hmacSecret,
-    ownerId: configured.ownerId ?? stored.ownerId,
-  }
+  return stored
 }
 
 async function stageWebChessRuntime(
@@ -661,19 +643,13 @@ export function buildNextLaunchSpec(
   if (!bridge) {
     throw new Error('The authenticated OpenClaw runtime bridge is required.')
   }
-  const runtimeIdentity = identity ?? (() => {
-    const configured = configuredRuntimeIdentity(environment)
-    if (
-      !configured.ownerId ||
-      !configured.hmacSecret ||
-      !configured.deletionHmacSecret
-    ) {
-      throw new Error(
-        'The persisted WebChess OpenClaw identity must be loaded before building the launch environment.',
-      )
-    }
-    return configured as LocalRuntimeIdentity
-  })()
+  assertNoRuntimeIdentityOverrides(environment)
+  if (!identity) {
+    throw new Error(
+      'The persisted WebChess OpenClaw identity must be loaded before building the launch environment.',
+    )
+  }
+  const runtimeIdentity = identity
   const url = `http://127.0.0.1:${options.port}/openclaw`
   const origin = `http://127.0.0.1:${options.port}`
   const localDatabaseUrl = dedicatedDatabaseUrl(environment)
@@ -776,6 +752,7 @@ function defaultOpenBrowser(url: string): void {
 const defaultDependencies: LauncherDependencies = {
   environment: process.env,
   fetch: globalThis.fetch,
+  loadRuntimeIdentity: loadOrCreateRuntimeIdentity,
   openBrowser: defaultOpenBrowser,
   removeRuntime: (root) => rm(root, { force: true, recursive: true }),
   resolveBuildIdentity: resolveWebChessBuildIdentity,
@@ -926,7 +903,9 @@ export async function launchWebChess(
   const sourceRoot = resolveWebChessRoot()
   const nextBinary = resolveNextBinary()
   await access(nextBinary)
-  const identity = await loadOrCreateRuntimeIdentity(dependencies.environment)
+  const identity = await dependencies.loadRuntimeIdentity(
+    dependencies.environment,
+  )
   const sourceBuildIdentity = await dependencies.resolveBuildIdentity(sourceRoot)
   const runtimeRoot = await dependencies.stageRuntime(sourceRoot, nextBinary)
   let server: SpawnedServer | null = null

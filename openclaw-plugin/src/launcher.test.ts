@@ -143,11 +143,8 @@ describe('OpenClaw WebChess launcher', () => {
         VERCEL_ENV: 'preview',
         VERCEL_TARGET_ENV: 'preview',
         VERCEL_URL: 'inherited-preview.vercel.app',
-        WEBCHESS_DELETION_HMAC_SECRET: 'd'.repeat(48),
-        WEBCHESS_HMAC_SECRET: 'h'.repeat(48),
         WEBCHESS_OPENCLAW_DATABASE_URL:
           'postgresql://webchess:test@127.0.0.1:55432/webchess',
-        WEBCHESS_OPENCLAW_OWNER_ID: 'openclaw_test_installation',
       },
       '/managed/node_modules/next/dist/bin/next',
       IDENTITY,
@@ -340,6 +337,26 @@ describe('OpenClaw WebChess launcher', () => {
     expect(spec.env.WEBCHESS_OPENCLAW_DATABASE_URL).toBe(databaseUrl)
   })
 
+  it.each([
+    ['WEBCHESS_HMAC_SECRET', 'h'.repeat(48)],
+    ['WEBCHESS_DELETION_HMAC_SECRET', 'd'.repeat(48)],
+    ['WEBCHESS_OPENCLAW_OWNER_ID', 'openclaw_ambient_owner'],
+    ['WEBCHESS_HMAC_SECRET', ' '],
+  ] as const)('rejects ambient local identity override %s', (name, value) => {
+    expect(() => buildNextLaunchSpec(
+      '/plugin/webchess',
+      parseLaunchOptions({}),
+      {
+        [name]: value,
+        WEBCHESS_OPENCLAW_DATABASE_URL:
+          'postgresql://webchess:test@127.0.0.1:55432/webchess',
+      },
+      '/managed/node_modules/next/dist/bin/next',
+      IDENTITY,
+      BRIDGE,
+    )).toThrow(/identity overrides are not accepted/u)
+  })
+
   it('persists one random private runtime identity and refuses permissive files', async () => {
     const temporaryRoot = await mkdtemp(
       path.join(tmpdir(), 'webchess-openclaw-identity-test-'),
@@ -386,19 +403,24 @@ describe('OpenClaw WebChess launcher', () => {
     expect((await lstat(stateRoot)).mode & 0o777).toBe(0o755)
   })
 
-  it('honors partial overrides and refuses a symlink identity file', async () => {
+  it('rejects ambient identity overrides and refuses a symlink identity file', async () => {
     const temporaryRoot = await mkdtemp(
       path.join(tmpdir(), 'webchess-openclaw-partial-identity-test-'),
     )
     temporaryRoots.push(temporaryRoot)
     const stateRoot = path.join(temporaryRoot, 'state')
-    const environment = {
-      HOME: temporaryRoot,
-      WEBCHESS_HMAC_SECRET: 'configured-hmac-secret-'.repeat(2),
-      WEBCHESS_OPENCLAW_STATE_DIR: stateRoot,
+    for (const [name, value] of [
+      ['WEBCHESS_HMAC_SECRET', 'configured-hmac-secret-'.repeat(2)],
+      ['WEBCHESS_DELETION_HMAC_SECRET', 'configured-deletion-secret-'.repeat(2)],
+      ['WEBCHESS_OPENCLAW_OWNER_ID', 'openclaw_configured_owner'],
+      ['WEBCHESS_HMAC_SECRET', ' '],
+    ] as const) {
+      await expect(loadOrCreateRuntimeIdentity({
+        HOME: temporaryRoot,
+        [name]: value,
+        WEBCHESS_OPENCLAW_STATE_DIR: stateRoot,
+      })).rejects.toThrow(/identity overrides are not accepted/u)
     }
-    const identity = await loadOrCreateRuntimeIdentity(environment)
-    expect(identity.hmacSecret).toBe('configured-hmac-secret-'.repeat(2))
 
     const symlinkRoot = await mkdtemp(
       path.join(tmpdir(), 'webchess-openclaw-symlink-identity-test-'),
@@ -416,25 +438,6 @@ describe('OpenClaw WebChess launcher', () => {
     await symlink(target, filename)
     await expect(loadOrCreateRuntimeIdentity(symlinkEnvironment)).rejects
       .toThrow(/regular file, not a symlink/u)
-  })
-
-  it('uses complete explicit identity overrides without creating a state file', async () => {
-    const temporaryRoot = await mkdtemp(
-      path.join(tmpdir(), 'webchess-openclaw-explicit-identity-test-'),
-    )
-    temporaryRoots.push(temporaryRoot)
-    const environment = {
-      WEBCHESS_DELETION_HMAC_SECRET: IDENTITY.deletionHmacSecret,
-      WEBCHESS_HMAC_SECRET: IDENTITY.hmacSecret,
-      WEBCHESS_OPENCLAW_OWNER_ID: IDENTITY.ownerId,
-      WEBCHESS_OPENCLAW_STATE_DIR: path.join(temporaryRoot, 'state'),
-    }
-
-    await expect(loadOrCreateRuntimeIdentity(environment)).resolves.toEqual(
-      IDENTITY,
-    )
-    await expect(lstat(resolveRuntimeIdentityPath(environment))).rejects
-      .toMatchObject({ code: 'ENOENT' })
   })
 
   it('accepts bounded display overrides and rejects invalid ports', () => {
@@ -482,14 +485,12 @@ describe('OpenClaw WebChess launcher', () => {
     const dependencies: LauncherDependencies = {
       environment: {
         NODE_ENV: 'test',
-        WEBCHESS_DELETION_HMAC_SECRET: IDENTITY.deletionHmacSecret,
-        WEBCHESS_HMAC_SECRET: IDENTITY.hmacSecret,
         WEBCHESS_OPENCLAW_DATABASE_URL:
           'postgresql://webchess:test@127.0.0.1:55432/webchess',
-        WEBCHESS_OPENCLAW_OWNER_ID: IDENTITY.ownerId,
       },
       fetch: vi.fn(async () => new Response(null, { status: 503 })) as
         unknown as typeof globalThis.fetch,
+      loadRuntimeIdentity: vi.fn(async () => IDENTITY),
       openBrowser: vi.fn(),
       removeRuntime: vi.fn(async () => {
         expect(server.exitCode).toBeNull()

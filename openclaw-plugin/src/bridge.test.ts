@@ -9,7 +9,11 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../../src/types.js'
-import type { CodexPackageAttestation } from './codex-attestation.js'
+import {
+  resolveOpenAiCodexAccessTokenIdentity,
+  type CodexPackageAttestation,
+  type PreparedAuthAccountInspector,
+} from './codex-attestation.js'
 import {
   CODEX_SEARCH_READINESS_QUERY,
   MAX_BRIDGE_REQUEST_BYTES,
@@ -48,6 +52,7 @@ const ADDITIONAL_CODEX_PROXY_CA_ENVIRONMENT_NAMES = [
   'CODEX_NETWORK_PROXY_ATTRIBUTION',
   'CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS',
   'CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE',
+  'CODEX_ROLLOUT_TRACE_ROOT',
   'CODEX_SANDBOX',
   'CURL_CA_BUNDLE',
   'DOCKER_HTTP_PROXY',
@@ -124,19 +129,34 @@ function digest(value: string): string {
 function oauthAccessJwt(
   accountId = 'account-fixture',
   rotation = 'fixture',
+  subject: string | null = 'user-fixture',
 ): string {
   const encode = (value: unknown) =>
     Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
   return [
     encode({ alg: 'RS256', typ: 'JWT' }),
     encode({
-      [OPENAI_CODEX_AUTH_CLAIM]: { chatgpt_account_id: accountId },
+      [OPENAI_CODEX_AUTH_CLAIM]: {
+        chatgpt_account_id: accountId,
+        ...(subject === null ? {} : { chatgpt_account_user_id: subject }),
+      },
       jti: rotation,
     }),
     // Synthetic signature bytes exercise local claim extraction only; OpenAI
     // validates signatures on real OAuth tokens.
     Buffer.from(`signature-${rotation}`, 'utf8').toString('base64url'),
   ].join('.')
+}
+
+function preparedAuthInspector(
+  sentinels: Readonly<Record<string, string>> = {},
+): PreparedAuthAccountInspector {
+  return {
+    resolveIdentity: vi.fn(async (value) => {
+      if (typeof value !== 'string') return null
+      return resolveOpenAiCodexAccessTokenIdentity(sentinels[value] ?? value)
+    }),
+  }
 }
 
 async function runtimeRoot(): Promise<string> {
@@ -371,6 +391,7 @@ async function start(
     codexPackageAttestor: codexPackageAttestor(api),
     environment: TEST_ENVIRONMENT,
     pluginRegistryRuntime: pluginRegistryRuntime(api),
+    preparedAuthAccountInspector: preparedAuthInspector(),
     token: TOKEN,
     simpleCompletionRuntime: simpleRuntime(),
     ...options,
@@ -454,9 +475,12 @@ describe('OpenClaw plugin runtime bridge', () => {
       })
       expect(api.runtime.modelAuth.resolveApiKeyForProvider)
         .toHaveBeenCalledWith({
-          cfg: expect.any(Object),
+          agentDir: AGENT_DIR,
+          cfg: api.runtime.config.current(),
+          lockedProfile: true,
+          modelApi: 'openai-chatgpt-responses',
+          profileId: 'openai:account',
           provider: 'openai',
-          workspaceDir: AGENT_WORKSPACE_DIR,
         })
       expect(authRuntime.resolveDefaultAgentId).toHaveBeenCalledWith(api.config)
       expect(authRuntime.resolveAgentDir).toHaveBeenCalledWith(
@@ -1067,6 +1091,11 @@ describe('OpenClaw plugin runtime bridge', () => {
     ['OPENCLAW_LIVE_OPENAI_KEY', 'provider-secret'],
     ['OPENCLAW_LIVE_OPENAI_KEYS', 'provider-secret'],
     ['OPENCLAW_MCP_TOKEN', 'provider-secret'],
+    ['OPENCLAW_SECRET_SENTINELS', 'off'],
+    ['OPENCLAW_SECRET_SENTINELS', '0'],
+    ['OPENCLAW_SECRET_SENTINELS', 'false'],
+    ['OPENCLAW_SECRET_SENTINELS', '   '],
+    ['oPeNcLaW_sEcReT_sEnTiNeLs', 'off'],
     ['OPENCLAW_VAPID_PRIVATE_KEY', 'provider-secret'],
     ['OPENCLAW_SHOW_SECRETS', '1'],
     ['LINE_CHANNEL_ACCESS_TOKEN', 'provider-secret'],
@@ -1082,6 +1111,8 @@ describe('OpenClaw plugin runtime bridge', () => {
     ['TELEGRAM_BOT_TOKEN', 'provider-secret'],
     ['SYNOLOGY_CHAT_INCOMING_URL', 'https://private.invalid/hook'],
     ['VOLCENGINE_TTS_TOKEN', 'provider-secret'],
+    ['WEBCHESS_DELETION_HMAC_SECRET', 'local-only-hmac'],
+    ['WEBCHESS_HMAC_SECRET', 'local-only-hmac'],
   ])('rejects a nonempty provider credential environment variable: %s', async (
     name,
     value,
@@ -1119,6 +1150,12 @@ describe('OpenClaw plugin runtime bridge', () => {
     ['OPENCLAW_ENABLE_PRIVATE_QA_CLI', '1'],
     ['OPENCLAW_BUILD_PRIVATE_QA', '1'],
     ['OPENCLAW_QA_FORCE_RUNTIME', 'codex'],
+    ['OPENCLAW_DEBUG_MODEL_PAYLOAD', '1'],
+    ['OPENCLAW_DEBUG_MODEL_PAYLOAD', '   '],
+    ['oPeNcLaW_dEbUg_MoDeL_pAyLoAd', '1'],
+    ['OPENCLAW_DEBUG_SSE', '1'],
+    ['OPENCLAW_DEBUG_SSE', '   '],
+    ['oPeNcLaW_dEbUg_SsE', '1'],
     ...ADDITIONAL_CODEX_PROXY_CA_ENVIRONMENT_NAMES.map((name) => [
       name,
       'private-transport-override',
@@ -1128,6 +1165,8 @@ describe('OpenClaw plugin runtime bridge', () => {
     ['cOdEx_ExEc_SeRvEr_NoIsE_cHaTgPt_AcCoUnT_iD', 'alternate-account'],
     ['CODEX_INTERNAL_ORIGINATOR_OVERRIDE', '   '],
     ['cOdEx_InTeRnAl_OrIgInAtOr_OvErRiDe', 'private-originator'],
+    ['CODEX_ROLLOUT_TRACE_ROOT', '   '],
+    ['cOdEx_RoLlOuT_tRaCe_RoOt', '/private/rollout-trace'],
     ['CODEX_SANDBOX', '   '],
     ['cOdEx_SaNdBoX', 'seatbelt'],
     ['HTTPS_PROXY', '   '],
@@ -1237,7 +1276,6 @@ describe('OpenClaw plugin runtime bridge', () => {
         DATABASE_URL: 'postgresql://local-only',
         NODE_ENV: 'test',
         SSH_AUTH_SOCK: '/run/user/test/ssh-agent',
-        WEBCHESS_HMAC_SECRET: 'local-only-hmac',
       },
     })
     try {
@@ -1274,15 +1312,21 @@ describe('OpenClaw plugin runtime bridge', () => {
         'OPENCLAW_BROWSER_CDP_AUTH_TOKEN',
         'OPENCLAW_BROWSER_NOVNC_PASSWORD',
         'OPENCLAW_CLAWHUB_TOKEN',
+        'OPENCLAW_DEBUG_MODEL_PAYLOAD',
+        'OPENCLAW_DEBUG_SSE',
         'OPENCLAW_GATEWAY_TOKEN',
         'OPENCLAW_MCP_TOKEN',
+        'OPENCLAW_CONFIG_PATH',
         'OPENCLAW_OAUTH_DIR',
         'OPENCLAW_PROFILE',
+        'OPENCLAW_SECRET_SENTINELS',
+        'OPENCLAW_STATE_DIR',
         'OPENCLAW_VAPID_PRIVATE_KEY',
         'REDIS_URL',
         'SSH_AUTH_SOCK',
         'TELEGRAM_BOT_TOKEN',
         'SYNOLOGY_CHAT_INCOMING_URL',
+        'WEBCHESS_DELETION_HMAC_SECRET',
         'WEBCHESS_HMAC_SECRET',
       ]))
       expect(provider!.createTool).toHaveBeenCalledWith(expect.objectContaining({
@@ -1557,13 +1601,28 @@ describe('OpenClaw plugin runtime bridge', () => {
     expect(failure.message).not.toContain('private auth store')
   })
 
-  it('rejects an API-key-only OpenAI profile for Hosted Search', async () => {
-    const api = fakeApi()
-    api.runtime.modelAuth.resolveApiKeyForProvider = vi.fn(async () => ({
+  it.each([
+    ['non-OAuth mode', {
       mode: 'api-key' as const,
-      profileId: 'openai:key-backup',
-      source: 'profile:openai:key-backup',
-    }))
+      profileId: 'openai:account',
+      source: 'profile:openai:account',
+    }],
+    ['different profile', {
+      mode: 'oauth' as const,
+      profileId: 'openai:different',
+      source: 'profile:openai:different',
+    }],
+    ['different source', {
+      mode: 'oauth' as const,
+      profileId: 'openai:account',
+      source: 'profile:openai:different',
+    }],
+  ])('rejects Hosted Search auth resolved from a %s', async (
+    _label,
+    resolved,
+  ) => {
+    const api = fakeApi()
+    api.runtime.modelAuth.resolveApiKeyForProvider = vi.fn(async () => resolved)
 
     const failure = await captureStartFailure(api)
 
@@ -2174,6 +2233,7 @@ describe('OpenClaw plugin runtime bridge', () => {
   })
 
   it('rejects a prepared model token routed to a different account', async () => {
+    const sentinel = `oc-sent-v1-${'c'.repeat(24)}`
     const runtime = simpleRuntime()
     const prepare = runtime.prepareSimpleCompletionModelForAgent
     runtime.prepareSimpleCompletionModelForAgent = vi.fn(async (params) => {
@@ -2183,18 +2243,63 @@ describe('OpenClaw plugin runtime bridge', () => {
         ...prepared,
         auth: {
           ...prepared.auth,
-          apiKey: oauthAccessJwt('different-account', 'prepared-mismatch'),
+          apiKey: sentinel,
         },
       }
     })
 
     const failure = await captureStartFailure(fakeApi(), {
+      preparedAuthAccountInspector: preparedAuthInspector({
+        [sentinel]: oauthAccessJwt(
+          'different-account',
+          'prepared-mismatch',
+        ),
+      }),
       simpleCompletionRuntime: runtime,
     })
 
     expect(failure.message).toMatch(/OpenAI account OAuth profile/u)
     expect(runtime.completeWithPreparedSimpleCompletionModel)
       .not.toHaveBeenCalled()
+  })
+
+  it('allows prepared sentinel rotation within the bound account', async () => {
+    const initialSentinel = `oc-sent-v1-${'d'.repeat(24)}`
+    const refreshedSentinel = `oc-sent-v1-${'e'.repeat(24)}`
+    let currentSentinel = initialSentinel
+    const runtime = simpleRuntime()
+    const prepare = runtime.prepareSimpleCompletionModelForAgent
+    runtime.prepareSimpleCompletionModelForAgent = vi.fn(async (params) => {
+      const prepared = await prepare(params)
+      if ('error' in prepared) return prepared
+      return {
+        ...prepared,
+        auth: { ...prepared.auth, apiKey: currentSentinel },
+      }
+    })
+    const inspector = preparedAuthInspector({
+      [initialSentinel]: oauthAccessJwt('account-fixture', 'sentinel-initial'),
+      [refreshedSentinel]: oauthAccessJwt(
+        'account-fixture',
+        'sentinel-refreshed',
+      ),
+    })
+    const bridge = await start(fakeApi(), {
+      preparedAuthAccountInspector: inspector,
+      simpleCompletionRuntime: runtime,
+    })
+    try {
+      currentSentinel = refreshedSentinel
+      const response = await fetch(`${bridge.url}/v1/status`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      })
+      expect(response.status).toBe(200)
+      expect(inspector.resolveIdentity).toHaveBeenCalledWith(
+        refreshedSentinel,
+      )
+    } finally {
+      await bridge.close()
+    }
   })
 
   it('allows OAuth token refresh while preserving the bound account identity', async () => {
@@ -2564,6 +2669,97 @@ describe('OpenClaw plugin runtime bridge', () => {
           message: expect.stringMatching(/OAuth profile/u),
         },
       })
+      expect(executeSearch).toHaveBeenCalledTimes(2)
+    } finally {
+      await bridge.close()
+    }
+  })
+
+  it('keeps authoritative OAuth refresh material private across a scoped retry', async () => {
+    const api = fakeApi()
+    const sourceCredential: Record<string, unknown> = {
+      access: oauthAccessJwt('account-fixture', 'scoped-refresh-fixture'),
+      accountId: 'account-fixture',
+      email: 'researcher@example.invalid',
+      provider: 'openai',
+      refresh: 'authoritative-refresh',
+      refreshToken: 'authoritative-refresh-token',
+      type: 'oauth',
+    }
+    const authoritativeSnapshot = structuredClone(sourceCredential)
+    const authRuntime = agentAuthRuntime()
+    authRuntime.loadAuthProfileStoreForSecretsRuntime = vi.fn(() => ({
+      order: { openai: ['openai:account'] },
+      profiles: { 'openai:account': sourceCredential },
+      version: 1,
+    }))
+    let scopedAttempts = 0
+    const executeSearch = vi.fn(async (
+      params: Parameters<CodexPackageAttestation['executeSearch']>[0],
+    ) => {
+      const profiles = params.authProfileStore.profiles as
+        Record<string, Record<string, unknown>>
+      const scopedCredential = profiles['openai:account']
+      expect(scopedCredential).toBeDefined()
+      expect(scopedCredential).not.toHaveProperty('refresh')
+      expect(scopedCredential).not.toHaveProperty('refreshToken')
+      expect(sourceCredential).toEqual(authoritativeSnapshot)
+
+      if (params.query !== CODEX_SEARCH_READINESS_QUERY) {
+        const failedScopedRefresh = () => {
+          scopedAttempts += 1
+          scopedCredential!.refresh = 'failed-scoped-refresh'
+          scopedCredential!.refreshToken = 'failed-scoped-refresh-token'
+          throw new Error('simulated scoped refresh failure')
+        }
+        expect(failedScopedRefresh).toThrow(/scoped refresh failure/u)
+        expect(sourceCredential).toEqual(authoritativeSnapshot)
+
+        // The isolated caller may discard its failed mutation and retry, but
+        // it never owns or mutates OpenClaw's authoritative refresh material.
+        delete scopedCredential!.refresh
+        delete scopedCredential!.refreshToken
+        scopedAttempts += 1
+      }
+
+      return {
+        content: 'grounded OAuth-only result',
+        externalContent: {
+          provider: 'codex',
+          source: 'web_search',
+          untrusted: true,
+          wrapped: true,
+        },
+        model: 'gpt-5.6-sol',
+        provider: 'codex',
+        query: params.query,
+        searches: [{ query: params.query }],
+        tookMs: 1,
+      }
+    })
+    const attestor: CodexPackageAttestor = vi.fn(async () => ({
+      executeSearch,
+      revalidate: vi.fn(async () => true),
+    }))
+    const bridge = await start(api, {
+      agentAuthRuntime: authRuntime,
+      codexPackageAttestor: attestor,
+    })
+    try {
+      const response = await fetch(`${bridge.url}/v1/web/search`, {
+        body: JSON.stringify({
+          limit: 4,
+          query: 'keep authoritative refresh material private',
+          timeoutMs: 45_000,
+          version: 1,
+        }),
+        headers: headers(),
+        method: 'POST',
+      })
+
+      expect(response.status).toBe(200)
+      expect(scopedAttempts).toBe(2)
+      expect(sourceCredential).toEqual(authoritativeSnapshot)
       expect(executeSearch).toHaveBeenCalledTimes(2)
     } finally {
       await bridge.close()
