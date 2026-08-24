@@ -8,7 +8,7 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { runtimePayloadIdentity } from './runtime-payload-identity.mjs'
 
@@ -98,6 +98,20 @@ async function main() {
       identity.runtimePayload.byteCount !== payload.byteCount
     ) {
       throw new Error('Packed WebChess build identity does not match extracted runtime bytes.')
+    }
+    const packedLauncher = await import(
+      pathToFileURL(
+        path.join(packageRoot, 'openclaw-plugin', 'dist', 'launcher.js'),
+      ).href
+    )
+    const launcherIdentity = await packedLauncher.resolveWebChessBuildIdentity(
+      packageRoot,
+    )
+    if (
+      launcherIdentity.sourceCommit !== identity.sourceCommit ||
+      launcherIdentity.runtimeArtifactSha256 !== payload.sha256
+    ) {
+      throw new Error('Packed launcher identity does not match extracted runtime bytes.')
     }
 
     const reviewedLock = await readFile(path.join(projectRoot, 'package-lock.json'))
