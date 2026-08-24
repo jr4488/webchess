@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { access, cp, mkdtemp, rm, symlink, } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
+import { access, cp, lstat, mkdir, mkdtemp, open, rm, symlink, } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startWebChessBridge, } from './bridge.js';
@@ -13,6 +14,10 @@ const DEFAULT_PORT = 3210;
 const STARTUP_TIMEOUT_MS = 120_000;
 const READINESS_REQUEST_TIMEOUT_MS = 30_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
+const RUNTIME_IDENTITY_FORMAT = 'webchess-openclaw-runtime-identity/1';
+const RUNTIME_IDENTITY_FILENAME = 'runtime-identity.json';
+const MAX_RUNTIME_IDENTITY_BYTES = 4_096;
+const LOCAL_OWNER_PATTERN = /^openclaw_[a-z0-9_-]{8,80}$/u;
 const RUNTIME_ENTRIES = [
     'CODE_OF_CONDUCT.md',
     'CONTRIBUTING.md',
@@ -71,31 +76,202 @@ function dedicatedDatabaseUrl(environment) {
     }
     return value;
 }
-function installationOwnerId(environment, installationRoot) {
-    const configured = environment.WEBCHESS_OPENCLAW_OWNER_ID?.trim();
-    if (configured) {
-        if (!/^openclaw_[a-z0-9_-]{8,80}$/u.test(configured)) {
-            throw new Error('WEBCHESS_OPENCLAW_OWNER_ID must start with openclaw_ and contain only lowercase letters, numbers, underscores, or hyphens.');
-        }
-        return configured;
+function validatedOwnerId(value, name) {
+    const ownerId = value.trim();
+    if (!LOCAL_OWNER_PATTERN.test(ownerId)) {
+        throw new Error(`${name} must start with openclaw_ and contain only lowercase letters, numbers, underscores, or hyphens.`);
     }
-    const digest = createHash('sha256')
-        .update(`webchess-openclaw-owner-v2\0${path.resolve(installationRoot)}`)
-        .digest('hex')
-        .slice(0, 32);
-    return `openclaw_${digest}`;
+    return ownerId;
 }
-function installationSecret(environment, name, purpose, installationRoot) {
-    const configured = environment[name]?.trim();
-    if (configured) {
-        if (Buffer.byteLength(configured, 'utf8') < 32) {
-            throw new Error(`${name} must contain at least 32 bytes.`);
+function validatedSecret(value, name) {
+    const secret = value.trim();
+    if (Buffer.byteLength(secret, 'utf8') < 32) {
+        throw new Error(`${name} must contain at least 32 bytes.`);
+    }
+    return secret;
+}
+function configuredRuntimeIdentity(environment) {
+    const ownerId = environment.WEBCHESS_OPENCLAW_OWNER_ID;
+    const hmacSecret = environment.WEBCHESS_HMAC_SECRET;
+    const deletionHmacSecret = environment.WEBCHESS_DELETION_HMAC_SECRET;
+    return {
+        ...(ownerId?.trim()
+            ? { ownerId: validatedOwnerId(ownerId, 'WEBCHESS_OPENCLAW_OWNER_ID') }
+            : {}),
+        ...(hmacSecret?.trim()
+            ? { hmacSecret: validatedSecret(hmacSecret, 'WEBCHESS_HMAC_SECRET') }
+            : {}),
+        ...(deletionHmacSecret?.trim()
+            ? {
+                deletionHmacSecret: validatedSecret(deletionHmacSecret, 'WEBCHESS_DELETION_HMAC_SECRET'),
+            }
+            : {}),
+    };
+}
+function runtimeStateRoot(environment) {
+    const explicit = environment.WEBCHESS_OPENCLAW_STATE_DIR?.trim();
+    if (explicit) {
+        if (!path.isAbsolute(explicit) || explicit.includes('\0')) {
+            throw new Error('WEBCHESS_OPENCLAW_STATE_DIR must be an absolute path.');
         }
+        return path.resolve(explicit);
+    }
+    const configuredHome = environment.HOME?.trim() ||
+        environment.USERPROFILE?.trim() || homedir();
+    if (!configuredHome || !path.isAbsolute(configuredHome)) {
+        throw new Error('A local home directory is required to persist the WebChess OpenClaw identity.');
+    }
+    if (process.platform === 'darwin') {
+        return path.join(configuredHome, 'Library', 'Application Support', 'WebChess', 'OpenClaw');
+    }
+    if (process.platform === 'win32') {
+        const localAppData = environment.LOCALAPPDATA?.trim() ||
+            path.join(configuredHome, 'AppData', 'Local');
+        if (!path.isAbsolute(localAppData)) {
+            throw new Error('LOCALAPPDATA must be an absolute path.');
+        }
+        return path.join(localAppData, 'WebChess', 'OpenClaw');
+    }
+    const stateHome = environment.XDG_STATE_HOME?.trim() ||
+        path.join(configuredHome, '.local', 'state');
+    if (!path.isAbsolute(stateHome)) {
+        throw new Error('XDG_STATE_HOME must be an absolute path.');
+    }
+    return path.join(stateHome, 'webchess', 'openclaw');
+}
+export function resolveRuntimeIdentityPath(environment = process.env) {
+    return path.join(runtimeStateRoot(environment), RUNTIME_IDENTITY_FILENAME);
+}
+function randomRuntimeIdentity() {
+    return {
+        deletionHmacSecret: randomBytes(48).toString('base64url'),
+        format: RUNTIME_IDENTITY_FORMAT,
+        hmacSecret: randomBytes(48).toString('base64url'),
+        ownerId: `openclaw_${randomBytes(16).toString('hex')}`,
+    };
+}
+function parseStoredRuntimeIdentity(value) {
+    let parsed;
+    try {
+        parsed = JSON.parse(value);
+    }
+    catch {
+        throw new Error('The persisted WebChess OpenClaw identity is invalid JSON.');
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('The persisted WebChess OpenClaw identity is invalid.');
+    }
+    const record = parsed;
+    if (Object.keys(record).sort().join(',') !==
+        'deletionHmacSecret,format,hmacSecret,ownerId' ||
+        record.format !== RUNTIME_IDENTITY_FORMAT ||
+        typeof record.ownerId !== 'string' ||
+        typeof record.hmacSecret !== 'string' ||
+        typeof record.deletionHmacSecret !== 'string') {
+        throw new Error('The persisted WebChess OpenClaw identity is invalid.');
+    }
+    return {
+        deletionHmacSecret: validatedSecret(record.deletionHmacSecret, 'Persisted deletion HMAC secret'),
+        format: RUNTIME_IDENTITY_FORMAT,
+        hmacSecret: validatedSecret(record.hmacSecret, 'Persisted HMAC secret'),
+        ownerId: validatedOwnerId(record.ownerId, 'Persisted owner ID'),
+    };
+}
+function isNodeError(error, code) {
+    return error instanceof Error &&
+        'code' in error &&
+        error.code === code;
+}
+async function assertPrivateDirectory(directory) {
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+        throw new Error('The WebChess OpenClaw state path must be a private directory, not a symlink.');
+    }
+    if (process.platform !== 'win32' &&
+        typeof process.getuid === 'function' &&
+        info.uid !== process.getuid()) {
+        throw new Error('The WebChess OpenClaw state directory has another owner.');
+    }
+    if (process.platform !== 'win32' && (info.mode & 0o777) !== 0o700) {
+        throw new Error('The WebChess OpenClaw state directory must have mode 0700.');
+    }
+}
+async function readStoredRuntimeIdentity(filename) {
+    const beforeOpen = await lstat(filename);
+    if (!beforeOpen.isFile() || beforeOpen.isSymbolicLink()) {
+        throw new Error('The persisted WebChess OpenClaw identity must be a regular file, not a symlink.');
+    }
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+    const handle = await open(filename, flags);
+    try {
+        const info = await handle.stat();
+        if (!info.isFile() || info.size < 1 || info.size > MAX_RUNTIME_IDENTITY_BYTES) {
+            throw new Error('The persisted WebChess OpenClaw identity has an invalid size or type.');
+        }
+        if (process.platform !== 'win32') {
+            if ((info.mode & 0o777) !== 0o600) {
+                throw new Error('The persisted WebChess OpenClaw identity must have mode 0600.');
+            }
+            if (typeof process.getuid === 'function' &&
+                info.uid !== process.getuid()) {
+                throw new Error('The persisted WebChess OpenClaw identity has another owner.');
+            }
+        }
+        return parseStoredRuntimeIdentity(await handle.readFile('utf8'));
+    }
+    finally {
+        await handle.close();
+    }
+}
+async function createStoredRuntimeIdentity(filename) {
+    const identity = randomRuntimeIdentity();
+    const flags = fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        fsConstants.O_WRONLY |
+        (fsConstants.O_NOFOLLOW ?? 0);
+    const handle = await open(filename, flags, 0o600);
+    try {
+        await handle.writeFile(`${JSON.stringify(identity)}\n`, 'utf8');
+        await handle.sync();
+        await handle.chmod(0o600);
+    }
+    finally {
+        await handle.close();
+    }
+    return identity;
+}
+export async function loadOrCreateRuntimeIdentity(environment = process.env) {
+    const configured = configuredRuntimeIdentity(environment);
+    if (configured.ownerId &&
+        configured.hmacSecret &&
+        configured.deletionHmacSecret) {
         return configured;
     }
-    return createHash('sha512')
-        .update(`webchess-openclaw-${purpose}-v2\0${path.resolve(installationRoot)}`)
-        .digest('hex');
+    const filename = resolveRuntimeIdentityPath(environment);
+    const directory = path.dirname(filename);
+    await mkdir(directory, { mode: 0o700, recursive: true });
+    await assertPrivateDirectory(directory);
+    let stored;
+    try {
+        stored = await readStoredRuntimeIdentity(filename);
+    }
+    catch (error) {
+        if (!isNodeError(error, 'ENOENT'))
+            throw error;
+        try {
+            stored = await createStoredRuntimeIdentity(filename);
+        }
+        catch (createError) {
+            if (!isNodeError(createError, 'EEXIST'))
+                throw createError;
+            stored = await readStoredRuntimeIdentity(filename);
+        }
+    }
+    return {
+        deletionHmacSecret: configured.deletionHmacSecret ?? stored.deletionHmacSecret,
+        hmacSecret: configured.hmacSecret ?? stored.hmacSecret,
+        ownerId: configured.ownerId ?? stored.ownerId,
+    };
 }
 async function stageWebChessRuntime(sourceRoot, nextBinary) {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), 'webchess-openclaw-runtime-'));
@@ -109,10 +285,19 @@ async function stageWebChessRuntime(sourceRoot, nextBinary) {
         throw error;
     }
 }
-export function buildNextLaunchSpec(root, options, environment = process.env, nextBinary = resolveNextBinary(), installationRoot = root, bridge) {
+export function buildNextLaunchSpec(root, options, environment = process.env, nextBinary = resolveNextBinary(), identity, bridge) {
     if (!bridge) {
         throw new Error('The authenticated OpenClaw runtime bridge is required.');
     }
+    const runtimeIdentity = identity ?? (() => {
+        const configured = configuredRuntimeIdentity(environment);
+        if (!configured.ownerId ||
+            !configured.hmacSecret ||
+            !configured.deletionHmacSecret) {
+            throw new Error('The persisted WebChess OpenClaw identity must be loaded before building the launch environment.');
+        }
+        return configured;
+    })();
     const url = `http://127.0.0.1:${options.port}/openclaw`;
     const origin = `http://127.0.0.1:${options.port}`;
     const localDatabaseUrl = dedicatedDatabaseUrl(environment);
@@ -135,18 +320,14 @@ export function buildNextLaunchSpec(root, options, environment = process.env, ne
         }
     }
     Object.assign(localEnvironment, {
-        CLERK_SECRET_KEY: '',
-        DATABASE_URL: '',
         NEXT_TELEMETRY_DISABLED: '1',
-        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: '',
         NEXT_PUBLIC_SITE_URL: origin,
         NODE_ENV: 'development',
-        OPENAI_API_KEY: '',
         WEBCHESS_DAILY_GAME_LIMIT: environment.WEBCHESS_DAILY_GAME_LIMIT ?? '1000',
         WEBCHESS_DAILY_GLOBAL_MODEL_REQUEST_LIMIT: environment.WEBCHESS_DAILY_GLOBAL_MODEL_REQUEST_LIMIT ?? '10000',
         WEBCHESS_DAILY_MODEL_REQUEST_LIMIT: environment.WEBCHESS_DAILY_MODEL_REQUEST_LIMIT ?? '10000',
-        WEBCHESS_DELETION_HMAC_SECRET: installationSecret(environment, 'WEBCHESS_DELETION_HMAC_SECRET', 'deletion-hmac', installationRoot),
-        WEBCHESS_HMAC_SECRET: installationSecret(environment, 'WEBCHESS_HMAC_SECRET', 'usage-hmac', installationRoot),
+        WEBCHESS_DELETION_HMAC_SECRET: runtimeIdentity.deletionHmacSecret,
+        WEBCHESS_HMAC_SECRET: runtimeIdentity.hmacSecret,
         WEBCHESS_HOURLY_GAME_START_LIMIT: environment.WEBCHESS_HOURLY_GAME_START_LIMIT ?? '1000',
         WEBCHESS_HOURLY_IP_GAME_START_LIMIT: environment.WEBCHESS_HOURLY_IP_GAME_START_LIMIT ?? '1000',
         WEBCHESS_HOURLY_IP_MODEL_REQUEST_LIMIT: environment.WEBCHESS_HOURLY_IP_MODEL_REQUEST_LIMIT ?? '1000',
@@ -155,7 +336,7 @@ export function buildNextLaunchSpec(root, options, environment = process.env, ne
         WEBCHESS_OPENCLAW_ENABLED: 'true',
         WEBCHESS_OPENCLAW_BRIDGE_TOKEN: bridge.token,
         WEBCHESS_OPENCLAW_BRIDGE_URL: bridge.url,
-        WEBCHESS_OPENCLAW_OWNER_ID: installationOwnerId(environment, installationRoot),
+        WEBCHESS_OPENCLAW_OWNER_ID: runtimeIdentity.ownerId,
         WEBCHESS_OPENCLAW_TIMEOUT_MS: environment.WEBCHESS_OPENCLAW_TIMEOUT_MS ?? '150000',
         WEBCHESS_OPENCLAW_TRANSPORT: 'local',
     });
@@ -243,6 +424,8 @@ async function waitForServer(url, server, fetcher, timeoutMs) {
                 const status = await response.json();
                 if (status.available === true &&
                     status.database?.available === true &&
+                    status.database.majorVersion === 17 &&
+                    status.model?.configurationReady === true &&
                     status.lifecycle === 'webchess-2.0') {
                     return;
                 }
@@ -302,12 +485,13 @@ export async function launchWebChess(options, dependencies = defaultDependencies
     const sourceRoot = resolveWebChessRoot();
     const nextBinary = resolveNextBinary();
     await access(nextBinary);
+    const identity = await loadOrCreateRuntimeIdentity(dependencies.environment);
     const runtimeRoot = await dependencies.stageRuntime(sourceRoot, nextBinary);
     let server = null;
     let bridge = null;
     try {
         bridge = await dependencies.startBridge(api, runtimeRoot);
-        const spec = buildNextLaunchSpec(runtimeRoot, options, dependencies.environment, nextBinary, sourceRoot, bridge);
+        const spec = buildNextLaunchSpec(runtimeRoot, options, dependencies.environment, nextBinary, identity, bridge);
         const spawnedServer = dependencies.spawnServer(spec.command, spec.args, {
             cwd: spec.cwd,
             detached: spec.detached,

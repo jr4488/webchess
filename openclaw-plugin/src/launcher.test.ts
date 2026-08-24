@@ -1,13 +1,26 @@
 import { EventEmitter } from 'node:events'
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+  symlink,
+} from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   buildNextLaunchSpec,
   launchWebChess,
+  loadOrCreateRuntimeIdentity,
   nodeModulesRootForNextBinary,
   parseLaunchOptions,
   resolveNextBinary,
+  resolveRuntimeIdentityPath,
   resolveWebChessRoot,
   type LauncherDependencies,
   type SpawnedServer,
@@ -18,6 +31,20 @@ const BRIDGE: Pick<WebChessBridge, 'token' | 'url'> = {
   token: 'b'.repeat(43),
   url: 'http://127.0.0.1:44123',
 }
+
+const IDENTITY = {
+  deletionHmacSecret: 'd'.repeat(48),
+  hmacSecret: 'h'.repeat(48),
+  ownerId: 'openclaw_test_installation',
+} as const
+
+const temporaryRoots: string[] = []
+
+afterEach(async () => {
+  for (const root of temporaryRoots.splice(0)) {
+    await rm(root, { force: true, recursive: true })
+  }
+})
 
 const API = {
   config: {},
@@ -58,8 +85,15 @@ describe('OpenClaw WebChess launcher', () => {
       '/plugin/webchess',
       parseLaunchOptions({}),
       {
+        AWS_ACCESS_KEY_ID: 'must-not-reach-next',
+        AWS_SECRET_ACCESS_KEY: 'must-not-reach-next',
+        CLERK_WEBHOOK_SIGNING_SECRET: 'must-not-reach-next',
+        DATABASE_URL: 'postgresql://hosted.example/production',
+        GITHUB_TOKEN: 'must-not-reach-next',
+        MIGRATION_DATABASE_URL: 'postgresql://owner.example/production',
         NODE_ENV: 'test',
         OPENAI_API_KEY: 'user-owned-provider-key',
+        OPENCLAW_GATEWAY_TOKEN: 'must-stay-in-openclaw',
         PATH: '/usr/bin',
         VERCEL: '1',
         VERCEL_ENV: 'preview',
@@ -72,7 +106,7 @@ describe('OpenClaw WebChess launcher', () => {
         WEBCHESS_OPENCLAW_OWNER_ID: 'openclaw_test_installation',
       },
       '/managed/node_modules/next/dist/bin/next',
-      '/plugin/webchess',
+      IDENTITY,
       BRIDGE,
     )
     expect(spec.cwd).toBe('/plugin/webchess')
@@ -90,13 +124,9 @@ describe('OpenClaw WebChess launcher', () => {
       '3210',
     ])
     expect(spec.env).toMatchObject({
-      CLERK_SECRET_KEY: '',
-      DATABASE_URL: '',
       NEXT_TELEMETRY_DISABLED: '1',
-      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: '',
       NEXT_PUBLIC_SITE_URL: 'http://127.0.0.1:3210',
       NODE_ENV: 'development',
-      OPENAI_API_KEY: '',
       PATH: '/usr/bin',
       WEBCHESS_DELETION_HMAC_SECRET: 'd'.repeat(48),
       WEBCHESS_HMAC_SECRET: 'h'.repeat(48),
@@ -113,6 +143,20 @@ describe('OpenClaw WebChess launcher', () => {
     expect(spec.env).not.toHaveProperty('VERCEL_ENV')
     expect(spec.env).not.toHaveProperty('VERCEL_TARGET_ENV')
     expect(spec.env).not.toHaveProperty('VERCEL_URL')
+    for (const forbidden of [
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'CLERK_SECRET_KEY',
+      'CLERK_WEBHOOK_SIGNING_SECRET',
+      'DATABASE_URL',
+      'GITHUB_TOKEN',
+      'MIGRATION_DATABASE_URL',
+      'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY',
+      'OPENAI_API_KEY',
+      'OPENCLAW_GATEWAY_TOKEN',
+    ]) {
+      expect(spec.env).not.toHaveProperty(forbidden)
+    }
 
     const withoutProviderEnvironment = buildNextLaunchSpec(
       '/plugin/webchess',
@@ -123,10 +167,107 @@ describe('OpenClaw WebChess launcher', () => {
           'postgresql://webchess:test@127.0.0.1:55432/webchess',
       },
       '/managed/node_modules/next/dist/bin/next',
-      '/plugin/webchess',
+      IDENTITY,
       BRIDGE,
     )
-    expect(withoutProviderEnvironment.env.OPENAI_API_KEY).toBe('')
+    expect(withoutProviderEnvironment.env).not.toHaveProperty('OPENAI_API_KEY')
+  })
+
+  it('persists one random private runtime identity and refuses permissive files', async () => {
+    const temporaryRoot = await mkdtemp(
+      path.join(tmpdir(), 'webchess-openclaw-identity-test-'),
+    )
+    temporaryRoots.push(temporaryRoot)
+    const environment = {
+      HOME: temporaryRoot,
+      WEBCHESS_OPENCLAW_STATE_DIR: path.join(temporaryRoot, 'state'),
+    }
+
+    const first = await loadOrCreateRuntimeIdentity(environment)
+    const second = await loadOrCreateRuntimeIdentity(environment)
+    const filename = resolveRuntimeIdentityPath(environment)
+    const info = await lstat(filename)
+
+    expect(second).toEqual(first)
+    expect(first.ownerId).toMatch(/^openclaw_[a-f0-9]{32}$/u)
+    expect(Buffer.byteLength(first.hmacSecret, 'utf8')).toBeGreaterThanOrEqual(32)
+    expect(Buffer.byteLength(first.deletionHmacSecret, 'utf8'))
+      .toBeGreaterThanOrEqual(32)
+    expect(first.hmacSecret).not.toBe(first.deletionHmacSecret)
+    if (process.platform !== 'win32') {
+      expect(info.mode & 0o777).toBe(0o600)
+      await chmod(filename, 0o700)
+      await expect(loadOrCreateRuntimeIdentity(environment)).rejects.toThrow(
+        /mode 0600/u,
+      )
+    }
+  })
+
+  it('refuses a permissive existing state directory without changing it', async () => {
+    if (process.platform === 'win32') return
+    const temporaryRoot = await mkdtemp(
+      path.join(tmpdir(), 'webchess-openclaw-directory-mode-test-'),
+    )
+    temporaryRoots.push(temporaryRoot)
+    const stateRoot = path.join(temporaryRoot, 'state')
+    await mkdir(stateRoot, { mode: 0o755 })
+    await chmod(stateRoot, 0o755)
+    await expect(loadOrCreateRuntimeIdentity({
+      HOME: temporaryRoot,
+      WEBCHESS_OPENCLAW_STATE_DIR: stateRoot,
+    })).rejects.toThrow(/mode 0700/u)
+    expect((await lstat(stateRoot)).mode & 0o777).toBe(0o755)
+  })
+
+  it('honors partial overrides and refuses a symlink identity file', async () => {
+    const temporaryRoot = await mkdtemp(
+      path.join(tmpdir(), 'webchess-openclaw-partial-identity-test-'),
+    )
+    temporaryRoots.push(temporaryRoot)
+    const stateRoot = path.join(temporaryRoot, 'state')
+    const environment = {
+      HOME: temporaryRoot,
+      WEBCHESS_HMAC_SECRET: 'configured-hmac-secret-'.repeat(2),
+      WEBCHESS_OPENCLAW_STATE_DIR: stateRoot,
+    }
+    const identity = await loadOrCreateRuntimeIdentity(environment)
+    expect(identity.hmacSecret).toBe('configured-hmac-secret-'.repeat(2))
+
+    const symlinkRoot = await mkdtemp(
+      path.join(tmpdir(), 'webchess-openclaw-symlink-identity-test-'),
+    )
+    temporaryRoots.push(symlinkRoot)
+    const symlinkState = path.join(symlinkRoot, 'state')
+    const symlinkEnvironment = {
+      HOME: symlinkRoot,
+      WEBCHESS_OPENCLAW_STATE_DIR: symlinkState,
+    }
+    await loadOrCreateRuntimeIdentity(symlinkEnvironment)
+    const filename = resolveRuntimeIdentityPath(symlinkEnvironment)
+    const target = path.join(symlinkRoot, 'identity-target')
+    await rename(filename, target)
+    await symlink(target, filename)
+    await expect(loadOrCreateRuntimeIdentity(symlinkEnvironment)).rejects
+      .toThrow(/regular file, not a symlink/u)
+  })
+
+  it('uses complete explicit identity overrides without creating a state file', async () => {
+    const temporaryRoot = await mkdtemp(
+      path.join(tmpdir(), 'webchess-openclaw-explicit-identity-test-'),
+    )
+    temporaryRoots.push(temporaryRoot)
+    const environment = {
+      WEBCHESS_DELETION_HMAC_SECRET: IDENTITY.deletionHmacSecret,
+      WEBCHESS_HMAC_SECRET: IDENTITY.hmacSecret,
+      WEBCHESS_OPENCLAW_OWNER_ID: IDENTITY.ownerId,
+      WEBCHESS_OPENCLAW_STATE_DIR: path.join(temporaryRoot, 'state'),
+    }
+
+    await expect(loadOrCreateRuntimeIdentity(environment)).resolves.toEqual(
+      IDENTITY,
+    )
+    await expect(lstat(resolveRuntimeIdentityPath(environment))).rejects
+      .toMatchObject({ code: 'ENOENT' })
   })
 
   it('accepts bounded display overrides and rejects invalid ports', () => {
@@ -165,8 +306,11 @@ describe('OpenClaw WebChess launcher', () => {
     const dependencies: LauncherDependencies = {
       environment: {
         NODE_ENV: 'test',
+        WEBCHESS_DELETION_HMAC_SECRET: IDENTITY.deletionHmacSecret,
+        WEBCHESS_HMAC_SECRET: IDENTITY.hmacSecret,
         WEBCHESS_OPENCLAW_DATABASE_URL:
           'postgresql://webchess:test@127.0.0.1:55432/webchess',
+        WEBCHESS_OPENCLAW_OWNER_ID: IDENTITY.ownerId,
       },
       fetch: vi.fn(async () => new Response(null, { status: 503 })) as
         unknown as typeof globalThis.fetch,
