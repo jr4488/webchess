@@ -348,6 +348,7 @@ describe('OpenClaw WebChess launcher', () => {
       parseLaunchOptions({}),
       {
         [name]: value,
+        NODE_ENV: 'test',
         WEBCHESS_OPENCLAW_DATABASE_URL:
           'postgresql://webchess:test@127.0.0.1:55432/webchess',
       },

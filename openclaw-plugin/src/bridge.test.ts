@@ -106,11 +106,13 @@ const ADDITIONAL_CODEX_PROXY_CA_ENVIRONMENT_NAMES = [
   'OPENCLAW_DEBUG_PROXY_SESSION_ID',
   'OPENCLAW_DEBUG_PROXY_URL',
   'OPENCLAW_ENABLE_PRIVATE_QA_CLI',
+  'OPENCLAW_LOG_LEVEL',
   'OPENCLAW_NODE_EXTRA_CA_CERTS_READY',
   'OPENCLAW_QA_FORCE_RUNTIME',
   'OPENSSL_CONF',
   'PIP_PROXY',
   'REQUESTS_CA_BUNDLE',
+  'RUST_LOG',
   'SSL_CERT_DIR',
   'SSL_CERT_FILE',
   'SSLKEYLOGFILE',
@@ -1029,6 +1031,65 @@ describe('OpenClaw plugin runtime bridge', () => {
     await bridge.close()
   })
 
+  it('accepts the pinned Codex plugin schema defaults', async () => {
+    const api = fakeApi()
+    api.config.plugins = {
+      allow: ['codex', 'webchess'],
+      entries: {
+        codex: {
+          enabled: true,
+          config: {
+            codexDynamicToolsExclude: [],
+            codexDynamicToolsLoading: 'searchable',
+          },
+        },
+        webchess: { enabled: true },
+      },
+    }
+
+    const bridge = await start(api)
+    await bridge.close()
+  })
+
+  it.each([
+    [
+      'alternate dynamic-tools mode',
+      {
+        codexDynamicToolsExclude: [],
+        codexDynamicToolsLoading: 'direct',
+      },
+    ],
+    [
+      'nonempty dynamic-tools exclusion',
+      {
+        codexDynamicToolsExclude: ['web_search'],
+        codexDynamicToolsLoading: 'searchable',
+      },
+    ],
+    [
+      'unexpected Codex plugin setting',
+      {
+        codexDynamicToolsExclude: [],
+        codexDynamicToolsLoading: 'searchable',
+        privateSetting: true,
+      },
+    ],
+  ])('rejects an unsafe pinned Codex plugin config: %s', async (
+    _label,
+    config,
+  ) => {
+    const api = fakeApi()
+    api.config.plugins = {
+      allow: ['codex', 'webchess'],
+      entries: { codex: { enabled: true, config } },
+    }
+
+    const failure = await captureStartFailure(api)
+
+    expect(failure.message).toMatch(/plugins\.allow/u)
+    expect(api.runtime.webSearch.listProviders).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['AMQP_URL', 'amqps://private.invalid'],
     ['ANTHROPIC_ADMIN_KEY', 'provider-secret'],
@@ -1156,6 +1217,10 @@ describe('OpenClaw plugin runtime bridge', () => {
     ['OPENCLAW_DEBUG_SSE', '1'],
     ['OPENCLAW_DEBUG_SSE', '   '],
     ['oPeNcLaW_dEbUg_SsE', '1'],
+    ['OPENCLAW_LOG_LEVEL', 'trace'],
+    ['oPeNcLaW_lOg_LeVeL', '   '],
+    ['RUST_LOG', 'codex_core=debug'],
+    ['rUsT_lOg', '   '],
     ...ADDITIONAL_CODEX_PROXY_CA_ENVIRONMENT_NAMES.map((name) => [
       name,
       'private-transport-override',
@@ -1194,6 +1259,21 @@ describe('OpenClaw plugin runtime bridge', () => {
       expect(api.runtime.webSearch.listProviders).not.toHaveBeenCalled()
     },
   )
+
+  it('rejects the native and OpenClaw debug-log combination before probing', async () => {
+    const api = fakeApi()
+
+    const failure = await captureStartFailure(api, {
+      environment: {
+        NODE_ENV: 'test',
+        OPENCLAW_LOG_LEVEL: 'debug',
+        RUST_LOG: 'codex_core=debug',
+      },
+    })
+
+    expect(failure.message).toMatch(/canonical OpenAI account endpoint/u)
+    expect(api.runtime.webSearch.listProviders).not.toHaveBeenCalled()
+  })
 
   it('accepts only exactly empty provider variables and enabled TLS verification', async () => {
     const bridge = await start(fakeApi(), {

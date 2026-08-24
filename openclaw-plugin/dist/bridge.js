@@ -142,6 +142,7 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
     'OPENCLAW_ENABLE_PRIVATE_QA_CLI',
     'OPENCLAW_GATEWAY_PASSWORD',
     'OPENCLAW_GATEWAY_TOKEN',
+    'OPENCLAW_LOG_LEVEL',
     'OPENCLAW_MCP_TOKEN',
     OPENCLAW_AUTO_CA_MARKER,
     'OPENCLAW_CONFIG_PATH',
@@ -165,6 +166,7 @@ const CODEX_APP_SERVER_ALWAYS_CLEAR_ENV = [
     'PIP_PROXY',
     'REDIS_URL',
     'REQUESTS_CA_BUNDLE',
+    'RUST_LOG',
     'SSL_CERT_DIR',
     'SSL_CERT_FILE',
     'SSLKEYLOGFILE',
@@ -664,10 +666,12 @@ const UNSAFE_PROVIDER_TRANSPORT_ENVIRONMENT_NAMES = new Set([
     'OPENCLAW_DEBUG_PROXY_URL',
     'OPENCLAW_DEBUG_SSE',
     'OPENCLAW_ENABLE_PRIVATE_QA_CLI',
+    'OPENCLAW_LOG_LEVEL',
     'OPENCLAW_QA_FORCE_RUNTIME',
     'OPENSSL_CONF',
     'PIP_PROXY',
     'REQUESTS_CA_BUNDLE',
+    'RUST_LOG',
     'SSL_CERT_DIR',
     'SSL_CERT_FILE',
     'SSLKEYLOGFILE',
@@ -1065,8 +1069,21 @@ function hasCompatiblePluginConfig(config) {
         return false;
     }
     const codexConfig = codexEntry.config;
-    return codexConfig === undefined ||
-        (isRecord(codexConfig) && hasOnlyKeys(codexConfig, ['appServer']));
+    if (codexConfig === undefined)
+        return true;
+    if (!isRecord(codexConfig) || !hasOnlyKeys(codexConfig, [
+        'appServer',
+        'codexDynamicToolsExclude',
+        'codexDynamicToolsLoading',
+    ]))
+        return false;
+    const dynamicToolsLoading = codexConfig.codexDynamicToolsLoading;
+    const dynamicToolsExclude = codexConfig.codexDynamicToolsExclude;
+    return (dynamicToolsLoading === undefined ||
+        dynamicToolsLoading === 'searchable') &&
+        (dynamicToolsExclude === undefined ||
+            (Array.isArray(dynamicToolsExclude) &&
+                dynamicToolsExclude.length === 0));
 }
 function staticReadinessFailure(api, config, environment, _agentDir, agentId, expectedClearEnv) {
     if (api.runtime.version !== PINNED_OPENCLAW_RUNTIME_VERSION) {

@@ -245,10 +245,12 @@ describe('official Codex package attestation primitives', () => {
     }
     expect(snapshotOAuthCredentialIdentity(store, profileId)).toBeNull()
 
-    store.profiles[profileId].accountId = ' '
+    const storedProfile = store.profiles[profileId] as
+      typeof store.profiles[typeof profileId] & { accountId?: string }
+    storedProfile.accountId = ' '
     expect(snapshotOAuthCredentialIdentity(store, profileId)).toBeNull()
 
-    store.profiles[profileId].accountId = 'different-account'
+    storedProfile.accountId = 'different-account'
     expect(snapshotOAuthCredentialIdentity(store, profileId)).toBeNull()
   })
 
