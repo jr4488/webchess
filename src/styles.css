@@ -929,6 +929,11 @@ button:disabled {
   justify-content: center;
 }
 
+.question-copy,
+.question-board-column {
+  min-width: 0;
+}
+
 .question-copy {
   max-width: 600px;
 }

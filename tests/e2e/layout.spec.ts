@@ -143,6 +143,69 @@ test.describe('responsive layout', () => {
       }
     })
   }
+
+  test('OpenClaw question-stage columns fit the viewport', async ({ page }) => {
+    test.skip(
+      !localAuthEnabled,
+      'The loopback-only test principal is disabled for external servers.',
+    )
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.route('**/api/games/current', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify({ game: null }),
+      }),
+    )
+    await expectSuccessfulDocument(page, '/openclaw')
+    await expect(
+      page.getByLabel('What are you trying to understand?'),
+    ).toBeVisible()
+    await page.locator('html').evaluate((element) => {
+      element.style.fontSize = '20px'
+    })
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    )
+
+    const layout = await page.evaluate(() => {
+      const viewportWidth = document.documentElement.clientWidth
+      const selectors = ['.question-copy', '.question-board-column']
+      return {
+        viewportWidth,
+        columns: selectors.map((selector) => {
+          const element = document.querySelector(selector)
+          if (!(element instanceof HTMLElement)) {
+            throw new Error(`Missing ${selector} in the question stage.`)
+          }
+          const bounds = element.getBoundingClientRect()
+          return {
+            selector,
+            left: bounds.left,
+            right: bounds.right,
+            minWidth: getComputedStyle(element).minWidth,
+          }
+        }),
+      }
+    })
+
+    for (const column of layout.columns) {
+      expect(
+        column.minWidth,
+        `${column.selector} must let the one-column grid shrink`,
+      ).toBe('0px')
+      expect(
+        column.left,
+        `${column.selector} begins outside the viewport`,
+      ).toBeGreaterThanOrEqual(-1)
+      expect(
+        column.right,
+        `${column.selector} ends outside the viewport`,
+      ).toBeLessThanOrEqual(layout.viewportWidth + 1)
+    }
+  })
 })
 
 test('primary navigation is keyboard operable', async ({ page }) => {
