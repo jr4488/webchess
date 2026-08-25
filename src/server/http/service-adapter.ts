@@ -251,9 +251,46 @@ type CastDirectedDivisionResultPayload = z.infer<
 >
 type AnswerResultPayload = z.infer<typeof AnswerResultPayloadSchema>
 type ApprovedAnswerResultPayload = z.infer<typeof ApprovedAnswerResultPayloadSchema>
+
+function requireApprovedAnswerResultPayload(
+  value: unknown,
+): ApprovedAnswerResultPayload {
+  const parsed = ApprovedAnswerResultPayloadSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new ModelContractError(
+      'The assembled Answer result did not match the durable result contract.',
+      { cause: parsed.error },
+    )
+  }
+  return parsed.data
+}
 type PortiaResultPayload = z.infer<typeof PortiaResultPayloadSchema>
 type CharlotteResultPayload = z.infer<typeof CharlotteResultPayloadSchema>
 type ApprovedCharlotteResultPayload = z.infer<typeof ApprovedCharlotteResultPayloadSchema>
+
+function requirePortiaResultPayload(value: unknown): PortiaResultPayload {
+  const parsed = PortiaResultPayloadSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new ModelContractError(
+      'The assembled Portia result did not match the durable result contract.',
+      { cause: parsed.error },
+    )
+  }
+  return parsed.data
+}
+
+function requireApprovedCharlotteResultPayload(
+  value: unknown,
+): ApprovedCharlotteResultPayload {
+  const parsed = ApprovedCharlotteResultPayloadSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new ModelContractError(
+      'The assembled Charlotte result did not match the durable result contract.',
+      { cause: parsed.error },
+    )
+  }
+  return parsed.data
+}
 
 type GameRepositoryPort = Pick<
   DurableGameRepository,
@@ -3560,41 +3597,73 @@ export function createApiServicesWithDependencies(
             }
           })()
 
-          const stored = ApprovedAnswerResultPayloadSchema.parse({
-            format: 'webchess-answer-result/2',
-            answer: {
-              answer: generated.result.answer,
-              model: generated.model,
-              prompt: generated.prompt,
-            },
-            approval: {
-              lifecycleRunId: lifecycle.id,
-              reviewedPromptDigest: approvedLifecycle.answerPrompt.digest,
-              gateInputDigest: approvedLifecycle.gate.inputDigest,
-              ...directionalResultSource(trajectoryDirectionalRecord),
-            },
-          })
-          const payload = modelResultPayload(stored)
+          let winning: ApprovedAnswerResultPayload | null = null
+          let successSettlement:
+            | Awaited<ReturnType<UsageController['settleModelRequest']>>
+            | null = null
           try {
+            const stored = requireApprovedAnswerResultPayload({
+              format: 'webchess-answer-result/2',
+              answer: {
+                answer: generated.result.answer,
+                model: generated.model,
+                prompt: generated.prompt,
+              },
+              approval: {
+                lifecycleRunId: lifecycle.id,
+                reviewedPromptDigest: approvedLifecycle.answerPrompt.digest,
+                gateInputDigest: approvedLifecycle.gate.inputDigest,
+                ...directionalResultSource(trajectoryDirectionalRecord),
+              },
+            })
+            const payload = modelResultPayload(stored)
             providerDeadline.assertBeforeDeadline()
+            const settlement = dependencies.usage.settleModelRequest({
+              userId: input.ownerId,
+              requestId: reservation.requestId,
+              leaseToken,
+              outcome: 'succeeded',
+              usage: providerUsage(generated),
+              ...(generated.providerId === null
+                ? {}
+                : { providerResponseId: generated.providerId }),
+              responseSha256: canonicalHash(payload),
+              resultPayload: payload,
+            })
+            successSettlement = await Promise.race([
+              settlement,
+              providerDeadline.expired,
+            ])
+            winning = stored
+            // Once the exact payload is durable it is the recovery authority,
+            // even if later lifecycle finalization fails.
+            successCommitted = successSettlement.ok
           } catch (error) {
-            await failProviderAttempt(error)
+            const recovered = await recoverCommittedResult(
+              dependencies,
+              input.ownerId,
+              input.gameId,
+              'answer',
+              {
+                requestSha256,
+                promptVersion: ANSWER_PROMPT_VERSION,
+              },
+            )
+            if (
+              recovered.found &&
+              recovered.status === 'succeeded' &&
+              recovered.resultPayload
+            ) {
+              successCommitted = true
+              winning = requireApprovedAnswerResultPayload(
+                recovered.resultPayload,
+              )
+            } else {
+              await failProviderAttempt(error)
+            }
           }
-          const settled = await dependencies.usage.settleModelRequest({
-            userId: input.ownerId,
-            requestId: reservation.requestId,
-            leaseToken,
-            outcome: 'succeeded',
-            usage: providerUsage(generated),
-            ...(generated.providerId === null
-              ? {}
-              : { providerResponseId: generated.providerId }),
-            responseSha256: canonicalHash(payload),
-            resultPayload: payload,
-          })
 
-          let winning = stored
-          if (!settled.ok) {
+          if (!successCommitted) {
             let recovered = await recoverCommittedResult(
               dependencies,
               input.ownerId,
@@ -3645,18 +3714,18 @@ export function createApiServicesWithDependencies(
                 'The answer result could not be committed safely.',
               )
             }
-            winning = ApprovedAnswerResultPayloadSchema.parse(
+            winning = requireApprovedAnswerResultPayload(
               recovered.resultPayload,
             )
+            successCommitted = true
           }
-          if (!approvedAnswerMatchesLifecycle(winning, lifecycle)) {
+          if (!winning || !approvedAnswerMatchesLifecycle(winning, lifecycle)) {
             throw new ApiError(
               'INTERNAL_ERROR',
               500,
               'The committed answer lost its Portia and Gate provenance.',
             )
           }
-          successCommitted = true
           pending = await storeAnswerForOwner(
             dependencies.repository,
             input.ownerId,
@@ -4109,53 +4178,77 @@ export function createApiServicesWithDependencies(
           }
           throw error
         }
-        const stored = PortiaResultPayloadSchema.parse({
-          format: 'webchess-portia-result/1',
-          review: generated.result,
-        })
-        const payload = modelResultPayload(stored)
-        const settled = await dependencies.usage.settleModelRequest({
-          userId: input.ownerId,
-          requestId: reservation.requestId,
-          leaseToken,
-          outcome: 'succeeded',
-          usage: providerUsage(generated),
-          ...(generated.providerId === null
-            ? {}
-            : { providerResponseId: generated.providerId }),
-          responseSha256: canonicalHash(payload),
-          resultPayload: payload,
-        })
-        let winning = stored
-        if (!settled.ok) {
-          const recovered = await recoverCommittedResult(
+        try {
+          const stored = requirePortiaResultPayload({
+            format: 'webchess-portia-result/1',
+            review: generated.result,
+          })
+          const payload = modelResultPayload(stored)
+          const settled = await dependencies.usage.settleModelRequest({
+            userId: input.ownerId,
+            requestId: reservation.requestId,
+            leaseToken,
+            outcome: 'succeeded',
+            usage: providerUsage(generated),
+            ...(generated.providerId === null
+              ? {}
+              : { providerResponseId: generated.providerId }),
+            responseSha256: canonicalHash(payload),
+            resultPayload: payload,
+          })
+          let winning = stored
+          if (!settled.ok) {
+            const recovered = await recoverCommittedResult(
+              dependencies,
+              input.ownerId,
+              terminal.id,
+              'portia',
+              {
+                requestSha256,
+                promptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+              },
+            )
+            if (!recovered.found || recovered.status !== 'succeeded') {
+              throw new ApiError(
+                'INTERNAL_ERROR',
+                500,
+                'The Portia result could not be committed safely.',
+              )
+            }
+            winning = portiaPayload(recovered.resultPayload)
+          }
+          return commitPortiaAndGate(
             dependencies,
             input.ownerId,
-            terminal.id,
-            'portia',
-            {
-              requestSha256,
-              promptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
-            },
+            terminal,
+            lifecycle,
+            reservation.requestId,
+            requestSha256,
+            winning.review,
           )
-          if (!recovered.found || recovered.status !== 'succeeded') {
-            throw new ApiError(
-              'INTERNAL_ERROR',
-              500,
-              'The Portia result could not be committed safely.',
+        } catch (error) {
+          const settled = await settleDefinitiveFailure(dependencies, {
+            ownerId: input.ownerId,
+            reservation,
+            leaseToken,
+            error,
+            signal: providerSignal,
+            settleAmbiguous: true,
+          })
+          if (settled) {
+            lifecycle = await transitionAfterPortiaProviderFailure(
+              dependencies,
+              input.ownerId,
+              terminal,
+              lifecycle,
+              reservation.requestId,
+              requestSha256,
+              'adversarial_review_failed',
             )
+            if (lifecycle.state === 'portia_unavailable') return lifecycle
           }
-          winning = portiaPayload(recovered.resultPayload)
+          throw error
         }
-        return commitPortiaAndGate(
-          dependencies,
-          input.ownerId,
-          terminal,
-          lifecycle,
-          reservation.requestId,
-          requestSha256,
-          winning.review,
-        )
       })
     },
 
@@ -4407,62 +4500,86 @@ export function createApiServicesWithDependencies(
           }
           throw error
         }
-        const stored = ApprovedCharlotteResultPayloadSchema.parse({
-          format: 'webchess-charlotte-result/3',
-          ...generated.result,
-          source: {
-            lifecycleRunId: lifecycle.id,
-            boardAnswerDigest: modelInput.boardAnswerDigest,
-            reviewedPromptDigest,
-            gateInputDigest: gate.inputDigest,
-            ...directionalResultSource(trajectoryDirectionalRecord),
-          },
-        })
-        const payload = modelResultPayload(stored)
-        const settled = await dependencies.usage.settleModelRequest({
-          userId: input.ownerId,
-          requestId: reservation.requestId,
-          leaseToken,
-          outcome: 'succeeded',
-          usage: providerUsage(generated),
-          ...(generated.providerId === null
-            ? {}
-            : { providerResponseId: generated.providerId }),
-          responseSha256: canonicalHash(payload),
-          resultPayload: payload,
-        })
-        let winning = stored
-        if (!settled.ok) {
-          const recovered = await recoverCommittedResult(
-            dependencies,
-            input.ownerId,
-            terminal.id,
-            'charlotte',
-            {
-              requestSha256,
-              promptVersion: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+        try {
+          const stored = requireApprovedCharlotteResultPayload({
+            format: 'webchess-charlotte-result/3',
+            ...generated.result,
+            source: {
+              lifecycleRunId: lifecycle.id,
+              boardAnswerDigest: modelInput.boardAnswerDigest,
+              reviewedPromptDigest,
+              gateInputDigest: gate.inputDigest,
+              ...directionalResultSource(trajectoryDirectionalRecord),
             },
-          )
-          if (!recovered.found || recovered.status !== 'succeeded') {
-            throw new ApiError(
-              'INTERNAL_ERROR',
-              500,
-              'The Charlotte result could not be committed safely.',
+          })
+          const payload = modelResultPayload(stored)
+          const settled = await dependencies.usage.settleModelRequest({
+            userId: input.ownerId,
+            requestId: reservation.requestId,
+            leaseToken,
+            outcome: 'succeeded',
+            usage: providerUsage(generated),
+            ...(generated.providerId === null
+              ? {}
+              : { providerResponseId: generated.providerId }),
+            responseSha256: canonicalHash(payload),
+            resultPayload: payload,
+          })
+          let winning = stored
+          if (!settled.ok) {
+            const recovered = await recoverCommittedResult(
+              dependencies,
+              input.ownerId,
+              terminal.id,
+              'charlotte',
+              {
+                requestSha256,
+                promptVersion: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+              },
+            )
+            if (!recovered.found || recovered.status !== 'succeeded') {
+              throw new ApiError(
+                'INTERNAL_ERROR',
+                500,
+                'The Charlotte result could not be committed safely.',
+              )
+            }
+            winning = requireApprovedCharlotteResultPayload(
+              recovered.resultPayload,
             )
           }
-          winning = ApprovedCharlotteResultPayloadSchema.parse(
-            recovered.resultPayload,
+          return commitCharlotte(
+            dependencies,
+            input.ownerId,
+            terminal,
+            lifecycle,
+            reservation.requestId,
+            requestSha256,
+            winning,
           )
+        } catch (error) {
+          const settled = await settleDefinitiveFailure(dependencies, {
+            ownerId: input.ownerId,
+            reservation,
+            leaseToken,
+            error,
+            signal: providerSignal,
+            settleAmbiguous: true,
+          })
+          if (settled) {
+            lifecycle = await transitionAfterCharlotteProviderFailure(
+              dependencies,
+              input.ownerId,
+              terminal,
+              lifecycle,
+              reservation.requestId,
+              requestSha256,
+              'qualification_failed',
+            )
+            if (lifecycle.state === 'charlotte_unavailable') return lifecycle
+          }
+          throw error
         }
-        return commitCharlotte(
-          dependencies,
-          input.ownerId,
-          terminal,
-          lifecycle,
-          reservation.requestId,
-          requestSha256,
-          winning,
-        )
       })
     },
 

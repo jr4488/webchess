@@ -3083,6 +3083,131 @@ describe('durable HTTP service adapter', () => {
     expect(dependencies.repository.storeAnswer).toHaveBeenCalledOnce()
   })
 
+  it('settles an assembled Answer payload contract failure without leaving the provider request active', async () => {
+    const generate = vi.mocked(dependencies.answerGenerator)
+      .getMockImplementation()
+    if (!generate) throw new Error('The Answer generator fixture is missing.')
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (answerInput, context) => ({
+        ...await generate(answerInput, context),
+        model: 'm'.repeat(121),
+      }),
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .answer(answerOperationInput())).rejects.toMatchObject({
+        code: 'UPSTREAM_FAILURE',
+        status: 502,
+      })
+
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'failed',
+        failureCode: 'provider_contract_invalid',
+      }),
+    )
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+  })
+
+  it('terminally settles a lost Answer success-settlement acknowledgement without another provider call', async () => {
+    vi.mocked(dependencies.usage.settleModelRequest)
+      .mockRejectedValueOnce(new Error('success settlement acknowledgement lost'))
+      .mockImplementationOnce(async (input) => ({
+        ok: true as const,
+        status: input.outcome,
+        alreadySettled: false,
+      }))
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .answer(answerOperationInput())).rejects.toMatchObject({
+        code: 'INTERNAL_ERROR',
+        status: 500,
+      })
+
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledTimes(2)
+    expect(dependencies.usage.settleModelRequest).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        outcome: 'indeterminate',
+        failureCode: 'provider_outcome_unknown',
+      }),
+    )
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+  })
+
+  it('recovers a durable Answer success after its settlement acknowledgement is lost', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const lifecycle = approvedCurrentDirectionalLifecycle(fixture)
+    dependencies = currentDirectionalDependencies(fixture, lifecycle)
+    vi.mocked(dependencies.usage.settleModelRequest)
+      .mockRejectedValueOnce(new Error('success settlement acknowledgement lost'))
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: GAME_ID,
+      operation: 'answer',
+      status: 'succeeded',
+      resultPayload: approvedAnswerResultPayload(
+        lifecycle,
+      ) as unknown as ModelResultPayload,
+    })
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .answer(answerOperationInput())).resolves.toMatchObject({
+        answer: STORED_ANSWER,
+        game: { status: 'answered' },
+      })
+
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.repository.failAnswer).not.toHaveBeenCalled()
+    expect(dependencies.repository.storeAnswer).toHaveBeenCalledOnce()
+  })
+
+  it('bounds a hung Answer success settlement by the shared five-minute deadline', async () => {
+    vi.useFakeTimers({ now: NOW })
+    vi.mocked(dependencies.usage.settleModelRequest)
+      .mockImplementationOnce(async () => new Promise<never>(() => {}))
+      .mockImplementationOnce(async (input) => ({
+        ok: true as const,
+        status: input.outcome,
+        alreadySettled: false,
+      }))
+
+    const answer = createApiServicesWithDependencies(dependencies)
+      .answer(answerOperationInput())
+    const answerOutcome = answer.then(
+      () => null,
+      (error: unknown) => error,
+    )
+    for (let index = 0; index < 12; index += 1) await Promise.resolve()
+
+    await vi.advanceTimersByTimeAsync(299_999)
+    expect(dependencies.repository.failAnswer).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+
+    await expect(answerOutcome).resolves.toMatchObject({
+      code: 'UPSTREAM_TIMEOUT',
+      status: 504,
+    })
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledTimes(2)
+    expect(dependencies.usage.settleModelRequest).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        outcome: 'indeterminate',
+        failureCode: 'answer_operation_timeout',
+      }),
+    )
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+  })
+
   it('binds a late Answer reservation to the original operation recovery cap', async () => {
     let now = NOW.getTime()
     const startedAt = now
@@ -5519,6 +5644,42 @@ describe('durable HTTP service adapter', () => {
       .not.toHaveBeenCalled()
   })
 
+  it('settles an assembled Portia payload failure without leaving its provider request active', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    dependencies = currentDirectionalDependencies(fixture)
+    const generate = vi.mocked(dependencies.portiaGenerator!)
+      .getMockImplementation()
+    if (!generate) throw new Error('The Portia fixture generator is missing.')
+    vi.mocked(dependencies.portiaGenerator!).mockImplementation(
+      async (portiaInput, context) => {
+        const generated = await generate(portiaInput, context)
+        return {
+          ...generated,
+          result: { ...generated.result, assessments: [] },
+        }
+      },
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })).rejects.toMatchObject({ code: 'UPSTREAM_FAILURE', status: 502 })
+
+    expect(dependencies.portiaGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'failed',
+        failureCode: 'provider_contract_invalid',
+      }),
+    )
+    expect(dependencies.lifecycleRepository?.failPortiaAttempt)
+      .toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.storePortia)
+      .not.toHaveBeenCalled()
+  })
+
   it('keeps a migrated pre-v2 Portia run read-only without recovery or provider work', async () => {
     const currentFingerprint = terminalFingerprint(LIFECYCLE_SURVIVORS)
     const legacyFingerprint = 'f'.repeat(64)
@@ -5874,6 +6035,59 @@ describe('durable HTTP service adapter', () => {
         }),
       }),
     )
+  })
+
+  it('settles an assembled Charlotte payload failure without leaving its provider request active', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const initialLifecycle = approvedCurrentDirectionalLifecycle(fixture)
+    dependencies = currentDirectionalDependencies(fixture, initialLifecycle)
+    vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+      directionalTerminalSnapshot(fixture, 'answered'),
+    )
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: '77777777-7777-4777-8777-777777777777',
+      gameId: GAME_ID,
+      operation: 'answer',
+      status: 'succeeded',
+      resultPayload: approvedAnswerResultPayload(
+        initialLifecycle,
+      ) as unknown as ModelResultPayload,
+    })
+    const generate = vi.mocked(dependencies.charlotteGenerator!)
+      .getMockImplementation()
+    if (!generate) throw new Error('The Charlotte fixture generator is missing.')
+    vi.mocked(dependencies.charlotteGenerator!).mockImplementation(
+      async (charlotteInput, context) => {
+        const generated = await generate(charlotteInput, context)
+        return {
+          ...generated,
+          result: { ...generated.result, renderedAnswer: 'too short' },
+        }
+      },
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .runCharlotte({
+        ...operationInput(),
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })).rejects.toMatchObject({ code: 'UPSTREAM_FAILURE', status: 502 })
+
+    expect(dependencies.charlotteGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'failed',
+        failureCode: 'provider_contract_invalid',
+      }),
+    )
+    expect(dependencies.lifecycleRepository?.failCharlotteAttempt)
+      .toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.storeCharlotte)
+      .not.toHaveBeenCalled()
   })
 
   it('ends in charlotte_unavailable after three definitive provider failures and never starts a fourth', async () => {
