@@ -4889,7 +4889,7 @@ button:disabled {
   }
 
   .board-card.is-live .radial-board {
-    min-width: 576px;
+    min-width: 768px;
   }
 
   .board-card.is-live .radial-board--3d {

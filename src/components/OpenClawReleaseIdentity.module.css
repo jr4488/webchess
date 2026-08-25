@@ -16,7 +16,7 @@
 }
 
 .software {
-  color: var(--vermillion-dark);
+  color: var(--vermillion);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -31,7 +31,7 @@
 }
 
 .source strong {
-  color: var(--vermillion-dark);
+  color: var(--vermillion);
 }
 
 @media (max-width: 620px) {
