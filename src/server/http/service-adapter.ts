@@ -108,7 +108,11 @@ import {
   OpenClawAnswerContractError,
   OpenClawProviderError,
 } from '../openclaw/errors'
-import { ANSWER_OPERATION_TIMEOUT_MS } from '../model-operation-timeouts'
+import {
+  ANSWER_OPERATION_TIMEOUT_MS,
+  MODEL_REQUEST_RESPONSE_GRACE_MS,
+  MODEL_SETTLEMENT_GRACE_MS,
+} from '../model-operation-timeouts'
 import {
   caseBundleRows,
   caseBundleStatements,
@@ -1011,6 +1015,7 @@ function durableAnswerOperationDeadline(): {
   readonly deadlineAt: number
   readonly dispose: () => void
   readonly expired: Promise<never>
+  readonly leaseExpiresAtCap: Date
   readonly signal: AbortSignal
 } {
   const controller = new AbortController()
@@ -1047,6 +1052,11 @@ function durableAnswerOperationDeadline(): {
     deadlineAt,
     dispose: () => clearTimeout(timer),
     expired,
+    leaseExpiresAtCap: new Date(
+      deadlineAt +
+        MODEL_REQUEST_RESPONSE_GRACE_MS +
+        MODEL_SETTLEMENT_GRACE_MS,
+    ),
     signal: controller.signal,
   }
 }
@@ -3270,6 +3280,7 @@ export function createApiServicesWithDependencies(
           model: modelName(dependencies),
           promptVersion: ANSWER_PROMPT_VERSION,
           softwareVersion: dependencies.softwareVersion,
+          leaseExpiresAtCap: providerDeadline.leaseExpiresAtCap,
           countsAsGameStart: false,
           ipAddress: input.ipAddress,
         })

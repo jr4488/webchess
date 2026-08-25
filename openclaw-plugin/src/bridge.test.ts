@@ -2987,7 +2987,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     }
   })
 
-  it('retains a signal-ignoring model turn concurrency slot until it settles', async () => {
+  it('blocks fresh model dispatch while a signal-ignoring turn drains under the production limit', async () => {
     let finishCompletion: (() => void) | undefined
     const complete = vi.fn<
       SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
@@ -3000,7 +3000,6 @@ describe('OpenClaw plugin runtime bridge', () => {
       })
     }))
     const bridge = await start(fakeApi(), {
-      maxConcurrentRuns: 1,
       simpleCompletionRuntime: simpleRuntime(complete),
     })
     vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
@@ -3008,7 +3007,6 @@ describe('OpenClaw plugin runtime bridge', () => {
       prompt: 'provider ignores the bounded model-turn abort',
       thinking: 'medium',
       timeoutMs: 10_000,
-      turnId: 'answer-turn-that-must-remain-draining',
       version: 1,
     })
     let settled = false
@@ -3020,6 +3018,17 @@ describe('OpenClaw plugin runtime bridge', () => {
       await waitForInvocation(complete)
 
       await vi.advanceTimersByTimeAsync(10_000)
+      await expect(rawJsonRequest(bridge, '/v1/model/run', {
+        prompt: 'a request during the bounded abort drain must not dispatch',
+        thinking: 'medium',
+        timeoutMs: 10_000,
+        version: 1,
+      })).resolves.toMatchObject({
+        body: { error: { code: 'MODEL_PROVIDER_DRAINING' } },
+        status: 503,
+      })
+      expect(complete).toHaveBeenCalledTimes(1)
+
       await vi.advanceTimersByTimeAsync(1_250)
       await new Promise<void>((resolve) => setImmediate(resolve))
 
@@ -3039,10 +3048,9 @@ describe('OpenClaw plugin runtime bridge', () => {
         prompt: 'provider ignores the bounded model-turn abort',
         thinking: 'medium',
         timeoutMs: 10_000,
-        turnId: 'answer-turn-that-must-remain-draining',
         version: 1,
       })).resolves.toMatchObject({
-        body: { error: { code: 'BRIDGE_BUSY' } },
+        body: { error: { code: 'MODEL_PROVIDER_DRAINING' } },
         status: 503,
       })
       await expect(rawJsonRequest(bridge, '/v1/model/run', {
@@ -3051,7 +3059,7 @@ describe('OpenClaw plugin runtime bridge', () => {
         timeoutMs: 10_000,
         version: 1,
       })).resolves.toMatchObject({
-        body: { error: { code: 'BRIDGE_BUSY' } },
+        body: { error: { code: 'MODEL_PROVIDER_DRAINING' } },
         status: 503,
       })
       expect(complete).toHaveBeenCalledTimes(1)
@@ -3074,6 +3082,76 @@ describe('OpenClaw plugin runtime bridge', () => {
     } finally {
       finishCompletion?.()
       await pending.catch(() => undefined)
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('rechecks drain state when an admitted request reaches provider dispatch', async () => {
+    let finishCompletion: (() => void) | undefined
+    const complete = vi.fn<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >(async () => await new Promise<Awaited<ReturnType<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >>>((resolve) => {
+      finishCompletion = () => resolve({
+        content: [{ type: 'text', text: 'late result must be discarded' }],
+        stopReason: 'stop',
+      })
+    }))
+    const runtime = simpleRuntime(complete)
+    const bridge = await start(fakeApi(), { simpleCompletionRuntime: runtime })
+    const prepare = runtime.prepareSimpleCompletionModelForAgent
+    let releaseSecondPreflight: (() => void) | undefined
+    let prepareCount = 0
+    runtime.prepareSimpleCompletionModelForAgent = vi.fn(async (params) => {
+      prepareCount += 1
+      if (prepareCount === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondPreflight = resolve
+        })
+      }
+      return prepare(params)
+    })
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const first = rawJsonRequest(bridge, '/v1/model/run', {
+      prompt: 'first provider ignores cancellation',
+      thinking: 'medium',
+      timeoutMs: 10_000,
+      version: 1,
+    })
+    try {
+      await waitForInvocation(complete)
+      const admittedBeforeDrain = rawJsonRequest(bridge, '/v1/model/run', {
+        prompt: 'second request pauses in authenticated preflight',
+        thinking: 'medium',
+        timeoutMs: 10_000,
+        version: 1,
+      })
+      await waitForInvocationCount(
+        runtime.prepareSimpleCompletionModelForAgent,
+        2,
+      )
+
+      await vi.advanceTimersByTimeAsync(10_000)
+      releaseSecondPreflight?.()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      await expect(admittedBeforeDrain).resolves.toMatchObject({
+        body: { error: { code: 'MODEL_PROVIDER_DRAINING' } },
+        status: 503,
+      })
+      expect(complete).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(1_250)
+      await expect(first).resolves.toMatchObject({
+        body: { error: { code: 'OPENCLAW_TIMEOUT' } },
+        status: 504,
+      })
+    } finally {
+      releaseSecondPreflight?.()
+      finishCompletion?.()
+      await first.catch(() => undefined)
       vi.useRealTimers()
       await bridge.close()
     }

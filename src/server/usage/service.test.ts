@@ -141,10 +141,13 @@ function wilburRateInput(
   }
 }
 
-function controllerWith(db: FakeSqlAdapter) {
+function controllerWith(
+  db: FakeSqlAdapter,
+  config: UsageConfig = CONFIG,
+) {
   return createUsageController({
     db,
-    config: CONFIG,
+    config,
     now: () => new Date(NOW),
     randomUuid: () => LEASE_TOKEN,
   })
@@ -344,6 +347,49 @@ describe('reservation lifecycle', () => {
     })
   })
 
+  it('uses an explicit fixed lease cap for an Answer reservation', async () => {
+    const db = new FakeSqlAdapter()
+    const leaseExpiresAtCap = new Date(NOW.valueOf() + 335_000)
+    db.transactionResults = [
+      sqlResult([{ held: null }]),
+      sqlResult([{ cleared_slots: 0 }]),
+      sqlResult([]),
+      sqlResult([]),
+      sqlResult([
+        {
+          code: 'ALLOW',
+          retry_at: null,
+          request_id: REQUEST_ID,
+          game_id: REQUEST_ID,
+          status: 'reserved',
+          lease_token: LEASE_TOKEN,
+          lease_expires_at: leaseExpiresAtCap,
+        },
+      ]),
+    ]
+
+    await expect(controllerWith(db, {
+      ...CONFIG,
+      modelLeaseSeconds: 335,
+    }).reserveModelRequest({
+      ...reserveInput(),
+      gameId: REQUEST_ID,
+      operation: 'answer',
+      promptVersion: 'answer-v1',
+      countsAsGameStart: false,
+      leaseExpiresAtCap,
+    })).resolves.toMatchObject({
+      ok: true,
+      kind: 'reserved',
+      leaseExpiresAt: leaseExpiresAtCap.toISOString(),
+    })
+
+    const statement = db.transactions[0]?.statements[4]
+    expect(statement?.values?.at(-1)).toBe(leaseExpiresAtCap.toISOString())
+    expect(statement?.text).toContain('$28::timestamptz')
+    expect(statement?.text).toContain("WHEN $4::text = 'answer' THEN least(")
+  })
+
   it.each([
     ['ACCOUNT_SUSPENDED', 403, null],
     ['IDEMPOTENCY_CONFLICT', 409, null],
@@ -396,6 +442,19 @@ describe('reservation lifecycle', () => {
         operation: 'answer',
       }),
     ).rejects.toThrow(/Division requests must count/)
+    expect(db.transactions).toHaveLength(0)
+  })
+
+  it('rejects an Answer reservation without a fixed recovery cap', async () => {
+    const db = new FakeSqlAdapter()
+
+    await expect(controllerWith(db).reserveModelRequest({
+      ...reserveInput(),
+      gameId: REQUEST_ID,
+      operation: 'answer',
+      promptVersion: 'answer-v1',
+      countsAsGameStart: false,
+    })).rejects.toThrow(/fixed leaseExpiresAtCap/u)
     expect(db.transactions).toHaveLength(0)
   })
 
@@ -859,7 +918,30 @@ describe('reservation lifecycle', () => {
     ])
     expect(statement?.text).toContain("decision.code = 'ALLOW'")
     expect(statement?.text).toContain("decision.code IN ('ALLOW', 'ALREADY_STARTED')")
-    expect(statement?.text).toContain('SET lease_expires_at = $5::timestamptz')
+    expect(statement?.text).toContain('ELSE $5::timestamptz')
+  })
+
+  it('never extends an Answer lease during an in-progress renewal', async () => {
+    const db = new FakeSqlAdapter()
+    db.transactionResults = [
+      sqlResult([{ held: null }]),
+      sqlResult([{ code: 'ALREADY_STARTED' }]),
+    ]
+
+    await expect(
+      controllerWith(db).beginProviderCall({
+        userId: USER_ID,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      alreadyStarted: true,
+    })
+
+    const statement = db.transactions[0]?.statements[1]
+    expect(statement?.text).toContain("request_state.operation = 'answer'")
+    expect(statement?.text).toContain('request_state.lease_expires_at')
   })
 
   it.each([

@@ -128,6 +128,7 @@ function answerReservation(
     operation: 'answer',
     promptVersion: 'answer-v1',
     countsAsGameStart: false,
+    leaseExpiresAtCap: new Date(NOW.valueOf() + 335_000),
     ...overrides,
   })
 }
@@ -1062,7 +1063,7 @@ describe('durable usage accounting against PostgreSQL', () => {
   it('renews one Answer request lease without consuming a second model operation', async () => {
     let currentTime = new Date(NOW)
     const usage = controller(
-      DEFAULT_CONFIG,
+      { ...DEFAULT_CONFIG, modelLeaseSeconds: 335 },
       () => new Date(currentTime),
     )
     const reservationInput = answerReservation()
@@ -1123,7 +1124,7 @@ describe('durable usage accounting against PostgreSQL', () => {
       {
         status: 'in_progress',
         provider_started_at: NOW,
-        lease_expires_at: new Date(NOW.valueOf() + 300_000),
+        lease_expires_at: new Date(NOW.valueOf() + 335_000),
       },
     ])
 
@@ -1196,7 +1197,7 @@ describe('durable usage accounting against PostgreSQL', () => {
   it('reconciles an Answer lease beyond 300 seconds without duplicate usage or stale settlement', async () => {
     let currentTime = new Date(NOW)
     const usage = controller(
-      DEFAULT_CONFIG,
+      { ...DEFAULT_CONFIG, modelLeaseSeconds: 335 },
       () => new Date(currentTime),
     )
     const reservationInput = answerReservation()
@@ -1225,7 +1226,7 @@ describe('durable usage accounting against PostgreSQL', () => {
       alreadyStarted: true,
     })
 
-    currentTime = new Date(NOW.valueOf() + 300_001)
+    currentTime = new Date(NOW.valueOf() + 335_000)
     await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
       expiredRequests: 1,
       clearedSlots: 1,
@@ -1329,6 +1330,125 @@ describe('durable usage accounting against PostgreSQL', () => {
         maximum_rate_count: 1,
       },
     ])
+  })
+
+  it('reconciles a crashed Answer at its fixed cap after late initial and corrective turns', async () => {
+    let currentTime = new Date(NOW)
+    const recoveryCap = new Date(NOW.valueOf() + 335_000)
+    const usage = controller(
+      { ...DEFAULT_CONFIG, modelLeaseSeconds: 335 },
+      () => new Date(currentTime),
+    )
+    const reservationInput = answerReservation({
+      leaseExpiresAtCap: recoveryCap,
+    })
+    await createDivisionShell(
+      OWNER,
+      MATURE_GAME_ID,
+      'How does a late interrupted Answer release its durable slot?',
+    )
+
+    currentTime = new Date(NOW.valueOf() + 250_000)
+    await expect(usage.reserveModelRequest(reservationInput)).resolves.toMatchObject({
+      ok: true,
+      kind: 'reserved',
+      leaseExpiresAt: recoveryCap.toISOString(),
+    })
+
+    await expect(usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })).resolves.toMatchObject({
+      ok: true,
+      alreadyStarted: false,
+    })
+
+    currentTime = new Date(NOW.valueOf() + 299_000)
+    await expect(usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })).resolves.toMatchObject({
+      ok: true,
+      alreadyStarted: true,
+    })
+
+    const active = await database.adapter.query({
+      text: `
+        SELECT slots.lease_expires_at
+        FROM model_concurrency_slots AS slots
+        WHERE slots.request_id = $1::uuid
+      `,
+      values: [REQUEST_ID],
+    })
+    expect(active.rows).toEqual([{ lease_expires_at: recoveryCap }])
+
+    currentTime = new Date(recoveryCap.valueOf() - 1)
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 0,
+      clearedSlots: 0,
+    })
+    currentTime = recoveryCap
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 1,
+      clearedSlots: 1,
+    })
+
+    await expect(usage.reserveModelRequest(reservationInput)).resolves.toEqual({
+      ok: true,
+      kind: 'existing',
+      requestId: REQUEST_ID,
+      gameId: MATURE_GAME_ID,
+      status: 'indeterminate',
+      leaseToken: null,
+      leaseExpiresAt: null,
+    })
+
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT
+          requests.status,
+          requests.failure_code,
+          (
+            SELECT count(*)::integer
+            FROM model_requests
+            WHERE
+              clerk_user_id = $2::text
+              AND game_id = $3::uuid
+              AND operation = 'answer'
+          ) AS request_count,
+          (
+            SELECT used
+            FROM usage_buckets
+            WHERE
+              subject_type = 'user'
+              AND subject_key = $2::text
+              AND metric = 'model_requests'
+          ) AS model_used,
+          (
+            SELECT max(count)::integer
+            FROM rate_buckets
+            WHERE action = 'model'
+          ) AS maximum_rate_count,
+          (
+            SELECT count(*)::integer
+            FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+        FROM model_requests AS requests
+        WHERE requests.id = $1::uuid
+      `,
+      values: [REQUEST_ID, OWNER, MATURE_GAME_ID],
+    })
+    expect(persisted.rows).toEqual([{
+      status: 'indeterminate',
+      failure_code: 'provider_outcome_unknown',
+      request_count: 1,
+      model_used: '1',
+      maximum_rate_count: 1,
+      occupied_slots: 0,
+    }])
   })
 
   it('returns the same duplicate-success rejection on an exact settlement retry', async () => {
@@ -2086,6 +2206,7 @@ describe('durable usage accounting against PostgreSQL', () => {
     )
     const usage = controller({
       ...DEFAULT_CONFIG,
+      modelLeaseSeconds: 335,
       hourlyGameStartLimit: 1,
       hourlyIpGameStartLimit: 1,
     })
@@ -2097,6 +2218,7 @@ describe('durable usage accounting against PostgreSQL', () => {
         idempotencyKey: OTHER_IDEMPOTENCY_KEY,
         requestSha256: 'f'.repeat(64),
         countsAsGameStart: false,
+        leaseExpiresAtCap: new Date(NOW.valueOf() + 335_000),
         ipAddress: '198.51.100.60',
       }),
     })

@@ -64,6 +64,12 @@ export interface ReserveModelRequestInput {
   readonly promptVersion: string
   readonly softwareVersion: string
   /**
+   * Fixed durable-recovery boundary for one logical Answer operation. It is
+   * established when Answer enters, not when a late reservation is written.
+   * Required for Answer and forbidden for every other model operation.
+   */
+  readonly leaseExpiresAtCap?: Date
+  /**
    * Division requests that create a new game reserve the separate daily game
    * allowance. All later lifecycle operations must leave this false.
    */

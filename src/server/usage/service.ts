@@ -288,6 +288,20 @@ function validateReservationInput(input: ReserveModelRequestInput): void {
       'Division requests must count as game starts; later lifecycle operations must not.',
     )
   }
+  if (input.operation === 'answer') {
+    if (
+      !(input.leaseExpiresAtCap instanceof Date) ||
+      !Number.isFinite(input.leaseExpiresAtCap.valueOf())
+    ) {
+      throw new TypeError(
+        'Answer requests require a valid fixed leaseExpiresAtCap.',
+      )
+    }
+  } else if (input.leaseExpiresAtCap !== undefined) {
+    throw new TypeError(
+      'leaseExpiresAtCap is only valid for Answer requests.',
+    )
+  }
 }
 
 function validateTransitionIdentity(input: {

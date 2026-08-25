@@ -1357,8 +1357,13 @@ lease AS (
     request_id = inserted_request.id,
     clerk_user_id = $2::text,
     lease_token = $20::uuid,
-    lease_expires_at = $13::timestamptz
-      + make_interval(secs => $23::integer)
+    lease_expires_at = CASE
+      WHEN $4::text = 'answer' THEN least(
+        $13::timestamptz + make_interval(secs => $23::integer),
+        $28::timestamptz
+      )
+      ELSE $13::timestamptz + make_interval(secs => $23::integer)
+    END
   FROM inserted_request, free_slot
   WHERE slots.slot = free_slot.slot
   RETURNING
@@ -1431,6 +1436,7 @@ export function buildReserveModelRequestStatement(
       context.deletedUserKey,
       config.hourlyGameStartLimit,
       config.hourlyIpGameStartLimit,
+      input.leaseExpiresAtCap?.toISOString() ?? null,
     ],
   }
 }
@@ -2150,6 +2156,7 @@ account_state AS MATERIALIZED (
 request_state AS MATERIALIZED (
   SELECT
     requests.id,
+    requests.operation,
     requests.status,
     requests.created_at,
     slots.slot,
@@ -2246,7 +2253,11 @@ start_request AS (
 ),
 extend_lease AS (
   UPDATE model_concurrency_slots AS slots
-  SET lease_expires_at = $5::timestamptz
+  SET lease_expires_at = CASE
+    WHEN request_state.operation = 'answer'
+      THEN request_state.lease_expires_at
+    ELSE $5::timestamptz
+  END
   FROM request_state, start_request
   WHERE
     slots.slot = request_state.slot

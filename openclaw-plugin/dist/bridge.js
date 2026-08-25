@@ -1674,6 +1674,11 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
         const activeRuns = new Set();
         const drainingStatusExecutions = new Map();
         const drainingModelExecutions = new Map();
+        const assertNoDrainingModelExecution = () => {
+            if (drainingModelExecutions.size === 0)
+                return;
+            throw new BridgeRequestError(503, 'MODEL_PROVIDER_DRAINING', 'A previous model turn is still draining after cancellation.');
+        };
         const drainDetachedStatusExecution = async (controller, execution) => {
             drainingStatusExecutions.set(controller, execution);
             const retire = () => {
@@ -1945,6 +1950,11 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                 try {
                     if (request.url === '/v1/model/run') {
                         const input = parseModelRunRequest(body);
+                        // A timed-out provider may ignore cancellation and continue running
+                        // after its HTTP request has settled. Do not let a fresh logical turn
+                        // overlap that unknown outcome: one retained controller is not enough
+                        // to fill the bridge's general four-request limit by itself.
+                        assertNoDrainingModelExecution();
                         const modelRequestDeadline = requestStartedAt + MODEL_REQUEST_ENVELOPE_TIMEOUT_MS;
                         const latestProviderStartAt = modelRequestDeadline -
                             input.timeoutMs - MODEL_REQUEST_POSTFLIGHT_RESERVE_MS;
@@ -2030,11 +2040,27 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                             controller.signal,
                             providerController.signal,
                         ]);
+                        const retainDrainingModelExecution = () => {
+                            const execution = modelProviderExecution.current;
+                            if (!execution)
+                                return false;
+                            if (modelTurn)
+                                modelTurn.state = 'draining';
+                            drainingModelExecutions.set(controller, execution);
+                            return true;
+                        };
+                        const onProviderAbort = () => {
+                            // Abort listeners run synchronously. Register unknown provider work
+                            // before another admitted request can cross its dispatch boundary.
+                            retainDrainingModelExecution();
+                        };
+                        providerSignal.addEventListener('abort', onProviderAbort);
                         let providerTimeout;
                         try {
                             const completion = await raceProviderExecution(async () => {
                                 // This callback is the actual provider-dispatch boundary. Only
                                 // now does the independently bounded provider turn begin.
+                                assertNoDrainingModelExecution();
                                 providerStarted = true;
                                 resetRequestDeadline(modelRequestDeadline);
                                 providerDeadlineAt = Date.now() + input.timeoutMs;
@@ -2093,6 +2119,7 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                         }
                         catch (error) {
                             if (providerStarted && providerSignal.aborted) {
+                                retainDrainingModelExecution();
                                 await new Promise((resolve) => {
                                     setTimeout(resolve, PROVIDER_ABORT_DRAIN_MS);
                                 });
@@ -2108,6 +2135,7 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                         finally {
                             if (providerTimeout !== undefined)
                                 clearTimeout(providerTimeout);
+                            providerSignal.removeEventListener('abort', onProviderAbort);
                         }
                         if (providerDeadlineExpired() || expireElapsedDeadline()) {
                             throw modelAbortFailure();
@@ -2321,20 +2349,19 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                 }
                 finally {
                     let retainControllerForDrainingModel = false;
-                    if (modelTurn) {
-                        const currentModelTurn = modelTurn;
-                        const drainingExecution = modelProviderExecution.current;
-                        if (drainingExecution) {
-                            currentModelTurn.state = 'draining';
-                            // A provider that ignores cancellation may outlive the bounded
-                            // HTTP drain. Keep its concurrency slot until the underlying work
-                            // really settles so a distinct request cannot amplify billed work.
-                            drainingModelExecutions.set(controller, drainingExecution);
-                            retainControllerForDrainingModel = true;
+                    const drainingExecution = modelProviderExecution.current;
+                    if (drainingExecution) {
+                        if (modelTurn) {
+                            modelTurn.state = 'draining';
                         }
-                        else {
-                            completeModelTurn(currentModelTurn);
-                        }
+                        // A provider that ignores cancellation may outlive the bounded HTTP
+                        // drain. Keep its concurrency slot until the underlying work really
+                        // settles so a keyed or unkeyed request cannot amplify billed work.
+                        drainingModelExecutions.set(controller, drainingExecution);
+                        retainControllerForDrainingModel = true;
+                    }
+                    else if (modelTurn) {
+                        completeModelTurn(modelTurn);
                     }
                     clearTimeout(timeout);
                     request.off('aborted', onAborted);

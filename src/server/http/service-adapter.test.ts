@@ -50,7 +50,11 @@ import {
   LifecycleRepositoryError,
   type LifecycleRepositoryPort,
 } from '../lifecycle'
-import { ANSWER_OPERATION_TIMEOUT_MS } from '../model-operation-timeouts'
+import {
+  ANSWER_OPERATION_TIMEOUT_MS,
+  MODEL_REQUEST_RESPONSE_GRACE_MS,
+  MODEL_SETTLEMENT_GRACE_MS,
+} from '../model-operation-timeouts'
 import {
   OpenClawAnswerContractError,
   OpenClawProviderError,
@@ -3030,6 +3034,46 @@ describe('durable HTTP service adapter', () => {
     expect(dependencies.repository.storeAnswer).toHaveBeenCalledOnce()
   })
 
+  it('binds a late Answer reservation to the original operation recovery cap', async () => {
+    let now = NOW.getTime()
+    const startedAt = now
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const getTerminalReplay = vi.mocked(
+      dependencies.repository.getTerminalReplay,
+    ).getMockImplementation()
+    if (!getTerminalReplay) throw new Error('The terminal replay fixture is missing.')
+    vi.mocked(dependencies.repository.getTerminalReplay).mockImplementationOnce(
+      async (...args) => {
+        const terminal = await getTerminalReplay(...args)
+        now = startedAt + 240_000
+        return terminal
+      },
+    )
+
+    try {
+      await expect(createApiServicesWithDependencies(dependencies)
+        .answer(answerOperationInput())).resolves.toMatchObject({
+          answer: STORED_ANSWER,
+          game: { status: 'answered' },
+        })
+    } finally {
+      nowSpy.mockRestore()
+    }
+
+    expect(dependencies.usage.reserveModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'answer',
+        leaseExpiresAtCap: new Date(
+          startedAt +
+            ANSWER_OPERATION_TIMEOUT_MS +
+            MODEL_REQUEST_RESPONSE_GRACE_MS +
+            MODEL_SETTLEMENT_GRACE_MS,
+        ),
+      }),
+    )
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+  })
+
   it('starts the absolute Answer deadline before setup and never reserves or calls a provider after it', async () => {
     let now = NOW.getTime()
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
@@ -3455,6 +3499,36 @@ describe('durable HTTP service adapter', () => {
     })).resolves.toMatchObject({ status: 'answer_failed' })
     expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
     expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+  })
+
+  it('does not dispatch a duplicate provider call for an idempotent indeterminate Answer', async () => {
+    vi.mocked(dependencies.usage.reserveModelRequest).mockResolvedValue({
+      ok: true,
+      kind: 'existing',
+      requestId: REQUEST_ID,
+      gameId: GAME_ID,
+      status: 'indeterminate',
+      leaseToken: null,
+      leaseExpiresAt: null,
+    })
+    vi.mocked(dependencies.usage.getModelRequestResult).mockResolvedValue({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: GAME_ID,
+      operation: 'answer',
+      status: 'indeterminate',
+      resultPayload: null,
+    })
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .answer(answerOperationInput())).rejects.toMatchObject({
+        code: 'UPSTREAM_FAILURE',
+        status: 502,
+      })
+
+    expect(dependencies.answerGenerator).not.toHaveBeenCalled()
+    expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+    expect(dependencies.usage.settleModelRequest).not.toHaveBeenCalled()
   })
 
   it('rejects a late Answer response after lease expiry without duplicating provider work', async () => {
