@@ -420,6 +420,24 @@ function requireCurrentLifecycleBase(
   return lifecycle
 }
 
+const FINALIZED_PORTIA_PROGRESS_STATES = new Set<
+  LifecycleAggregate['state']
+>([
+  'portia_complete',
+  'gate_passed',
+  'gate_failed',
+  'retry_ready',
+  'retry_running',
+  'charlotte_pending',
+  'charlotte_running',
+  'charlotte_unavailable',
+  'charlotte_complete',
+  'wilbur_planning',
+  'wilbur_in_progress',
+  'wilbur_observed',
+  'insufficient_basis',
+])
+
 function requireCurrentPortiaProgress(
   lifecycle: LifecycleAggregate,
   directionalRecord?: TrajectoryDirectionalRecord,
@@ -440,6 +458,20 @@ function requireCurrentPortiaProgress(
     }
 
     const ordered = orderPortiaCandidates(lifecycle.survivors)
+    const immutableReview = lifecycle.portia
+    const finalized =
+      FINALIZED_PORTIA_PROGRESS_STATES.has(lifecycle.state) ||
+      (lifecycle.state === 'abandoned' && immutableReview !== null)
+    if (finalized && immutableReview === null) {
+      throw new Error(
+        'Finalized Portia progress requires its immutable review.',
+      )
+    }
+    if (!finalized && immutableReview !== null) {
+      throw new Error(
+        'Draft Portia progress cannot contain an immutable review.',
+      )
+    }
     if (
       new Set(ordered.map((survivor) => survivor.candidateId)).size !==
         ordered.length
@@ -469,7 +501,10 @@ function requireCurrentPortiaProgress(
           'Portia completed progress must match the canonical survivor traversal prefix.',
         )
       }
-      if (assessment.redundancyClusterId !== null) {
+      if (
+        assessment.redundancyClusterId !== null &&
+        !finalized
+      ) {
         throw new Error(
           'Portia draft progress cannot pre-assign a redundancy cluster.',
         )
@@ -479,6 +514,32 @@ function requireCurrentPortiaProgress(
         survivor,
         directionalRecord,
       )
+    }
+    if (finalized) {
+      if (
+        lifecycle.answerPromptDigest === null ||
+        progress.currentCandidateId !== null ||
+        progress.completedAssessments.length !== ordered.length
+      ) {
+        throw new Error(
+          'Finalized Portia progress must retain its reviewed prompt and a complete traversal with no active candidate.',
+        )
+      }
+      if (
+        canonicalHash(progress.completedAssessments) !==
+          canonicalHash(immutableReview!.assessments)
+      ) {
+        throw new Error(
+          'Finalized Portia progress must exactly mirror its immutable review.',
+        )
+      }
+      validatePortiaReview(
+        immutableReview,
+        lifecycle.survivors,
+        lifecycle.answerPromptDigest,
+        directionalRecord,
+      )
+      return
     }
     const nextCandidateId =
       ordered[progress.completedAssessments.length]?.candidateId ?? null

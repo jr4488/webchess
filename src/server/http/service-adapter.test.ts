@@ -931,12 +931,27 @@ function currentReviewedDirectionalLifecycle(
   if (portia.reviewedAnswerPromptDigest !== answerPromptDigest) {
     throw new Error('The current Portia fixture must review the exact prompt.')
   }
-  const gate = evaluateGate(portia, retryContext, fixture.record)
+  const orderedAssessments = orderPortiaCandidates(fixture.survivors).map(
+    (survivor) => {
+      const assessment = portia.assessments.find(
+        (candidate) => candidate.candidateId === survivor.candidateId,
+      )
+      if (!assessment) {
+        throw new Error('The current Portia fixture assessment is missing.')
+      }
+      return assessment
+    },
+  )
+  const persistedPortia: PortiaReview = {
+    ...portia,
+    assessments: orderedAssessments,
+  }
+  const gate = evaluateGate(persistedPortia, retryContext, fixture.record)
   const answerUserPrompt = gate.passed
     ? buildPlayerVisibleAnswerPrompt({
         plan: directionalAnswerPlan(fixture),
         reviewedPromptDigest: answerPromptDigest,
-        portia,
+        portia: persistedPortia,
         gate,
       })
     : null
@@ -949,7 +964,14 @@ function currentReviewedDirectionalLifecycle(
     answerUserPromptSha256: answerUserPrompt
       ? createHash('sha256').update(answerUserPrompt, 'utf8').digest('hex')
       : null,
-    portia,
+    portiaProgress: {
+      currentCandidateId: null,
+      completedCandidateIds: orderedAssessments.map(
+        (assessment) => assessment.candidateId,
+      ),
+      completedAssessments: orderedAssessments,
+    },
+    portia: persistedPortia,
     gate,
     ...overrides,
   })
@@ -1617,7 +1639,19 @@ function approvedCurrentDirectionalLifecycle(
 ): LifecycleAggregate {
   const plan = directionalAnswerPlan(fixture)
   const answerPromptDigest = directionalAnswerPromptDigest(fixture)
-  const portia = directionalLifecycleReview(fixture, answerPromptDigest)
+  const generatedPortia = directionalLifecycleReview(
+    fixture,
+    answerPromptDigest,
+  )
+  const orderedAssessments = orderPortiaCandidates(fixture.survivors).map(
+    (survivor) => generatedPortia.assessments.find(
+      (assessment) => assessment.candidateId === survivor.candidateId,
+    )!,
+  )
+  const portia: PortiaReview = {
+    ...generatedPortia,
+    assessments: orderedAssessments,
+  }
   const gate = evaluateGate(portia, {
     sameFieldRetryCount: 0,
     fieldRegenerationCount: 0,
@@ -1635,6 +1669,13 @@ function approvedCurrentDirectionalLifecycle(
     answerUserPromptSha256: createHash('sha256')
       .update(answerUserPrompt, 'utf8')
       .digest('hex'),
+    portiaProgress: {
+      currentCandidateId: null,
+      completedCandidateIds: orderedAssessments.map(
+        (assessment) => assessment.candidateId,
+      ),
+      completedAssessments: orderedAssessments,
+    },
     portia,
     gate,
     ...overrides,
@@ -1653,19 +1694,18 @@ function currentWilburFixture(
   overrides: Partial<LifecycleAggregate> = {},
 ) {
   const fixture = makeTrajectoryDirectionalFixture()
-  const portia = directionalLifecycleReview(
-    fixture,
-    directionalAnswerPromptDigest(fixture),
-  )
+  const approved = approvedCurrentDirectionalLifecycle(fixture)
+  const portia = approved.portia as PortiaReview
   const charlotte = lifecycleCharlotte(portia)
   const charlotteRenderedAnswer =
     'Charlotte preserves the qualified evidence boundary. '.repeat(12)
-  const lifecycle = approvedCurrentDirectionalLifecycle(fixture, {
+  const lifecycle: LifecycleAggregate = {
+    ...approved,
     state: 'charlotte_complete',
     charlotte,
     charlotteRenderedAnswer,
     ...overrides,
-  })
+  }
   const dependencies = currentDirectionalDependencies(fixture, lifecycle)
   vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
     directionalTerminalSnapshot(fixture, 'answered'),
@@ -4639,6 +4679,205 @@ describe('durable HTTP service adapter', () => {
         .not.toHaveBeenCalled()
     },
   )
+
+  it('keeps finalized Portia summary clusters readable after Gate and while Answer is in progress', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    dependencies = currentDirectionalDependencies(fixture)
+    const baseGenerator = vi.mocked(
+      dependencies.portiaGenerator!,
+    ).getMockImplementation()
+    if (!baseGenerator) {
+      throw new Error('The directional Portia fixture generator is missing.')
+    }
+    vi.mocked(dependencies.portiaGenerator!).mockImplementation(
+      async (input, context) => {
+        const generated = await baseGenerator(input, context)
+        const candidateIds = generated.result.assessments
+          .slice(-2)
+          .map((assessment) => assessment.candidateId)
+        if (candidateIds.length !== 2) {
+          throw new Error('The Portia cluster fixture requires two candidates.')
+        }
+        const memberIds = new Set(candidateIds)
+        const clusterId = 'summary-owned-cluster'
+        return {
+          ...generated,
+          result: {
+            ...generated.result,
+            assessments: generated.result.assessments.map((assessment) =>
+              memberIds.has(assessment.candidateId)
+                ? { ...assessment, redundancyClusterId: clusterId }
+                : assessment),
+            redundancyClusters: [{
+              id: clusterId,
+              candidateIds,
+              explanation:
+                'These reviewed candidates repeat one bounded direction.',
+            }],
+          },
+        }
+      },
+    )
+    const services = createApiServicesWithDependencies(dependencies)
+    const approved = await services.runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+    expect(approved).toMatchObject({
+      state: 'gate_passed',
+      portia: {
+        redundancyClusters: [{ id: 'summary-owned-cluster' }],
+      },
+    })
+    expect(approved.portiaProgress.completedAssessments.filter(
+      (assessment) => assessment.redundancyClusterId !== null,
+    )).toHaveLength(2)
+    const providerLeaseCallCount = vi.mocked(
+      dependencies.usage.beginProviderCall,
+    ).mock.calls.length
+
+    const lifecycleInput = {
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    }
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      directionalTerminalSnapshot(fixture),
+    )
+    await expect(services.getLifecycle(lifecycleInput)).resolves.toEqual(
+      approved,
+    )
+
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      directionalTerminalSnapshot(fixture, 'answering'),
+    )
+    await expect(services.getLifecycle(lifecycleInput)).resolves.toEqual(
+      approved,
+    )
+    expect(dependencies.answerGenerator).not.toHaveBeenCalled()
+    expect(dependencies.portiaGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.reserveModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.usage.beginProviderCall)
+      .toHaveBeenCalledTimes(providerLeaseCallCount)
+  })
+
+  it('rejects missing, partial, reordered, tampered, or premature finalized Portia projections', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const primingDependencies = currentDirectionalDependencies(fixture)
+    const finalized = await createApiServicesWithDependencies(
+      primingDependencies,
+    ).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+    const progress = finalized.portiaProgress
+    const reversedIds = [...progress.completedCandidateIds].reverse()
+    const reversedAssessments = [...progress.completedAssessments].reverse()
+    const tamperedAssessments = progress.completedAssessments.map(
+      (assessment, index) => index === 0
+        ? {
+            ...assessment,
+            countercase:
+              'A different persisted countercase would change the immutable review.',
+          }
+        : assessment,
+    )
+    const emptyProgress: LifecycleAggregate['portiaProgress'] = {
+      currentCandidateId: null,
+      completedCandidateIds: [],
+      completedAssessments: [],
+    }
+    if (!finalized.portia) {
+      throw new Error('The finalized Portia fixture is missing its review.')
+    }
+    const finalizedReview = finalized.portia as PortiaReview
+    const forgedClusterId = 'premature-final-cluster'
+    const forgedClusterCandidateIds = progress.completedCandidateIds.slice(0, 2)
+    const forgedClusterMembers = new Set(forgedClusterCandidateIds)
+    const forgedClusteredAssessments = progress.completedAssessments.map(
+      (assessment) => forgedClusterMembers.has(assessment.candidateId)
+        ? { ...assessment, redundancyClusterId: forgedClusterId }
+        : assessment,
+    )
+    const forgedReview: PortiaReview = {
+      ...finalizedReview,
+      assessments: forgedClusteredAssessments,
+      redundancyClusters: [{
+        id: forgedClusterId,
+        candidateIds: forgedClusterCandidateIds,
+        explanation:
+          'A forged summary cluster must not be accepted during draft progress.',
+      }],
+    }
+    const cases: ReadonlyArray<readonly [string, LifecycleAggregate]> = [
+      ['missing review', { ...finalized, portia: null }],
+      ['empty projection', {
+        ...finalized,
+        portiaProgress: emptyProgress,
+      }],
+      ['partial projection', {
+        ...finalized,
+        portiaProgress: {
+          currentCandidateId: null,
+          completedCandidateIds: progress.completedCandidateIds.slice(0, -1),
+          completedAssessments: progress.completedAssessments.slice(0, -1),
+        },
+      }],
+      ['reordered projection', {
+        ...finalized,
+        portiaProgress: {
+          currentCandidateId: null,
+          completedCandidateIds: reversedIds,
+          completedAssessments: reversedAssessments,
+        },
+      }],
+      ['tampered projection', {
+        ...finalized,
+        portiaProgress: {
+          ...progress,
+          completedAssessments: tamperedAssessments,
+        },
+      }],
+      ['premature immutable review', {
+        ...finalized,
+        state: 'portia_running',
+        portiaActiveModelRequestId: REQUEST_ID,
+        portia: forgedReview,
+        portiaProgress: {
+          currentCandidateId: null,
+          completedCandidateIds: progress.completedCandidateIds,
+          completedAssessments: forgedClusteredAssessments,
+        },
+      }],
+    ]
+
+    for (const [kind, invalid] of cases) {
+      dependencies = currentDirectionalDependencies(fixture, invalid)
+      vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+        directionalTerminalSnapshot(fixture, 'answering'),
+      )
+      await expect(
+        createApiServicesWithDependencies(dependencies).getLifecycle({
+          ownerId: OWNER_ID,
+          gameId: GAME_ID,
+          requestId: REQUEST_ID,
+          signal: new AbortController().signal,
+        }),
+        kind,
+      ).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+      expect(dependencies.lifecycleRepository?.transition, kind)
+        .not.toHaveBeenCalled()
+      expect(dependencies.usage.reconcileExpiredLeases, kind)
+        .not.toHaveBeenCalled()
+      expect(dependencies.usage.reserveModelRequest, kind)
+        .not.toHaveBeenCalled()
+      expect(dependencies.portiaGenerator, kind).not.toHaveBeenCalled()
+      expect(dependencies.answerGenerator, kind).not.toHaveBeenCalled()
+    }
+  })
 
   it('binds each legal terminal trajectory into current Portia, Gate, and request identity', async () => {
     const fixtures = [
