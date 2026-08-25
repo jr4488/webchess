@@ -376,7 +376,7 @@ describe('OpenClaw WebChess 2.2 model generation', () => {
       expect.any(Object),
       expect.objectContaining({
         idempotencyKey: 'division-initial-turn',
-        thinking: 'medium',
+        thinking: 'low',
       }),
     )
     expect(harness.runOpenClawModel).toHaveBeenNthCalledWith(
@@ -385,7 +385,7 @@ describe('OpenClaw WebChess 2.2 model generation', () => {
       expect.any(Object),
       expect.objectContaining({
         idempotencyKey: 'division-repair-turn',
-        thinking: 'medium',
+        thinking: 'low',
       }),
     )
   })
@@ -410,7 +410,7 @@ describe('OpenClaw WebChess 2.2 model generation', () => {
     expect(harness.runOpenClawModel).toHaveBeenCalledWith(
       expect.stringContaining('"castApplication"'),
       expect.any(Object),
-      expect.objectContaining({ thinking: 'medium' }),
+      expect.objectContaining({ thinking: 'low' }),
     )
 
     const mismatched = validCastDirectedFacets()

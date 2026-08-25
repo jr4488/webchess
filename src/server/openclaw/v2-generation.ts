@@ -262,6 +262,10 @@ export async function generateOpenClawDivisionV2(
       input.problem,
       input.castAssignments,
     ) }),
+    // Division is a wide, strictly validated 64-object transformation. Low
+    // reasoning preserves the exact prompt and contract while leaving enough
+    // of the bounded provider turn for the complete structured response.
+    'low',
   )
   return { ...generated, usage: UNREPORTED_USAGE }
 }
