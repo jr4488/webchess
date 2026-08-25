@@ -3104,7 +3104,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const prepare = runtime.prepareSimpleCompletionModelForAgent
     let releaseSecondPreflight: (() => void) | undefined
     let prepareCount = 0
-    runtime.prepareSimpleCompletionModelForAgent = vi.fn(async (params) => {
+    const prepareMock = vi.fn(async (params) => {
       prepareCount += 1
       if (prepareCount === 2) {
         await new Promise<void>((resolve) => {
@@ -3113,6 +3113,7 @@ describe('OpenClaw plugin runtime bridge', () => {
       }
       return prepare(params)
     })
+    runtime.prepareSimpleCompletionModelForAgent = prepareMock
     vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
     const first = rawJsonRequest(bridge, '/v1/model/run', {
       prompt: 'first provider ignores cancellation',
@@ -3128,10 +3129,7 @@ describe('OpenClaw plugin runtime bridge', () => {
         timeoutMs: 10_000,
         version: 1,
       })
-      await waitForInvocationCount(
-        runtime.prepareSimpleCompletionModelForAgent,
-        2,
-      )
+      await waitForInvocationCount(prepareMock, 2)
 
       await vi.advanceTimersByTimeAsync(10_000)
       releaseSecondPreflight?.()
