@@ -44,6 +44,10 @@ import {
   canReopenInsufficientBasis,
 } from '../../lib/lifecycle/retry'
 import type {
+  DirectionalContributions,
+  TrajectoryDirectionalRecord,
+} from '../../lib/lifecycle/trajectory-direction'
+import type {
   CaptureRecord,
   GeneratedAnswer,
   GameOutcome,
@@ -73,6 +77,7 @@ interface LifecycleStageProps {
   boardAnswer: GeneratedAnswer | null
   answerFailurePrompt: string
   busy: boolean
+  readOnly?: boolean
   error: string
   actionPendingIndex: number | null
   wilburPending: boolean
@@ -102,6 +107,40 @@ interface LifecycleStageProps {
 }
 
 const EMPTY_SET = new Set<string>()
+
+const DIRECTIONAL_CONTRIBUTION_LABELS = [
+  ['departureVisits', 'Departure visits'],
+  ['departureMaterial', 'Departure material'],
+  ['arrivalVisits', 'Arrival visits'],
+  ['arrivalMaterial', 'Arrival material'],
+  ['chronology', 'Move-order contribution'],
+  ['captureCount', 'Captures'],
+  ['capturedMaterial', 'Captured material'],
+  ['attackerMaterial', 'Attacker material'],
+  ['captureResonance', 'Capture resonance'],
+  ['captureOrder', 'Capture-order contribution'],
+  ['forcedPassConstraints', 'Forced-pass constraints'],
+  ['forcedPassMaterial', 'Forced-pass material'],
+  ['survivorCount', 'Surviving pieces'],
+  ['survivorMaterial', 'Surviving material'],
+  ['survivorMoveCount', 'Survivor moves'],
+  ['winningSurvivorMaterial', 'Winning-side survivor material'],
+  ['terminalOutcomeWeight', 'Terminal-outcome weight'],
+  ['terminalCapture', 'Terminal capture'],
+] as const satisfies readonly (readonly [keyof DirectionalContributions, string])[]
+
+function survivingDirectionalSignals(
+  record: TrajectoryDirectionalRecord | null,
+): readonly TrajectoryDirectionalRecord['directions'][number][] {
+  if (!record) return []
+  const signalByKey = new Map(
+    record.directions.map((signal) => [signal.lens.key, signal] as const),
+  )
+  return record.survivingDirectionKeys.flatMap((key) => {
+    const signal = signalByKey.get(key)
+    return signal ? [signal] : []
+  })
+}
 
 function copyWithDomFallback(text: string): boolean {
   const textarea = document.createElement('textarea')
@@ -399,6 +438,7 @@ export function LifecycleStage({
   boardAnswer,
   answerFailurePrompt,
   busy,
+  readOnly = false,
   error,
   actionPendingIndex,
   wilburPending,
@@ -532,6 +572,7 @@ export function LifecycleStage({
   const stableTerminal = portiaTerminalStop || charlotteQualificationUnavailable
   const retryPending = busy || lifecycle?.state === 'retry_running'
   const canRetry = Boolean(
+    !readOnly &&
     lifecycle?.gate?.passed === false
     && (
       recoverableInsufficientBasis
@@ -579,6 +620,16 @@ export function LifecycleStage({
   const promptBoundPortia = lifecycle?.portia &&
     'promptDecision' in lifecycle.portia
     ? lifecycle.portia
+    : null
+  const directionalRecord = lifecycle?.trajectoryDirectionalRecord ?? null
+  const directionalSignals = useMemo(
+    () => survivingDirectionalSignals(directionalRecord),
+    [directionalRecord],
+  )
+  const portiaDirectionalSummary = lifecycle?.portia &&
+    'directionalSummary' in lifecycle.portia &&
+    typeof lifecycle.portia.directionalSummary === 'string'
+    ? lifecycle.portia.directionalSummary
     : null
   const researchPortiaAdjudication = researchRecords.some(
     (record) => record.stage === 'portia',
@@ -771,7 +822,7 @@ export function LifecycleStage({
               <button
                 className="primary-button"
                 type="button"
-                disabled={busy}
+                disabled={busy || readOnly}
                 aria-busy={busy}
                 onClick={onRetryAnswer}
               >
@@ -786,7 +837,7 @@ export function LifecycleStage({
             portiaAdjudication={researchPortiaAdjudication}
           />
 
-          {(busy || !lifecycle) && !stableTerminal ? (
+          {!readOnly && (busy || !lifecycle) && !stableTerminal ? (
             <ProcessGraphic
               mode="answering"
               headline={activeHeadline(lifecycle, gameStatus)}
@@ -876,6 +927,100 @@ export function LifecycleStage({
                 <div><small>Portia · adversarial examination</small><h2>What survived scrutiny</h2></div>
               </div>
               <p>{lifecycle.portia.runSummary}</p>
+              {directionalRecord ? (
+                <section
+                  className="directional-provenance"
+                  aria-labelledby={`directional-provenance-${lifecycle.id}`}
+                >
+                  <header className="directional-provenance__heading">
+                    <small>I Ching cast + canonical chess trajectory</small>
+                    <h3 id={`directional-provenance-${lifecycle.id}`}>
+                      Full-trajectory directional provenance
+                    </h3>
+                  </header>
+                  <p>
+                    The cast and the complete saved trajectory jointly determine which
+                    directions continue into Portia scrutiny. Move order, departures,
+                    arrivals, ordered captures and piece values, forced passes, promotions,
+                    surviving pieces, and the terminal result are included in this versioned
+                    calculation.
+                  </p>
+                  <dl className="directional-provenance__identity">
+                    <div>
+                      <dt>Record version</dt>
+                      <dd><code>{directionalRecord.version}</code></dd>
+                    </div>
+                    <div>
+                      <dt>Record digest</dt>
+                      <dd><code>{directionalRecord.digest}</code></dd>
+                    </div>
+                  </dl>
+                  <div className="directional-provenance__explanation">
+                    {directionalRecord.explanation
+                      .filter((item) =>
+                        item !== directionalRecord.epistemicBoundary.statement,
+                      )
+                      .map((item) => <p key={item}>{item}</p>)}
+                  </div>
+                  {portiaDirectionalSummary ? (
+                    <div className="directional-provenance__portia-summary">
+                      <strong>Portia’s directional synthesis</strong>
+                      <p>{portiaDirectionalSummary}</p>
+                    </div>
+                  ) : null}
+                  <h4>Directions carried into scrutiny</h4>
+                  <ol className="directional-signals">
+                    {directionalSignals.map((signal) => (
+                      <li key={signal.lens.key}>
+                        <header>
+                          <div>
+                            <small>Rank {signal.rank} · Hexagram {signal.lens.hexagram}</small>
+                            <h5>{signal.lens.dimension} / {signal.lens.movement}</h5>
+                          </div>
+                          <span>Score {signal.score}</span>
+                        </header>
+                        <p>
+                          <strong>{signal.lens.hexagramName}:</strong>{' '}
+                          {signal.lens.theme}
+                        </p>
+                        <p><strong>Cast direction:</strong> {signal.lens.directionalCue}</p>
+                        <p><strong>Facet application:</strong> {signal.lens.castApplication}</p>
+                        <p>{signal.explanation}</p>
+                        <details>
+                          <summary>Inspect calculated contribution ledger</summary>
+                          <dl className="directional-signal__contributions">
+                            {DIRECTIONAL_CONTRIBUTION_LABELS.map(([key, label]) => (
+                              <div key={key}>
+                                <dt>{label}</dt>
+                                <dd>{signal.contributions[key]}</dd>
+                              </div>
+                            ))}
+                          </dl>
+                        </details>
+                      </li>
+                    ))}
+                  </ol>
+                  <aside className="directional-provenance__boundary" aria-label="Directional evidence boundary">
+                    <strong>Epistemic boundary</strong>
+                    <p>{directionalRecord.epistemicBoundary.statement}</p>
+                  </aside>
+                </section>
+              ) : lifecycle.trajectoryDirectionalRecordStatus ===
+                'legacy_pre_directional_generation' ? (
+                  <aside
+                    className="directional-provenance directional-provenance--legacy"
+                    role="note"
+                    aria-label="Legacy directional provenance status"
+                  >
+                    <strong>Preserved legacy directional status</strong>
+                    <p><code>legacy_pre_directional_generation</code></p>
+                    <p>
+                      This preserved run predates the versioned full-trajectory directional
+                      record. WebChess does not reconstruct or fabricate that provenance;
+                      its saved Portia findings remain available as historical evidence.
+                    </p>
+                  </aside>
+                ) : null}
               <div className="portia-dispositions">
                 {(['preserved', 'wounded', 'consumed', 'unresolved'] as const).map((disposition) => (
                   <span key={disposition} className={`is-${disposition}`}>
@@ -893,6 +1038,44 @@ export function LifecycleStage({
                       <strong>{assessment.disposition}</strong>
                       <p>{assessment.survivingInterpretation ?? assessment.countercase}</p>
                       {assessment.requiredQualification ? <blockquote>{assessment.requiredQualification}</blockquote> : null}
+                      {directionalRecord &&
+                      'directionalSignalKeys' in assessment &&
+                      assessment.directionalSignalKeys &&
+                      'directionalRecordDigest' in assessment &&
+                      assessment.directionalRecordDigest &&
+                      'directionalInterpretation' in assessment &&
+                      assessment.directionalInterpretation &&
+                      'directionalAmendment' in assessment &&
+                      assessment.directionalAmendment ? (
+                        <section
+                          className="portia-assessment__directional"
+                          aria-label={`Directional scrutiny for ${assessment.candidateId}`}
+                        >
+                          <h3>Directional scrutiny</h3>
+                          <dl>
+                            <div>
+                              <dt>Record digest</dt>
+                              <dd><code>{assessment.directionalRecordDigest}</code></dd>
+                            </div>
+                            <div>
+                              <dt>Direction keys</dt>
+                              <dd>
+                                {assessment.directionalSignalKeys.map((key) => (
+                                  <code key={key}>{key}</code>
+                                ))}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>Interpretation under scrutiny</dt>
+                              <dd>{assessment.directionalInterpretation}</dd>
+                            </div>
+                            <div>
+                              <dt>Required directional amendment</dt>
+                              <dd>{assessment.directionalAmendment}</dd>
+                            </div>
+                          </dl>
+                        </section>
+                      ) : null}
                     </article>
                   ))}
                 </div>
@@ -1234,7 +1417,7 @@ export function LifecycleStage({
                         <TrackActionControl
                           index={index}
                           actionLabel={actionLabel}
-                          pending={actionPendingIndex !== null}
+                          pending={actionPendingIndex !== null || readOnly}
                           onCreate={onCreateAction}
                         />
                       ) : (
@@ -1245,7 +1428,7 @@ export function LifecycleStage({
                               <select
                                 value={action.status}
                                 aria-label={`Status for ${actionLabel}`}
-                                disabled={wilburPending}
+                                disabled={wilburPending || readOnly}
                                 onChange={(event) => onUpdateAction(
                                   action,
                                   event.target.value as WilburActionStatus,
@@ -1265,7 +1448,7 @@ export function LifecycleStage({
                                 type="date"
                                 aria-label={`Follow-up date for ${actionLabel}`}
                                 value={dateInputValue(action.followUpAt)}
-                                disabled={wilburPending}
+                                disabled={wilburPending || readOnly}
                                 onChange={(event) => onUpdateAction(
                                   action,
                                   action.status,
@@ -1277,7 +1460,7 @@ export function LifecycleStage({
                           <ObservationForm
                             action={action}
                             actionLabel={actionLabel}
-                            pending={wilburPending}
+                            pending={wilburPending || readOnly}
                             onObserve={onObserve}
                           />
                           {(observationsByAction.get(action.id) ?? []).length > 0 ? (
@@ -1323,7 +1506,7 @@ export function LifecycleStage({
                           <select
                             value={action.status}
                             aria-label={`Status for ${actionLabel}`}
-                            disabled={wilburPending}
+                            disabled={wilburPending || readOnly}
                             onChange={(event) => onUpdateAction(
                               action,
                               event.target.value as WilburActionStatus,
@@ -1340,7 +1523,7 @@ export function LifecycleStage({
                         <ObservationForm
                           action={action}
                           actionLabel={actionLabel}
-                          pending={wilburPending}
+                          pending={wilburPending || readOnly}
                           onObserve={onObserve}
                         />
                       </div>
@@ -1645,7 +1828,7 @@ export function LifecycleStage({
               <button
                 className="secondary-button"
                 type="button"
-                disabled={replayDisabled}
+                disabled={replayDisabled || readOnly}
                 aria-busy={replayPending}
                 onClick={onReplay}
               >

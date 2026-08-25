@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { PublicReleaseIdentity } from '@/lib/release-source'
+import { CURRENT_METHOD_VERSION_TUPLE } from '@/lib/lifecycle/method-versions.mjs'
 
 import { resolveOpenClawReleaseIdentity } from './page'
 
@@ -10,6 +11,7 @@ const MANIFEST = {
   status: 'resolved',
   release: {
     version: '2.2.0-rc.1',
+    methodVersions: { ...CURRENT_METHOD_VERSION_TUPLE },
   },
   source: {
     repository: 'https://github.com/jr4488/webchess',
@@ -50,6 +52,7 @@ describe('local OpenClaw release identity resolution', () => {
     }, MANIFEST)).toEqual({
       softwareVersion: '2.2.0-rc.1',
       sourceCommit: SOURCE_COMMIT,
+      methodVersions: CURRENT_METHOD_VERSION_TUPLE,
     })
   })
 
@@ -59,6 +62,7 @@ describe('local OpenClaw release identity resolution', () => {
     }, MANIFEST)).toEqual({
       softwareVersion: '2.2.0-rc.1',
       sourceCommit: null,
+      methodVersions: CURRENT_METHOD_VERSION_TUPLE,
     })
   })
 

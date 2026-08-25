@@ -8,6 +8,7 @@ proposed benefits should be tested against explicit alternatives.
 | Construct | Question | Candidate measures |
 | --- | --- | --- |
 | Perspective diversity | Does the 64-cell field produce materially distinct frames? | Semantic redundancy, expert ratings, frame coverage |
+| Directional traceability | Does the assigned cast and complete chess trajectory produce a reproducible, inspectable change in what is scrutinized and retained? | Record replay agreement, digest agreement, path/seed sensitivity, Portia amendment traceability |
 | Decision quality | Does the process improve choices after evidence is gathered? | Blind rubric scores, calibration, later outcome review |
 | Action quality | Does the result produce smaller and more reversible next moves? | Specificity, reversibility, completion rate |
 | Epistemic discipline | Can users distinguish resonance, interpretation, and evidence? | Claim audits, uncertainty labels, counterpoint retention |
@@ -18,9 +19,12 @@ proposed benefits should be tested against explicit alternatives.
 A useful evaluation:
 
 - identifies the exact commit or release, rules version, engine version, prompt
-  version, and model;
+  version, directional-record version/digest, and model;
 - describes the sample, comparison, procedure, and measures;
 - preserves or publishes non-sensitive seeds and replay event logs;
+- uses current lifecycle-v2.5 cases for executable evaluation; any preserved
+  `legacy_pre_directional_generation` artifact is identified as historical,
+  inspected read-only, and never pooled with current semantics;
 - reports null and adverse findings;
 - separates observation from interpretation and uncertainty; and
 - shares non-sensitive reproduction materials.
@@ -29,13 +33,47 @@ Engine arena results are regression evidence, not an Elo estimate. Structured
 output and deterministic facet checks establish bounded conformance, not
 semantic quality.
 
+## Direction is inspectable, not factual evidence
+
+Current Division receives a deterministic I Ching cast direction for every
+facet ID, and each accepted facet records how that direction shaped it. At the
+terminal transition, WebChess derives `webchess-directional-record-v1` from the
+complete canonical game: ordered moves and forced passes, capture sequence,
+exact moving and captured-piece identities, original/current kinds and values,
+promotions, survivor routes and material, terminal outcome, and all field cast
+applications. Identical inputs must reproduce the record digest; materially
+different legal capture paths or captured values should change it.
+
+The record is required in Portia interpretations/amendments, Gate inputs,
+Answer and Charlotte prompts/provenance, **What survived scrutiny**, and full
+case export. This makes influence testable; it does not make the cast or chess
+trajectory a source of external facts, probability, causation, authority, or
+efficacy. Verified facts, safety constraints, and consent remain higher-order
+boundaries. Historical runs without this contract stay explicitly
+`legacy_pre_directional_generation`; retroactive derivation would falsely claim
+that their earlier Division, Portia, or Gate stages used information they did
+not receive. They are archival evidence only, not supported inputs to provider
+generation, gameplay, browser import, replay, Retry, Wilbur, or mutation.
+
+Directional evaluation should compare same-question/model conditions across
+recorded field and trajectory seeds, plus legal trajectories that differ in
+capture order or material. Useful ablations remove cast direction from
+Division, remove trajectory direction from Portia/Gate, or replace chess with a
+predeclared allocator. Report both deterministic replay agreement and human or
+task outcomes; the first is implementation conformance, not evidence of the
+second.
+
 ## Automatic research is not evaluation evidence
 
 Only the local OpenClaw runtime can run the automatic pre-Portia research
 broker. It is off until the player gives case-scoped, versioned consent.
 Deterministic policy permits at most one Codex Search invocation and at most
-three guarded direct-page requests within the broker's time, redirect,
-address, media, and content limits. The original question and bounded query go
+three guarded direct-page requests. The Hosted Search request has a coherent
+300-second ceiling across its bridge, parser, requester, durable record, and
+stale-request watchdog; there is no shorter 150-second compatibility cap. The
+increase is time headroom only and leaves the broker's result, source, page,
+redirect, address, media, and content limits. The original question and bounded
+query go
 to the configured search provider under the researcher's account; requested
 public page hosts see an ordinary network request from the local machine.
 Retained URLs, excerpts, timestamps, failures, and content digests become
@@ -43,12 +81,20 @@ provenance. A search synthesis or fetched page is untrusted material for Portia
 to scrutinize—not a verified fact, study result, or validation of WebChess.
 Opting out must leave the non-search lifecycle usable.
 
+If Search exceeds 300 seconds or its process/response is lost, the case must
+show a retryable terminal failure and close the durable claim. It must not
+retain stale `in_progress` state or duplicate the same provider request. Answer
+has the same 300-second aggregate policy across its initial and at most one
+contract-corrective turn, while each individual model turn remains bounded at
+150 seconds. These operational bounds are not study outcome measures.
+
 The reproducible path pins the official
 `@openclaw/codex@2026.7.1-1` provider plugin at npm integrity
 `sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==`.
 It must be installed with OpenClaw's supported `plugins install ... --pin`
-command, selected as `tools.web.search.provider=codex`, and used with an exact
-allowlist of the pinned OpenClaw runtime's bundled `openai` model provider, the
+command, selected as `tools.web.search.provider=codex`, configured with the
+required `tools.web.search.timeoutSeconds=300` inner provider bound, and used
+with an exact allowlist of the pinned OpenClaw runtime's bundled `openai` model provider, the
 pinned `codex` search provider, and packed `webchess`. WebChess includes the
 `openai` entry solely to activate the bundled provider for the selected
 account/OAuth model; cached agent model-catalog discovery remains disabled.
@@ -94,12 +140,19 @@ cannot supply that evidence by itself.
 Do not submit confidential questions, credentials, personal data, or regulated
 information.
 
-For reproducible case exchange, use **Export case** and **Import & verify
-case** with schema `webchess-case-bundle/1`. Offline verification checks the
-bundle's digests, event-log replay, terminal position, and recorded provenance;
-it does not rerun a model, establish that a source was correct, or validate the
-method. **Start another game on this field** creates a new trajectory and is
-not replay verification.
+For reproducible exchange of current lifecycle-v2.5 cases, use **Export case**
+and **Import & verify case** with schema `webchess-case-bundle/1`. Offline
+verification checks the bundle's digests, event-log replay, terminal position,
+recorded provenance and, for a private full current-case profile, the re-derived
+trajectory-direction record. The retained CLI parser may report a redacted
+omission or legacy marker for historical read-only inspection, but a pre-v2.5
+artifact is not a supported browser import or runtime/replay source.
+Verification does not rerun a model, establish that a source or direction was
+correct, or validate the method.
+**Start another game on this field** creates a new trajectory and is not replay
+verification. Every normal current-case load, new game, Retry, restore, import,
+and replay starts in 2D; the optional 3D view is an active-session choice, not a
+saved research condition unless a study records it separately.
 
 Read the preserved historical paper,
 [The First Answer Is Not Enough](WEBCHESS_WHITE_PAPER_V3.md).

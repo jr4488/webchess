@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { CURRENT_METHOD_VERSION_TUPLE } from '@/lib/lifecycle/method-versions.mjs'
 import { parsePublicReleaseIdentity } from '@/lib/release-source'
 import { sourceArchiveResponse } from './route'
 
@@ -9,7 +10,10 @@ function identity() {
   const parsed = parsePublicReleaseIdentity({
     schema: 'webchess-release-identity/1',
     status: 'resolved',
-    release: { version: '2.2.0-rc.1' },
+    release: {
+      version: '2.2.0-rc.1',
+      methodVersions: { ...CURRENT_METHOD_VERSION_TUPLE },
+    },
     source: {
       repository: 'https://github.com/jr4488/webchess',
       commit: SHA,

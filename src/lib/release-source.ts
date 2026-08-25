@@ -3,6 +3,11 @@ import 'server-only'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import {
+  CURRENT_METHOD_VERSION_TUPLE,
+  type CurrentMethodVersionTuple,
+} from './lifecycle/method-versions.mjs'
+
 const RELEASE_COMMIT_PATTERN = /^[a-f0-9]{40}$/u
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u
 
@@ -19,6 +24,7 @@ export interface PublicReleaseIdentity {
   readonly status: 'resolved'
   readonly release: {
     readonly version: '2.2.0-rc.1'
+    readonly methodVersions: CurrentMethodVersionTuple
   }
   readonly source: {
     readonly repository: typeof WEBCHESS_REPOSITORY_URL
@@ -57,6 +63,16 @@ function record(value: unknown): Record<string, unknown> | null {
     : null
 }
 
+function isCurrentMethodVersionTuple(
+  value: unknown,
+): value is CurrentMethodVersionTuple {
+  const tuple = record(value)
+  const expectedEntries = Object.entries(CURRENT_METHOD_VERSION_TUPLE)
+  return tuple !== null &&
+    Object.keys(tuple).length === expectedEntries.length &&
+    expectedEntries.every(([key, expected]) => tuple[key] === expected)
+}
+
 export function parsePublicReleaseIdentity(
   value: unknown,
 ): PublicReleaseIdentity | null {
@@ -78,6 +94,7 @@ export function parsePublicReleaseIdentity(
     identity?.schema !== 'webchess-release-identity/1' ||
     identity.status !== 'resolved' ||
     release?.version !== '2.2.0-rc.1' ||
+    !isCurrentMethodVersionTuple(release.methodVersions) ||
     source?.repository !== WEBCHESS_REPOSITORY_URL ||
     !RELEASE_COMMIT_PATTERN.test(commit) ||
     source.commit !== commit ||

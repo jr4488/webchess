@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { CURRENT_METHOD_VERSION_TUPLE } from './lifecycle/method-versions.mjs'
 import {
   configuredReleaseCommit,
   immutableReleaseSourceUrl,
@@ -23,7 +24,10 @@ function identity(overrides: Record<string, unknown> = {}) {
   return {
     schema: 'webchess-release-identity/1',
     status: 'resolved',
-    release: { version: '2.2.0-rc.1' },
+    release: {
+      version: '2.2.0-rc.1',
+      methodVersions: { ...CURRENT_METHOD_VERSION_TUPLE },
+    },
     source: {
       repository: 'https://github.com/jr4488/webchess',
       commit: SHA,
@@ -115,6 +119,36 @@ describe('immutable release source identity', () => {
     expect(parsePublicReleaseIdentity(
       identityWithCodexSearch({ [field]: driftedValue }),
     )).toBeNull()
+  })
+
+  it.each(Object.keys(CURRENT_METHOD_VERSION_TUPLE))(
+    'rejects public method-version drift in %s',
+    (field) => {
+      expect(parsePublicReleaseIdentity(identity({
+        release: {
+          version: '2.2.0-rc.1',
+          methodVersions: {
+            ...CURRENT_METHOD_VERSION_TUPLE,
+            [field]: 'webchess-drifted-v999',
+          },
+        },
+      }))).toBeNull()
+    },
+  )
+
+  it('rejects a missing or extended method-version tuple', () => {
+    expect(parsePublicReleaseIdentity(identity({
+      release: { version: '2.2.0-rc.1' },
+    }))).toBeNull()
+    expect(parsePublicReleaseIdentity(identity({
+      release: {
+        version: '2.2.0-rc.1',
+        methodVersions: {
+          ...CURRENT_METHOD_VERSION_TUPLE,
+          unreviewedStage: 'webchess-unreviewed-v1',
+        },
+      },
+    }))).toBeNull()
   })
 
   it.each([

@@ -13,6 +13,7 @@ import { promisify } from 'node:util'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { CURRENT_METHOD_VERSION_TUPLE } from '../src/lib/lifecycle/method-versions.mjs'
 import {
   RELEASE_IDENTITY_TEMPLATE_PATH,
   checkPublicReleaseArtifacts,
@@ -193,6 +194,7 @@ describe('release identity provenance', () => {
           anansi: 'Anansi/Division field-construction mnemonic',
         },
         caseBundleSchema: 'webchess-case-bundle/1',
+        methodVersions: CURRENT_METHOD_VERSION_TUPLE,
       },
       paper: {
         candidate: { edition: '3.1', repositoryPath: null },
@@ -249,6 +251,44 @@ describe('release identity provenance', () => {
     expect(() => validateResolvedReleaseIdentity(identity)).toThrow(
       'does not match the canonical',
     )
+  })
+
+  it.each(Object.keys(CURRENT_METHOD_VERSION_TUPLE))(
+    'rejects release method-version drift in %s',
+    (field) => {
+      const template = structuredClone(unresolvedReleaseIdentityTemplate())
+      template.release.methodVersions[field] = 'webchess-drifted-v999'
+      expect(() => validateReleaseIdentityTemplate(template)).toThrow(
+        'must retain the exact unresolved',
+      )
+
+      const identity = structuredClone(resolveReleaseIdentity(releaseInputs()))
+      identity.release.methodVersions[field] = 'webchess-drifted-v999'
+      expect(() => validateResolvedReleaseIdentity(identity)).toThrow(
+        'does not match the canonical',
+      )
+    },
+  )
+
+  it('keeps schema /1 while adding the pre-freeze canonical method tuple', () => {
+    const identity = unresolvedReleaseIdentityTemplate()
+    expect(identity.schema).toBe('webchess-release-identity/1')
+    expect(identity.release.methodVersions).toEqual(CURRENT_METHOD_VERSION_TUPLE)
+  })
+
+  it('keeps the public version map, installer, and current paper on the canonical tuple', async () => {
+    const root = dirname(dirname(dirname(RELEASE_IDENTITY_TEMPLATE_PATH)))
+    const documents = await Promise.all([
+      readFile(join(root, 'README.md'), 'utf8'),
+      readFile(join(root, 'INSTALL.md'), 'utf8'),
+      readFile(join(root, 'docs', 'ARACHNE_METHOD_WHITE_PAPER_3_1.md'), 'utf8'),
+    ])
+
+    for (const document of documents) {
+      for (const version of Object.values(CURRENT_METHOD_VERSION_TUPLE)) {
+        expect(document).toContain(version)
+      }
+    }
   })
 
   it.each([

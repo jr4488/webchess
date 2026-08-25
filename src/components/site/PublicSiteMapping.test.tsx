@@ -44,6 +44,11 @@ describe('public candidate mapping and method taxonomy', () => {
       'href',
       '/white-paper',
     )
+    expect(screen.getByRole('link', { name: 'OpenClaw auth' })).toHaveAttribute(
+      'href',
+      '/install#2-install-and-authenticate-the-reviewed-openclaw-version',
+    )
+    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument()
   })
 
   it('names eight formal authorities and keeps Answer as a generated artifact', () => {
@@ -72,6 +77,25 @@ describe('public candidate mapping and method taxonomy', () => {
     expect(scoped.getByText(/Answer sits between a passed Gate and Charlotte/)).toHaveTextContent(
       'not a ninth authority',
     )
+  })
+
+  it('teaches the mandatory full-trajectory direction and its evidence boundary', () => {
+    const { container } = render(<ProductHome />)
+
+    expect(
+      screen.getByText(/every move, pass, capture, piece value, survivor route, and terminal outcome/i),
+    ).toHaveTextContent('replay-verifiable directional record')
+    expect(
+      within(container.querySelector('#rulemoment') as HTMLElement).getByText(
+        /complete legal trajectory—not captures alone/,
+      ),
+    ).toHaveTextContent('never factual evidence')
+
+    cleanup()
+    render(<ResearchHome />)
+    expect(
+      screen.getByText(/full legal chess trajectory deterministically shapes the scrutiny record/),
+    ).toHaveTextContent('Neither is factual evidence')
   })
 
   it('fails closed to historical paper 3.0 while release identity is unresolved', () => {

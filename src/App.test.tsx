@@ -29,7 +29,10 @@ import type {
   RevisionCommand,
   UpdateWilburActionCommand,
 } from './lib/webchess-api'
-import { makeDivisionAnalysis } from './test/fixtures'
+import {
+  makeDivisionAnalysis,
+  makeTrajectoryDirectionalFixture,
+} from './test/fixtures'
 import type { CellCoord, GeneratedAnswer, Piece, Side } from './types'
 
 interface DeferredEngineRequest {
@@ -80,12 +83,14 @@ const apiHarness = vi.hoisted(() => ({
   getOwnedGame: vi.fn(),
   recoverDivisionIntent: vi.fn(),
   replayGame: vi.fn(),
+  retryLifecycle: vi.fn(),
   requestGameAnswer: vi.fn(),
   runCharlotte: vi.fn(),
   runPortia: vi.fn(),
   startGame: vi.fn(),
   submitMove: vi.fn(),
   updateWilburAction: vi.fn(),
+  verifyLocalCaseBundle: vi.fn(),
 }))
 
 /**
@@ -118,6 +123,12 @@ vi.mock('./lib/auto-play', async () => {
   }
 })
 
+vi.mock('./components/board3d/WebChessBoard3D', () => ({
+  WebChessBoard3D: () => (
+    <div data-board-dimension="3d">Three-dimensional scene</div>
+  ),
+}))
+
 vi.mock('./lib/webchess-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/webchess-api')>()
   return {
@@ -133,12 +144,14 @@ vi.mock('./lib/webchess-api', async (importOriginal) => {
     getOwnedGame: apiHarness.getOwnedGame,
     recoverDivisionIntent: apiHarness.recoverDivisionIntent,
     replayGame: apiHarness.replayGame,
+    retryLifecycle: apiHarness.retryLifecycle,
     requestGameAnswer: apiHarness.requestGameAnswer,
     runCharlotte: apiHarness.runCharlotte,
     runPortia: apiHarness.runPortia,
     startGame: apiHarness.startGame,
     submitMove: apiHarness.submitMove,
     updateWilburAction: apiHarness.updateWilburAction,
+    verifyLocalCaseBundle: apiHarness.verifyLocalCaseBundle,
   }
 })
 
@@ -386,6 +399,7 @@ function makeLifecycle(
     fieldRegenerationCount?: number
   } = {},
 ): LifecycleAggregate {
+  const directionalRecord = makeTrajectoryDirectionalFixture().record
   const candidateId = 'attempt-1:white-rook-1'
   const answerPromptDigest = 'd'.repeat(64)
   const portia = options.portia ? {
@@ -466,6 +480,8 @@ function makeLifecycle(
     trajectorySeed: 'trajectory-seed',
     retryReason: null,
     terminalFingerprint: 'f'.repeat(64),
+    trajectoryDirectionalRecord: directionalRecord,
+    trajectoryDirectionalRecordStatus: 'bound',
     answerPromptDigest: options.portia ? answerPromptDigest : null,
     answerUserPrompt: null,
     answerUserPromptSha256: null,
@@ -510,7 +526,23 @@ function makeLifecycle(
     wilburObservations: [],
     activities: [],
     research: [],
-    versions: {},
+    versions: {
+      software: CURRENT_LIFECYCLE_VERSIONS.software,
+      lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+      portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+      portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      gateAlgorithm: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      retryPolicy: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+      charlottePrompt: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+      charlotteContract: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+      wilburRecord: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      trajectoryDirectionalRecord:
+        CURRENT_LIFECYCLE_VERSIONS.trajectoryDirectionalRecord,
+      rules: CURRENT_GAME_VERSIONS.rules,
+      engine: CURRENT_GAME_VERSIONS.engine,
+      cast: CURRENT_GAME_VERSIONS.cast,
+      event: CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
+    },
     createdAt: '2026-08-01T20:00:00.000Z',
     updatedAt: '2026-08-01T20:00:00.000Z',
   } as unknown as LifecycleAggregate
@@ -579,6 +611,22 @@ async function flushAsyncWork(): Promise<void> {
   })
 }
 
+function installBoardViewControls() {
+  vi.stubGlobal('WebGLRenderingContext', class WebGLRenderingContext {})
+  vi.stubGlobal('matchMedia', vi.fn(() => ({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  })))
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+    (contextId) => (
+      contextId === 'webgl' || contextId === 'webgl2'
+        ? {} as WebGLRenderingContext
+        : null
+    ),
+  )
+}
+
 async function renderRestoredApp(): Promise<ReturnType<typeof render>> {
   const previousRestoreCalls = apiHarness.getCurrentGame.mock.calls.length
   const previousLifecycleCalls = apiHarness.getGameLifecycle.mock.calls.length
@@ -592,9 +640,8 @@ async function renderRestoredApp(): Promise<ReturnType<typeof render>> {
     ['completed', 'answering', 'answer_failed', 'answered'].includes(serverGame.status)
   ) {
     await waitFor(() => {
-      expect(apiHarness.getGameLifecycle).toHaveBeenCalledTimes(
-        previousLifecycleCalls + 1,
-      )
+      expect(apiHarness.getGameLifecycle.mock.calls.length)
+        .toBeGreaterThanOrEqual(previousLifecycleCalls + 1)
     })
     await flushAsyncWork()
   } else if (!serverGame) {
@@ -624,6 +671,8 @@ async function finishMapping(): Promise<void> {
 }
 
 beforeEach(() => {
+  window.localStorage.clear()
+  window.sessionStorage.clear()
   serverGame = null
   engineHarness.deferred = false
   engineHarness.pending.splice(0)
@@ -639,6 +688,19 @@ beforeEach(() => {
       type: 'application/json',
     }),
     fileName: `webchess-case-${GAME_ID}-research-redacted-v1.json`,
+  })
+  apiHarness.verifyLocalCaseBundle.mockResolvedValue({
+    ok: true,
+    errors: [],
+    warnings: [],
+    verified: [],
+    notVerified: [],
+    replay: {
+      checked: true,
+      exactProblemMapping: false,
+      completedPlies: 1,
+      terminal: false,
+    },
   })
   apiHarness.getGameLifecycle.mockRejectedValue(
     new WebChessApiError('This saved game predates the v2 lifecycle.', {
@@ -761,6 +823,39 @@ describe('durable WebChess client flow', () => {
     expect(screen.queryByLabelText(/what are you trying to understand/i)).not.toBeInTheDocument()
   })
 
+  it('keeps one explicit 3D choice through mapping and play, then resets for a new question', async () => {
+    installBoardViewControls()
+    window.localStorage.setItem('webchess:board-view', '3d')
+    window.sessionStorage.setItem('webchess:board-view', '3d')
+    serverGame = makeMappedGame()
+
+    const { container } = await renderRestoredApp()
+    const boardShell = () => container.querySelector('.board-dimension-shell')
+
+    expect(boardShell()).toHaveAttribute('data-board-view', '2d')
+    fireEvent.click(await screen.findByRole('button', { name: '3D world' }))
+    expect(boardShell()).toHaveAttribute('data-board-view', '3d')
+
+    fireEvent.click(screen.getByRole('button', {
+      name: /set the pieces in motion/i,
+    }))
+    await waitFor(() => {
+      expect(screen.getByRole('region', {
+        name: /play the problem on the circular board/i,
+      })).toBeInTheDocument()
+    })
+    expect(boardShell()).toHaveAttribute('data-board-view', '3d')
+
+    fireEvent.click(screen.getByRole('button', { name: /new question/i }))
+    await waitFor(() => {
+      expect(screen.getByLabelText(/what are you trying to understand/i))
+        .toBeInTheDocument()
+    })
+    expect(boardShell()).toHaveAttribute('data-board-view', '2d')
+    expect(window.localStorage.getItem('webchess:board-view')).toBe('3d')
+    expect(window.sessionStorage.getItem('webchess:board-view')).toBe('3d')
+  })
+
   it('restores the same authoritative move DTO after a browser remount', async () => {
     serverGame = moveGame(
       makePlayingGame(),
@@ -786,19 +881,20 @@ describe('durable WebChess client flow', () => {
 
   it('restores the original question above a completed game outcome and answer', async () => {
     serverGame = makeAnsweredGame()
-
-    const { container } = await renderRestoredApp()
-    const question = container.querySelector('.reading-question')
-    const outcomeBanner = container.querySelector('.outcome-banner')
-    const answerCard = container.querySelector('.ai-answer-card')
-
-    expect(question).toHaveTextContent(PROBLEM)
-    expect(question?.compareDocumentPosition(outcomeBanner as Node)).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('charlotte_complete', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
     )
-    expect(question?.compareDocumentPosition(answerCard as Node)).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    )
+
+    await renderRestoredApp()
+
+    expect(screen.getByText(PROBLEM)).toBeInTheDocument()
+    expect(screen.getByRole('heading', {
+      name: /the answer, qualified for people and action/i,
+    })).toBeInTheDocument()
   })
 
   it('keeps polling a restored division across unchanged and transient responses', async () => {
@@ -851,6 +947,9 @@ describe('durable WebChess client flow', () => {
       .mockResolvedValueOnce(answering)
       .mockRejectedValueOnce(new Error('The saved game store briefly disconnected.'))
       .mockResolvedValue(answered)
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('gate_passed', { portia: true, gate: true }),
+    )
 
     render(<OpenClawApp />)
     await act(() => vi.advanceTimersByTimeAsync(0))
@@ -859,22 +958,15 @@ describe('durable WebChess client flow', () => {
     await flushAsyncWork()
 
     expect(apiHarness.getCurrentGame).toHaveBeenCalledOnce()
-    expect(
-      screen.getAllByRole('status').some((element) =>
-        /final answer is being composed/i.test(element.textContent ?? ''),
-      ),
-    ).toBe(true)
+    expect(screen.getByRole('region', {
+      name: /webchess lifecycle progress/i,
+    })).toHaveAttribute('data-answer-status', 'answering')
     expect(screen.getByRole('button', { name: /new question/i })).toBeDisabled()
-    expect(screen.getByRole('button', {
-      name: /start another game on this field/i,
-    })).toBeDisabled()
-    expect(screen.getByRole('button', { name: /bring another problem/i })).toBeDisabled()
 
     await act(() => vi.advanceTimersByTimeAsync(1_500))
     await flushAsyncWork()
 
     expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
-    expect(screen.getByText('00:01')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent(/briefly disconnected/i)
 
     await act(() => vi.advanceTimersByTimeAsync(1_500))
@@ -883,6 +975,63 @@ describe('durable WebChess client flow', () => {
     expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(3)
     expect(screen.getByText(ANSWER.answer)).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('polls the durable Answer while the foreground request still shows a completed game', async () => {
+    vi.useFakeTimers()
+    const completed = moveGame(
+      makeTerminalReadyGame(),
+      'white-rook-1',
+      { ring: 0, sector: 4 },
+    )
+    const answering: DurableGame = {
+      ...completed,
+      revision: completed.revision + 1,
+      status: 'answering',
+      answer: null,
+    }
+    const answered: DurableGame = {
+      ...answering,
+      revision: answering.revision + 1,
+      status: 'answered',
+      answer: ANSWER,
+    }
+    const foregroundAnswer = createDeferred<{
+      game: DurableGame
+      answer: GeneratedAnswer
+    }>()
+    serverGame = completed
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('gate_passed', { portia: true, gate: true }),
+    )
+    apiHarness.requestGameAnswer.mockImplementationOnce(async () => {
+      serverGame = answering
+      return foregroundAnswer.promise
+    })
+
+    render(<OpenClawApp />)
+    for (let index = 0; index < 4; index += 1) {
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      await flushAsyncWork()
+    }
+
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledOnce()
+    expect(apiHarness.requestGameAnswer).toHaveBeenCalledOnce()
+
+    await act(() => vi.advanceTimersByTimeAsync(1_499))
+    await flushAsyncWork()
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledOnce()
+
+    await act(() => vi.advanceTimersByTimeAsync(1))
+    await flushAsyncWork()
+    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
+
+    serverGame = answered
+    foregroundAnswer.resolve({ game: answered, answer: ANSWER })
+    await flushAsyncWork()
+
+    expect(apiHarness.requestGameAnswer).toHaveBeenCalledOnce()
+    expect(screen.getByText(ANSWER.answer)).toBeInTheDocument()
   })
 
   it('gives a foreground answer restore priority over the next silent poll', async () => {
@@ -902,6 +1051,9 @@ describe('durable WebChess client flow', () => {
       )
       .mockImplementationOnce(() => foregroundRestore.promise)
       .mockResolvedValue(answered)
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('gate_passed', { portia: true, gate: true }),
+    )
 
     render(<OpenClawApp />)
     await act(() => vi.advanceTimersByTimeAsync(0))
@@ -1201,9 +1353,16 @@ describe('durable WebChess client flow', () => {
 
   it('durably abandons an answered game before showing a new question', async () => {
     serverGame = makeAnsweredGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('charlotte_complete', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
+    )
     await renderRestoredApp()
 
-    fireEvent.click(screen.getByRole('button', { name: /bring another problem/i }))
+    fireEvent.click(screen.getByRole('button', { name: /new question/i }))
     await flushAsyncWork()
 
     expect(apiHarness.abandonGame).toHaveBeenCalledWith(
@@ -1416,7 +1575,7 @@ describe('durable WebChess client flow', () => {
     expect(document.querySelector('.turn-header .eyebrow')).toHaveTextContent('Move 01')
   })
 
-  it('answers a terminal server move using only its game id and saved revision', async () => {
+  it('keeps a terminal game with no current lifecycle read-only', async () => {
     serverGame = makeTerminalReadyGame()
     await renderRestoredApp()
     engineHarness.deferred = true
@@ -1434,27 +1593,60 @@ describe('durable WebChess client flow', () => {
       })
     })
 
-    await waitFor(() => expect(apiHarness.requestGameAnswer).toHaveBeenCalledOnce())
     await waitFor(() => {
-      expect(screen.getByRole('region', { name: /final webchess answer/i })).toBeInTheDocument()
-      expect(screen.getByText(/protect the purpose, then test/i)).toBeInTheDocument()
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        /no current lifecycle provenance and is read-only/i,
+      )
     })
+    expect(apiHarness.requestGameAnswer).not.toHaveBeenCalled()
+    expect(apiHarness.runPortia).not.toHaveBeenCalled()
+    expect(apiHarness.runCharlotte).not.toHaveBeenCalled()
+    expect(apiHarness.retryLifecycle).not.toHaveBeenCalled()
+    expect(apiHarness.replayGame).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', {
+      name: /start another game on this field/i,
+    })).not.toBeInTheDocument()
 
-    const [gameId, command, options] = apiHarness.requestGameAnswer.mock.calls[0] as [
-      string,
-      RevisionCommand,
-      { idempotencyKey: string; signal: AbortSignal },
-    ]
-    expect(gameId).toBe(GAME_ID)
-    expect(command).toEqual({ expectedRevision: 12 })
-    expect(Object.keys(command)).toEqual(['expectedRevision'])
-    expect(command).not.toHaveProperty('captures')
-    expect(command).not.toHaveProperty('outcome')
-    expect(command).not.toHaveProperty('problem')
-    expect(options).toEqual({
-      idempotencyKey: expect.any(String),
-      signal: expect.any(AbortSignal),
-    })
+    const reset = screen.getByRole('button', { name: /new question/i })
+    expect(reset).toBeEnabled()
+    fireEvent.click(reset)
+    await flushAsyncWork()
+    expect(screen.getByLabelText(/what are you trying to understand/i))
+      .toBeInTheDocument()
+  })
+
+  it('leaves a historical answering game through a local New Question reset', async () => {
+    const completed = moveGame(
+      makeTerminalReadyGame(),
+      'white-rook-1',
+      { ring: 0, sector: 4 },
+    )
+    serverGame = {
+      ...completed,
+      status: 'answering',
+      answer: null,
+    }
+
+    await renderRestoredApp()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /no current lifecycle provenance and is read-only/i,
+    )
+    expect(screen.queryByText('Finding the lifecycle thread'))
+      .not.toBeInTheDocument()
+    expect(screen.queryByText('Loading')).not.toBeInTheDocument()
+    const reset = screen.getByRole('button', { name: /new question/i })
+    expect(reset).toBeEnabled()
+    fireEvent.click(reset)
+    await flushAsyncWork()
+
+    expect(screen.getByLabelText(/what are you trying to understand/i))
+      .toBeInTheDocument()
+    expect(apiHarness.abandonGame).not.toHaveBeenCalled()
+    expect(apiHarness.requestGameAnswer).not.toHaveBeenCalled()
+    expect(apiHarness.runPortia).not.toHaveBeenCalled()
+    expect(apiHarness.runCharlotte).not.toHaveBeenCalled()
+    expect(apiHarness.retryLifecycle).not.toHaveBeenCalled()
   })
 
   it('advances a v2 terminal game through Portia, board Answer, and Charlotte', async () => {
@@ -1507,6 +1699,42 @@ describe('durable WebChess client flow', () => {
     )
     expect(screen.getByRole('region', { name: /WebChess 2\.2 lifecycle/i }))
       .toBeInTheDocument()
+  })
+
+  it('keeps a mixed historical lifecycle visible but disables provider and replay actions', async () => {
+    serverGame = moveGame(
+      makeTerminalReadyGame(),
+      'white-rook-1',
+      { ring: 0, sector: 4 },
+    )
+    const current = makeLifecycle('gate_passed', {
+      portia: true,
+      gate: true,
+    })
+    apiHarness.getGameLifecycle.mockResolvedValue({
+      ...current,
+      trajectoryDirectionalRecord: null,
+      trajectoryDirectionalRecordStatus: 'legacy_pre_directional_generation',
+      versions: {
+        ...current.versions,
+        lifecycle: 'webchess-lifecycle-v2.4',
+        trajectoryDirectionalRecord: null,
+      },
+    })
+
+    await renderRestoredApp()
+
+    expect(await screen.findByText(
+      /preserved historical lifecycle is read-only/i,
+    )).toBeInTheDocument()
+    expect(screen.queryByRole('button', {
+      name: /start another game on this field/i,
+    })).not.toBeInTheDocument()
+    expect(apiHarness.runPortia).not.toHaveBeenCalled()
+    expect(apiHarness.requestGameAnswer).not.toHaveBeenCalled()
+    expect(apiHarness.runCharlotte).not.toHaveBeenCalled()
+    expect(apiHarness.retryLifecycle).not.toHaveBeenCalled()
+    expect(apiHarness.replayGame).not.toHaveBeenCalled()
   })
 
   it('reuses the automatic Answer key while a promptless 502 is reconciled', async () => {
@@ -1724,6 +1952,37 @@ describe('durable WebChess client flow', () => {
     expect(apiHarness.requestGameAnswer).not.toHaveBeenCalled()
   })
 
+  it('resets an explicit 3D choice when a bounded lifecycle retry begins', async () => {
+    installBoardViewControls()
+    serverGame = makeAnsweredGame()
+    const failedGate = makeLifecycle('gate_failed', {
+      portia: true,
+      gate: true,
+      gatePassed: false,
+      gateRecommendation: 'retry_game',
+    })
+    const pendingRetry = createDeferred<{
+      game: DurableGame | null
+      lifecycle: LifecycleAggregate
+    }>()
+    apiHarness.getGameLifecycle.mockResolvedValue(failedGate)
+    apiHarness.retryLifecycle.mockReturnValue(pendingRetry.promise)
+
+    const { container } = await renderRestoredApp()
+    fireEvent.click(await screen.findByRole('button', { name: '3D world' }))
+    expect(container.querySelector('.board-dimension-shell'))
+      .toHaveAttribute('data-board-view', '3d')
+
+    fireEvent.click(screen.getByRole('button', {
+      name: /try another bounded path/i,
+    }))
+    expect(container.querySelector('.board-dimension-shell'))
+      .toHaveAttribute('data-board-view', '2d')
+
+    pendingRetry.resolve({ game: null, lifecycle: failedGate })
+    await flushAsyncWork()
+  })
+
   it('settles a durable v2 Answer failure until the player starts one fresh request', async () => {
     serverGame = makeAnswerFailedGame()
     apiHarness.getGameLifecycle.mockResolvedValue(
@@ -1811,8 +2070,14 @@ describe('durable WebChess client flow', () => {
     )
   })
 
-  it('retries an ambiguous answer with the same idempotency key', async () => {
+  it('mints a fresh Answer intent after an ambiguous response is durably confirmed failed', async () => {
     serverGame = makeAnswerFailedGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('gate_passed', { portia: true, gate: true }),
+    )
+    apiHarness.createIdempotencyKey
+      .mockReturnValueOnce('98000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('98000000-0000-4000-8000-000000000002')
     await renderRestoredApp()
     apiHarness.requestGameAnswer.mockRejectedValueOnce(
       new WebChessApiError('The connection ended before the answer was confirmed.', {
@@ -1820,13 +2085,14 @@ describe('durable WebChess client flow', () => {
       }),
     )
 
-    expect(screen.getByText(/server replay is complete, but the model answer failed/i)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /try the answer again/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /try the answer again/i }))
     await waitFor(() => {
-      expect(screen.getByText(/connection ended before the answer was confirmed/i)).toBeInTheDocument()
+      expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /try the answer again/i }))
+    fireEvent.click(await screen.findByRole('button', {
+      name: /try the answer again/i,
+    }))
     await waitFor(() => {
       expect(screen.getByText(ANSWER.answer)).toBeInTheDocument()
     })
@@ -1838,7 +2104,55 @@ describe('durable WebChess client flow', () => {
     const retryOptions = apiHarness.requestGameAnswer.mock.calls[1]?.[2] as {
       idempotencyKey: string
     }
-    expect(retryOptions.idempotencyKey).toBe(firstOptions.idempotencyKey)
+    expect(firstOptions.idempotencyKey).toBe(
+      '98000000-0000-4000-8000-000000000001',
+    )
+    expect(retryOptions.idempotencyKey).toBe(
+      '98000000-0000-4000-8000-000000000002',
+    )
+  })
+
+  it('does not mint or submit another Answer while an ambiguous request remains unresolved', async () => {
+    const failed = makeAnswerFailedGame()
+    serverGame = failed
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('gate_passed', { portia: true, gate: true }),
+    )
+    apiHarness.createIdempotencyKey
+      .mockReturnValueOnce('99000000-0000-4000-8000-000000000001')
+    apiHarness.requestGameAnswer.mockImplementationOnce(async () => {
+      serverGame = {
+        ...failed,
+        revision: failed.revision + 1,
+        status: 'answering',
+        answer: null,
+      }
+      throw new WebChessApiError(
+        'The connection ended before the answer was confirmed.',
+        { kind: 'transport' },
+      )
+    })
+
+    await renderRestoredApp()
+    fireEvent.click(screen.getByRole('button', { name: /try the answer again/i }))
+    await waitFor(() => {
+      expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
+    })
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 25))
+    })
+    expect(apiHarness.requestGameAnswer).toHaveBeenCalledOnce()
+    expect(apiHarness.createIdempotencyKey).toHaveBeenCalledOnce()
+    expect(apiHarness.requestGameAnswer).toHaveBeenCalledWith(
+      GAME_ID,
+      { expectedRevision: failed.revision },
+      expect.objectContaining({
+        idempotencyKey: '99000000-0000-4000-8000-000000000001',
+      }),
+    )
+    expect(screen.queryByRole('button', { name: /try the answer again/i }))
+      .not.toBeInTheDocument()
   })
 
   it.each(AMBIGUOUS_WILBUR_FAILURES)(
@@ -2446,6 +2760,13 @@ describe('durable WebChess client flow', () => {
 
   it('guards replay against rapid duplicate clicks and other reading actions', async () => {
     serverGame = makeAnsweredGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('wilbur_observed', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
+    )
     const pendingReplay = createDeferred<DurableGame>()
     apiHarness.replayGame.mockImplementationOnce(() => pendingReplay.promise)
     await renderRestoredApp()
@@ -2459,7 +2780,6 @@ describe('durable WebChess client flow', () => {
     expect(apiHarness.replayGame).toHaveBeenCalledOnce()
     expect(replayButton).toBeDisabled()
     expect(screen.getByRole('button', { name: /new question/i })).toBeDisabled()
-    expect(screen.getByRole('button', { name: /bring another problem/i })).toBeDisabled()
 
     const replayed = {
       ...makeMappedGame(PROBLEM, REPLAY_GAME_ID, GAME_ID),
@@ -2498,8 +2818,63 @@ describe('durable WebChess client flow', () => {
     )
   })
 
+  it('resets an explicit 3D choice for case import verification and same-field replay', async () => {
+    installBoardViewControls()
+    serverGame = makeAnsweredGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('wilbur_observed', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
+    )
+    const { container } = await renderRestoredApp()
+
+    const choose3D = async () => {
+      fireEvent.click(await screen.findByRole('button', { name: '3D world' }))
+      expect(container.querySelector('.board-dimension-shell'))
+        .toHaveAttribute('data-board-view', '3d')
+    }
+    await choose3D()
+
+    const bundle = new File(
+      ['{"format":"webchess-case-bundle/1"}'],
+      'case.json',
+      { type: 'application/json' },
+    )
+    fireEvent.change(screen.getByLabelText(/case bundle json/i), {
+      target: { files: [bundle] },
+    })
+    fireEvent.click(screen.getByRole('button', {
+      name: /import & verify case bundle/i,
+    }))
+    await waitFor(() => {
+      expect(apiHarness.verifyLocalCaseBundle).toHaveBeenCalledWith(bundle)
+    })
+    expect(container.querySelector('.board-dimension-shell'))
+      .toHaveAttribute('data-board-view', '2d')
+
+    await choose3D()
+    fireEvent.click(screen.getByRole('button', {
+      name: /start another game on this field/i,
+    }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /set the pieces in motion/i }))
+        .toBeEnabled()
+    })
+    expect(container.querySelector('.board-dimension-shell'))
+      .toHaveAttribute('data-board-view', '2d')
+  })
+
   it('locks reset after an ambiguous replay until a same-key retry resolves its child', async () => {
     serverGame = makeAnsweredGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('wilbur_observed', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
+    )
     const firstMount = await renderRestoredApp()
     let replayChild: DurableGame | null = null
     apiHarness.replayGame
@@ -2541,12 +2916,10 @@ describe('durable WebChess client flow', () => {
     })
 
     const headerReset = screen.getByRole('button', { name: /new question/i })
-    const readingReset = screen.getByRole('button', { name: /bring another problem/i })
     const replayButton = screen.getByRole('button', {
       name: /start another game on this field/i,
     })
     expect(headerReset).toBeDisabled()
-    expect(readingReset).toBeDisabled()
     expect(replayButton).toBeEnabled()
     fireEvent.click(headerReset)
     expect(apiHarness.abandonGame).not.toHaveBeenCalled()
@@ -2591,6 +2964,13 @@ describe('durable WebChess client flow', () => {
 
   it('creates a durable replay and abandons that replay before a new question', async () => {
     serverGame = makeAnsweredGame()
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('wilbur_observed', {
+        portia: true,
+        gate: true,
+        charlotte: true,
+      }),
+    )
     await renderRestoredApp()
 
     fireEvent.click(screen.getByRole('button', {

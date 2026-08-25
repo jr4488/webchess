@@ -6566,6 +6566,160 @@ body {
 .portia-dispositions .is-wounded { border-color: rgba(var(--gold-rgb), 0.42); }
 .portia-dispositions .is-consumed { border-color: rgba(var(--vermillion-rgb), 0.45); }
 
+.directional-provenance {
+  display: grid;
+  gap: 14px;
+  margin: 20px 0;
+  padding: clamp(14px, 2vw, 20px);
+  border: 1px solid rgba(var(--gold-rgb), 0.4);
+  background:
+    radial-gradient(circle at 92% 8%, rgba(var(--gold-rgb), 0.1), transparent 42%),
+    rgba(var(--paper-deep-rgb), 0.34);
+}
+
+.directional-provenance__heading small,
+.directional-provenance h4,
+.directional-signals small,
+.directional-provenance dt,
+.portia-assessment__directional dt {
+  color: var(--ink-faint);
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.directional-provenance__heading h3,
+.directional-signals h5,
+.portia-assessment__directional h3 {
+  margin: 4px 0 0;
+  color: var(--ink);
+  font-family: 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
+}
+
+.directional-provenance > p,
+.directional-provenance__explanation p,
+.directional-provenance__portia-summary p,
+.directional-signals p,
+.directional-provenance__boundary p,
+.portia-assessment__directional dd {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+  line-height: 1.58;
+}
+
+.directional-provenance__identity,
+.directional-signal__contributions,
+.portia-assessment__directional dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.directional-provenance__identity > div,
+.directional-signal__contributions > div,
+.portia-assessment__directional dl > div {
+  min-width: 0;
+  padding: 10px;
+  background: rgba(var(--panel-rgb), 0.88);
+}
+
+.directional-provenance__identity dd,
+.directional-signal__contributions dd,
+.portia-assessment__directional dd {
+  margin: 4px 0 0;
+}
+
+.directional-provenance code,
+.portia-assessment__directional code {
+  overflow-wrap: anywhere;
+}
+
+.directional-provenance__explanation {
+  display: grid;
+  gap: 8px;
+}
+
+.directional-signals {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.directional-signals > li {
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  background: rgba(var(--panel-rgb), 0.62);
+}
+
+.directional-signals > li > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.directional-signals > li > header > span {
+  flex: 0 0 auto;
+  color: var(--gold);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.directional-signals details {
+  margin-top: 10px;
+}
+
+.directional-signal__contributions {
+  margin-top: 10px;
+}
+
+.directional-provenance__boundary {
+  padding: 12px;
+  border-left: 3px solid var(--jade);
+  background: rgba(var(--jade-rgb), 0.08);
+}
+
+.directional-provenance__boundary > strong,
+.directional-provenance__portia-summary > strong,
+.directional-provenance--legacy > strong {
+  color: var(--ink);
+  font-size: 0.68rem;
+}
+
+.directional-provenance__portia-summary {
+  padding: 12px;
+  border-left: 3px solid var(--gold);
+  background: rgba(var(--gold-rgb), 0.07);
+}
+
+.directional-provenance--legacy {
+  border-color: rgba(var(--ink-rgb), 0.24);
+}
+
+.portia-assessment__directional {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.portia-assessment__directional dl {
+  grid-template-columns: 1fr;
+}
+
+.portia-assessment__directional dd code {
+  display: block;
+  margin-top: 3px;
+}
+
 .portia-progress-card {
   border-color: rgba(var(--vermillion-rgb), 0.34);
   background:
@@ -7751,6 +7905,15 @@ body {
 
   .portia-dispositions {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .directional-provenance__identity,
+  .directional-signal__contributions {
+    grid-template-columns: 1fr;
+  }
+
+  .directional-signals > li > header {
+    display: grid;
   }
 
   .gate-metrics {

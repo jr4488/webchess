@@ -3,13 +3,15 @@
 WebChess is the reference software instrument for **The Arachne Method**, an
 experimental architecture for slowing down a difficult question before acting.
 It constructs a 64-facet field, plays a complete circular-chess trajectory,
-attacks what survives, permits a deterministic Gate to refuse, qualifies any
-answer, and records human-owned action and observation.
+rolls that complete trajectory into a versioned directional record, attacks
+what survives, permits a deterministic Gate to refuse, qualifies any answer,
+and records human-owned action and observation.
 
 **Research boundary:** the software and its contracts can be inspected and
-tested. The method's efficacy has not been established. A board event creates
-salience, not evidence, and WebChess is not a validated safety, medical, legal,
-financial, or emergency-decision system.
+tested. The method's efficacy has not been established. The complete board
+trajectory creates directional salience, not factual evidence, and WebChess is
+not a validated safety, medical, legal, financial, or emergency-decision
+system.
 
 ## Candidate and publication status
 
@@ -49,25 +51,45 @@ mistake salience for evidence.
 
 ## What one complete lifecycle does
 
-1. **Anansi / Division** produces exactly 64 bounded, schema-valid facets for
-   the question. Structural validation cannot prove relevance or completeness.
+1. **Anansi / Division** receives a deterministic I Ching cast assignment for
+   each facet and produces exactly 64 bounded, schema-valid facets whose
+   recorded `castApplication` explains how that direction shaped the facet.
+   Structural validation cannot prove relevance or completeness.
 2. **Field construction** independently and deterministically permutes facets,
-   I Ching-inspired change lenses, and board locations from recorded seeds.
+   cast-derived change lenses, and board locations from recorded seeds.
 3. **Chess** plays the cylindrical 8-by-8 variant to a terminal state. Kings
    are captured directly; sectors wrap; rings do not; passes and bounded draw
    rules are part of the variant.
-4. **Research, when explicitly enabled**, runs one bounded search and guarded
+4. **Trajectory direction** deterministically derives one versioned record
+   from the complete canonical event stream: move order, forced passes,
+   capture sequence, exact piece identities, kinds and values, promotions,
+   survivors, routes, terminal outcome, and the cast applications attached to
+   all 64 field cells. Replaying the same inputs must reproduce its digest;
+   materially different legal trajectories can produce different directions.
+5. **Research, when explicitly enabled**, runs one bounded search and guarded
    direct-page evidence collection before Portia. Failure is visible and the
    source provenance is retained.
-5. **Portia** applies all 13 attack types to every surviving signal and then
-   produces a cross-signal summary before an Answer is allowed.
-6. **Gate and Retry** use deterministic rules to pass, refuse, start another
+6. **Portia** applies all 13 attack types to every surviving signal, records
+   how the trajectory directions shaped each interpretation or amendment, and
+   then produces a cross-signal summary before an Answer is allowed.
+7. **Gate and Retry** use deterministic rules to pass, refuse, start another
    game on the same field, or construct one fresh field. Retry is bounded.
-7. **Answer** receives the exact prompt Portia reviewed and Gate approved.
-8. **Charlotte** qualifies that stored answer and proposes exactly three
-   reversible actions without silently replacing it.
-9. **Wilbur and the Web** let the person own an action, record observation, and
+8. **Answer** receives the exact prompt and directional record Portia reviewed
+   and Gate approved.
+9. **Charlotte** qualifies that stored answer and its directional provenance
+   and proposes exactly three reversible actions without silently replacing it.
+10. **Wilbur and the Web** let the person own an action, record observation, and
    preserve the case genealogy for export and later verification.
+
+The directional record is a required method input, not decorative or optional
+metaphor. It is also **not external factual evidence**: its cast and chess
+trajectory cannot override verified facts, research provenance, safety
+constraints, or consent. Current cases expose the record version, digest,
+human-readable explanation, and the bindings carried through Portia, Gate,
+Answer, Charlotte, the visible **What survived scrutiny** result, and case
+export. Preserved older cases that predate this contract remain readable and
+are labeled `legacy_pre_directional_generation`; WebChess does not fabricate a
+current record for them.
 
 See [Architecture](docs/ARCHITECTURE.md) for the implementation boundaries,
 [The Arachne Method 3.1 candidate paper](docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md)
@@ -104,8 +126,11 @@ The candidate's reproducibility and acceptance environment is pinned to:
   repository;
 - Google Chrome `150.0.7871.128` for the connected interactive acceptance
   pass; and
-- WebGL 2 for the optional 3D board. The accessible 2D board must remain
-  available when WebGL is absent or motion is reduced.
+- WebGL 2 for the optional 3D board. Initial load, new question/game, bounded
+  Retry, restore/reload, import/verification, and replay all start in accessible
+  2D regardless of stale browser storage; 3D is an explicit, session-only
+  choice and falls back safely when WebGL is absent, its context fails, or
+  motion is reduced.
 
 These are reproducibility pins, not claims that all newer versions are broken.
 Node 24 is the recommended line in the pinned OpenClaw documentation. The
@@ -133,7 +158,7 @@ mkdir -- "$WEBCHESS_INSTALL_WORKSPACE"
 cd -- "$WEBCHESS_INSTALL_WORKSPACE"
 export WEBCHESS_IDENTITY_URL='https://webchess.anansiportia.com/downloads/webchess-release-identity.json'
 curl --fail --location --remove-on-error --output webchess-release-identity.json "$WEBCHESS_IDENTITY_URL"
-node -e 'const m=require("./webchess-release-identity.json"); if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved") process.exit(1)'
+node -e 'const m=require("./webchess-release-identity.json"),v={lifecycle:"webchess-lifecycle-v2.5",divisionPrompt:"webchess-division-v4",portiaPrompt:"webchess-portia-v5",portiaReview:"webchess-portia-review-v3",gateAlgorithm:"webchess-gate-v5",answerPrompt:"webchess-answer-v4",charlottePrompt:"webchess-charlotte-v5"}; if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved"||JSON.stringify(m.release?.methodVersions)!==JSON.stringify(v)) process.exit(1)'
 export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.source.commit ?? "")')"
 test "${#WEBCHESS_RELEASE_SHA}" -eq 40
 ```
@@ -363,6 +388,7 @@ webchess_assert_account_oauth_only
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install @openclaw/codex@2026.7.1-1 --pin
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install npm-pack:../webchess-2.2.0-rc.1.tgz
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set tools.web.search.provider codex
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set tools.web.search.timeoutSeconds 300 --strict-json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set plugins.allow '["codex","openai","webchess"]' --strict-json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config validate
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect codex --runtime --json
@@ -395,6 +421,15 @@ account/OAuth profile. Neither may use a WebChess-side, Codex, OpenAI, or other
 provider API key/token; a missing account capability must fail visibly rather
 than select a substitute.
 
+The launcher then completes two sequential authenticated readiness stages
+before it prints a browser URL: the OpenAI account model stage has one absolute
+150-second allowance, followed by a Codex Hosted Search stage with one absolute
+300-second allowance. Those ceilings include OAuth/auth checks, attestation,
+the provider probe, and postchecks. A slow but healthy authenticated readiness
+sequence can therefore take nearly 7.5 minutes, in addition to bounded local
+staging; no bridge listener is exposed until both stages pass, and an expired
+stage aborts and fails closed.
+
 WebChess includes the `openai` allowlist entry solely to activate the pinned
 OpenClaw runtime's bundled provider for the selected account/OAuth model;
 cached agent model-catalog discovery remains disabled. This does not make any
@@ -425,11 +460,13 @@ Use the visible interface, not a hidden endpoint:
    `webchess@2.2.0-rc.1`;
 2. enter a non-secret research question;
 3. choose whether to consent to research search for this case;
-4. choose the accessible 2D or 3D board and start Division;
+4. confirm the default accessible 2D board, or explicitly opt in to 3D for the
+   current board, and start Division;
 5. play manually, request guided moves, or use autoplay until the canonical
    initial board reaches a real terminal game state;
-6. inspect Portia's per-signal progress, Gate decision, Retry ancestry if any,
-   the board-derived Answer, and Charlotte's qualifications;
+6. inspect the trajectory-direction record and its digest, how **What survived
+   scrutiny** carries those directions through Portia, the Gate decision,
+   Retry ancestry if any, the approved Answer, and Charlotte's qualifications;
 7. choose one reversible Wilbur action, update it, and add an observation;
 8. reload the page and confirm the same case and lifecycle return from
    PostgreSQL;
@@ -523,6 +560,15 @@ attempt count, planned and executed query data, evidence and provenance, and
 any visible failure/refusal status and code. Optional direct-page requests are
 a later WebChess-local step.
 
+One consented Hosted Search has a coherent five-minute (`300000` ms) ceiling.
+The bridge request, response parser, durable research record, and stale-request
+watchdog all allow that same window; no older 150-second layer may terminate a
+valid search early. The existing one-query, result, source, direct-page,
+redirect, body, citation, synthesis, and consent limits are unchanged. If the
+window expires, WebChess persists a visible retryable failure and closes the
+durable claim instead of leaving research indefinitely `in_progress` or
+silently issuing a duplicate provider call.
+
 ## Model-call, time, context, and allowance implications
 
 Each launcher process first makes one authenticated model readiness request and
@@ -554,6 +600,18 @@ therefore uses `S + 5` generations (6 to 37), while a same-field path uses
 `S + 4`. Provider failures, transport failures, and
 cancellation do not earn a corrective turn, and invalid provider output is not
 copied into the corrective prompt.
+
+The complete Answer operation—not each turn separately—has one coherent
+five-minute (`300000` ms) allowance. An initial turn and its one permitted
+contract-correction turn are each capped at 150 seconds inside that aggregate
+window. The request watchdog, per-turn lease renewal, upstream HTTP route, and
+durable settlement grace are coordinated so no shorter legacy cap silently
+wins. Exceeding the aggregate window or losing the process/response persists a
+visible retryable Answer failure and releases the slot. When the provider
+outcome cannot be known, the original model-request ledger entry is marked
+`indeterminate`, so that same intent cannot duplicate its provider call. The
+repair never authorizes a silently truncated prompt or an indefinite
+`in_progress` row.
 
 Failures and Gate decisions can amplify that cost:
 
@@ -601,6 +659,7 @@ reruns must not be added together as if they were new tests.
 | Audited Linux 2.2 candidate | `7a3749cf7f2c4e4c5ebfeb9b9aa870a11843f3a2` | Historical audit input, not this final RC |
 | Historical V3 manuscript/software snapshot | paper 3.0 / `0384978b2ba709da4c9824f2821c8623d3f84364` | Preserved audit evidence |
 | Integrated candidate | WebChess `2.2.0-rc.1` / full SHA and archive digest in generated release identity | Resolved only when the manifest says `resolved` and its local byte checks pass; that alone is not publication |
+| Current method-version tuple | lifecycle `webchess-lifecycle-v2.5`; Division `webchess-division-v4`; Portia `webchess-portia-v5`; Portia review `webchess-portia-review-v3`; Gate `webchess-gate-v5`; Answer `webchess-answer-v4`; Charlotte `webchess-charlotte-v5` | One canonical tuple in [`src/lib/lifecycle/method-versions.mjs`](src/lib/lifecycle/method-versions.mjs), copied into and strictly verified by the release identity |
 | Candidate paper mapped to integrated candidate | [Arachne paper edition 3.1](docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md) / PDF SHA-256 in generated release identity | Manifest-dependent; resolved only when the candidate PDF and source mapping pass together |
 | Provider harness | OpenClaw `2026.7.1-2` / `0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c` | Pinned external dependency |
 | Hosted Search provider | `@openclaw/codex@2026.7.1-1` / npm integrity `sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==` | Pinned official provider dependency; inventory proves local registration, not account execution |
@@ -613,10 +672,17 @@ contemporaneous code mapping.
 
 The tracked template at
 `docs/releases/webchess-release-identity.template.json` intentionally contains
-nulls for the as-yet nonexistent code-freeze and paper artifacts. A release
-operator must first commit edition 3.1, freeze the exact source, create the
-retained uncompressed Git archive and deterministic paper PDF, and then bind
-their exact bytes from an otherwise clean checkout:
+nulls for the as-yet nonexistent code-freeze and paper artifacts.
+
+The schema remains `webchess-release-identity/1`: no resolved `/1` candidate
+has been published, and the method tuple was added while its tracked template
+was still unresolved. All canonical validators require the tuple, so an older
+pre-freeze manifest without it fails closed rather than being treated as the
+same release.
+
+A release operator must first commit edition 3.1, freeze the exact source,
+create the retained uncompressed Git archive and deterministic paper PDF, and
+then bind their exact bytes from an otherwise clean checkout:
 
 ```bash
 export WEBCHESS_RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
@@ -663,7 +729,7 @@ candidate URL.
 - [Historical V3 white paper](docs/WEBCHESS_WHITE_PAPER_V3.md)
 - [Archived WebChess 2.0 white paper](docs/WEBCHESS_WHITE_PAPER_V2.md)
 - [Archived WebChess 1.3 white paper](docs/archive/WEBCHESS_WHITE_PAPER_V1.3.md)
-- [WebChess 2.0 operator guide](docs/WEBCHESS_2_0_OPERATIONS.md)
+- [WebChess 2.2 operator guide (retained filename)](docs/WEBCHESS_2_0_OPERATIONS.md)
 - [Contributing](CONTRIBUTING.md)
 - [Support](SUPPORT.md)
 - [Apache License 2.0](LICENSE)

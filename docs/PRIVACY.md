@@ -10,8 +10,9 @@ does not claim that a production hosted gameplay deployment is live.
 ## Local OpenClaw plugin
 
 The plugin launches WebChess on `127.0.0.1` and keeps the question, generated
-cast, move history, lifecycle artifacts, actions, and observations in a
-dedicated PostgreSQL 17 database on the same machine. WebChess does not create
+cast and per-facet cast applications, move history, trajectory-direction
+record, lifecycle artifacts, actions, and observations in a dedicated
+PostgreSQL 17 database on the same machine. WebChess does not create
 a hosted account, upload that history to a WebChess-operated database,
 synchronize it, or receive telemetry from the local app. Browser refreshes do
 not delete the local game; database retention and deletion remain under the
@@ -19,18 +20,35 @@ local installation owner's control.
 
 On the supported public path, model work uses the user's own OpenClaw
 installation, an OpenAI model, and the selected OpenAI account/OAuth profile.
-OpenClaw sends bounded prompts for Division, Portia, the approved board-derived
-Answer, Charlotte, and legacy-v1 answer recovery where applicable to OpenAI
-under that account's terms and data controls.
-Portia receives the concrete candidate prompt assembled from board weights,
-values, routes, captures, and survivor signals before an answer exists;
-Charlotte receives the exact generated answer afterward. OpenClaw resolves and
-applies the selected account/OAuth auth object inside the plugin runtime.
+OpenClaw sends bounded prompts for cast-directed Division, Portia, the approved
+Answer, and Charlotte to OpenAI under that account's terms and data controls.
+The supported runtime never sends a pre-v2.5 case for legacy-answer recovery or
+any other provider generation. After terminal play, WebChess
+locally derives a deterministic record from the complete canonical event stream
+(including ordered moves/passes/captures, piece identities, kinds and values,
+promotions, survivors/routes, outcome, and all field cast applications).
+Portia receives that record with the concrete candidate prompt assembled from
+board weights, values, routes, captures, and survivor signals before an answer
+exists; Answer and Charlotte receive its verified directional provenance.
+OpenClaw resolves and applies the selected account/OAuth auth object inside the
+plugin runtime.
 WebChess never logs, persists, exports, returns, or places that credential in
 the browser, loopback bridge payload, PostgreSQL records, or Next.js child
 environment, and adds no WebChess-operated service to the path. Gate, Retry
 policy, Wilbur records, and provenance are local deterministic or user-authored
 operations.
+
+The cast and trajectory record are required directional inputs in the method,
+not factual evidence. They cannot override verified facts, safety constraints,
+or consent. Current records and their digests remain inspectable in Portia,
+Gate, Answer/Charlotte provenance, **What survived scrutiny**, and case export.
+Preserved cases that predate the record are labeled
+`legacy_pre_directional_generation`; WebChess does not infer or transmit a
+replacement record for them. They are historical read-only evidence, not
+supported gameplay, import/replay, Retry, Wilbur, or other mutation inputs.
+Board-view preference is not durable case data: every current load/new
+game/Retry/restore/import/replay starts in 2D, while a 3D opt-in is limited to
+the active UI session.
 
 This candidate supports that path only on Linux x86_64. Before inference or
 search, the plugin attests the exact reviewed official Codex package/runtime and
@@ -69,6 +87,15 @@ filtering and provenance do not prove that a source or claim is true. Opting
 out leaves the non-search lifecycle available and must not select another
 hosted search service.
 
+A consented Hosted Search may remain active for at most 300 seconds. This time
+headroom does not enlarge the one-query, result, source, page, redirect, body,
+citation, injection, or consent bounds. Answer likewise has one 300-second
+aggregate window across its initial and, only when structurally necessary,
+corrective turn; each turn remains capped at 150 seconds. Expiry or interruption
+settles visibly, closes the durable claim or releases the Answer slot as
+appropriate, and prevents a duplicate request for the same durable intent
+rather than retaining stale `in_progress` state.
+
 ## Retired runtime privacy boundaries
 
 Earlier candidates described a source-checkout launcher and a hosted gameplay
@@ -105,9 +132,13 @@ WebChess stores:
 
 - the question submitted for a game;
 - the 64 generated facets and composed facet–lens field;
-- the random seed and prompt/model/rules/engine/software provenance;
+- per-facet cast applications, the random seeds, and
+  prompt/model/rules/engine/software provenance;
 - the append-only move and forced-pass event log;
 - derived captures and outcome;
+- for current terminal games, the full replay-verifiable trajectory-direction
+  record, its version/digest/explanation and downstream bindings; for older
+  games, the explicit `legacy_pre_directional_generation` status;
 - terminal survivors, the reviewed answer-prompt digest, resumable per-signal
   Portia assessments, technical-attempt counters, final Portia reviews,
   deterministic Gate decisions, semantic retry ancestry, generated answers and
@@ -141,10 +172,10 @@ artifacts, database URLs, and raw request bodies.
 
 Data is used to authenticate the user, preserve games across refreshes, replay
 and validate moves, produce the requested division, assemble and validate the
-board-derived answer prompt, generate an approved Answer, qualify that exact
-Answer through Charlotte, preserve user-authored observations, prevent abuse,
-enforce quotas, account for model cost, diagnose failures, support export and
-deletion, and protect the service.
+cast- and trajectory-directed answer prompt, generate an approved Answer,
+qualify that exact Answer and its direction through Charlotte, preserve
+user-authored observations, prevent abuse, enforce quotas, account for model
+cost, diagnose failures, support export and deletion, and protect the service.
 
 WebChess does not sell game content or use it for advertising.
 
@@ -200,8 +231,16 @@ material retention change before it takes effect.
 
 The local plugin exposes **Export case** and **Import & verify case** for a
 redaction-aware `webchess-case-bundle/1` artifact. Verification checks the
-bundle's digests, event-log replay, terminal board, and recorded provenance;
-it does not rerun provider calls or prove that the answer is true. The UI action
+bundle's digests, event-log replay, terminal board, and recorded provenance. A
+private full current-case bundle retains the exact trajectory-direction record
+and downstream bindings so verification can re-derive it from canonical events;
+a redacted profile identifies omitted detail instead of claiming it was
+recomputed. The supported browser path rejects pre-v2.5 bundles. A retained
+offline parser may label a preserved legacy bundle for historical read-only
+inspection rather than fabricating a record; that result cannot make the case
+playable, import it into PostgreSQL, authorize provider work, or enable replay
+or mutation. Verification does not rerun provider calls or prove that a
+direction, source, or answer is true. The UI action
 **Start another game on this field** creates a new trajectory and is not replay
 verification. A case bundle is not a PostgreSQL backup, an OpenAI
 subject-access export, or a substitute for retaining a tested database dump.

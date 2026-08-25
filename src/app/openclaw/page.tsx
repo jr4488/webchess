@@ -34,6 +34,7 @@ export function resolveOpenClawReleaseIdentity(
   return {
     softwareVersion: identity.release.version,
     sourceCommit: configuredReleaseCommit(environment, identity),
+    methodVersions: identity.release.methodVersions,
   }
 }
 

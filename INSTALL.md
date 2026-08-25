@@ -18,6 +18,17 @@ instrument. ANANSI is the Anansi/Division field-construction mnemonic inside
 that method. Software conformance and successful execution do not validate the
 method's efficacy or the truth of an answer.
 
+For current cases, the server supplies Division with one deterministic
+I Ching cast direction per facet. After terminal play it derives one versioned,
+replay-verifiable directional record from the complete canonical trajectory:
+ordered moves and passes, capture order, exact captured-piece identities, kinds
+and values, promotions, survivors and routes, terminal outcome, and all saved
+cast applications. The record is required in Portia, Gate, Answer, Charlotte,
+the visible **What survived scrutiny** result, and case provenance. It is a
+directional method input—not factual evidence—and cannot override verified
+facts, safety constraints, or consent. Older preserved cases are labeled
+`legacy_pre_directional_generation`; they are not silently upgraded.
+
 The command transcript below is the reviewed Linux/bash **x86_64** candidate
 path. Publication requires retained evidence that its source, exact packed
 plugin, account-OAuth inference and search, PostgreSQL, and connected-Chrome
@@ -26,6 +37,23 @@ launcher attests exact Linux x86_64 Codex runtime and native-executable bytes an
 fails closed on every other platform/architecture pair. macOS, Windows, Linux
 ARM, WSL-on-ARM, and other native paths are therefore not supported by this
 candidate, even when their shell and Docker commands appear similar.
+
+The exact current method-version tuple is part of that candidate identity:
+
+| Boundary | Required version |
+| --- | --- |
+| Lifecycle | `webchess-lifecycle-v2.5` |
+| Division prompt | `webchess-division-v4` |
+| Portia prompt | `webchess-portia-v5` |
+| Portia review contract | `webchess-portia-review-v3` |
+| Gate algorithm | `webchess-gate-v5` |
+| Answer prompt | `webchess-answer-v4` |
+| Charlotte prompt | `webchess-charlotte-v5` |
+
+[`src/lib/lifecycle/method-versions.mjs`](src/lib/lifecycle/method-versions.mjs)
+is the dependency-free source of this tuple. The resolved release identity must
+carry the same seven values; the canonical release-identity and packed-artifact
+verifiers reject missing, extra, or drifted values.
 
 Run the transcript in one dedicated Bash session. Its fail-closed shell mode
 must remain active, and a nonzero command is a stop condition—not permission to
@@ -53,7 +81,10 @@ test -x "$WEBCHESS_CHROME_BIN"
 ```
 
 JavaScript, cookies/local storage, and access to loopback HTTP must be enabled.
-WebGL 2 is optional because the accessible 2D board is the required fallback.
+WebGL 2 is optional. Initial load, a new question/game, bounded Retry,
+restore/reload, import/verification, and replay all start in accessible 2D; the
+3D view is an explicit choice for the active UI session and remains a
+fail-closed fallback to 2D.
 If a prerequisite is unavailable, stop and install it through the operating
 system's supported channel; this guide does not ask for `sudo` or silently
 replace a system component.
@@ -73,7 +104,7 @@ mkdir -- "$WEBCHESS_INSTALL_WORKSPACE"
 cd -- "$WEBCHESS_INSTALL_WORKSPACE"
 export WEBCHESS_IDENTITY_URL='https://webchess.anansiportia.com/downloads/webchess-release-identity.json'
 curl --fail --location --remove-on-error --output webchess-release-identity.json "$WEBCHESS_IDENTITY_URL"
-node -e 'const m=require("./webchess-release-identity.json"); if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved") process.exit(1)'
+node -e 'const m=require("./webchess-release-identity.json"),v={lifecycle:"webchess-lifecycle-v2.5",divisionPrompt:"webchess-division-v4",portiaPrompt:"webchess-portia-v5",portiaReview:"webchess-portia-review-v3",gateAlgorithm:"webchess-gate-v5",answerPrompt:"webchess-answer-v4",charlottePrompt:"webchess-charlotte-v5"}; if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved"||JSON.stringify(m.release?.methodVersions)!==JSON.stringify(v)) process.exit(1)'
 export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.source.commit ?? "")')"
 test "${#WEBCHESS_RELEASE_SHA}" -eq 40
 ```
@@ -463,6 +494,7 @@ webchess_assert_account_oauth_only
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install @openclaw/codex@2026.7.1-1 --pin
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins install npm-pack:../webchess-2.2.0-rc.1.tgz
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set tools.web.search.provider codex
+openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set tools.web.search.timeoutSeconds 300 --strict-json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config set plugins.allow '["codex","openai","webchess"]' --strict-json
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" config validate
 openclaw --profile "$WEBCHESS_OPENCLAW_PROFILE" plugins inspect codex --runtime --json
@@ -532,14 +564,26 @@ Open the printed `http://127.0.0.1:<port>/openclaw` address in a browser with
 JavaScript, cookies/local browser storage, and loopback access. The connected
 candidate acceptance target is Google Chrome `150.0.7871.128`; other evergreen
 browsers may work but are not represented by that pass. WebGL 2 is optional:
-the accessible 2D board remains available when WebGL is absent, the 3D renderer
-fails, or the user requests reduced motion.
+every initial, new, retried, restored, or replayed board starts in accessible
+2D. The player can opt in to 3D for that active board; unavailable WebGL, a 3D
+renderer failure, or a newly enabled reduced-motion preference returns it to
+2D. Board view is not restored from browser storage. Importing a bundle verifies
+its saved replay without replacing or mutating the active game or board data;
+the presentation intentionally resets to 2D.
 
 The startup must fail closed when the model, selected OAuth profile, provider
 credential environment gate, OpenClaw runtime, database, migrations, or
 local-mode boundary is unavailable. A provider-key variable or API-key profile
 is a startup failure. It must not silently call a WebChess-hosted or alternate
 provider, Clerk, Neon, or a repository `.env` service.
+
+Before printing the loopback URL, the launcher runs two sequential authenticated
+readiness stages: an absolute 150-second OpenAI account model stage, then an
+absolute 300-second Codex Hosted Search stage. Each budget includes OAuth/auth
+checks, attestation, its provider probe, and postchecks. A slow healthy
+authenticated readiness sequence can therefore take nearly 7.5 minutes, in
+addition to bounded local staging; no bridge listener exists until both stages
+pass, and expiry aborts and fails closed.
 
 ## 6. Choose research-search consent separately
 
@@ -582,6 +626,15 @@ transport, bounded attempt count, planned and executed query data, evidence and
 provenance, and any explicit failure/refusal status and code. The subsequent
 maximum-three-page retrieval is a separate local WebChess operation.
 
+One lifecycle Hosted Search may run for at most five minutes (`300000` ms).
+That same ceiling applies coherently across the bridge request, parser,
+research record, and stale-request watchdog, so no older 150-second layer may end
+a valid search early. This adds time headroom only: the single-query, result,
+source, citation, synthesis, page-count, page-body, redirect, injection, and
+consent limits remain unchanged. Timeout persists a visible retryable failure
+and closes the durable claim; it must not leave stale `in_progress` work or issue a
+duplicate provider request.
+
 A bounded Retry child inherits the saved consent choice and can make its own
 single lifecycle search plus bounded direct-page requests; a fresh-field Retry
 also repeats Division. Those are new account/network transmissions and are
@@ -594,12 +647,14 @@ Follow the visible interface through the whole case:
 1. Confirm it reports `webchess@2.2.0-rc.1` and the same full source SHA as the
    release identity.
 2. Enter a non-secret question and make the separate search-consent choice.
-3. Choose the 2D or 3D board, start Division, and play manually, request guided
-   moves, or use autoplay until the canonical initial position reaches a real
-   terminal state.
-4. Inspect Portia for every surviving signal, the deterministic Gate decision,
-   Retry ancestry if used, the board-derived Answer, and Charlotte's
-   qualifications.
+3. Confirm the default 2D board, or explicitly opt in to 3D for the current
+   board, start Division, and play manually, request guided moves, or use
+   autoplay until the canonical initial position reaches a real terminal state.
+4. Inspect the versioned trajectory-direction record and digest, then verify
+   that **What survived scrutiny**, every usable Portia interpretation or
+   amendment, the deterministic Gate, the approved Answer, and Charlotte retain
+   that binding. Inspect Retry ancestry if used. A legacy case must instead show
+   `legacy_pre_directional_generation` and must not claim current semantics.
 5. Choose one reversible Wilbur action, update it, and record an observation.
 6. Reload the page and verify that PostgreSQL restores the same case and
    lifecycle.
@@ -660,6 +715,16 @@ and one fresh field can further amplify model calls, context, runtime, and
 allowance use. Each Retry child inherits consent and can repeat its own bounded
 search/page transmission; a fresh field also repeats Division. No duration or
 unmetered-use promise is made.
+
+One logical Answer has a five-minute (`300000` ms) end-to-end ceiling. Its
+initial turn and at most one contract-corrective turn each remain bounded to
+150 seconds within that aggregate. The HTTP route, watchdog, per-turn lease
+renewal, and settlement grace are coordinated so no shorter upstream cap wins.
+If the five-minute window expires or the process/response is interrupted,
+WebChess persists a visible retryable Answer failure and releases the slot.
+When the provider outcome cannot be known, the original model-request row is
+marked `indeterminate`, preventing a duplicate call for that intent rather than
+leaving Answer indefinitely `in_progress`.
 
 ## 8. Interpret verification honestly
 

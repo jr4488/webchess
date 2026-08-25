@@ -87,11 +87,12 @@ drift, or a different provider client fail closed rather than falling back.
 Only this OpenClaw composition provides automatic external research. It is off
 without case-scoped, versioned consent. Its deterministic pre-Portia policy
 invokes local Codex Search at most once, accepts at most five result links and
-five stored citation candidates, and uses a 150-second WebChess envelope. The
-local broker may then attempt at most three consented public-HTTPS pages in
-total. It rejects credentials, non-global DNS results and connected addresses,
-unsafe redirects, unsupported content, oversized bodies, and page text with
-guarded injection signals; accepted excerpts and every failure remain bounded
+five stored citation candidates, and uses a coherent 300-second WebChess
+envelope. The local broker may then attempt at most three consented
+public-HTTPS pages in total. It rejects credentials, non-global DNS results and
+connected addresses, unsafe redirects, unsupported content, oversized bodies,
+and page text with guarded injection signals; accepted excerpts and every
+failure remain bounded
 and separately attributed. Search synthesis, titles, URLs, page text, and
 failure labels remain untrusted evidence candidates and cannot authorize a
 mutation, provider selection, or Gate pass.
@@ -154,8 +155,8 @@ migration bytes and again before opening the owner connection. Direct
 invocation of the underlying migration script is forbidden.
 
 Hosted and local migration runners require the existing ledger to be an exact,
-checksum-matching prefix of the 15 canonical migrations through
-`0015_direct_page_research_evidence`. Migration `0012` is upgrade-safe without a
+checksum-matching prefix of the 17 canonical migrations through
+`0017_trajectory_directional_record`. Migration `0012` is upgrade-safe without a
 duplicate-data audit: pre-`0012` actions retain a null binding version,
 including duplicate suggestion indexes, while a trigger stamps current inserts
 before the partial unique constraint and makes their identity, canonical
@@ -169,8 +170,10 @@ Migration `0014` adds owner-bound, explicitly selected Web-memory links and
 follow-up scheduling without silently reusing an observation. Migration `0015`
 records the versioned research-consent decision and bounded direct-page facts
 or failures; historical rows are conservatively backfilled as not consented.
-These migrations are append-only and do not reinterpret missing consent as
-permission.
+Migration `0016` raises only the guarded Search ceiling to 300 seconds, and
+`0017` adds all-or-none versioned trajectory-direction records while preserving
+legacy null rows. These migrations are append-only and do not reinterpret
+missing consent as permission or legacy data as current directional input.
 
 `db/migrations/0001_durable_webchess.sql` becomes immutable at its first
 durable application. Never edit, rename, reorder, or delete an applied
@@ -202,7 +205,7 @@ The Vercel build uses only the least-privileged runtime `DATABASE_URL` for a
 repeatable-read, read-only check of the exact migration ledger; 20 application
 tables plus the ledger—21 total; all 12 contract indexes; exactly two
 origin-enabled, unfiltered `BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur
-trigger/function pairs; all 35 reviewed constraints; all 11 reviewed defaults;
+trigger/function pairs; all 39 reviewed constraints; all 11 reviewed defaults;
 and effective schema/table privileges obtained directly, through role
 membership, or through `PUBLIC`. Missing or unexpected tables or columns, an
 invalid index, trigger, constraint, or default, under-privilege, or over-

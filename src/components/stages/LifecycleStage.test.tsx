@@ -22,6 +22,12 @@ import type {
 import { PORTIA_ATTACK_TYPES } from '../../lib/lifecycle/contracts'
 import { CURRENT_LIFECYCLE_VERSIONS } from '../../lib/lifecycle/versions'
 import {
+  DIRECTIONAL_EPISTEMIC_BOUNDARY,
+  DIRECTIONAL_RECORD_VERSION,
+  type DirectionalContributions,
+  type TrajectoryDirectionalRecord,
+} from '../../lib/lifecycle/trajectory-direction'
+import {
   RESEARCH_CONSENT_VERSION,
   type ResearchRecord,
 } from '../../lib/research'
@@ -301,7 +307,7 @@ function makePortableGame(): DurableGame {
 
 function makePortablePortiaReview(): PortiaReview {
   return {
-    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    contractVersion: 'webchess-portia-review-v2',
     reviewedAnswerPromptDigest: PORTABLE_PROMPT_DIGEST,
     promptDecision: 'permit',
     promptDecisionRationale:
@@ -338,6 +344,147 @@ function makePortablePortiaReview(): PortiaReview {
       fieldRepairReasons: [],
     },
   }
+}
+
+const DIRECTIONAL_RECORD_DIGEST = '9'.repeat(64)
+const PRIMARY_DIRECTION_KEY = 'direction-adapt-refine'
+const SECONDARY_DIRECTION_KEY = 'direction-resource-examine'
+
+function directionalContributions(
+  overrides: Partial<DirectionalContributions>,
+): DirectionalContributions {
+  return {
+    departureVisits: 0,
+    departureMaterial: 0,
+    arrivalVisits: 0,
+    arrivalMaterial: 0,
+    chronology: 0,
+    captureCount: 0,
+    capturedMaterial: 0,
+    attackerMaterial: 0,
+    captureResonance: 0,
+    captureOrder: 0,
+    forcedPassConstraints: 0,
+    forcedPassMaterial: 0,
+    survivorCount: 0,
+    survivorMaterial: 0,
+    survivorMoveCount: 0,
+    winningSurvivorMaterial: 0,
+    terminalOutcomeWeight: 0,
+    terminalCapture: 0,
+    ...overrides,
+  }
+}
+
+function makeDirectionalRecord(): TrajectoryDirectionalRecord {
+  return {
+    version: DIRECTIONAL_RECORD_VERSION,
+    digest: DIRECTIONAL_RECORD_DIGEST,
+    survivingDirectionKeys: [PRIMARY_DIRECTION_KEY, SECONDARY_DIRECTION_KEY],
+    directions: [
+      {
+        rank: 1,
+        lens: {
+          key: PRIMARY_DIRECTION_KEY,
+          coordinate: { ring: 1, sector: 1 },
+          partId: 10,
+          hexagram: 49,
+          hexagramName: 'Revolution',
+          theme: 'Change the frame when accumulated evidence requires it.',
+          dimension: 'Adapt',
+          movement: 'Refine',
+          title: 'Reversible change',
+          focus: 'Test one bounded shift.',
+          prompt: 'What can change without hiding the cost?',
+          keyword: 'change',
+          directionalCue: 'Transform only what the trajectory puts under pressure.',
+          castApplication:
+            'Use the cast direction to make the surviving trial reversible and measurable.',
+        },
+        score: 1_327,
+        contributions: directionalContributions({
+          arrivalVisits: 3,
+          departureVisits: 2,
+          captureCount: 1,
+          capturedMaterial: 5,
+          survivorCount: 1,
+          survivorMaterial: 9,
+          terminalOutcomeWeight: 12,
+        }),
+        supportingPlies: [1, 7, 19],
+        captureIds: ['capture-7'],
+        survivorPieceIds: ['white-queen'],
+        explanation:
+          'Adapt / Refine scored 1327 because ordered arrivals, a high-value capture, the final queen, and the terminal result reinforced this cast-qualified lens.',
+      },
+      {
+        rank: 2,
+        lens: {
+          key: SECONDARY_DIRECTION_KEY,
+          coordinate: { ring: 3, sector: 4 },
+          partId: 29,
+          hexagram: 20,
+          hexagramName: 'Contemplation',
+          theme: 'Observe the system before committing further resources.',
+          dimension: 'Resources',
+          movement: 'Examine',
+          title: 'Observe first',
+          focus: 'Keep the measurement boundary visible.',
+          prompt: 'What must be observed before commitment?',
+          keyword: 'observe',
+          directionalCue: 'Let the surviving material set the observation horizon.',
+          castApplication:
+            'Require direct observation before treating the surviving direction as useful.',
+        },
+        score: 884,
+        contributions: directionalContributions({
+          arrivalVisits: 1,
+          forcedPassConstraints: 2,
+          survivorCount: 1,
+          survivorMaterial: 5,
+          terminalOutcomeWeight: 6,
+        }),
+        supportingPlies: [32, 33],
+        captureIds: [],
+        survivorPieceIds: ['black-rook'],
+        explanation:
+          'Resources / Examine scored 884 because forced-pass constraints and surviving material reinforced an observation-first direction.',
+      },
+    ],
+    explanation: [
+      'All 95 canonical plies, ordered captures, surviving pieces, and the terminal outcome contributed to this record.',
+      'The two fixture directions shown here continue into the saved Portia review.',
+      DIRECTIONAL_EPISTEMIC_BOUNDARY.statement,
+    ],
+    epistemicBoundary: DIRECTIONAL_EPISTEMIC_BOUNDARY,
+  } as unknown as TrajectoryDirectionalRecord
+}
+
+function makeDirectionalLifecycle(): LifecycleAggregate {
+  const directionalRecord = makeDirectionalRecord()
+  const portia = makePortablePortiaReview()
+  return {
+    ...aggregate('portia_complete', 'answer'),
+    trajectoryDirectionalRecord: directionalRecord,
+    trajectoryDirectionalRecordStatus: 'bound',
+    portia: {
+      ...portia,
+      contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      directionalRecordVersion: directionalRecord.version,
+      directionalRecordDigest: directionalRecord.digest,
+      directionalSummary:
+        'Portia retained the replay-derived change and observation directions under factual limits.',
+      assessments: portia.assessments.map((assessment) => ({
+        ...assessment,
+        directionalRecordDigest: directionalRecord.digest,
+        directionalSignalKeys: [PRIMARY_DIRECTION_KEY, SECONDARY_DIRECTION_KEY],
+        directionalInterpretation:
+          'The full trajectory directs this survivor toward a small reversible test with an observation horizon.',
+        directionalAmendment:
+          'State the reversal threshold and the observation required before wider commitment.',
+      })),
+    },
+  } as LifecycleAggregate
 }
 
 function makePortableResearch(): ResearchRecord {
@@ -404,6 +551,8 @@ function makePortableLifecycle(game: DurableGame): LifecycleAggregate {
   return {
     ...lifecycle,
     terminalFingerprint: 'f'.repeat(64),
+    trajectoryDirectionalRecord: null,
+    trajectoryDirectionalRecordStatus: 'legacy_pre_directional_generation',
     answerPromptDigest: PORTABLE_PROMPT_DIGEST,
     answerUserPrompt: PORTABLE_EXACT_INPUT,
     answerUserPromptSha256: PORTABLE_PROMPT_SHA256,
@@ -439,7 +588,7 @@ function makePortableLifecycle(game: DurableGame): LifecycleAggregate {
     },
     portia,
     gate: {
-      algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      algorithmVersion: 'webchess-gate-v4',
       passed: true,
       usableCandidateCount: 1,
       preservedCount: 1,
@@ -465,14 +614,15 @@ function makePortableLifecycle(game: DurableGame): LifecycleAggregate {
     research: [makePortableResearch()],
     versions: {
       software: CURRENT_LIFECYCLE_VERSIONS.software,
-      lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
-      portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
-      portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
-      gateAlgorithm: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      lifecycle: 'webchess-lifecycle-v2.4',
+      portiaPrompt: 'webchess-portia-v4',
+      portiaContract: 'webchess-portia-review-v2',
+      gateAlgorithm: 'webchess-gate-v4',
       retryPolicy: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
       charlottePrompt: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
       charlotteContract: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
       wilburRecord: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      trajectoryDirectionalRecord: null,
       rules: CURRENT_GAME_VERSIONS.rules,
       engine: CURRENT_GAME_VERSIONS.engine,
       cast: CURRENT_GAME_VERSIONS.cast,
@@ -491,6 +641,7 @@ function renderStage(
     replayDisabled?: boolean
     replayError?: string
     replayPending?: boolean
+    readOnly?: boolean
     localCaseVerificationEnabled?: boolean
     boardAnswer?: GeneratedAnswer | null
     answerFailurePrompt?: string
@@ -542,6 +693,7 @@ function renderStage(
       boardAnswer={options.boardAnswer ?? null}
       answerFailurePrompt={options.answerFailurePrompt ?? ''}
       busy={options.busy ?? false}
+      readOnly={options.readOnly ?? false}
       error=""
       actionPendingIndex={null}
       wilburPending={false}
@@ -585,6 +737,108 @@ describe('LifecycleStage terminal Gate experience', () => {
       .toHaveTextContent('—')
     expect(screen.queryByLabelText('WebChess 2.2 lifecycle progress'))
       .not.toBeInTheDocument()
+  })
+
+  it('does not present an active loading graphic for a null read-only lifecycle', () => {
+    renderStage(null, {
+      busy: false,
+      readOnly: true,
+      gameStatus: 'answering',
+    })
+
+    expect(screen.queryByText('Finding the lifecycle thread'))
+      .not.toBeInTheDocument()
+    expect(screen.queryByText('Loading')).not.toBeInTheDocument()
+  })
+
+  it('shows the bound full-trajectory record and its directional Portia amendments', () => {
+    renderStage(makeDirectionalLifecycle())
+
+    const provenance = screen.getByRole('region', {
+      name: 'Full-trajectory directional provenance',
+    })
+    expect(within(provenance).getByText(DIRECTIONAL_RECORD_VERSION))
+      .toBeInTheDocument()
+    expect(within(provenance).getByText(DIRECTIONAL_RECORD_DIGEST))
+      .toBeInTheDocument()
+    expect(within(provenance).getByText(/All 95 canonical plies/i))
+      .toBeInTheDocument()
+    expect(within(provenance).getByText(/retained the replay-derived change/i))
+      .toBeInTheDocument()
+    expect(within(provenance).getByRole('heading', {
+      name: 'Directions carried into scrutiny',
+    })).toBeInTheDocument()
+    expect(within(provenance).getByRole('heading', {
+      name: 'Adapt / Refine',
+    })).toBeInTheDocument()
+    expect(within(provenance).getByText('Score 1327')).toBeInTheDocument()
+    expect(within(provenance).getByText(/ordered arrivals, a high-value capture/i))
+      .toBeInTheDocument()
+    expect(within(provenance).getByRole('heading', {
+      name: 'Resources / Examine',
+    })).toBeInTheDocument()
+    expect(within(provenance).getByText('Score 884')).toBeInTheDocument()
+
+    const boundary = within(provenance).getByLabelText(
+      'Directional evidence boundary',
+    )
+    expect(boundary).toHaveTextContent(/required directional input/i)
+    expect(boundary).toHaveTextContent(/not external factual evidence/i)
+    expect(boundary).toHaveTextContent(
+      /cannot override verified facts, consent, safety constraints/i,
+    )
+
+    const contributionDetails = within(provenance).getAllByText(
+      'Inspect calculated contribution ledger',
+    )[0]!.closest('details')
+    expect(contributionDetails).not.toBeNull()
+    fireEvent.click(within(contributionDetails as HTMLElement).getByText(
+      'Inspect calculated contribution ledger',
+    ))
+    expect(contributionDetails).toHaveAttribute('open')
+    expect(within(contributionDetails as HTMLElement).getByText('Captured material'))
+      .toBeInTheDocument()
+    expect(within(contributionDetails as HTMLElement).getByText('12'))
+      .toBeInTheDocument()
+
+    const assessmentDetails = screen.getByText(
+      'Inspect survivor-by-survivor findings',
+    ).closest('details')
+    expect(assessmentDetails).not.toBeNull()
+    fireEvent.click(within(assessmentDetails as HTMLElement).getByText(
+      'Inspect survivor-by-survivor findings',
+    ))
+    const directionalAssessment = screen.getByRole('region', {
+      name: 'Directional scrutiny for candidate-white-queen',
+    })
+    expect(within(directionalAssessment).getByText(PRIMARY_DIRECTION_KEY))
+      .toBeInTheDocument()
+    expect(within(directionalAssessment).getByText(SECONDARY_DIRECTION_KEY))
+      .toBeInTheDocument()
+    expect(within(directionalAssessment).getByText(/directs this survivor toward/i))
+      .toBeInTheDocument()
+    expect(within(directionalAssessment).getByText(/State the reversal threshold/i))
+      .toBeInTheDocument()
+  })
+
+  it('labels a preserved pre-directional run without inventing provenance', () => {
+    renderStage({
+      ...aggregate('portia_complete', 'answer'),
+      trajectoryDirectionalRecord: null,
+      trajectoryDirectionalRecordStatus: 'legacy_pre_directional_generation',
+      portia: makePortablePortiaReview(),
+    } as LifecycleAggregate)
+
+    const legacyNotice = screen.getByRole('note', {
+      name: 'Legacy directional provenance status',
+    })
+    expect(legacyNotice).toHaveTextContent('legacy_pre_directional_generation')
+    expect(legacyNotice).toHaveTextContent(/predates the versioned full-trajectory/i)
+    expect(legacyNotice).toHaveTextContent(/does not reconstruct or fabricate/i)
+    expect(screen.queryByRole('region', {
+      name: 'Full-trajectory directional provenance',
+    })).not.toBeInTheDocument()
+    expect(screen.queryByText(PRIMARY_DIRECTION_KEY)).not.toBeInTheDocument()
   })
 
   it.each([
@@ -650,6 +904,21 @@ describe('LifecycleStage terminal Gate experience', () => {
     expect(screen.getByRole('button', {
       name: /creating same-field replay/i,
     })).toBeDisabled()
+  })
+
+  it('keeps historical replay visible but read-only', () => {
+    const onReplay = vi.fn()
+    renderStage(aggregate('charlotte_complete', 'answer'), {
+      onReplay,
+      readOnly: true,
+    })
+
+    const replay = screen.getByRole('button', {
+      name: /start another game on this field/i,
+    })
+    expect(replay).toBeDisabled()
+    fireEvent.click(replay)
+    expect(onReplay).not.toHaveBeenCalled()
   })
 
   it('exports the selected case profile without calling a provider', async () => {
@@ -766,6 +1035,28 @@ describe('LifecycleStage terminal Gate experience', () => {
     expect(screen.queryByTestId('process-graphic')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Try the answer again' }))
     expect(onRetryAnswer).toHaveBeenCalledOnce()
+  })
+
+  it('disables Answer retry for a historical lifecycle', () => {
+    const lifecycle = aggregate('gate_passed', 'answer')
+    const { onRetryAnswer } = renderStage(
+      {
+        ...lifecycle,
+        gate: {
+          ...lifecycle.gate!,
+          passed: true,
+          missingRequirements: [],
+          recommendedNextTransition: 'answer',
+          explanation: 'The historical Gate permitted its saved prompt.',
+        },
+      },
+      { gameStatus: 'answer_failed', readOnly: true },
+    )
+
+    const retry = screen.getByRole('button', { name: 'Try the answer again' })
+    expect(retry).toBeDisabled()
+    fireEvent.click(retry)
+    expect(onRetryAnswer).not.toHaveBeenCalled()
   })
 
   it('discloses the exact safe corrective prompt on terminal Answer contract failure', () => {

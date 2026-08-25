@@ -6,7 +6,7 @@ import { loadTerms } from '@/content/documents/terms'
 export const metadata: Metadata = {
   title: 'Terms of use',
   description:
-    'Terms for the hosted experimental WebChess reflection and problem-framing service.',
+    'Terms for the local WebChess research candidate and its account-authenticated OpenClaw path.',
 }
 
 export default async function TermsPage() {

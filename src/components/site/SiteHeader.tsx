@@ -28,7 +28,12 @@ export function SiteHeader() {
         </nav>
 
         <div className="wc-nav-actions">
-          <Link className="wc-nav-signin" href="/sign-in">Sign in</Link>
+          <Link
+            className="wc-nav-signin"
+            href="/install#2-install-and-authenticate-the-reviewed-openclaw-version"
+          >
+            OpenClaw auth
+          </Link>
           <Link className="wc-nav-play" href="/install">Run locally</Link>
         </div>
       </div>

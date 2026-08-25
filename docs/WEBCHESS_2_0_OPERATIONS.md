@@ -21,6 +21,12 @@ The state machine records the deterministic Gate and semantic Retry policy as
 internal branches between Portia and Answer. They remain inspectable in the
 genealogy but are not presented as additional player-facing stages.
 
+The accessible 2D board is the universal presentation default: initial load,
+new question/game, bounded Retry, restore/reload, replay, and import/verify do
+not reuse a prior 3D choice or stale browser storage. The player may opt in to
+the side-elevated 3D board for the active UI session and switch back. WebGL or
+renderer failure and reduced motion fail safely to 2D.
+
 The browser may request an allowed operation, but it cannot provide survivor
 sets, the board-derived answer prompt or digest, Portia IDs, assessments or
 dispositions, technical-attempt counters, Gate decisions, retry counters,
@@ -30,16 +36,32 @@ saved game revision; lifecycle and Wilbur mutations use compare-and-swap
 revisions inside the repository.
 
 Division, Portia, Answer, and Charlotte are separately authorized and durably
-accounted model stages. Portia receives the exact concrete prompt assembled
-from replay-derived board weights, values, routes, captures, and survivors
-before any answer is generated. The Gate and Retry policy are deterministic and
-make no provider call. Wilbur actions and observations are human-owned records
-and make no provider call.
+accounted model stages. Before Division, the server assigns every facet ID a
+fixed I Ching direction; the returned facet must explain its material
+`castApplication`. At terminal play, canonical replay derives one versioned
+trajectory-direction record from the full ordered move/pass/capture history,
+exact piece identities, kinds and values, promotions, survivors and routes,
+terminal outcome, and all 64 cast applications. Portia receives that exact
+record with the concrete prompt assembled from replay-derived board weights,
+values, routes, captures, and survivors before any answer is generated. The
+Gate and Retry policy are deterministic and make no provider call. Wilbur
+actions and observations are human-owned records and make no provider call.
+
+The directional record is required method input, not optional metaphor and not
+external factual evidence. Every current Portia assessment and aggregate,
+Gate input, Answer/Charlotte prompt, visible **What survived scrutiny** result,
+and full case export binds its version/digest and inspectable explanation. It
+cannot override verified facts, research provenance, safety, or consent. A run
+created before this contract may remain in preserved rows with status
+`legacy_pre_directional_generation`, but it is historical inspection evidence,
+not a supported gameplay, provider-generation, import/replay, Retry, Wilbur, or
+other mutation source. Operators must not backfill, relabel, or resume it; start
+a new lifecycle-v2.5 game.
 
 Automatic external research is available only in the OpenClaw runtime. Its
 deterministic broker runs immediately before Portia, invokes local Codex Search
 at most once, retains at most five citation candidates and bounded synthesis,
-and uses a 150-second WebChess envelope. With separate case-scoped consent, the
+and uses a 300-second WebChess envelope. With separate case-scoped consent, the
 local broker may fetch at most three eligible public-HTTPS pages through bounded
 redirect, address, media, size, provenance, and injection filters. Accepted
 excerpts and every failure are retained as attributed, untrusted evidence.
@@ -70,6 +92,23 @@ existing durable quota, rate, lease, idempotency, deletion-barrier, and
 settlement behavior. An ambiguous provider completion is reconciled through
 the durable ledger before another bounded Portia attempt can begin.
 
+One logical Answer, including its initial turn and the one correction allowed
+only for contract-invalid output, has a coherent 300-second provider window.
+Each turn remains capped at 150 seconds inside that aggregate; the lease is
+renewed before each actual turn, the HTTP layer permits the full aggregate, and
+30 seconds is reserved for durable cancellation/settlement rather than more
+provider work. A hang, interruption, lost response, or timeout must settle or
+reconcile to a visible retryable Answer failure and release the slot. An unknown
+provider outcome marks the original request `indeterminate`, preventing a
+duplicate call for that intent instead of leaving `in_progress` indefinitely.
+
+One consented Hosted Search likewise has a coherent 300-second request window
+through the bridge, parser, requester, durable row, and stale-request watchdog.
+The time increase changes none of the one-query, result, source, direct-page,
+redirect, address, body, citation, injection, or consent bounds. Timeout is a
+visible retryable failure that closes its durable claim and cannot duplicate
+the same provider request.
+
 The operator should budget account allowance, context, runtime, and retries for
 the worst bounded path, not only the happy path. OpenAI account controls and
 allowance notices remain external to WebChess; a provider key or alternate
@@ -77,10 +116,10 @@ billing route is not an accepted backstop.
 
 ## Migration and runtime roles
 
-The supported OpenClaw launcher owns local bootstrap: it applies all 15
+The supported OpenClaw launcher owns local bootstrap: it applies all 17
 canonical migrations, from
 `db/migrations/0001_durable_webchess.sql` through
-`db/migrations/0015_direct_page_research_evidence.sql`, to the dedicated
+`db/migrations/0017_trajectory_directional_record.sql`, to the dedicated
 loopback database and rejects an existing ledger that is not an exact checksum-
 matching prefix. A local player must not run the hosted deployment migration
 owner or supply its credentials. `npm run db:migrate` is retained solely for the
@@ -105,6 +144,16 @@ Migration `0014` adds owner-bound, explicitly selected Web-memory links and
 follow-up scheduling; no observation is silently reused. Migration `0015` adds
 bounded direct-page research evidence and request/source provenance. Both are
 append-only schema evolution and preserve earlier cases as historical records.
+Migration `0016` expands only the research-request timeout constraint to
+300 seconds. Migration `0017` adds all-or-none, version-, digest-, and
+shape-checked trajectory-direction fields to lifecycle runs while leaving
+older rows null and explicitly legacy-labeled.
+
+The append-only migration history preserves old rows and schema facts so an
+archive can be audited; it is not a compatibility promise. Pre-v2.5 rows are
+outside the supported runtime lifecycle and cannot authorize a model call,
+game continuation, replay, import, or mutation. Retained migration assertions
+and legacy parsers are read-only historical inspection aids.
 
 The following least-privilege role details apply to the retained hosted design;
 they are not extra setup steps for the supported local player. Its runtime
@@ -112,7 +161,8 @@ schema check expects 20 application tables plus
 `webchess_schema_migrations`—21 total—12 contract indexes, and the
 two exact, origin-enabled, unfiltered `BEFORE INSERT OR UPDATE FOR EACH ROW`
 Wilbur trigger/function pairs, 18 critical Wilbur constraints, and all five
-`0013` defaults. Unexpected noninternal triggers, trigger arguments/filters,
+`0013` defaults, plus the four trajectory-record constraints. Unexpected
+noninternal triggers, trigger arguments/filters,
 altered constraint shape, or disabled foreign-key enforcement fail the check.
 Lifecycle runs need table-level `SELECT`, `INSERT`,
 and `UPDATE`. The mutation ledger needs `SELECT` and `INSERT` plus column-scoped
@@ -166,8 +216,13 @@ provider-key path or bypass the durable ledger.
   from that terminal state.
 - A persisted Portia review can advance through the deterministic Gate after a
   restart without another model call.
+- Current terminal runs must load a replay-verified trajectory-direction
+  record. Portia/Gate recovery rejects a missing or mismatched digest. A
+  pre-v2.5 row may be labeled explicitly for historical inspection, but recovery
+  does not resume it or fabricate a record.
 - A persisted approved Answer is bound to the lifecycle run, reviewed prompt
-  digest, and Gate input digest before Charlotte can use it.
+  digest, Gate input digest, and trajectory-direction digest before Charlotte
+  can use it.
 - A persisted Charlotte result is returned idempotently after later Wilbur
   states begin.
 - A lost compare-and-swap race returns conflict; the client reloads the saved
@@ -192,7 +247,8 @@ requires the PostgreSQL volume and the database/HMAC/session secrets.
 Useful versioned metrics include operation status and duration, completed
 Portia signal count, failed technical attempt count, `portia_unavailable`
 outcomes, Portia disposition counts, Gate result and missing requirements,
-semantic retry mode and count, Answer provenance status, Charlotte support
+trajectory-direction status/version/digest and binding failures, semantic
+retry mode and count, Answer provenance status, Charlotte support
 count, Wilbur action status, and observation count. Do not log prompts, raw
 model output, user observations, chain-of-thought, secrets, database URLs,
 Clerk artifacts, or raw client addresses.
@@ -244,11 +300,14 @@ launcher at hosted or production data.
 
 ## Rollback boundary
 
-The 15-migration history is append-only. Application rollback moves code back
+The 17-migration history is append-only. Application rollback moves code back
 but never reverses migration history or drops lifecycle data. Migration `0012`
 preserves legacy null-bound rows while protecting newly stamped bindings, and
 `0013` preserves committed or denied mutation history. Migrations `0014` and
-`0015` preserve Web-memory selection and research provenance. Legacy v1 games
-remain readable through their stored answer path. New v2
-games fail closed if their lifecycle authority is unavailable; the client does
-not fabricate a Portia review, Gate pass, or legacy answer.
+`0015` preserve Web-memory selection and research provenance; `0016` preserves
+the five-minute Search ceiling and `0017` preserves the trajectory-direction
+record. Legacy v1 and pre-v2.5 rows remain only as historical database evidence;
+they are not supported gameplay, generation, replay/import, or mutation paths.
+Current lifecycle-v2.5 games fail closed if their lifecycle authority is
+unavailable; the client does not fabricate a Portia review, Gate pass,
+directional record, or legacy answer.

@@ -20,8 +20,8 @@ Before posting, search existing Discussions and include:
 - minimal, redacted logs or screenshots.
 
 Do not post your question from the game, generated facets, answers, email
-address, cookies, Clerk tokens, database URL, OpenAI key, environment file, or
-other personal or confidential information.
+address, cookies, OAuth artifacts, database URL, provider credentials,
+environment file, or other personal or confidential information.
 
 ## Reproducible bugs
 
@@ -38,12 +38,13 @@ or feature requests.
 
 ## Account and privacy actions
 
-In the intended hosted service, `/account` is the self-service path for
-exporting WebChess data, deleting WebChess data, and deleting the Clerk account.
-Authentication and passkey management are handled through Clerk's controls.
-The signed local source runtime exposes export and sign-out but intentionally
-withholds Clerk profile and deletion controls. The OpenClaw runtime has no
-account API; its local database owner controls backup, export, and deletion.
+The sole supported runnable candidate is the packed local OpenClaw path. It has
+no WebChess account API: the local database owner controls PostgreSQL backup,
+lifecycle case export, and deletion, while OpenClaw manages the separate OpenAI
+account/OAuth profile. The former hosted `/account` path (including Clerk
+profile and deletion controls) and the signed local source runtime are retained
+only as retired audit/reference implementations; they are not supported
+authentication, storage, or privacy-control alternatives.
 
 Account export format `webchess-account-export/4` is generated synchronously as
 one JSON file and is limited to 3,000,000 bytes by default. It includes the
@@ -57,7 +58,8 @@ than partially returned. Wilbur's admission envelope preserves existing history
 and does not guarantee whole-account exportability because other account content
 also accumulates.
 
-If an export is refused or another self-service account control fails, use
+If a supported local export fails, or a retained account-export contract is
+being studied and refuses a request, use
 [GitHub Discussions](https://github.com/jr4488/webchess/discussions) and
 include only non-sensitive technical details. Do not identify the account or
 post private data. Community support can help diagnose the general behavior,

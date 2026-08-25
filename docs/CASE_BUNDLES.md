@@ -10,8 +10,9 @@ export is a point-in-time snapshot, so
 its recorded lifecycle state may be in progress, failed, or complete:
 
 - `private-full-v1` retains the stored question, mapped field, model result
-  payloads, Portia/Gate/Charlotte records, and Wilbur text. Treat this as
-  private data.
+  payloads, Portia/Gate/Charlotte records, Wilbur text, and the exact
+  `webchess-directional-record-v1` generated from the canonical game
+  trajectory. Treat this as private data.
 - `research-redacted-v1` retains versions, digests, seeds, provider/model
   metadata, lifecycle links, per-move request digests, and the complete move
   log while omitting case narrative and move idempotency keys. Review it before
@@ -31,11 +32,28 @@ only source host/trust/discovery metadata; the omission ledger names what was
 removed. A successful provider label is provenance, not proof that a source or
 claim is correct.
 
+For a current terminal lifecycle, the exporter requires one bound trajectory
+directional record. It independently derives that record from the stored
+64-part Division field, all canonical move/pass events, ordered captures and
+piece values, survivors, and terminal outcome before it emits the bundle.
+`private-full-v1` includes the exact record, its version and digest, the field
+parts digest, the event-stream digest, and the epistemic boundary. The two
+redacted profiles retain only the version, digest, and boundary, and explicitly
+mark the exact record as profile-omitted; they cannot recompute it because the
+mapped Division parts are also omitted. The record is a required directional
+input to Arachne scrutiny, not factual web evidence, and it cannot override
+verified facts, consent, safety constraints, or Gate.
+
 Earlier `/1` bundles used the same format identifier before the consent tuple
-and fetch-failure ledger were added. They remain importable for compatibility,
-but verification emits a prominent legacy-provenance warning and lists those
-missing fields under **Not verified**. Do not interpret a successfully imported
-legacy bundle as containing current consent or direct-fetch provenance.
+and fetch-failure ledger were added. Lifecycle-v2.4 bundles also predate
+trajectory-directional generation and carry
+`legacy_pre_directional_generation`. Their schemas and parser branches remain
+only so preserved archives can be inspected offline as historical evidence.
+They are not supported inputs to browser import/verification, gameplay,
+same-field replay, provider generation, Retry, Wilbur, or any other database
+mutation. The historical CLI inspection reports absent consent, direct-fetch,
+and trajectory-direction provenance under **Not verified**; it never invents
+those fields. A current experiment must start as a new lifecycle-v2.5 case.
 
 Every profile is assembled with explicit field allowlists. The bundle records
 the selected policy and a field-level omission ledger. For each redacted
@@ -62,12 +80,15 @@ non-sensitive in a particular case.
 
 ## Offline, read-only verification
 
-The local OpenClaw interface also offers **Import & verify case bundle** for files up
-to the default 3,000,000-byte local export ceiling. The browser sends the file
-only to the authenticated loopback WebChess process, which verifies it in
-memory without persistence or provider calls. That convenience check does not
-receive checkout, runtime-payload, or migration context. It verifies the
-bundle's canonical section digests and integrity root for internal
+For current lifecycle-v2.5 files, the local OpenClaw interface offers **Import &
+verify case bundle** up to the default 3,000,000-byte local export ceiling. The
+browser sends the file only to the authenticated loopback WebChess process,
+which verifies it in memory without persistence or provider calls. The
+supported browser path rejects pre-v2.5 cases; use the CLI only when historical
+read-only inspection of a preserved legacy artifact is necessary. Neither path
+imports a case into PostgreSQL or makes it playable. The browser convenience
+check does not receive checkout, runtime-payload, or migration context. It
+verifies the bundle's canonical section digests and integrity root for internal
 self-consistency, not equality with the installed bytes. Because those internal
 digests are recomputable, that result is neither authorship proof nor a local
 artifact match. Use the CLI below for exact local source, runtime-payload, and
@@ -96,6 +117,15 @@ checks:
   bundles recompute the canonical move-request digests retained by those
   profiles;
 - the terminal outcome summary, when present;
+- for current terminal `private-full-v1` bundles, the exact
+  `webchess-directional-record-v1` rederived from the exported Division parts
+  and canonical events, including its record, field-parts, and event-stream
+  digests, versions, and seeds;
+- for redacted current bundles, the directional-record version, digest,
+  epistemic boundary, and explicit non-recomputable omission marker; the
+  retained historical parser may identify a lifecycle-v2.4 bundle as
+  `legacy_pre_directional_generation`, but that result is inspection-only and
+  does not make the case runtime-compatible;
 - package, immutable commit, staged runtime-payload digest, and
   applied-migration compatibility against the current checkout when that
   evidence is available.

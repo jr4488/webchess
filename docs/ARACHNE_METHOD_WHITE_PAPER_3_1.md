@@ -16,8 +16,9 @@ The Arachne Method is an experimental deliberation architecture for resisting
 premature closure on difficult questions. WebChess is the reference software
 instrument that implements and records one version of that architecture. It
 expands a question into a bounded field, uses a deterministic circular-chess
-trajectory to allocate attention, subjects terminal survivors and the exact
-prospective Answer prompt to structured adversarial review, permits a
+trajectory to derive a replay-verifiable directional record, subjects terminal
+survivors, that record, and the exact prospective Answer prompt to structured
+adversarial review, permits a
 deterministic Gate to refuse, qualifies any approved Answer, and records a
 person-owned action and later observation.
 
@@ -51,9 +52,22 @@ engine, persistence, local runtime, user interface, provenance, and export
 needed to inspect a concrete run of the method. Software conformance can show
 that a versioned procedure was followed; it cannot establish that the
 procedure was wise, that model content was true, or that an action caused an
-observed outcome. The current lifecycle and prompt versions are declared in
-[`src/lib/lifecycle/versions.ts`](../src/lib/lifecycle/versions.ts), while the
-major boundaries are summarized in
+observed outcome. The exact current method-version tuple is:
+
+| Boundary | Version |
+| --- | --- |
+| Lifecycle | `webchess-lifecycle-v2.5` |
+| Division prompt | `webchess-division-v4` |
+| Portia prompt | `webchess-portia-v5` |
+| Portia review contract | `webchess-portia-review-v3` |
+| Gate algorithm | `webchess-gate-v5` |
+| Answer prompt | `webchess-answer-v4` |
+| Charlotte prompt | `webchess-charlotte-v5` |
+
+The dependency-free authority is
+[`src/lib/lifecycle/method-versions.mjs`](../src/lib/lifecycle/method-versions.mjs);
+application and provider modules re-export its values, and the canonical
+release identity binds the same tuple. The major boundaries are summarized in
 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ### 1.3 The ANANSI subroutine
@@ -88,31 +102,40 @@ are defined in
 | Authority or artifact | Implemented operation | Required boundary |
 | --- | --- | --- |
 | Question | Preserve one normalized 12-240 character problem | A question may contain error, bias, or unsafe instructions |
-| Anansi / Division | Generate exactly 64 bounded facets under a structured contract | Structural and lexical checks do not prove relevance, diversity, or truth |
-| Field | Independently permute facets, I Ching-inspired lenses, and completed pairs onto 64 cells from recorded seeds | Reproducibility and variation are not evidence |
+| Anansi / Division | Apply one server-derived I Ching cast direction to each facet ID, then generate exactly 64 bounded facets and explanations under a structured contract | Directional influence is required, but structural and lexical checks do not prove relevance, diversity, or truth |
+| Field | Independently permute facets, cast-derived lenses, and completed pairs onto 64 cells from recorded seeds | Reproducibility and variation are not factual evidence |
 | Chess | Play a semantically blind cylindrical 8-by-8 variant to a terminal state | Capture and survival allocate attention; they do not establish importance or correctness |
+| Trajectory direction | Derive one versioned record from all canonical moves, passes, captures, pieces, survivors, outcome, and cast applications | Deterministic direction is inspectable interpretation, not external evidence or mystical truth |
 | Research, if consented and material | Perform one bounded search and guarded direct-page retrieval before Portia | Search synthesis and retrieved text remain untrusted candidate material |
-| Portia | Apply 13 attack types to each terminal survivor, then assess the set and the exact forthcoming Answer prompt | Same-provider criticism is not independent adjudication |
-| Gate | Deterministically evaluate sufficiency, coverage, contradiction, and prompt binding | A pass authorizes generation; it does not certify truth |
+| Portia | Apply 13 attack types to each terminal survivor, then assess the set, directional record, and exact forthcoming Answer prompt | Same-provider criticism is not independent adjudication |
+| Gate | Deterministically evaluate sufficiency, coverage, contradiction, prompt binding, and directional binding | A pass authorizes generation; it does not certify truth |
 | Retry | Permit at most two additional same-field games and one regenerated field | Exhaustion produces explicit insufficiency, not forced prose |
-| Answer | Generate from the exact prompt reviewed by Portia and approved by Gate | Answer cannot silently substitute a different evidence package |
-| Charlotte | Qualify the stored Answer and produce exactly three reversible actions | Qualification cannot resurrect consumed support or erase uncertainty |
+| Answer | Generate from the exact prompt and directional record reviewed by Portia and approved by Gate | Answer cannot silently substitute a different evidence or direction package |
+| Charlotte | Qualify the stored Answer and its directional provenance, then produce exactly three reversible actions | Qualification cannot resurrect consumed support or erase uncertainty |
 | Wilbur | Let the person own an action, its status, and an observation | Model output cannot declare that reality succeeded |
 | Web | Persist genealogy, versions, provenance, feedback, and selected memory | A durable record is not causal proof or permission for surveillance |
 
 ### 2.1 Division, cast, and play
 
-Division requests 64 problem-specific facets. The implementation rejects
-wrong counts, malformed fields, duplicate normalized titles or focuses, and
-several explainable lexical-collapse patterns. It cannot decide whether 64 is
-the right field size or whether a fluent facet is genuinely useful; those are
-evaluation questions. The generation and validation path is in
+Before Division calls the model, the server derives exactly one immutable cast
+assignment for each facet ID from the durable Division seed. Each assignment
+contains the analytical dimension, movement, I Ching hexagram/name/theme, and a
+concrete directional cue. The model cannot choose, swap, or omit assignments:
+it must return the exact assigned fields and a bounded `castApplication` that
+explains how that direction materially shaped the facet. Division still
+requests exactly 64 problem-specific facets. The implementation rejects wrong
+counts, malformed or mismatched cast fields, duplicate normalized titles or
+focuses, and several explainable lexical-collapse patterns. It cannot decide
+whether 64 is the right field size or whether a fluent directionally shaped
+facet is genuinely useful; those are evaluation questions. The generation and
+validation path is in
 [`src/server/openai/division.ts`](../src/server/openai/division.ts) and
 [`src/server/openai/division-quality.ts`](../src/server/openai/division-quality.ts).
 
-The accepted facets, 64 fixed change lenses, and board positions are joined by
-three domain-separated seeded permutations. The cast version is recorded with
-the game so the same inputs can be reconstructed. The engine has eight bounded
+The accepted facets, their 64 fixed cast-derived change lenses, and board
+positions are joined by three domain-separated seeded permutations. The cast
+assignment and shuffle versions are recorded so the same field can be
+reconstructed. The engine has eight bounded
 rings and eight wrapping sectors. White moves outside-in; Black moves
 inside-out. Kings are captured directly, forced passes are persisted, and
 bounded draw rules terminate non-capturing or overlong play. The canonical
@@ -124,16 +147,40 @@ rules and replay boundaries are in
 Every accepted move is replayed from the immutable initial state and ordered
 event log. The server, not browser animation, derives captures, promotion,
 counters, passes, and outcome. A terminal board supplies a replayable history
-and a set of signals for closer examination. It does not turn chess tactics
-into facts about the original question.
+and a set of signals for closer examination.
+
+At the terminal lifecycle transition, WebChess deterministically derives
+`webchess-directional-record-v1` from that entire canonical history—not merely
+from the initial cast or a prose interpretation. The record includes every
+move and forced pass in order; exact mover and captured-piece identities,
+original/current kinds and material values; capture order and resonance;
+promotions; every survivor, route, value, and final cell; terminal winner,
+reason, and ply; and all 64 cast assignments/applications. A versioned scoring
+method produces all 64 ranked directions and eight stable
+`survivingDirectionKeys`, with a human-readable contribution explanation. Its
+weights are method parameters, not empirical probabilities.
+
+The complete record, version, and digest are stored atomically with terminal
+state. Replaying identical field and event inputs must reproduce the same
+digest; a materially different legal capture path, captured value, survivor
+set, or outcome can change the ranked directions. This is required directional
+influence, not optional decorative metaphor. It also does not turn chess or the
+I Ching into factual evidence, prediction, causal proof, or permission to
+override verified facts, safety constraints, or consent. Preserved runs created
+before this contract remain explicitly `legacy_pre_directional_generation`;
+WebChess does not retroactively claim their Division, Portia, or Gate stages saw
+a record that did not exist.
 
 ### 2.2 Portia, Gate, and Retry
 
 After a terminal game, WebChess constructs the concrete provider-neutral
 Answer prompt package before generating the Answer. Portia receives that
-package, its digest, the terminal survivors, trajectory provenance, and any
-permitted research or selected Web-memory evidence. For each survivor, Portia
-must address all 13 versioned attacks: relevance, unsupported assumption,
+package, its digest, the terminal survivors, the verified trajectory-direction
+record and digest, and any permitted research or selected Web-memory evidence.
+For each survivor, Portia must cite one or more allowed surviving direction
+keys, explain how the full-trajectory direction changed its interpretation,
+and record a concrete directional amendment while addressing all 13 versioned
+attacks: relevance, unsupported assumption,
 evidence grounding, redundancy, contradiction, causal overreach, stakeholder
 response, seed or path sensitivity, actionability, reversibility, harm or
 exclusion, metaphor overreach, and narrative overfitting. A survivor is
@@ -145,8 +192,12 @@ deterministic aggregation checks are in
 The Gate then evaluates persisted Portia output in code. It checks, among other
 things, usable material, independent clusters, coverage, tensions, severe
 objections, fatal contradictions, and the digest binding to the exact Answer
-prompt. Its outcomes are Answer, same-field retry, field retry, or insufficient
-basis. The algorithm and bounded semantic retry policy are in
+prompt. For current runs it additionally requires every usable assessment and
+the Portia summary to bind the exact directional record/version/digest and only
+its permitted direction keys. A missing or mismatched direction fails the Gate;
+direction cannot satisfy missing factual evidence or erase a safety objection.
+Its outcomes are Answer, same-field retry, field retry, or insufficient basis.
+The algorithm and bounded semantic retry policy are in
 [`src/lib/lifecycle/gate.ts`](../src/lib/lifecycle/gate.ts) and
 [`src/lib/lifecycle/retry.ts`](../src/lib/lifecycle/retry.ts). Provider-started
 technical attempts are separately bounded and persisted; technical exhaustion
@@ -154,8 +205,9 @@ is visible rather than converted into a fabricated review.
 
 ### 2.3 Answer and Charlotte
 
-Only a prompt permitted by Portia and a persisted Gate pass may generate an
-Answer. WebChess transports the complete structured prompt through an
+Only a prompt and trajectory-direction binding permitted by Portia and a
+persisted Gate pass may generate an Answer. WebChess transports the complete
+structured prompt and verified direction through an
 authenticated loopback OpenClaw bridge instead of placing a large lifecycle
 prompt in one process argument. The bridge preserves prompt bytes up to the
 durable bound and fails visibly rather than silently truncating evidence; see
@@ -166,13 +218,22 @@ Answer output is strictly validated. If the first generation returns content
 that violates the Answer contract, WebChess may make exactly one corrective
 turn using the same approved evidence and bounded disclosure. Provider,
 transport, or cancellation failure does not earn that semantic correction.
+The complete logical Answer has one 300-second provider window; its initial and
+possible corrective turns each remain capped at 150 seconds inside that
+aggregate. The lease is renewed before each actual turn and the HTTP/watchdog
+stack preserves the full window plus settlement grace. A hang, lost response,
+process interruption, or deadline expiry therefore persists a visible
+retryable Answer failure and releases the slot. If the provider outcome is
+unknown, the original request settles `indeterminate`, preventing that durable
+intent from being called again or left indefinitely `in_progress`.
 The behavior is implemented in
 [`src/server/openai/answer.ts`](../src/server/openai/answer.ts) and the local
 OpenClaw adapter in
 [`src/server/openclaw/v2-generation.ts`](../src/server/openclaw/v2-generation.ts).
 
-Charlotte runs only after the approved Answer is durably stored. It qualifies
-that exact Answer against evidence boundaries, values, stakeholders,
+Charlotte runs only after the approved Answer is durably stored. It receives
+and retains the same directional version/digest and trace, then qualifies that
+exact Answer against evidence boundaries, values, stakeholders,
 uncertainty, audience, and reversal conditions, then supplies exactly three
 bounded next actions. It cannot replace the Answer with unrelated prose or use
 a consumed survivor as support. See
@@ -211,7 +272,7 @@ decides whether external information is material; it does not spend a hidden
 model call deciding whether to browse.
 
 One durable broker invocation may request at most five search results and
-retain at most five source candidates within a 150-second and 12,000-character
+retain at most five source candidates within a 300-second and 12,000-character
 synthesis bound. WebChess may then fetch at most three selected public HTTPS
 pages. Each fetch is bounded by time, redirects, raw bytes, accepted media
 types, and 6,000 accepted characters. The fetcher rejects credentials in URLs,
@@ -239,6 +300,14 @@ The user-facing boundary is summarized in
 [`docs/RESEARCH.md`](RESEARCH.md) and
 [`docs/PRIVACY.md`](PRIVACY.md).
 
+The five-minute allowance is coherent across the Hosted Search bridge request,
+response parser, requester, durable record, and stale-request watchdog; an older
+150-second layer cannot silently win. It adds time headroom only. Query count,
+result/source/page counts, redirect/address/body/citation/injection rules, and
+consent remain unchanged. Exceeding 300 seconds persists a visible retryable
+failure, closes the durable claim, and does not duplicate the same provider
+request or leave stale `in_progress` state.
+
 ## 4. Provenance, export, and replay
 
 WebChess persists game, event, lifecycle, model-request, Portia, Gate,
@@ -251,10 +320,12 @@ case from the database rather than from animation state.
 The player can export one lifecycle as `webchess-case-bundle/1` under three
 allowlist profiles:
 
-- `private-full-v1` retains the case narrative and model-result artifacts and
-  should be treated as private;
+- `private-full-v1` retains the case narrative, model-result artifacts, exact
+  current trajectory-direction record, and downstream bindings and should be
+  treated as private;
 - `research-redacted-v1` omits case narrative while retaining structural
-  provenance, seeds, move history, versions, and digests; and
+  provenance, seeds, move history, versions, directional digest or an explicit
+  omission marker, and other permitted digests; and
 - `metadata-only-v1` narrows the retained evidence further.
 
 All profiles can contain linkable timestamps, stable case identifiers,
@@ -262,8 +333,12 @@ hostnames, seeds, and unsalted digests. None is guaranteed anonymous. The
 offline command `npm run case:verify -- /path/to/bundle.json` checks schema,
 section digests, integrity root, internal references, supported versions, and
 canonical move legality by reconstructing the initial board and replaying the
-event log. It checks local artifact compatibility when the necessary identity
-evidence is present. It does not call OpenClaw or OpenAI, prove remote
+event log. For a private full current record it also deterministically re-derives
+the trajectory direction and rejects a content, version, or digest mismatch.
+Redacted profiles do not claim an omitted record was recomputed, and preserved
+legacy cases retain `legacy_pre_directional_generation`. The verifier checks
+local artifact compatibility when the necessary identity evidence is present.
+It does not call OpenClaw or OpenAI, prove remote
 publication, authenticate an author, validate source claims, or establish
 efficacy. Its SHA-256 manifest is not a signature.
 
@@ -295,7 +370,8 @@ At publication, the paper and public site must expose the same generated
    source commit;
 3. the retained source archive path and its SHA-256;
 4. this edition 3.1 repository path and the exact published PDF SHA-256; and
-5. the pinned OpenClaw, official Codex Search plugin, and toolchain identities.
+5. the exact seven-field method-version tuple in section 1.2; and
+6. the pinned OpenClaw, official Codex Search plugin, and toolchain identities.
 
 The reader verifies the downloaded source archive and PDF bytes, clones the
 repository, checks out the full commit in detached state, and confirms `HEAD`
@@ -325,8 +401,11 @@ Linux x86_64. That is the only platform/architecture pair whose official Codex
 plugin, reviewed runtime modules, wrapper, and native executable this candidate
 attests; every other platform fails closed rather than selecting an unattested
 binary.
-WebGL 2 is optional: the accessible 2D board remains available when WebGL is
-missing, motion is reduced, or the player prefers it.
+WebGL 2 is optional. Initial load, a new question/game, bounded Retry,
+restore/reload, import/verification, and replay all start in accessible 2D; 3D
+is an explicit choice for the active UI session. Missing WebGL, renderer
+failure, or a new reduced-motion preference returns the interface to 2D.
+Browser storage is not used to restore a prior 3D choice.
 
 OpenClaw is installed in a dedicated tool directory and uses a dedicated
 profile. The researcher runs OpenClaw's official OpenAI provider login, chooses
@@ -383,15 +462,19 @@ In connected Chrome, the researcher should:
 2. enter a non-secret question for which current external evidence is material,
    give separate research consent, and inspect the persisted Codex Search and
    direct-page provenance or an explicit visible failure before Portia;
-3. select the accessible 2D or 3D view and start Division;
+3. confirm the default accessible 2D view, or explicitly opt in to 3D for the
+   current board, and start Division;
 4. play manually, use guided moves, or autoplay until the canonical initial
    game reaches a real terminal state;
-5. inspect every terminal survivor's Portia progress, the Gate decision, any
-   Retry ancestry, the board-derived Answer, and Charlotte's qualifications;
+5. inspect the trajectory-direction version/digest and explanation, verify how
+   **What survived scrutiny** and every usable Portia interpretation/amendment
+   retain it, then inspect the Gate decision, any Retry ancestry, the approved
+   Answer, and Charlotte's directional qualifications;
 6. choose and update one Wilbur action and record an observation;
 7. reload and confirm that PostgreSQL restores the same case and lifecycle;
 8. export a chosen redaction profile, inspect its omission summary, and run the
-   offline verifier so it replays the complete event log; and
+   offline verifier so it replays the complete event log and, when the full
+   current record is present, re-derives its directional digest; and
 9. preserve the case digest and, if studying path sensitivity, start a clearly
    identified new game on the same field rather than calling it the same run.
 
@@ -434,15 +517,24 @@ claim is made that Arachne improves answer accuracy, decision quality,
 calibration, creativity, safety, reversibility, or outcomes. No evidence yet
 establishes that a 64-cell field is superior to a smaller field, that chess is
 better than another attention allocator, that same-model Portia reliably finds
-errors, that Gate thresholds are well calibrated, or that selected Web memory
-helps more than it anchors or leaks.
+errors, that the cast/trajectory directions improve the result, that Gate
+thresholds are well calibrated, or that selected Web memory helps more than it
+anchors or leaks. Deterministic record replay demonstrates implementation
+conformance and traceability only; it does not validate an I Ching
+interpretation or its efficacy.
 
 A credible evaluation should preregister the exact source identity, model,
 prompts, versions, seed policy, sample, exclusions, outcomes, and analysis. At
 minimum it should compare the full method with a direct-answer baseline and
 with ablations that remove or replace Division, chess, Portia/Gate, research,
-and prior Web memory. Cross-seed runs should preserve the same question and
-model conditions while varying recorded field and trajectory seeds. Blinded
+and prior Web memory. Directional ablations should separately remove the cast
+assignment from Division, remove the terminal trajectory record from
+Portia/Gate, and replace chess with a preregistered allocator. Cross-seed runs
+should preserve the same question and model conditions while varying recorded
+field and trajectory seeds; paired legal trajectories should vary capture
+order or captured material while holding the remaining inputs fixed where
+possible. Every run must preserve the directional version/digest and must not
+pool current records with `legacy_pre_directional_generation`. Blinded
 raters should assess factual accuracy, relevant coverage, calibration,
 reversibility, stakeholder impact, time, model calls, false consumption, false
 Gate passes, retry cost, and adverse outcomes. Null and negative findings must
@@ -472,8 +564,9 @@ The following historical identities remain distinct from the candidate:
 
 The exact citation is therefore a tuple, not a product name alone: paper
 edition 3.1, WebChess `2.2.0-rc.1`, the 40-character source commit, retained
-source-archive SHA-256, paper PDF SHA-256, case-bundle schema, and provider
-harness identity from the resolved manifest. The repository's
+source-archive SHA-256, paper PDF SHA-256, case-bundle schema, the exact
+seven-field method-version tuple, and provider harness identity from the
+resolved manifest. The repository's
 [`CITATION.cff`](../CITATION.cff) deliberately directs readers to that mapping
 and claims no DOI. If the manifest remains unresolved or the named artifacts
 are unavailable, the candidate is not citable as a completed public release.
@@ -484,9 +577,11 @@ The release target is not merely merged code or a green suite. It is a public,
 auditable journey: encounter the Arachne paper or site; resolve the same
 immutable source and artifact digests; clone without private knowledge; use the
 documented OpenClaw OpenAI-account path while rejecting provider keys/tokens;
-launch an isolated database and packed plugin; play a terminal game; inspect Portia,
-Gate, Retry, Answer, Charlotte, Wilbur, and the Web; reload; export; and replay
-the event history under an offline verifier.
+launch an isolated database and packed plugin; play a terminal game; inspect
+Portia, the full-trajectory directional record, Gate, Retry, Answer, Charlotte,
+Wilbur, and the Web; reload; export; and replay both the event history and
+directional digest under an offline verifier. The ordinary journey starts in
+2D and leaves the side-elevated 3D world as an explicit session choice.
 
 If any link in that journey is missing, it should be reported as missing. If
 the journey succeeds, it establishes inspectability and operational

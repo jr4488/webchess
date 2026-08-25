@@ -14,7 +14,7 @@ const PRINCIPLES = [
   },
   {
     title: 'Claims stay bounded',
-    body: 'Random casting creates perturbation. Chess creates a path. Neither creates evidence, probability, causality, or moral authority.',
+    body: 'The cast is a required directional input, and the full legal chess trajectory deterministically shapes the scrutiny record. Neither is factual evidence, probability, causality, or moral authority.',
   },
   {
     title: 'Threats are explicit',

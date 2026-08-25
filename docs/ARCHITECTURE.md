@@ -7,12 +7,16 @@ access separate so that each has an inspectable provenance and failure mode.
 
 1. **Question** — preserve the runtime-authoritative owner's normalized 12–240
    character problem as the governing reference.
-2. **Division** — a structured model request proposes 64 bounded perspective
-   facets. Deterministic checks reject known structural and lexical failure
-   patterns; they do not prove truth, relevance, or distinctness.
-3. **Independent cast** — the server creates a seed and independently
-   permutes facets, I Ching-inspired change lenses, and completed pair
-   positions. The exact field and provenance are persisted.
+2. **Cast-directed Division** — before the model call, the server derives one
+   immutable I Ching direction for each of 64 facet IDs. A structured request
+   proposes one bounded perspective per ID and must explain in a saved
+   `castApplication` how that assigned direction materially shaped the facet.
+   Deterministic checks reject missing or mismatched cast fields and known
+   structural or lexical failures; they do not prove truth, relevance, or
+   distinctness.
+3. **Independent field cast** — the server independently permutes the accepted
+   facets, cast-derived change lenses, and completed pair positions from
+   recorded seeds. The exact field and provenance are persisted.
 4. **Circular play** — the complete rules engine operates on eight bounded
    rings and eight wrapping sectors. White moves outside evidence inward;
    Black moves inner intention outward. Captures create a chronological
@@ -20,25 +24,48 @@ access separate so that each has an inspectable provenance and failure mode.
 5. **Authoritative replay** — every requested move is checked by replaying the
    immutable starting state and ordered event log. The server derives captures,
    forced passes, promotion, counters, and outcomes.
-6. **Board-derived answer prompt** — replay-derived weights, values, routes,
-   captures, and terminal survivors are assembled into the concrete prompt
-   package that would generate the substantive answer.
-7. **Portia** — before any answer exists, a strict structured model operation
+6. **Trajectory-direction record** — at the terminal transition, the server
+   deterministically rolls the full canonical event stream into
+   `webchess-directional-record-v1`: move ordering, forced passes, promotions,
+   exact moving and captured-piece identities, kinds and values, capture order,
+   survivor routes and values, terminal outcome, and every field cell's cast
+   application. The complete record and its digest are stored atomically with
+   the terminal lifecycle state. Identical source inputs replay to the same
+   digest; materially different legal trajectories can change it.
+7. **Board-derived answer prompt** — replay-derived weights, values, routes,
+   captures, terminal survivors, and the verified directional record are
+   assembled into the concrete prompt package that would generate the
+   substantive answer.
+8. **Portia** — before any answer exists, a strict structured model operation
    validates that exact prompt by attacking every survivor with the complete
-   versioned taxonomy. Each accepted per-signal assessment is persisted. Three
-   failed provider-started attempts end at the technical `portia_unavailable`
-   state without authorizing an answer.
-8. **Internal Gate and Retry** — deterministic code checks usable count,
+   versioned taxonomy. Each current assessment must bind the directional
+   digest, cite permitted surviving direction keys, and explain how direction
+   changed its interpretation or required amendment. Each accepted per-signal
+   assessment is persisted. Three failed provider-started attempts end at the
+   technical `portia_unavailable` state without authorizing an answer.
+9. **Internal Gate and Retry** — deterministic code checks usable count,
    independent clusters, coverage, tension, severe objections, and fatal
-   contradictions. A stored semantic policy permits at most two same-field
-   games and one regenerated field, then ends at `insufficient_basis`.
-9. **Answer, then Charlotte** — Portia permission and a persisted Gate pass
-   authorize generation from the exact reviewed board prompt. Charlotte then
-   qualifies that exact generated answer for evidence boundaries, values,
-   stakeholders, audience, and reversible action; it cannot substitute an
-   unrelated answer.
-10. **Wilbur and Web** — the player owns action status and appends observations
+   contradictions, plus the complete directional binding. A stored semantic
+   policy permits at most two same-field games and one regenerated field, then
+   ends at `insufficient_basis`.
+10. **Answer, then Charlotte** — Portia permission and a persisted Gate pass
+    authorize generation from the exact reviewed prompt and directional
+    record. Charlotte then qualifies that exact generated answer and its
+    directional provenance for evidence boundaries, values, stakeholders,
+    audience, and reversible action; it cannot substitute an unrelated answer.
+11. **Wilbur and Web** — the player owns action status and appends observations
     to the immutable genealogy; model output cannot declare real-world success.
+
+The I Ching/cast record is first-class direction, not optional metaphor. Its
+influence is inspectable in Division, Portia amendments, Gate inputs, Answer,
+Charlotte, the **What survived scrutiny** view, and export. It remains a
+method-generated interpretive input—not external factual evidence—and cannot
+override verified facts, source provenance, safety constraints, or consent.
+Runs created before this contract retain null record columns and expose
+`legacy_pre_directional_generation`. Those rows and their parsers are retained
+only for historical read-only inspection; recovery never fabricates a new
+record, resumes provider generation/gameplay, imports or replays them, or
+rewrites their already persisted Portia/Gate history.
 
 ## Runtime topology
 
@@ -102,6 +129,13 @@ saved state authoritative. The shared service recomposes the cast from its
 facets and seed and canonically replays the durable event log before every
 mutation and lifecycle transition.
 
+Board presentation is deliberately ephemeral. Initial load, a new question or
+current game, bounded Retry, restore/reload, replay, and import/verification all
+begin in the accessible 2D view even when WebGL is available or stale browser
+storage mentions 3D. The player may opt in to the side-elevated 3D view for the
+active UI session and return to 2D; WebGL loss, render failure, or reduced
+motion fails back to 2D. Pre-v2.5 cases are outside all of those runtime paths.
+
 There is no Clerk login, cloud database, hosted WebChess request, sync, or
 shared operator credential. A stable installation-scoped principal owns local
 records; the browser header is a mode discriminator within the same-OS trust
@@ -145,9 +179,9 @@ unsupported. The owner applies pending files atomically under an advisory lock
 and records their normalized checksums. The supported local player does not run
 that deployment command or supply its credential: the OpenClaw launcher applies
 the canonical tail to its dedicated loopback database. Both paths reject any
-existing ledger that is not an exact checksum-matching prefix of the 15
+existing ledger that is not an exact checksum-matching prefix of the 17
 canonical migrations from `0001_durable_webchess` through
-`0015_direct_page_research_evidence`.
+`0017_trajectory_directional_record`.
 
 Migration `0012` is upgrade-safe without a duplicate-data audit. It preserves
 all pre-`0012` rows with a null `charlotte_binding_version`, including duplicate
@@ -163,17 +197,22 @@ immutable. Migration `0014` adds follow-up scheduling and owner-bound,
 explicitly selected Web-memory links; at most eight observations can be carried
 into a later game and no observation is silently reused. Migration `0015`
 persists versioned research consent and bounded direct-page facts/failures,
-while conservatively treating historical rows as not consented. These
-migrations do not reinterpret missing consent as permission.
+while conservatively treating historical rows as not consented. Migration
+`0016` extends only the durable Hosted Search timeout ceiling to five minutes;
+query, source, page, citation, and consent bounds are unchanged. Migration
+`0017` adds an all-or-none, version/digest/shape-checked trajectory-direction
+record to lifecycle runs while leaving legacy rows null. These migrations do
+not reinterpret missing consent as permission or old lifecycle data as a
+current directional record. Preserving rows and migration evidence is not a
+runtime compatibility promise: pre-v2.5 rows cannot authorize provider work,
+gameplay, browser import/replay, Retry, Wilbur, or another mutation.
 
 After `0001_durable_webchess.sql` is first applied to a durable database, that
 file is immutable. Later changes are append-only, monotonically ordered
-`0002_*`, `0003_*`, and later migrations. They follow expand/contract: a schema
-expansion must support the candidate release and the previous Production
-deployment throughout its rollback window. Contracting changes such as drops,
-renames, and tightened constraints wait for a later migration after the old
-deployment is retired as a rollback target. Application rollback moves code
-back; it does not rewrite or reverse migration history.
+`0002_*`, `0003_*`, and later migrations. The retained hosted-design history
+records its former expand/contract discipline and rollback windows; current
+WebChess does not promise executable compatibility with a pre-v2.5 application
+or case. Application rollback never rewrites or reverses migration history.
 
 The migration owner explicitly revokes and grants the reviewed per-table
 runtime allowlist after each migration. The runtime role has database
@@ -195,7 +234,8 @@ and checksums; exactly 20 application tables plus the migration ledger—21 tota
 and their column names, types, and nullability; valid and ready definitions for
 all 12 contract indexes; exactly two origin-enabled, unfiltered
 `BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur trigger/function pairs, all 35
-reviewed constraints, and all 11 reviewed defaults; and the exact
+reviewed pre-directional constraints plus the four trajectory-record
+constraints—39 total—and all 11 reviewed defaults; and the exact
 effective schema/table privilege allowlist, including access inherited through
 memberships or `PUBLIC`. The indexes cover the current game, succeeded
 operation, one run per game, one current-bound Wilbur action per Charlotte
@@ -292,10 +332,12 @@ replay rather than trusted as event input.
 
 ### `model_requests`
 
-The authoritative model-call ledger. Each Division, Portia, approved Answer,
-Charlotte, or legacy-answer operation records an
-idempotency key, request digest, status, model and prompt provenance, provider
-response ID, bounded token counts, timestamps, and a safe failure code.
+The authoritative model-call ledger. Each current Division, Portia, approved
+Answer, or Charlotte operation records an idempotency key, request digest,
+status, model and prompt provenance, provider response ID, bounded token counts,
+timestamps, and a safe failure code. Historical legacy-answer rows may remain
+for inspection, but no legacy-answer provider operation is callable in the
+supported runtime.
 Provider output that is refused, incomplete, malformed, or schema-invalid is
 not persisted; WebChess keeps only a syntactically sanitized provider response
 ID, safe failure classification, HTTP status when applicable, and normalized
@@ -308,8 +350,9 @@ into operational logs.
 visible Anansi → Chess → Portia → Answer → Charlotte → Wilbur → Web sequence.
 Gate and Retry remain inspectable internal decision branches rather than
 player-facing stages. The run stores independent seeds, semantic retry counters,
-parent/root relationships, survivor sets, terminal fingerprints, the exact
-reviewed answer-prompt digest, resumable per-signal Portia assessments, its
+parent/root relationships, survivor sets, terminal fingerprints, the complete
+trajectory-direction record/version/digest, the exact reviewed answer-prompt
+digest, resumable per-signal Portia assessments, its
 active provider-attempt fence and three-attempt technical budget, Charlotte's
 separate active-request fence and three-attempt qualification budget, and all
 contract/algorithm versions. Exhausting Charlotte's budget preserves the
@@ -318,8 +361,10 @@ does not silently present that Answer as Charlotte-qualified.
 
 `portia_reviews`, `gate_decisions`, and `charlotte_results` are immutable
 attempt artifacts. The generated Answer and its lifecycle-run, reviewed-prompt,
-and Gate-input provenance are stored through the durable game/model-result
-boundary. `wilbur_actions` is revisioned; `wilbur_observations` and
+Gate-input, and trajectory-direction provenance are stored through the durable
+game/model-result boundary. Current Portia reviews bind every usable assessment
+and their aggregate summary to the same record; Gate fails closed on a missing
+or mismatched binding. `wilbur_actions` is revisioned; `wilbur_observations` and
 `lifecycle_events` are append-only. Each current Wilbur action is copied from
 and version-bound to one of the exact three stored Charlotte suggestions.
 Migration `0012` permits at most one current-bound action for a suggestion index
@@ -389,8 +434,8 @@ A move command contains:
 
 The request also carries an idempotency key. The server:
 
-1. resolves the runtime-authoritative owner (Clerk, signed local session, or
-   OpenClaw installation principal);
+1. resolves the OpenClaw installation principal; retained Clerk and signed-local
+   ownership branches are historical test/audit fixtures, not runtime choices;
 2. loads the game scoped to that user;
 3. rejects a stale expected revision;
 4. rebuilds the initial pieces and replays ordered events;
@@ -407,8 +452,10 @@ downloaded replay data, and integrity tests.
 
 ## Replay start path
 
-A replay is a new counted game that preserves the source division. The
-browser supplies the source game ID, expected revision, and an idempotency key.
+A replay is a new counted lifecycle-v2.5 game that preserves a current source
+division. Pre-v2.5 sources are rejected rather than upgraded or reinterpreted.
+The browser supplies the source game ID, expected revision, and an idempotency
+key.
 Under the durable usage advisory lock, the database either returns the child
 already associated with that exact intent or atomically performs every source
 check, hourly user/IP game-start check, daily game-start check, clone, intent
@@ -456,6 +503,17 @@ indeterminate provider-started attempts. Exhaustion produces
 settlement committed but final attachment was interrupted, the durable result
 payload is the recovery authority.
 
+One logical Answer operation has an aggregate 300-second provider deadline.
+The initial turn and, only after contract-invalid output, one corrective turn
+each retain a 150-second turn ceiling inside that aggregate. The lease is
+renewed immediately before each actual provider turn and includes 30 seconds
+for settlement, while the HTTP handler leaves the same settlement grace above
+the 300-second provider window. A provider hang, lost response, process
+interruption, or expired lease therefore settles or reconciles visibly,
+transitions the lifecycle to a retryable Answer failure, and releases the slot.
+An unknown provider outcome marks the original request `indeterminate`, so the
+same durable intent cannot be called again or left indefinitely `in_progress`.
+
 The application quotas and concurrency leases bound WebChess operations, while
 the selected account's allowance and workspace controls remain external.
 WebChess cannot promise or enforce unmetered use, and no provider key or API-
@@ -466,7 +524,7 @@ project billing path is a permitted backstop for the supported runtime.
 Only the OpenClaw composition injects the durable research broker, and it stays
 off without case-scoped, versioned consent. Immediately before Portia,
 deterministic policy may authorize one local Codex Search invocation with at
-most five result links, five stored citation candidates, a 150-second WebChess
+most five result links, five stored citation candidates, a 300-second WebChess
 ceiling, and a 12,000-character synthesis ceiling. WebChess may then attempt at
 most three public-HTTPS pages selected from those sources. Each request is
 bounded and rejects credentialed URLs, non-global DNS/connected addresses,
@@ -476,6 +534,14 @@ Search synthesis and accepted page text are both untrusted candidate material,
 not proof that a page or claim is true. Search remains outside the model-
 operation quota ledger and is governed by its own one-invocation bound. Hosted
 and local source-checkout compositions do not provide this broker.
+
+The 300-second Search ceiling is coherent across the bridge body, response
+parser, HTTP requester, durable request row, and stale-request watchdog; no 150-second
+compatibility layer may win first. A response-drain or settlement grace does
+not increase provider work. Timeout becomes a visible retryable terminal record
+and closes the durable claim without a duplicate provider call. The time increase
+changes no query, page, redirect, address, body, citation, injection, consent,
+or provenance bound.
 
 ## Transactional recovery and disaster recovery
 
@@ -492,6 +558,22 @@ is not a database-restorable backup. Hosted operators must separately configure
 and test vendor backup/restore; local operators must preserve the PostgreSQL
 volume and the database, HMAC, deletion-HMAC, and local-session secrets needed
 to address and interpret its rows.
+
+## Case export and directional replay
+
+The private full case profile retains the exact trajectory-direction record,
+its version and digest, and downstream Portia/Gate/Answer/Charlotte bindings.
+Offline verification reconstructs the canonical game from the saved initial
+field and events, re-derives the record, and rejects a content or digest
+mismatch. Redacted profiles may omit sensitive narrative or record detail, but
+must retain an explicit omission marker and the permitted version/digest
+provenance; an omitted record is not claimed as independently recomputed. A
+legacy export retains `legacy_pre_directional_generation` rather than
+manufacturing direction from old rows. That retained parser behavior is solely
+for offline, read-only historical inspection; it does not import the case into
+PostgreSQL or make it eligible for gameplay, replay, provider work, or mutation.
+Neither verification nor a matching digest proves that the direction, evidence,
+or answer is true or effective.
 
 ## Account export path
 
@@ -537,7 +619,8 @@ dedicated OpenClaw profile and one loopback PostgreSQL database.
 ## Invariants
 
 - Randomization generates variation, not evidence.
-- Board events create salience, not factual warrant.
+- The complete chess trajectory creates reproducible directional influence,
+  not factual warrant.
 - The original question and every transformation remain inspectable.
 - OpenClaw resolves and applies the selected OpenAI account/OAuth auth object
   inside the local plugin runtime; WebChess never logs, persists, exports, or
@@ -547,17 +630,21 @@ dedicated OpenClaw profile and one loopback PostgreSQL database.
 - The server is authoritative for ownership, moves, passes, captures, endings,
   prompts, quota, and usage.
 - No correctness or security property depends on Function memory.
-- Portia is allowed only after canonical replay proves an ending and assembles
-  the exact board-derived answer prompt.
+- Portia is allowed only after canonical replay proves an ending, persists the
+  exact trajectory-direction record, and assembles the exact answer prompt.
 - Answer generation is allowed only after Portia permits that exact prompt and
-  the deterministic Gate passes it.
+  directional binding and the deterministic Gate passes them.
 - Charlotte is allowed only after the approved Answer is durably stored; it
-  qualifies that exact generated answer and cannot replace its provenance.
+  qualifies that exact generated answer and directional provenance and cannot
+  replace either.
 - Portia progress is persisted per signal and technical failure is bounded to
   three provider-started attempts before `portia_unavailable`.
 - Retry is bounded to two same-field games and one regenerated field.
 - Model output cannot author or rewrite a Wilbur observation.
 - A replay preserves the cast; a new division creates a new cast.
+- Current records are replay-verifiable; legacy pre-v2.5 runs remain explicitly
+  labeled for historical inspection and are never executed or retroactively
+  relabeled.
 - Model and prompt provenance are recorded without logging secrets.
 - A replay start is cloned and accounted atomically.
 - Forced deletion retains no raw Clerk ID in application tables.

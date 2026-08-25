@@ -147,6 +147,11 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
     )
   })
 
+  await page.addInitScript(() => {
+    window.localStorage.setItem('webchess:board-view', '3d')
+    window.sessionStorage.setItem('webchess:board-view', '3d')
+  })
+
   await page.goto('/openclaw', { waitUntil: 'domcontentloaded' })
   await expect(
     page.getByRole('heading', { name: /Bring a problem/i }),
@@ -165,6 +170,10 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
   await expect(page.getByText(/Charlotte reviews and qualifies it/i)).toBeVisible()
   await expect(page.getByRole('link', { name: /WebChess home/i }))
     .toHaveAttribute('href', '/openclaw')
+  await expect(page.locator('.board-dimension-shell'))
+    .toHaveAttribute('data-board-view', '2d')
+  await page.getByRole('button', { name: '3D world' }).press('Enter')
+  await expect(page.locator('[data-board-dimension="3d"]')).toBeVisible()
 
   await page.getByLabel('What are you trying to understand?').fill(problem)
   await page.getByRole('radio', { name: /Allow bounded research/i }).check()
@@ -173,6 +182,10 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
     name: /Set the pieces in motion/i,
   })
   await expect(start).toBeEnabled({ timeout: 15_000 })
+  await expect(page.locator('.board-dimension-shell'))
+    .toHaveAttribute('data-board-view', '2d')
+  await page.getByRole('button', { name: '3D world' }).press('Enter')
+  await expect(page.locator('[data-board-dimension="3d"]')).toBeVisible()
   await start.press('Enter')
 
   await expect(
@@ -180,7 +193,8 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
       name: /Play the problem on the circular board/i,
     }),
   ).toBeVisible()
-  await expect(page.locator('[data-board-dimension="3d"]')).toBeVisible()
+  await expect(page.locator('.board-dimension-shell'))
+    .toHaveAttribute('data-board-view', '3d')
   await expect(page.getByRole('button', { name: '3D world' }))
     .toHaveAttribute('aria-pressed', 'true')
   await page.getByRole('button', { name: '2D board' }).press('Enter')
@@ -207,9 +221,10 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
     'i',
   )
   await expect(page.getByRole('button', { name: destination })).toBeVisible()
-  await expect.poll(
-    () => page.evaluate(() => window.localStorage.length),
-  ).toBe(0)
+  await expect.poll(() => page.evaluate(() => ({
+    local: window.localStorage.getItem('webchess:board-view'),
+    session: window.sessionStorage.getItem('webchess:board-view'),
+  }))).toEqual({ local: '3d', session: '3d' })
 
   await page.reload({ waitUntil: 'domcontentloaded' })
   await expect(
@@ -217,7 +232,11 @@ test('runs the shared WebChess 2.0 flow and restores it from durable local state
       name: /Play the problem on the circular board/i,
     }),
   ).toBeVisible()
-  await page.getByRole('button', { name: '2D board' }).press('Enter')
+  await expect(page.locator('.board-dimension-shell'))
+    .toHaveAttribute('data-board-view', '2d')
+  await expect(page.locator('.radial-board__svg')).toBeVisible()
+  await expect(page.getByRole('button', { name: '2D board' }))
+    .toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('.turn-header .eyebrow')).toContainText('Move 02')
   await expect(page.getByRole('button', { name: destination })).toBeVisible()
   expect(calls.filter((call) => call !== 'GET /api/web-memory')).toEqual([

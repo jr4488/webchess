@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDeepStrictEqual, promisify } from 'node:util'
 
 import { validateCanonicalSourceArchive } from './create-release-source-archive.mjs'
+import { CURRENT_METHOD_VERSION_TUPLE } from '../src/lib/lifecycle/method-versions.mjs'
 
 const execFileAsync = promisify(execFile)
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -87,6 +88,7 @@ function releaseIdentityShape({
         anansi: 'Anansi/Division field-construction mnemonic',
       },
       caseBundleSchema: 'webchess-case-bundle/1',
+      methodVersions: { ...CURRENT_METHOD_VERSION_TUPLE },
     },
     source: {
       repository: 'https://github.com/jr4488/webchess',

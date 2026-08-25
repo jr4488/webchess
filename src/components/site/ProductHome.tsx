@@ -19,7 +19,7 @@ const LIFECYCLE_PANELS = [
     authority: 'Model-mediated authority',
     authorityClass: 'wc-authority-model',
     title: 'Anansi',
-    body: 'Generates a plural field of exactly 64 facets, crossing eight practical dimensions with eight movements of change.',
+    body: 'Generates exactly 64 facets and applies the seeded cast as a first-class direction for each mapped board part.',
     prohibition: 'declare any facet true or complete.',
   },
   {
@@ -27,7 +27,7 @@ const LIFECYCLE_PANELS = [
     authority: 'Deterministic authority',
     authorityClass: 'wc-authority-det',
     title: 'Chess',
-    body: 'A semantically blind engine plays a complete game on the circular board—a bounded, replayable trajectory.',
+    body: 'A semantically blind engine plays a complete game, then code derives one replay-verifiable directional record from every move, pass, capture, piece value, survivor route, and terminal outcome.',
     prohibition: 'read facet meaning or assess evidence.',
   },
   {
@@ -35,7 +35,7 @@ const LIFECYCLE_PANELS = [
     authority: 'Model-mediated authority',
     authorityClass: 'wc-authority-model',
     title: 'Portia',
-    body: 'Attacks every surviving candidate with thirteen examinations before any answer exists.',
+    body: 'Attacks every surviving candidate with thirteen examinations and must retain auditable amendments from the trajectory-directional record before any answer exists.',
     prohibition: 'generate the substantive answer.',
   },
   {
@@ -43,7 +43,7 @@ const LIFECYCLE_PANELS = [
     authority: 'Deterministic authority',
     authorityClass: 'wc-authority-det',
     title: 'Gate',
-    body: 'Code decides whether the reviewed surviving basis and exact prospective Answer prompt satisfy the persisted sufficiency rules.',
+    body: 'Code decides whether the record-bound reviewed basis and exact prospective Answer prompt satisfy the persisted sufficiency rules.',
     prohibition: 'invent material, waive requirements, or certify truth.',
   },
   {
@@ -59,7 +59,7 @@ const LIFECYCLE_PANELS = [
     authority: 'Generated artifact · not an authority',
     authorityClass: 'wc-authority-model',
     title: 'Answer artifact',
-    body: 'After a passed Gate, the model synthesizes only the exact permitted prompt: reviewed evidence, usable candidates, and required qualifications.',
+    body: 'After a passed Gate, the model synthesizes only the exact permitted prompt: reviewed evidence, usable candidates, required directional amendments, and qualifications.',
     prohibition: 'cite consumed or unresolved candidates.',
   },
   {
@@ -67,7 +67,7 @@ const LIFECYCLE_PANELS = [
     authority: 'Model-mediated authority',
     authorityClass: 'wc-authority-model',
     title: 'Charlotte',
-    body: 'Qualifies the stored answer—truth boundaries, stakeholders, audience—and returns exactly three reversible actions.',
+    body: 'Qualifies the stored answer with the same directional record—truth boundaries, stakeholders, audience—and returns exactly three reversible actions.',
     prohibition: 'silently replace the analysis.',
   },
   {
@@ -83,7 +83,7 @@ const LIFECYCLE_PANELS = [
     authority: 'Persistence authority',
     authorityClass: 'wc-authority-store',
     title: 'The Web',
-    body: 'Preserves the full genealogy—field, seeds, moves, dispositions, digests, actions, and observations.',
+    body: 'Preserves the full genealogy—field, seeds, moves, the directional record and digest, dispositions, actions, and observations.',
     prohibition: 'convert provenance into truth.',
   },
 ] as const
@@ -91,17 +91,17 @@ const LIFECYCLE_PANELS = [
 const STATUS = [
   {
     title: 'Implemented',
-    body: '64-facet contract, seeded casting, circular engine, 13 Portia attacks, deterministic Gate, Charlotte, Wilbur, and provenance.',
+    body: '64-facet cast contract, full-trajectory directional record, circular engine, 13 Portia attacks, deterministic Gate, Charlotte, Wilbur, and provenance.',
     limit: 'Does not establish that any component improves reasoning.',
   },
   {
     title: 'Reproducible',
-    body: 'The same field, seeds, versions, and event log reconstruct the cast and game state.',
+    body: 'The same field, seeds, versions, and canonical event log reconstruct the cast, game state, directional record, and digest.',
     limit: 'Does not make a reproducible trajectory epistemically privileged.',
   },
   {
     title: 'Inspectable',
-    body: 'Typed artifacts, dispositions, thresholds, transitions, and ancestry are exposed.',
+    body: 'Typed artifacts expose how the complete trajectory shaped surviving directions, amendments, dispositions, thresholds, transitions, and ancestry.',
     limit: 'Does not guarantee truth or prevent manipulation.',
   },
   {
@@ -186,15 +186,16 @@ export function ProductHome() {
         <div className="wc-wrap">
           <div className="wc-kicker">The governing rule</div>
           <h2>
-            Board events generate <span className="wc-salience">salience,</span>
+            Full trajectories generate <span className="wc-salience">direction,</span>
             <br />
             <span className="wc-strike">not evidence.</span>
           </h2>
           <p>
-            A capture earns a candidate <b>inspection—never truth</b>. The hexagram lenses, seeded
-            cast, and chess conflict exist to disturb premature closure. Evidence enters only
-            through observation, sources, domain knowledge, stakeholder testimony, formal tools,
-            and real-world tests.
+            The seeded cast directs every mapped facet, and the complete legal trajectory—not
+            captures alone—deterministically ranks the directions that Portia must scrutinize.
+            That directional influence is required and traceable, but it is <b>never factual
+            evidence</b>. Evidence enters only through observation, sources, domain knowledge,
+            stakeholder testimony, formal tools, and real-world tests.
           </p>
         </div>
       </section>

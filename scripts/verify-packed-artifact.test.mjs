@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { CURRENT_METHOD_VERSION_TUPLE } from '../src/lib/lifecycle/method-versions.mjs'
 import { resolveReleaseIdentity } from './release-identity.mjs'
 import { validatePackedReleaseIdentity } from './verify-packed-artifact.mjs'
 
@@ -41,6 +42,19 @@ describe('packed public release identity', () => {
       COMMIT,
     )).toThrow('does not match the canonical release contract')
   })
+
+  it.each(Object.keys(CURRENT_METHOD_VERSION_TUPLE))(
+    'rejects packed method-version drift in %s',
+    (field) => {
+      const releaseIdentity = identity()
+      releaseIdentity.release.methodVersions[field] = 'webchess-drifted-v999'
+
+      expect(() => validatePackedReleaseIdentity(
+        releaseIdentity,
+        COMMIT,
+      )).toThrow('does not match the canonical release contract')
+    },
+  )
 
   it('rejects a missing dependency contract and a mismatched build commit', () => {
     const missingDependency = identity()

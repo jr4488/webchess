@@ -1,7 +1,16 @@
 'use client'
 
 import dynamic from 'next/dynamic'
-import { Component, useEffect, useId, useMemo, useRef, useState } from 'react'
+import {
+  Component,
+  createContext,
+  useContext,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
 
 import { cellKey } from '../lib/board'
@@ -33,6 +42,31 @@ export interface RadialBoardProps {
   onPieceSelect?: (pieceId: string) => void
   onCellSelect?: (cell: CellCoord) => void
   className?: string
+}
+
+export type BoardViewMode = '2d' | '3d'
+
+interface BoardViewSessionValue {
+  viewMode: BoardViewMode
+  setViewMode: (viewMode: BoardViewMode) => void
+}
+
+const BoardViewSessionContext = createContext<BoardViewSessionValue | null>(null)
+
+export function BoardViewSessionProvider({
+  children,
+  viewMode,
+  setViewMode,
+}: BoardViewSessionValue & { children: ReactNode }) {
+  const value = useMemo(
+    () => ({ viewMode, setViewMode }),
+    [setViewMode, viewMode],
+  )
+  return (
+    <BoardViewSessionContext.Provider value={value}>
+      {children}
+    </BoardViewSessionContext.Provider>
+  )
 }
 
 type WebChessBoard3DProps = RadialBoardProps & {
@@ -594,10 +628,13 @@ function RadialBoard2D({
 }
 
 export function RadialBoard(props: RadialBoardProps) {
+  const boardViewSession = useContext(BoardViewSessionContext)
   const [supports3D, setSupports3D] = useState(false)
-  const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d')
+  const [localViewMode, setLocalViewMode] = useState<BoardViewMode>('2d')
   const [reducedMotion, setReducedMotion] = useState(false)
   const [fallbackNotice, setFallbackNotice] = useState('')
+  const viewMode = boardViewSession?.viewMode ?? localViewMode
+  const setViewMode = boardViewSession?.setViewMode ?? setLocalViewMode
 
   useEffect(() => {
     const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)')
@@ -606,7 +643,7 @@ export function RadialBoard(props: RadialBoardProps) {
       const available = supportsWebGL()
       setReducedMotion(prefersReducedMotion)
       setSupports3D(available)
-      if (available && !prefersReducedMotion) setViewMode('3d')
+      if (!available) setViewMode('2d')
     })
 
     const handleMotionChange = (event: MediaQueryListEvent) => {
@@ -623,7 +660,7 @@ export function RadialBoard(props: RadialBoardProps) {
       window.cancelAnimationFrame(frame)
       motionQuery?.removeEventListener?.('change', handleMotionChange)
     }
-  }, [])
+  }, [setViewMode])
 
   const returnTo2D = () => {
     setViewMode('2d')

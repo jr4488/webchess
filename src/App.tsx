@@ -5,6 +5,10 @@ import type { FormEvent } from 'react'
 
 import { Header } from './components/Header'
 import {
+  BoardViewSessionProvider,
+  type BoardViewMode,
+} from './components/RadialBoard'
+import {
   OpenClawReleaseIdentityBanner,
   type OpenClawReleaseIdentity,
 } from './components/OpenClawReleaseIdentity'
@@ -43,6 +47,7 @@ import type {
   WilburObservation,
 } from './lib/lifecycle/contracts'
 import { CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION } from './lib/lifecycle/contracts'
+import { isCurrentLifecycleExecutable } from './lib/lifecycle/execution'
 import {
   HOSTED_WEBCHESS_RUNTIME,
   OPENCLAW_WEBCHESS_RUNTIME,
@@ -83,7 +88,7 @@ interface ActiveEngineRequest {
 }
 
 type GameMutationMode = 'starting' | 'resetting'
-type LifecycleMode = 'loading' | 'v2' | 'legacy'
+type LifecycleMode = 'loading' | 'v2' | 'historical' | 'legacy'
 
 interface ActiveGameMutation {
   mode: GameMutationMode
@@ -242,6 +247,7 @@ function WebChessExperience({
   const [caseExportPending, setCaseExportPending] = useState(false)
   const [caseExportError, setCaseExportError] = useState('')
   const [caseExportNotice, setCaseExportNotice] = useState('')
+  const [boardViewMode, setBoardViewMode] = useState<BoardViewMode>('2d')
   const restoreRequestRef = useRef<ActiveRestoreRequest | null>(null)
   const restoreRequestGenerationRef = useRef(0)
   const divisionRequestRef = useRef<AbortController | null>(null)
@@ -368,10 +374,11 @@ function WebChessExperience({
     setLifecycleError('')
     setActionPendingIndex(null)
     setWilburPending(false)
-  setSelectedMemoryObservationIds([])
-  setCaseExportPending(false)
-  setCaseExportError('')
-  setCaseExportNotice('')
+    setSelectedMemoryObservationIds([])
+    setCaseExportPending(false)
+    setCaseExportError('')
+    setCaseExportNotice('')
+    setBoardViewMode('2d')
     setNotice('Choose a white piece. Its possible paths will appear.')
   }, [invalidateEngineRequest])
 
@@ -383,6 +390,9 @@ function WebChessExperience({
       preserveLifecycle?: boolean
     } = {},
   ) => {
+    if (nextGame.status === 'answer_failed') {
+      answerIntentRef.current = null
+    }
     const division = nextGame.division
     const state = nextGame.state
     const storedAnswer = nextGame.answer
@@ -552,6 +562,7 @@ function WebChessExperience({
     options: { silent?: boolean } = {},
   ) => {
     const silent = Boolean(options.silent)
+    if (!silent) setBoardViewMode('2d')
     if (
       silent &&
       restoreRequestRef.current &&
@@ -952,7 +963,13 @@ function WebChessExperience({
       })
       if (controller.signal.aborted) return null
       setLifecycle(restored)
-      setLifecycleMode('v2')
+      const executable = isCurrentLifecycleExecutable(restored)
+      setLifecycleMode(executable ? 'v2' : 'historical')
+      if (!executable) {
+        setLifecycleError(
+          'This preserved historical lifecycle is read-only. Start a new question to run the current Arachne lifecycle.',
+        )
+      }
       const actionIntent = wilburActionIntentRef.current
       if (
         actionIntent?.gameId === current.id &&
@@ -1002,7 +1019,13 @@ function WebChessExperience({
     } catch (error) {
       if (controller.signal.aborted) return null
       if (isWebChessApiError(error) && error.kind === 'not-found') {
-        setLifecycleMode('legacy')
+        setLifecycle(null)
+        setLifecycleMode('historical')
+        setLifecycleError(
+          'This completed game has no current lifecycle provenance and is read-only. Start a new question to use the current Arachne lifecycle.',
+        )
+        setAnswerStatus(current.answer ? 'success' : 'idle')
+        setAnswerActivity(null)
         return null
       }
       if (
@@ -1213,7 +1236,10 @@ function WebChessExperience({
       stage !== 'reading' ||
       lifecycleMode !== 'v2' ||
       lifecycle?.state !== 'gate_passed' ||
-      game?.status !== 'answering'
+      (
+        game?.status !== 'answering' &&
+        !(lifecycleBusy && game?.status === 'completed')
+      )
     ) return
 
     let cancelled = false
@@ -1230,7 +1256,14 @@ function WebChessExperience({
       cancelled = true
       if (timer !== null) window.clearTimeout(timer)
     }
-  }, [game?.status, lifecycle?.state, lifecycleMode, restoreCurrentGame, stage])
+  }, [
+    game?.status,
+    lifecycle?.state,
+    lifecycleBusy,
+    lifecycleMode,
+    restoreCurrentGame,
+    stage,
+  ])
 
   useEffect(() => {
     const pollingGameId = game?.id ?? null
@@ -1531,12 +1564,14 @@ function WebChessExperience({
     if (cleaned.length < 12 || !researchConsentDecision) return
 
     invalidateEngineRequest(true)
+    setBoardViewMode('2d')
     setProblem(cleaned)
     setStage('mapping')
     void analyzeProblem(cleaned)
   }
 
   const retryDivision = () => {
+    setBoardViewMode('2d')
     void analyzeProblem(problem)
   }
 
@@ -1656,6 +1691,7 @@ function WebChessExperience({
 
   const retryAnswer = () => {
     if (!game || !outcome) return
+    setBoardViewMode('2d')
     setAnswer('')
     setAnswerPrompt('')
     setAnswerError('')
@@ -1668,10 +1704,15 @@ function WebChessExperience({
     if (
       !current ||
       !outcome ||
+      lifecycleMode !== 'v2' ||
+      !lifecycle ||
+      !isCurrentLifecycleExecutable(lifecycle) ||
       lifecycle?.state !== 'gate_passed' ||
       current.status !== 'answer_failed' ||
       lifecycleBusy
     ) return
+
+    setBoardViewMode('2d')
 
     const existingIntent = answerIntentRef.current
     const intent = existingIntent?.gameId === current.id
@@ -1724,7 +1765,15 @@ function WebChessExperience({
 
   const retryLifecyclePath = async () => {
     const current = game
-    if (!current || !lifecycle || lifecycleBusy) return
+    if (
+      !current ||
+      !lifecycle ||
+      lifecycleMode !== 'v2' ||
+      !isCurrentLifecycleExecutable(lifecycle) ||
+      lifecycleBusy
+    ) return
+
+    setBoardViewMode('2d')
 
     const existingIntent = lifecycleRetryIntentRef.current
     const intent = existingIntent?.gameId === current.id
@@ -1776,7 +1825,14 @@ function WebChessExperience({
   ) => {
     const current = game
     const suggestion = lifecycle?.charlotte?.exactlyThreeNextActions[index]
-    if (!current || !suggestion || actionPendingIndex !== null) return
+    if (
+      !current ||
+      !lifecycle ||
+      lifecycleMode !== 'v2' ||
+      !isCurrentLifecycleExecutable(lifecycle) ||
+      !suggestion ||
+      actionPendingIndex !== null
+    ) return
 
     const existingIntent = wilburActionIntentRef.current
     const intent = existingIntent?.gameId === current.id &&
@@ -1834,7 +1890,13 @@ function WebChessExperience({
     followUpAt: string | null,
   ) => {
     const current = game
-    if (!current || wilburPending) return
+    if (
+      !current ||
+      !lifecycle ||
+      lifecycleMode !== 'v2' ||
+      !isCurrentLifecycleExecutable(lifecycle) ||
+      wilburPending
+    ) return
 
     const existingIntent = wilburStatusIntentRef.current
     const intent = existingIntent?.gameId === current.id &&
@@ -1891,7 +1953,13 @@ function WebChessExperience({
     observation: AppendWilburObservationCommand,
   ): Promise<boolean> => {
     const current = game
-    if (!current || wilburPending) return false
+    if (
+      !current ||
+      !lifecycle ||
+      lifecycleMode !== 'v2' ||
+      !isCurrentLifecycleExecutable(lifecycle) ||
+      wilburPending
+    ) return false
 
     const existingIntent = wilburObservationIntentRef.current
     const intent = existingIntent?.gameId === current.id &&
@@ -1994,14 +2062,22 @@ function WebChessExperience({
     }
   }
 
+  const verifyLifecycleCase = useCallback(async (bundle: Blob) => {
+    setBoardViewMode('2d')
+    return runtime.api.verifyLocalCaseBundle(bundle)
+  }, [runtime.api])
+
   const replayProblem = async () => {
     const current = game
     if (
       !current ||
+      lifecycleMode === 'historical' ||
       replayPendingRef.current ||
       activeGameMutationRef.current ||
       answerStatus === 'loading'
     ) return
+
+    setBoardViewMode('2d')
 
     const existingIntent = replayIntentRef.current
     const intent = existingIntent?.gameId === current.id
@@ -2094,17 +2170,27 @@ function WebChessExperience({
   }
 
   const reset = async () => {
+    const historicalEscape = lifecycleMode === 'historical'
     if (
       activeGameMutationRef.current ||
       replayPendingRef.current ||
       replayTargetUnresolved ||
       movePendingRef.current ||
-      game?.status === 'dividing' ||
-      game?.status === 'answering' ||
-      answerStatus === 'loading' ||
+      (!historicalEscape && game?.status === 'dividing') ||
+      (!historicalEscape && game?.status === 'answering') ||
+      (!historicalEscape && answerStatus === 'loading') ||
       divisionTargetUnresolved ||
       (!game && divisionRequestRef.current)
     ) return
+
+    if (historicalEscape) {
+      // Historical games are intentionally read-only. Leaving one is a local
+      // UI reset, never an abandon/recovery/provider mutation against old data.
+      resetGameState()
+      setGame(null)
+      setRestoreError('')
+      return
+    }
 
     const mutation: ActiveGameMutation = { mode: 'resetting' }
     activeGameMutationRef.current = mutation
@@ -2187,8 +2273,8 @@ function WebChessExperience({
     lifecycleBusy ||
     actionPendingIndex !== null ||
     wilburPending ||
-    game?.status === 'dividing' ||
-    game?.status === 'answering' ||
+    (lifecycleMode !== 'historical' && game?.status === 'dividing') ||
+    (lifecycleMode !== 'historical' && game?.status === 'answering') ||
     (lifecycleMode === 'legacy' && answerStatus === 'loading') ||
     divisionTargetUnresolved ||
     (!game && divisionStatus === 'loading')
@@ -2236,7 +2322,11 @@ function WebChessExperience({
         onUseNextDecision={useMemoryNextDecision}
       />
 
-      <main className="main-content">
+      <BoardViewSessionProvider
+        viewMode={boardViewMode}
+        setViewMode={setBoardViewMode}
+      >
+        <main className="main-content">
         {dueWebMemoryCount > 0 && !webMemoryOpen ? (
           <button
             className="web-memory-reminder"
@@ -2340,6 +2430,7 @@ function WebChessExperience({
             boardAnswer={game?.answer ?? null}
             answerFailurePrompt={answerPrompt}
             busy={lifecycleBusy}
+            readOnly={lifecycleMode === 'historical'}
             error={lifecycleError}
             actionPendingIndex={actionPendingIndex}
             wilburPending={wilburPending}
@@ -2357,7 +2448,7 @@ function WebChessExperience({
             onUpdateAction={(action, status, followUpAt) => void setWilburActionStatus(action, status, followUpAt)}
             onObserve={observeWilburAction}
             onExportCase={exportLifecycleCase}
-            onVerifyCase={runtime.api.verifyLocalCaseBundle}
+            onVerifyCase={verifyLifecycleCase}
             onReplay={() => void replayProblem()}
           />
         )}
@@ -2387,7 +2478,8 @@ function WebChessExperience({
             onReset={reset}
           />
         )}
-      </main>
+        </main>
+      </BoardViewSessionProvider>
 
       <footer className="site-footer">
         <span>WebChess</span>

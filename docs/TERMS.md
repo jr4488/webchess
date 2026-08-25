@@ -2,40 +2,47 @@
 
 **Effective date:** August 1, 2026
 
-These plain-language terms describe the intended production WebChess service.
-Using a deployed WebChess service means agreeing to these terms and the
-[Acceptable Use Policy](ACCEPTABLE_USE.md).
-
-The repository does not claim that a production hosted service is currently
-live. The supported runnable candidate is the packed local OpenClaw path.
-Archived source-checkout and key-backed hosted descriptions are retired
+These plain-language terms describe the supported WebChess research candidate:
+the packed, loopback-only local OpenClaw path. They do not describe a live
+hosted WebChess service. By running or using the candidate, the local operator
+and user accept these terms and the [Acceptable Use Policy](ACCEPTABLE_USE.md).
+Archived source-checkout, Clerk, and key-backed hosted descriptions are retired
 snapshot evidence, not supported installation or authentication alternatives.
 
 ## What the service is
 
-WebChess is an experimental reflection and problem-framing tool. It generates a
-64-facet field and uses a circular-chess game to produce board-derived weights,
-values, and terminal survivors. Those results become the concrete prompt for a
-possible answer. Portia evaluates that exact prompt before generation, while an
-internal deterministic Gate and bounded Retry policy decide whether it may
-proceed. Only an approved prompt generates an Answer. Charlotte then qualifies
-that exact generated answer and proposes reversible next actions. Wilbur
-records what the user reports happened afterward. Each action created under the
-current contract is version-bound to one of Charlotte's exact three stored
-suggestions, and Web retains the resulting provenance. Pre-`0012` rows remain
-preserved, null-bound historical records.
+WebChess is an experimental reflection and problem-framing tool. A cast-directed
+Division maps 64 facets to the board before play. After the circular-chess game
+ends, a deterministic, versioned directional record binds the complete legal
+trajectory: move order, passes, captures, piece identities and values,
+survivors, routes, and terminal outcome. That record must materially direct the
+Portia criteria and amendments, Gate input, approved Answer prompt, and
+Charlotte qualification, and its digest remains visible in provenance and
+case export. The deterministic Gate and bounded Retry policy decide whether the
+reviewed prompt may proceed. Only an approved prompt generates an Answer.
+Charlotte then proposes reversible next actions, Wilbur records what the user
+reports happened afterward, and Web retains the resulting provenance. Each
+current action is version-bound to one of Charlotte's exact three stored
+suggestions. Pre-`0012` and other pre-v2.5 rows may remain preserved as
+null-bound historical records. They are not supported gameplay, provider-
+generation, browser import/replay, Retry, Wilbur, or mutation paths; a user must
+start a new lifecycle-v2.5 game.
 
 WebChess is not divination, prediction, factual verification, professional
-advice, an emergency service, or an autonomous decision maker. A capture,
-attention weight, model statement, or winning side is not evidence that a claim
-is true or that an action is safe.
+advice, an emergency service, or an autonomous decision maker. The cast and
+trajectory record are required directional inputs, not external factual
+evidence. They cannot override verified facts, consent, safety constraints, or
+Gate. A capture, directional weight, model statement, or winning side is not
+evidence that a claim is true or that an action is safe.
 
 ## Eligibility and accounts
 
-Users must be at least 18 and able to agree to these terms. Keep authentication
-methods secure and do not share an account or attempt to use another person's
-account. Users are responsible for activity performed through their account
-until it is secured or deleted.
+Users must be at least 18 and able to agree to these terms. WebChess does not
+create or manage a WebChess account on the supported path. OpenClaw uses the
+user's existing OpenAI account/OAuth profile; keep that profile and the local
+machine secure, do not use another person's account, and follow the applicable
+OpenAI and OpenClaw terms. WebChess must not receive a provider API key or
+alternate credential route.
 
 ## User content
 
@@ -68,66 +75,52 @@ professional obligations.
 
 ## Usage limits
 
-WebChess may enforce per-user and global quotas, rate limits, concurrency
-limits, input bounds, and temporary or permanent suspensions. Users may not
-evade controls by automating requests, creating duplicate accounts, sharing
-accounts, or manipulating clients or network identities.
+WebChess enforces bounded inputs, operation deadlines, persisted retry budgets,
+and local concurrency controls. Users may not evade those controls or use the
+candidate to automate abusive requests. OpenAI account allowances, model
+availability, and provider billing rules remain the user's responsibility; a
+retry can consume another allowed model or Hosted Search operation even though
+WebChess uses no API key.
 
-New divisions and replays are counted game starts and may share daily and
-hourly limits. Wilbur actions and observations have independent user/IP hourly
-limits. Account format `webchess-account-export/4` has independent user/IP
-limits and a maximum
-response size. It is an owner-scoped application export, not a vendor subject-
-access package or database backup. An oversized synchronous export is refused;
-WebChess does not paginate it or prepare it later. Wilbur's lifetime admission
-envelope preserves existing history and does not guarantee whole-account
-exportability because other account content also accumulates. The
-[support path](../SUPPORT.md) can help
-troubleshoot general behavior but does not promise a custom data handoff or
-response time. Retrying an already-recorded idempotent request does not create
-a new operation; an exact Wilbur retry replays its committed result or durable
-denial, while a changed request conflicts. Portia may make a new fenced attempt after a failed or
-indeterminate provider-started request, but the persisted three-attempt limit
-prevents an unbounded automatic cycle.
-
-Limits may change to protect availability, security, and cost. The interface
-should disclose the limits that apply to an authenticated user.
+Retrying an unresolved idempotent request does not create a second provider
+operation. After a durable retryable failure, a visible user retry creates one
+new fenced request. Portia has a persisted three-attempt technical limit; Gate
+has at most two same-field games and one regenerated field. Answer and Hosted
+Search each have a five-minute aggregate operation window. These bounds prevent
+unbounded automatic cycles and do not promise that an allowed provider call
+will complete.
 
 ## Availability and changes
 
-The service may be changed, interrupted, limited, or discontinued. Games are
-stored durably by design, but uninterrupted access, permanent retention, and
-perfect recovery are not guaranteed. Preview deployments are test
-environments, not production service commitments.
+The candidate may be changed, interrupted, limited, or discontinued. Games are
+stored in the operator's loopback-only PostgreSQL database by design, but
+uninterrupted access, permanent retention, and perfect recovery are not
+guaranteed.
 
 Event replay and persisted request/lifecycle state can recover some interrupted
-operations. They are not a disaster-recovery guarantee: backup schedules,
-point-in-time restore, recovery objectives, and vendor restore behavior depend
-on the separately configured deployment or local operator.
-
-Deleting WebChess data may leave a suspended deletion-pending account marker
-until Clerk confirms identity deletion. After that signed confirmation,
-WebChess retains only an HMAC deletion marker needed to prevent quota-reset
-recreation, subject to the privacy notice and applicable law. Shared IP windows
-and vendor backups may remain until their independent expiry or retention
-period ends.
+operations. They are not a disaster-recovery guarantee. The local operator is
+responsible for PostgreSQL backups, restore testing, retention, and teardown.
+Deleting the local database removes WebChess application records but does not
+delete or alter the separate OpenAI/OpenClaw account or OAuth profile.
 
 ## Open-source materials
 
 Repository source and documentation are licensed under Apache-2.0. That license
 governs copying and modification of the open-source materials. These terms
-govern use of the hosted service and do not replace the Apache license.
+govern use of the runnable research candidate and do not replace the Apache
+license or third-party provider terms.
 
 ## Enforcement
 
-The project may reject content, limit requests, suspend access, or delete an
-account to enforce these terms, the Acceptable Use Policy, law, security, or
-service integrity. Security vulnerabilities must be reported through the
-private flow in [SECURITY.md](../SECURITY.md).
+The local software may reject content or requests that violate its bounds,
+security controls, or the Acceptable Use Policy. It does not suspend or delete
+a WebChess account because no such account exists on the supported path.
+Security vulnerabilities must be reported through the private flow in
+[SECURITY.md](../SECURITY.md).
 
 ## Disclaimer
 
-To the extent permitted by applicable law, the service and model output are
+To the extent permitted by applicable law, the candidate and model output are
 provided as-is and as-available, without a promise that they are accurate,
 complete, suitable for a particular purpose, uninterrupted, or error-free.
 

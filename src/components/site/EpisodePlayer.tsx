@@ -6,9 +6,9 @@ import { useEffect, useRef, useState } from 'react'
 type EpisodePhase = 'cast' | 'traverse' | 'attack' | 'gate'
 
 const PHASE_LABELS: Record<EpisodePhase, string> = {
-  cast: 'Casting field',
+  cast: 'Casting · directing field',
   traverse: 'Traversing · complete game',
-  attack: 'Portia attacking · 13 examinations',
+  attack: 'Deriving direction · Portia attacking',
   gate: 'Gate · deciding',
 }
 
@@ -22,25 +22,25 @@ const STEPS: readonly {
     phase: 'cast',
     number: 'i',
     title: 'Cast',
-    body: 'A seeded permutation scatters facets across 8 rings × 8 sectors. Same seed, same cast.',
+    body: 'A seeded cast maps 64 facets and gives every board part an auditable directional cue. Same seed, same cast.',
   },
   {
     phase: 'traverse',
     number: 'ii',
     title: 'Traverse',
-    body: 'A semantically blind engine plays a complete game. Captures mark candidates for scrutiny.',
+    body: 'A semantically blind engine plays a complete game. Every move, pass, capture, piece value, survivor route, and outcome enters one replay-verifiable directional record.',
   },
   {
     phase: 'attack',
     number: 'iii',
-    title: 'Attack',
-    body: 'Portia strikes before any answer exists. Candidates are preserved, wounded, or consumed.',
+    title: 'Derive and attack',
+    body: 'Code ranks cast-qualified directions from the full trajectory. Portia must apply them through auditable criteria and amendments before any answer exists.',
   },
   {
     phase: 'gate',
     number: 'iv',
     title: 'Gate',
-    body: 'Deterministic code—not prose—admits, retries, or refuses. Refusal is a feature.',
+    body: 'Deterministic code checks the record-bound scrutiny and prospective prompt, then admits, retries, or refuses. Direction is not factual evidence.',
   },
 ]
 
@@ -465,7 +465,7 @@ export function EpisodePlayer() {
           ref={svgRef}
           viewBox="-230 -230 460 460"
           role="img"
-          aria-label="Illustrative deterministic WebChess sequence showing a seeded cast, circular traversal, adversarial review, and a Gate verdict."
+          aria-label="Illustrative deterministic WebChess sequence showing a cast-directed field, complete circular trajectory, derived directional scrutiny, and a Gate verdict."
         />
         <div className="wc-ep-hud" aria-live="polite">
           <span className="wc-ep-phase">{phaseLabel}</span>
