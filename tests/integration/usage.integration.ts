@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { Client } from 'pg'
 
 import { composeProblemParts } from '../../src/lib/division'
 import { RESEARCH_CONSENT_VERSION } from '../../src/lib/research'
@@ -86,14 +87,53 @@ afterEach(async () => {
 
 function controller(
   config: UsageConfig = DEFAULT_CONFIG,
-  now: () => Date = () => new Date(NOW),
+  now: (() => Date) | null = () => new Date(NOW),
 ) {
-  return createUsageController({
+  const dependencies = {
     db: database.adapter,
     config,
-    now,
     randomUuid: () => LEASE_TOKEN,
+  }
+  return createUsageController(
+    now === null ? dependencies : { ...dependencies, now },
+  )
+}
+
+async function holdUsageReservationLock(): Promise<{
+  release(): Promise<void>
+}> {
+  const connectionString = process.env.DATABASE_URL
+  if (!connectionString) {
+    throw new Error('DATABASE_URL is required for the lock-wait regression.')
+  }
+  const client = new Client({
+    connectionString,
+    options: `-c search_path=${database.schema},public`,
   })
+  await client.connect()
+  await client.query('BEGIN')
+  await client.query(`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended('webchess-usage-reservation-v1', 0)
+    )
+  `)
+  let released = false
+  return {
+    async release() {
+      if (released) return
+      released = true
+      try {
+        await client.query('COMMIT')
+      } finally {
+        await client.end()
+      }
+    },
+  }
+}
+
+async function waitUntilAfter(deadline: Date): Promise<void> {
+  const delay = Math.max(0, deadline.valueOf() - Date.now() + 100)
+  await new Promise((resolve) => setTimeout(resolve, delay))
 }
 
 function divisionReservation(
@@ -128,6 +168,7 @@ function answerReservation(
     operation: 'answer',
     promptVersion: 'answer-v1',
     countsAsGameStart: false,
+    operationDeadlineAt: new Date(NOW.valueOf() + 300_000),
     leaseExpiresAtCap: new Date(NOW.valueOf() + 335_000),
     ...overrides,
   })
@@ -450,13 +491,15 @@ async function attachActiveMatureRequest(): Promise<void> {
       INSERT INTO model_requests (
         id, clerk_user_id, game_id, operation, idempotency_key,
         request_sha256, status, provider, model, prompt_version,
-        software_version, provider_started_at, created_at, updated_at
+        software_version, provider_started_at, created_at, updated_at,
+        operation_deadline_at
       )
       VALUES (
         $1::uuid, $2::text, $3::uuid, 'answer', $1::uuid,
         $4::text, 'in_progress', 'openai', 'gpt-5.6-sol',
         'answer-v1', 'integration-test', $5::timestamptz,
-        $5::timestamptz, $5::timestamptz
+        $5::timestamptz, $5::timestamptz,
+        $5::timestamptz + interval '145 seconds'
       )
     `,
     values: [
@@ -1128,7 +1171,7 @@ describe('durable usage accounting against PostgreSQL', () => {
       },
     ])
 
-    currentTime = new Date(NOW.valueOf() + 240_000)
+    currentTime = new Date(NOW.valueOf() + 299_999)
     await expect(
       usage.settleModelRequest({
         userId: OWNER,
@@ -1226,10 +1269,19 @@ describe('durable usage accounting against PostgreSQL', () => {
       alreadyStarted: true,
     })
 
-    currentTime = new Date(NOW.valueOf() + 335_000)
+    currentTime = new Date(NOW.valueOf() + 299_999)
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 0,
+      clearedSlots: 0,
+    })
+    currentTime = new Date(NOW.valueOf() + 300_000)
     await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
       expiredRequests: 1,
       clearedSlots: 1,
+    })
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 0,
+      clearedSlots: 0,
     })
 
     const reconciled = await database.adapter.query({
@@ -1252,7 +1304,7 @@ describe('durable usage accounting against PostgreSQL', () => {
     expect(reconciled.rows).toEqual([
       {
         status: 'indeterminate',
-        failure_code: 'provider_outcome_unknown',
+        failure_code: 'answer_operation_timeout',
         provider_started_at: NOW,
         completed_at: currentTime,
         occupied_slots: 0,
@@ -1283,8 +1335,8 @@ describe('durable usage accounting against PostgreSQL', () => {
       }),
     ).resolves.toEqual({
       ok: false,
-      code: 'SETTLEMENT_CONFLICT',
-      httpStatus: 409,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
     })
     await expect(
       usage.reserveModelRequest(reservationInput),
@@ -1340,6 +1392,7 @@ describe('durable usage accounting against PostgreSQL', () => {
       () => new Date(currentTime),
     )
     const reservationInput = answerReservation({
+      operationDeadlineAt: new Date(recoveryCap.valueOf() - 35_000),
       leaseExpiresAtCap: recoveryCap,
     })
     await createDivisionShell(
@@ -1384,12 +1437,13 @@ describe('durable usage accounting against PostgreSQL', () => {
     })
     expect(active.rows).toEqual([{ lease_expires_at: recoveryCap }])
 
-    currentTime = new Date(recoveryCap.valueOf() - 1)
+    const operationDeadlineAt = new Date(recoveryCap.valueOf() - 35_000)
+    currentTime = new Date(operationDeadlineAt.valueOf() - 1)
     await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
       expiredRequests: 0,
       clearedSlots: 0,
     })
-    currentTime = recoveryCap
+    currentTime = operationDeadlineAt
     await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
       expiredRequests: 1,
       clearedSlots: 1,
@@ -1405,11 +1459,58 @@ describe('durable usage accounting against PostgreSQL', () => {
       leaseExpiresAt: null,
     })
 
+    const lateSuccess = {
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      outcome: 'succeeded' as const,
+      providerResponseId: 'resp_after_watchdog_cleanup',
+      responseSha256: '6'.repeat(64),
+      resultPayload: { answer: 'must remain discarded after timeout' },
+      usage: {
+        reported: true,
+        inputTokens: 144,
+        cachedInputTokens: 21,
+        cacheWriteInputTokens: 5,
+        outputTokens: 55,
+        reasoningTokens: 13,
+        totalTokens: 199,
+      },
+    }
+    await expect(usage.settleModelRequest(lateSuccess)).resolves.toEqual({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+    await expect(usage.settleModelRequest(lateSuccess)).resolves.toEqual({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+    await expect(usage.settleModelRequest({
+      ...lateSuccess,
+      providerResponseId: 'resp_conflicting_provider_operation',
+    })).resolves.toEqual({
+      ok: false,
+      code: 'SETTLEMENT_CONFLICT',
+      httpStatus: 409,
+    })
+
     const persisted = await database.adapter.query({
       text: `
         SELECT
           requests.status,
           requests.failure_code,
+          requests.provider_response_id,
+          requests.response_sha256,
+          requests.result_payload,
+          requests.usage_reported,
+          requests.input_tokens,
+          requests.cached_input_tokens,
+          requests.cache_write_input_tokens,
+          requests.output_tokens,
+          requests.reasoning_tokens,
+          requests.total_tokens,
           (
             SELECT count(*)::integer
             FROM model_requests
@@ -1443,12 +1544,485 @@ describe('durable usage accounting against PostgreSQL', () => {
     })
     expect(persisted.rows).toEqual([{
       status: 'indeterminate',
-      failure_code: 'provider_outcome_unknown',
+      failure_code: 'answer_operation_timeout',
+      provider_response_id: 'resp_after_watchdog_cleanup',
+      response_sha256: null,
+      result_payload: null,
+      usage_reported: true,
+      input_tokens: '144',
+      cached_input_tokens: '21',
+      cache_write_input_tokens: '5',
+      output_tokens: '55',
+      reasoning_tokens: '13',
+      total_tokens: '199',
       request_count: 1,
       model_used: '1',
       maximum_rate_count: 1,
       occupied_slots: 0,
     }])
+  })
+
+  it('fences a late Answer success at the logical deadline before lease expiry', async () => {
+    let currentTime = new Date(NOW)
+    const usage = controller(
+      { ...DEFAULT_CONFIG, modelLeaseSeconds: 335 },
+      () => new Date(currentTime),
+    )
+    const reservationInput = answerReservation()
+    await createDivisionShell(
+      OWNER,
+      MATURE_GAME_ID,
+      'Can a late provider response overwrite the durable Answer deadline?',
+    )
+
+    await usage.reserveModelRequest(reservationInput)
+    await usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })
+    currentTime = new Date(NOW.valueOf() + 300_000)
+
+    const lateSuccess = {
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      outcome: 'succeeded' as const,
+      providerResponseId: 'resp_at_logical_deadline',
+      responseSha256: '7'.repeat(64),
+      resultPayload: {
+        kind: 'answer',
+        gameId: MATURE_GAME_ID,
+      },
+      usage: {
+        reported: true,
+        inputTokens: 200,
+        cachedInputTokens: 40,
+        cacheWriteInputTokens: 0,
+        outputTokens: 80,
+        reasoningTokens: 30,
+        totalTokens: 280,
+      },
+    }
+    await expect(usage.settleModelRequest(lateSuccess)).resolves.toEqual({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+
+    const settled = await database.adapter.query({
+      text: `
+        SELECT
+          requests.status,
+          requests.failure_code,
+          requests.completed_at,
+          slots.lease_expires_at,
+          (
+            SELECT count(*)::integer
+            FROM model_requests
+            WHERE clerk_user_id = $2::text
+              AND operation = 'answer'
+          ) AS request_count,
+          (
+            SELECT used
+            FROM usage_buckets
+            WHERE subject_type = 'user'
+              AND subject_key = $2::text
+              AND metric = 'model_requests'
+          ) AS model_used
+        FROM model_requests AS requests
+        LEFT JOIN model_concurrency_slots AS slots
+          ON slots.request_id = requests.id
+        WHERE requests.id = $1::uuid
+      `,
+      values: [REQUEST_ID, OWNER],
+    })
+    expect(settled.rows).toEqual([{
+      status: 'indeterminate',
+      failure_code: 'answer_operation_timeout',
+      completed_at: currentTime,
+      lease_expires_at: null,
+      request_count: 1,
+      model_used: '1',
+    }])
+
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 0,
+      clearedSlots: 0,
+    })
+    await expect(usage.settleModelRequest(lateSuccess)).resolves.toEqual({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+  })
+
+  it('rechecks PostgreSQL time after a lock wait and never starts Answer late', async () => {
+    const usage = controller(
+      { ...DEFAULT_CONFIG, modelLeaseSeconds: 335 },
+      null,
+    )
+    const operationDeadlineAt = new Date(Date.now() + 1_500)
+    await createDivisionShell(
+      OWNER,
+      MATURE_GAME_ID,
+      'Can a pre-deadline caller start provider work after waiting on the lock?',
+    )
+    await usage.reserveModelRequest(answerReservation({
+      operationDeadlineAt,
+      leaseExpiresAtCap: new Date(operationDeadlineAt.valueOf() + 35_000),
+    }))
+
+    const lock = await holdUsageReservationLock()
+    const transition = usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })
+    try {
+      await waitUntilAfter(operationDeadlineAt)
+    } finally {
+      await lock.release()
+    }
+
+    await expect(transition).resolves.toEqual({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 1,
+      clearedSlots: 1,
+    })
+
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT
+          requests.status,
+          requests.failure_code,
+          requests.provider_started_at,
+          (
+            SELECT count(*)::integer
+            FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+        FROM model_requests AS requests
+        WHERE requests.id = $1::uuid
+      `,
+      values: [REQUEST_ID],
+    })
+    expect(persisted.rows).toEqual([{
+      status: 'failed',
+      failure_code: 'answer_operation_timeout_before_provider',
+      provider_started_at: null,
+      occupied_slots: 0,
+    }])
+  })
+
+  it('rechecks PostgreSQL time after a reconciliation lock wait', async () => {
+    const usage = controller(
+      { ...DEFAULT_CONFIG, modelLeaseSeconds: 335 },
+      null,
+    )
+    const operationDeadlineAt = new Date(Date.now() + 1_500)
+    await createDivisionShell(
+      OWNER,
+      MATURE_GAME_ID,
+      'Can reconciliation cross the logical deadline while waiting on its lock?',
+    )
+    await usage.reserveModelRequest(answerReservation({
+      operationDeadlineAt,
+      leaseExpiresAtCap: new Date(operationDeadlineAt.valueOf() + 35_000),
+    }))
+    await usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })
+
+    const lock = await holdUsageReservationLock()
+    const reconciliation = usage.reconcileExpiredLeases()
+    try {
+      await waitUntilAfter(operationDeadlineAt)
+    } finally {
+      await lock.release()
+    }
+
+    await expect(reconciliation).resolves.toEqual({
+      expiredRequests: 1,
+      clearedSlots: 1,
+    })
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT status, failure_code,
+          (
+            SELECT count(*)::integer
+            FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+        FROM model_requests
+        WHERE id = $1::uuid
+      `,
+      values: [REQUEST_ID],
+    })
+    expect(persisted.rows).toEqual([{
+      status: 'indeterminate',
+      failure_code: 'answer_operation_timeout',
+      occupied_slots: 0,
+    }])
+  })
+
+  it('uses post-lock time to fence late success and retain provider usage provenance', async () => {
+    const usage = controller(
+      { ...DEFAULT_CONFIG, modelLeaseSeconds: 335 },
+      null,
+    )
+    const operationDeadlineAt = new Date(Date.now() + 1_500)
+    await createDivisionShell(
+      OWNER,
+      MATURE_GAME_ID,
+      'Can a blocked success cross the logical Answer deadline?',
+    )
+    await usage.reserveModelRequest(answerReservation({
+      operationDeadlineAt,
+      leaseExpiresAtCap: new Date(operationDeadlineAt.valueOf() + 35_000),
+    }))
+    await usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })
+
+    const lateSuccess = {
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      outcome: 'succeeded' as const,
+      providerResponseId: 'resp_after_lock_wait',
+      responseSha256: '8'.repeat(64),
+      resultPayload: { kind: 'answer', answer: 'must not persist' },
+      usage: {
+        reported: true,
+        inputTokens: 321,
+        cachedInputTokens: 12,
+        cacheWriteInputTokens: 3,
+        outputTokens: 89,
+        reasoningTokens: 34,
+        totalTokens: 410,
+      },
+    }
+    const lock = await holdUsageReservationLock()
+    const settlement = usage.settleModelRequest(lateSuccess)
+    try {
+      await waitUntilAfter(operationDeadlineAt)
+    } finally {
+      await lock.release()
+    }
+
+    await expect(settlement).resolves.toEqual({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT
+          status,
+          failure_code,
+          provider_response_id,
+          response_sha256,
+          result_payload,
+          usage_reported,
+          input_tokens,
+          cached_input_tokens,
+          cache_write_input_tokens,
+          output_tokens,
+          reasoning_tokens,
+          total_tokens,
+          (
+            SELECT count(*)::integer
+            FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+        FROM model_requests
+        WHERE id = $1::uuid
+      `,
+      values: [REQUEST_ID],
+    })
+    expect(persisted.rows).toEqual([{
+      status: 'indeterminate',
+      failure_code: 'answer_operation_timeout',
+      provider_response_id: 'resp_after_lock_wait',
+      response_sha256: null,
+      result_payload: null,
+      usage_reported: true,
+      input_tokens: '321',
+      cached_input_tokens: '12',
+      cache_write_input_tokens: '3',
+      output_tokens: '89',
+      reasoning_tokens: '34',
+      total_tokens: '410',
+      occupied_slots: 0,
+    }])
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 0,
+      clearedSlots: 0,
+    })
+    await expect(usage.settleModelRequest(lateSuccess)).resolves.toEqual({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+  })
+
+  it('refunds an unstarted Answer reservation at its logical deadline', async () => {
+    let currentTime = new Date(NOW)
+    const usage = controller(
+      { ...DEFAULT_CONFIG, modelLeaseSeconds: 335 },
+      () => new Date(currentTime),
+    )
+    const reservationInput = answerReservation()
+    await createDivisionShell(
+      OWNER,
+      MATURE_GAME_ID,
+      'How should an unstarted Answer time out without a provider charge?',
+    )
+
+    await usage.reserveModelRequest(reservationInput)
+    currentTime = new Date(NOW.valueOf() + 299_999)
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 0,
+      clearedSlots: 0,
+    })
+    currentTime = new Date(NOW.valueOf() + 300_000)
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 1,
+      clearedSlots: 1,
+    })
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 0,
+      clearedSlots: 0,
+    })
+
+    const settled = await database.adapter.query({
+      text: `
+        SELECT
+          requests.status,
+          requests.failure_code,
+          requests.provider_started_at,
+          requests.completed_at,
+          (
+            SELECT used
+            FROM usage_buckets
+            WHERE subject_type = 'user'
+              AND subject_key = $2::text
+              AND metric = 'model_requests'
+          ) AS model_used,
+          (
+            SELECT reserved
+            FROM usage_buckets
+            WHERE subject_type = 'user'
+              AND subject_key = $2::text
+              AND metric = 'model_requests'
+          ) AS model_reserved,
+          (
+            SELECT count(*)::integer
+            FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+        FROM model_requests AS requests
+        WHERE requests.id = $1::uuid
+      `,
+      values: [REQUEST_ID, OWNER],
+    })
+    expect(settled.rows).toEqual([{
+      status: 'failed',
+      failure_code: 'answer_operation_timeout_before_provider',
+      provider_started_at: null,
+      completed_at: currentTime,
+      model_used: '0',
+      model_reserved: '0',
+      occupied_slots: 0,
+    }])
+
+    await expect(usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })).resolves.toEqual({
+      ok: false,
+      code: 'INVALID_REQUEST_STATE',
+      httpStatus: 409,
+    })
+  })
+
+  it('releases a deadline-barred Answer with timeout provenance before dispatch', async () => {
+    let currentTime = new Date(NOW)
+    const usage = controller(
+      { ...DEFAULT_CONFIG, modelLeaseSeconds: 335 },
+      () => new Date(currentTime),
+    )
+    await createDivisionShell(
+      OWNER,
+      MATURE_GAME_ID,
+      'Can provider dispatch begin at the durable Answer cutoff?',
+    )
+    await usage.reserveModelRequest(answerReservation())
+    currentTime = new Date(NOW.valueOf() + 300_000)
+
+    await expect(usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })).resolves.toEqual({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+    await expect(usage.releaseReservation({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      reason: 'provider_not_started',
+    })).resolves.toEqual({ ok: true, released: true })
+    await expect(usage.releaseReservation({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      reason: 'provider_not_started',
+    })).resolves.toEqual({ ok: true, released: false })
+
+    const settled = await database.adapter.query({
+      text: `
+        SELECT status, failure_code, provider_started_at,
+          (
+            SELECT used
+            FROM usage_buckets
+            WHERE subject_type = 'user'
+              AND subject_key = $2::text
+              AND metric = 'model_requests'
+          ) AS model_used,
+          (
+            SELECT count(*)::integer
+            FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+        FROM model_requests
+        WHERE id = $1::uuid
+      `,
+      values: [REQUEST_ID, OWNER],
+    })
+    expect(settled.rows).toEqual([{
+      status: 'failed',
+      failure_code: 'answer_operation_timeout_before_provider',
+      provider_started_at: null,
+      model_used: '0',
+      occupied_slots: 0,
+    }])
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 0,
+      clearedSlots: 0,
+    })
   })
 
   it('returns the same duplicate-success rejection on an exact settlement retry', async () => {
@@ -1476,7 +2050,8 @@ describe('durable usage accounting against PostgreSQL', () => {
           result_payload,
           completed_at,
           created_at,
-          updated_at
+          updated_at,
+          operation_deadline_at
         )
         VALUES
           (
@@ -1496,7 +2071,8 @@ describe('durable usage accounting against PostgreSQL', () => {
             '{"kind":"answer","answer":"winner"}'::jsonb,
             $9::timestamptz,
             $9::timestamptz - interval '1 minute',
-            $9::timestamptz
+            $9::timestamptz,
+            $9::timestamptz + interval '5 minutes'
           ),
           (
             $2::uuid,
@@ -1515,7 +2091,8 @@ describe('durable usage accounting against PostgreSQL', () => {
             NULL,
             NULL,
             $9::timestamptz,
-            $9::timestamptz
+            $9::timestamptz,
+            $9::timestamptz + interval '145 seconds'
           )
       `,
       values: [
@@ -2218,6 +2795,7 @@ describe('durable usage accounting against PostgreSQL', () => {
         idempotencyKey: OTHER_IDEMPOTENCY_KEY,
         requestSha256: 'f'.repeat(64),
         countsAsGameStart: false,
+        operationDeadlineAt: new Date(NOW.valueOf() + 300_000),
         leaseExpiresAtCap: new Date(NOW.valueOf() + 335_000),
         ipAddress: '198.51.100.60',
       }),

@@ -64,9 +64,16 @@ export interface ReserveModelRequestInput {
   readonly promptVersion: string
   readonly softwareVersion: string
   /**
-   * Fixed durable-recovery boundary for one logical Answer operation. It is
-   * established when Answer enters, not when a late reservation is written.
-   * Required for Answer and forbidden for every other model operation.
+   * Immutable logical cutoff for one Answer operation. Provider success must
+   * be durably committed before this instant. Required for Answer and
+   * forbidden for every other model operation.
+   */
+  readonly operationDeadlineAt?: Date
+  /**
+   * Fixed lease/fence boundary for one Answer operation. It is the logical
+   * cutoff plus response and settlement headroom, established when Answer
+   * enters rather than when a late reservation is written. Required for
+   * Answer and forbidden for every other model operation.
    */
   readonly leaseExpiresAtCap?: Date
   /**

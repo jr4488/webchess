@@ -180,9 +180,9 @@ unsupported. The owner applies pending files atomically under an advisory lock
 and records their normalized checksums. The supported local player does not run
 that deployment command or supply its credential: the OpenClaw launcher applies
 the canonical tail to its dedicated loopback database. Both paths reject any
-existing ledger that is not an exact checksum-matching prefix of the 18
+existing ledger that is not an exact checksum-matching prefix of the 19
 canonical migrations from `0001_durable_webchess` through
-`0018_align_answer_prompt_durable_limit`.
+`0019_durable_answer_operation_deadline`.
 
 Migration `0012` is upgrade-safe without a duplicate-data audit. It preserves
 all pre-`0012` rows with a null `charlotte_binding_version`, including duplicate
@@ -205,7 +205,11 @@ query, source, page, citation, and consent bounds are unchanged. Migration
 record to lifecycle runs while leaving legacy rows null. Migration `0018`
 aligns the exact Gate-approved Answer input with the shared 3,000,000-character
 durable model-prompt ceiling, closing the earlier 200,000-character persistence
-cap without changing model, research, or evidence bounds. These migrations do
+cap without changing model, research, or evidence bounds. Migration `0019`
+persists the immutable five-minute Answer cutoff separately from its brief
+response-and-settlement fence, so reserved or started work is reconciled to a
+retryable terminal state at the logical deadline instead of remaining
+`in_progress`. These migrations do
 not reinterpret missing consent as permission or old lifecycle data as a
 current directional record. Preserving rows and migration evidence is not a
 runtime compatibility promise: pre-v2.5 rows cannot authorize provider work,
@@ -236,11 +240,12 @@ Every configured Vercel build checks the runtime connection in a
 repeatable-read, read-only transaction. The check requires exact migration IDs
 and checksums; exactly 20 application tables plus the migration ledger—21 total—
 and their column names, types, and nullability; valid and ready definitions for
-all 12 contract indexes; exactly two origin-enabled, unfiltered
-`BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur trigger/function pairs, all 35
+all 12 contract indexes; exactly three origin-enabled, unfiltered trigger/
+function pairs—the two `BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur guards
+and the `BEFORE UPDATE FOR EACH ROW` model-request Answer-deadline guard—all 35
 reviewed pre-directional constraints plus the Gate-approved Answer-prompt
-constraint and four trajectory-record constraints—40 total—and all 11 reviewed
-defaults; and the exact
+constraint, four trajectory-record constraints, and the Answer-deadline
+constraint—41 total—and all 11 reviewed defaults; and the exact
 effective schema/table privilege allowlist, including access inherited through
 memberships or `PUBLIC`. The indexes cover the current game, succeeded
 operation, one run per game, one current-bound Wilbur action per Charlotte
@@ -516,9 +521,11 @@ single-generation HTTP route allow 35 additional seconds—335 seconds total: up
 to 5 seconds to drain the loopback response after the authenticated envelope,
 then 30 seconds for durable settlement. Neither grace period permits more
 provider work. Portia's multi-generation route remains separately bounded.
-
 Answer also has a separate hard 300-second logical-operation deadline across
 its initial turn and, only after contract-invalid output, one corrective turn.
+The cutoff is captured at Answer HTTP route entry before authentication,
+service initialization, and body parsing, so the route's 335-second cap cannot
+silently consume its 35-second response-and-settlement fence.
 Each actual provider turn retains its 150-second ceiling, but neither bridge
 request restarts or extends the aggregate Answer deadline. A provider hang,
 lost response, process interruption, or expired deadline therefore settles or

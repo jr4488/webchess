@@ -1071,16 +1071,26 @@ class AnswerOperationDeadlineError extends OpenClawProviderError {
   }
 }
 
-function durableAnswerOperationDeadline(): {
+function durableAnswerOperationDeadline(operationDeadlineAt: Date): {
   readonly assertBeforeDeadline: () => void
   readonly deadlineAt: number
   readonly dispose: () => void
   readonly expired: Promise<never>
   readonly leaseExpiresAtCap: Date
+  readonly operationDeadlineAt: Date
   readonly signal: AbortSignal
 } {
   const controller = new AbortController()
-  const deadlineAt = Date.now() + ANSWER_OPERATION_TIMEOUT_MS
+  const startedAt = Date.now()
+  const deadlineAt = operationDeadlineAt.valueOf()
+  if (!Number.isFinite(deadlineAt)) {
+    throw new TypeError('Answer operationDeadlineAt must be a valid date.')
+  }
+  if (deadlineAt > startedAt + ANSWER_OPERATION_TIMEOUT_MS) {
+    throw new TypeError(
+      'Answer operationDeadlineAt cannot extend beyond the five-minute route window.',
+    )
+  }
   let timer!: ReturnType<typeof setTimeout>
   let rejectExpired!: (error: AnswerOperationDeadlineError) => void
   let deadlineError: AnswerOperationDeadlineError | null = null
@@ -1095,7 +1105,7 @@ function durableAnswerOperationDeadline(): {
     rejectExpired = reject
     timer = setTimeout(() => {
       expire()
-    }, ANSWER_OPERATION_TIMEOUT_MS)
+    }, Math.max(0, deadlineAt - startedAt))
   })
   // The timer starts at Answer entry, before provider work begins. Keep its
   // rejection observed even when setup returns early or reaches the deadline
@@ -1118,6 +1128,7 @@ function durableAnswerOperationDeadline(): {
         MODEL_REQUEST_RESPONSE_GRACE_MS +
         MODEL_SETTLEMENT_GRACE_MS,
     ),
+    operationDeadlineAt: new Date(deadlineAt),
     signal: controller.signal,
   }
 }
@@ -3242,7 +3253,9 @@ export function createApiServicesWithDependencies(
     },
 
     answer(input) {
-      const providerDeadline = durableAnswerOperationDeadline()
+      const providerDeadline = durableAnswerOperationDeadline(
+        input.operationDeadlineAt,
+      )
       return apiOperation(async () => {
         providerDeadline.assertBeforeDeadline()
         let terminal = await dependencies.repository.getTerminalReplay(
@@ -3341,6 +3354,7 @@ export function createApiServicesWithDependencies(
           model: modelName(dependencies),
           promptVersion: ANSWER_PROMPT_VERSION,
           softwareVersion: dependencies.softwareVersion,
+          operationDeadlineAt: providerDeadline.operationDeadlineAt,
           leaseExpiresAtCap: providerDeadline.leaseExpiresAtCap,
           countsAsGameStart: false,
           ipAddress: input.ipAddress,

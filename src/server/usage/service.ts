@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import type { SqlResult, SqlRow } from '../db/sql'
+import { MODEL_SETTLEMENT_HEADROOM_MS } from '../model-operation-timeouts'
 import {
   hashDeletedUserKey,
   hashIpRateKey,
@@ -290,6 +291,14 @@ function validateReservationInput(input: ReserveModelRequestInput): void {
   }
   if (input.operation === 'answer') {
     if (
+      !(input.operationDeadlineAt instanceof Date) ||
+      !Number.isFinite(input.operationDeadlineAt.valueOf())
+    ) {
+      throw new TypeError(
+        'Answer requests require a valid fixed operationDeadlineAt.',
+      )
+    }
+    if (
       !(input.leaseExpiresAtCap instanceof Date) ||
       !Number.isFinite(input.leaseExpiresAtCap.valueOf())
     ) {
@@ -297,9 +306,20 @@ function validateReservationInput(input: ReserveModelRequestInput): void {
         'Answer requests require a valid fixed leaseExpiresAtCap.',
       )
     }
-  } else if (input.leaseExpiresAtCap !== undefined) {
+    if (
+      input.leaseExpiresAtCap.valueOf() !==
+      input.operationDeadlineAt.valueOf() + MODEL_SETTLEMENT_HEADROOM_MS
+    ) {
+      throw new TypeError(
+        'Answer leaseExpiresAtCap must equal operationDeadlineAt plus the fixed settlement headroom.',
+      )
+    }
+  } else if (
+    input.operationDeadlineAt !== undefined ||
+    input.leaseExpiresAtCap !== undefined
+  ) {
     throw new TypeError(
-      'leaseExpiresAtCap is only valid for Answer requests.',
+      'operationDeadlineAt and leaseExpiresAtCap are only valid for Answer requests.',
     )
   }
 }
@@ -467,6 +487,10 @@ export function createUsageController(
   dependencies: UsageControllerDependencies,
 ): UsageController {
   const { db, config } = dependencies
+  // Production transitions must sample PostgreSQL's wall clock only after the
+  // transaction-wide advisory lock is held. Tests that inject a clock retain
+  // deterministic boundary control.
+  const useDatabaseClock = dependencies.now === undefined
   const now = dependencies.now ?? (() => new Date())
   const nextUuid = dependencies.randomUuid ?? randomUUID
 
@@ -484,7 +508,10 @@ export function createUsageController(
       const results = await db.transaction(
         [
           buildAcquireUsageLockStatement(),
-          buildCleanupExpiredLeasesStatement(requestedAt),
+          buildCleanupExpiredLeasesStatement(
+            requestedAt,
+            useDatabaseClock,
+          ),
           buildCleanupExpiredRateBucketsStatement(requestedAt),
           buildEnsureUsageBucketsStatement(
             input.userId,
@@ -887,6 +914,7 @@ export function createUsageController(
               config.deletionHmacSecret,
               input.userId,
             ),
+            useDatabaseClock,
           }),
         ],
         { isolationLevel: 'ReadCommitted' },
@@ -939,6 +967,7 @@ export function createUsageController(
           buildAcquireUsageLockStatement(),
           buildSettleModelRequestStatement(input, {
             now: now(),
+            useDatabaseClock,
           }),
         ],
         { isolationLevel: 'ReadCommitted' },
@@ -948,6 +977,17 @@ export function createUsageController(
         throw new Error('Settlement transaction returned no result.')
       }
       const row = firstRow<DecisionRow>(transactionResult)
+
+      if (
+        row.code === 'TIMEOUT_ENRICH' ||
+        row.code === 'TIMEOUT_ALREADY_RECORDED'
+      ) {
+        return {
+          ok: false,
+          code: 'LEASE_EXPIRED',
+          httpStatus: 410,
+        }
+      }
 
       if (row.code === 'ALLOW' || row.code === 'ALREADY_SETTLED') {
         return {
@@ -981,6 +1021,7 @@ export function createUsageController(
           buildAcquireUsageLockStatement(),
           buildReleaseReservationStatement(input, {
             now: now(),
+            useDatabaseClock,
           }),
         ],
         { isolationLevel: 'ReadCommitted' },
@@ -1015,7 +1056,7 @@ export function createUsageController(
       const result = await db.transaction(
         [
           buildAcquireUsageLockStatement(),
-          buildCleanupExpiredLeasesStatement(now()),
+          buildCleanupExpiredLeasesStatement(now(), useDatabaseClock),
         ],
         { isolationLevel: 'ReadCommitted' },
       )
@@ -1045,7 +1086,10 @@ export function createUsageController(
       const result = await db.transaction(
         [
           buildAcquireUsageLockStatement(),
-          buildCleanupExpiredLeasesStatement(requestedAt),
+          buildCleanupExpiredLeasesStatement(
+            requestedAt,
+            useDatabaseClock,
+          ),
           buildDeleteAccountGamesStatement(
             userId,
             requestedAt,

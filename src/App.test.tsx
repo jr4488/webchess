@@ -63,6 +63,11 @@ function createDeferred<T>(): Deferred<T> {
   }
 }
 
+function requireAbortSignal(signal: AbortSignal | null): AbortSignal {
+  if (!signal) throw new Error('The expected request signal was not captured.')
+  return signal
+}
+
 const engineHarness = vi.hoisted(() => ({
   deferred: false,
   pending: [] as DeferredEngineRequest[],
@@ -1000,11 +1005,17 @@ describe('durable WebChess client flow', () => {
       game: DurableGame
       answer: GeneratedAnswer
     }>()
+    let foregroundSignal: AbortSignal | null = null
     serverGame = completed
     apiHarness.getGameLifecycle.mockResolvedValue(
       makeLifecycle('gate_passed', { portia: true, gate: true }),
     )
-    apiHarness.requestGameAnswer.mockImplementationOnce(async () => {
+    apiHarness.requestGameAnswer.mockImplementationOnce(async (
+      _gameId: string,
+      _command: RevisionCommand,
+      options: { signal: AbortSignal },
+    ) => {
+      foregroundSignal = options.signal
       serverGame = answering
       return foregroundAnswer.promise
     })
@@ -1017,14 +1028,19 @@ describe('durable WebChess client flow', () => {
 
     expect(apiHarness.getCurrentGame).toHaveBeenCalledOnce()
     expect(apiHarness.requestGameAnswer).toHaveBeenCalledOnce()
+    const activeForegroundSignal = requireAbortSignal(foregroundSignal)
 
-    await act(() => vi.advanceTimersByTimeAsync(1_499))
-    await flushAsyncWork()
-    expect(apiHarness.getCurrentGame).toHaveBeenCalledOnce()
+    for (let poll = 1; poll <= 3; poll += 1) {
+      await act(() => vi.advanceTimersByTimeAsync(1_500))
+      await flushAsyncWork()
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      await flushAsyncWork()
 
-    await act(() => vi.advanceTimersByTimeAsync(1))
-    await flushAsyncWork()
-    expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(2)
+      expect(apiHarness.getCurrentGame).toHaveBeenCalledTimes(poll + 1)
+      expect(apiHarness.getGameLifecycle).toHaveBeenCalledOnce()
+      expect(apiHarness.requestGameAnswer).toHaveBeenCalledOnce()
+      expect(activeForegroundSignal.aborted).toBe(false)
+    }
 
     serverGame = answered
     foregroundAnswer.resolve({ game: answered, answer: ANSWER })
@@ -1032,6 +1048,46 @@ describe('durable WebChess client flow', () => {
 
     expect(apiHarness.requestGameAnswer).toHaveBeenCalledOnce()
     expect(screen.getByText(ANSWER.answer)).toBeInTheDocument()
+  })
+
+  it('aborts an in-flight foreground lifecycle mutation on unmount', async () => {
+    vi.useFakeTimers()
+    const completed = moveGame(
+      makeTerminalReadyGame(),
+      'white-rook-1',
+      { ring: 0, sector: 4 },
+    )
+    const pendingAnswer = createDeferred<{
+      game: DurableGame
+      answer: GeneratedAnswer
+    }>()
+    let foregroundSignal: AbortSignal | null = null
+    serverGame = completed
+    apiHarness.getGameLifecycle.mockResolvedValue(
+      makeLifecycle('gate_passed', { portia: true, gate: true }),
+    )
+    apiHarness.requestGameAnswer.mockImplementationOnce(async (
+      _gameId: string,
+      _command: RevisionCommand,
+      options: { signal: AbortSignal },
+    ) => {
+      foregroundSignal = options.signal
+      return pendingAnswer.promise
+    })
+
+    const mounted = render(<OpenClawApp />)
+    for (let index = 0; index < 4; index += 1) {
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      await flushAsyncWork()
+    }
+
+    expect(apiHarness.requestGameAnswer).toHaveBeenCalledOnce()
+    const activeForegroundSignal = requireAbortSignal(foregroundSignal)
+    expect(activeForegroundSignal.aborted).toBe(false)
+
+    mounted.unmount()
+
+    expect(activeForegroundSignal.aborted).toBe(true)
   })
 
   it('gives a foreground answer restore priority over the next silent poll', async () => {

@@ -121,4 +121,20 @@ describe('principal-bound API service selection', () => {
     expect(harness.getOpenClawServices).toHaveBeenCalledOnce()
     expect(harness.createHostedServices).not.toHaveBeenCalled()
   })
+
+  it('rechecks cached OpenClaw reconciliation readiness on every request', async () => {
+    harness.localMode.mockReturnValue(true)
+    harness.getOpenClawServices
+      .mockResolvedValueOnce({ kind: 'openclaw' })
+      .mockRejectedValueOnce(new Error('durable reconciliation unavailable'))
+    const { getApiServices } = await import('./services')
+
+    await expect(getApiServices('local-openclaw')).resolves.toEqual({
+      kind: 'openclaw',
+    })
+    await expect(getApiServices('local-openclaw')).rejects.toThrow(
+      'durable reconciliation unavailable',
+    )
+    expect(harness.getOpenClawServices).toHaveBeenCalledTimes(2)
+  })
 })

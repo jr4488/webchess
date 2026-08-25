@@ -8,8 +8,10 @@ const harness = vi.hoisted(() => ({
   createUsageController: vi.fn(),
   loadUsageConfig: vi.fn(),
   readFile: vi.fn(),
+  reconcileExpiredLeases: vi.fn(),
   readdir: vi.fn(),
   runMigrations: vi.fn(),
+  startUsageReconciliationWatchdog: vi.fn(),
 }))
 
 vi.mock('server-only', () => ({}))
@@ -47,6 +49,10 @@ vi.mock('@/server/research', () => ({
 vi.mock('@/server/usage', () => ({
   createUsageController: harness.createUsageController,
   loadUsageConfig: harness.loadUsageConfig,
+}))
+vi.mock('./usage-reconciliation-watchdog', () => ({
+  startUsageReconciliationWatchdog:
+    harness.startUsageReconciliationWatchdog,
 }))
 
 const ENVIRONMENT_KEYS = [
@@ -103,8 +109,16 @@ beforeEach(() => {
   harness.readFile.mockImplementation(async (path: unknown) =>
     `-- migration ${String(path)}`)
   harness.loadUsageConfig.mockReturnValue({ hmacSecret: 'test-hmac-secret' })
-  harness.createUsageController.mockReturnValue({ kind: 'usage-controller' })
+  harness.reconcileExpiredLeases.mockResolvedValue({
+    expiredRequests: 0,
+    clearedSlots: 0,
+  })
+  harness.createUsageController.mockReturnValue({
+    kind: 'usage-controller',
+    reconcileExpiredLeases: harness.reconcileExpiredLeases,
+  })
   harness.runMigrations.mockResolvedValue(undefined)
+  harness.startUsageReconciliationWatchdog.mockReturnValue(vi.fn())
   harness.createApiServices.mockReturnValue({ kind: 'api-services' })
   harness.createPostgresSqlAdapter.mockReturnValue(databaseWithRow({
     has_migration_ledger: false,
@@ -312,9 +326,62 @@ describe('OpenClaw durable service bootstrap', () => {
         softwareVersion: 'webchess@2.2.0-rc.1-openclaw',
       }),
     )
+    expect(harness.reconcileExpiredLeases).toHaveBeenCalledOnce()
+    expect(
+      harness.reconcileExpiredLeases.mock.invocationCallOrder[0],
+    ).toBeLessThan(harness.createApiServices.mock.invocationCallOrder[0] ?? 0)
+    expect(harness.startUsageReconciliationWatchdog).toHaveBeenCalledOnce()
+    expect(
+      harness.createApiServices.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      harness.startUsageReconciliationWatchdog.mock.invocationCallOrder[0] ?? 0,
+    )
     expect(harness.createPostgresSqlAdapter).toHaveBeenCalledOnce()
     expect(database.query).toHaveBeenCalledTimes(2)
     expect(database.close).not.toHaveBeenCalled()
+  })
+
+  it('fails cached readiness closed after a watchdog error and recovers on success', async () => {
+    const database = databaseWithRow({
+      has_migration_ledger: true,
+      relation_count: 74,
+      schema_name: 'public',
+      unexpected_relation: null,
+    })
+    harness.createPostgresSqlAdapter.mockReturnValue(database)
+    const services = { kind: 'webchess-services' }
+    harness.createApiServices.mockReturnValue(services)
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const {
+      getOpenClawApiServices,
+      getOpenClawDatabaseStatus,
+    } = await loadServicesModule()
+
+    await expect(getOpenClawApiServices()).resolves.toBe(services)
+    const watchdogOptions = harness.startUsageReconciliationWatchdog
+      .mock.calls[0]?.[1] as {
+        reportFailure?: () => void
+        reportSuccess?: () => void
+      } | undefined
+    watchdogOptions?.reportFailure?.()
+
+    await expect(getOpenClawApiServices()).rejects.toMatchObject({
+      reason: 'unavailable',
+    })
+    await expect(getOpenClawDatabaseStatus()).rejects.toMatchObject({
+      reason: 'unavailable',
+    })
+    expect(harness.createPostgresSqlAdapter).toHaveBeenCalledOnce()
+    expect(consoleError).toHaveBeenCalledWith(
+      'OpenClaw durable lease reconciliation failed; a bounded retry is scheduled.',
+    )
+
+    watchdogOptions?.reportSuccess?.()
+    await expect(getOpenClawApiServices()).resolves.toBe(services)
+    await expect(getOpenClawDatabaseStatus()).resolves.toMatchObject({
+      available: true,
+    })
+    expect(harness.createPostgresSqlAdapter).toHaveBeenCalledOnce()
   })
 
   it('closes PostgreSQL and allows a clean retry when initialization fails', async () => {
@@ -345,5 +412,27 @@ describe('OpenClaw durable service bootstrap', () => {
 
     expect(failedDatabase.close).toHaveBeenCalledOnce()
     expect(recoveredDatabase.close).not.toHaveBeenCalled()
+  })
+
+  it('fails closed before composing routes when startup reconciliation fails', async () => {
+    const database = databaseWithRow({
+      has_migration_ledger: true,
+      relation_count: 74,
+      schema_name: 'public',
+      unexpected_relation: null,
+    })
+    harness.createPostgresSqlAdapter.mockReturnValue(database)
+    harness.reconcileExpiredLeases.mockRejectedValueOnce(
+      new Error('durable reconciliation failed'),
+    )
+    const { getOpenClawApiServices } = await loadServicesModule()
+
+    await expect(getOpenClawApiServices()).rejects.toThrow(
+      'durable reconciliation failed',
+    )
+
+    expect(harness.createApiServices).not.toHaveBeenCalled()
+    expect(harness.startUsageReconciliationWatchdog).not.toHaveBeenCalled()
+    expect(database.close).toHaveBeenCalledOnce()
   })
 })

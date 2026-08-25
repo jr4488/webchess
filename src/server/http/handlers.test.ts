@@ -342,6 +342,38 @@ describe('authenticated API handlers', () => {
     expect(services.answer).not.toHaveBeenCalled()
   })
 
+  it('threads only the trusted route-entry Answer deadline', async () => {
+    const operationDeadlineAt = new Date('2026-08-25T19:05:00.000Z')
+    const response = await handleAnswerRequest(
+      request(`/api/games/${GAME_ID}/answer`, {
+        body: { expectedRevision: 3 },
+      }),
+      GAME_ID,
+      { ...dependencies, operationDeadlineAt },
+    )
+
+    expect(response.status).toBe(200)
+    expect(services.answer).toHaveBeenCalledWith(
+      expect.objectContaining({ operationDeadlineAt }),
+    )
+  })
+
+  it('rejects a client-supplied Answer operation deadline', async () => {
+    const response = await handleAnswerRequest(
+      request(`/api/games/${GAME_ID}/answer`, {
+        body: {
+          expectedRevision: 3,
+          operationDeadlineAt: '2099-01-01T00:00:00.000Z',
+        },
+      }),
+      GAME_ID,
+      dependencies,
+    )
+
+    expect(response.status).toBe(400)
+    expect(services.answer).not.toHaveBeenCalled()
+  })
+
   it.each([null, -1, 3, 1.5])(
     'rejects invalid Charlotte suggestion index %s for a new Wilbur action',
     async (charlotteActionIndex) => {

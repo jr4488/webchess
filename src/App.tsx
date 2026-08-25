@@ -237,6 +237,7 @@ function WebChessExperience({
   const [lifecycleMode, setLifecycleMode] = useState<LifecycleMode>('loading')
   const [lifecycleBusy, setLifecycleBusy] = useState(false)
   const [lifecycleError, setLifecycleError] = useState('')
+  const [lifecycleRetryGeneration, setLifecycleRetryGeneration] = useState(0)
   const [actionPendingIndex, setActionPendingIndex] = useState<number | null>(null)
   const [wilburPending, setWilburPending] = useState(false)
   const [webMemory, setWebMemory] = useState<WebMemoryIndex | null>(null)
@@ -252,7 +253,8 @@ function WebChessExperience({
   const restoreRequestGenerationRef = useRef(0)
   const divisionRequestRef = useRef<AbortController | null>(null)
   const answerRequestRef = useRef<AbortController | null>(null)
-  const lifecycleRequestRef = useRef<AbortController | null>(null)
+  const lifecycleReadRequestRef = useRef<AbortController | null>(null)
+  const lifecycleMutationRequestRef = useRef<AbortController | null>(null)
   const webMemoryRequestRef = useRef<AbortController | null>(null)
   const movePendingRef = useRef(false)
   const divisionIntentRef = useRef<{
@@ -319,8 +321,10 @@ function WebChessExperience({
     divisionRequestRef.current = null
     answerRequestRef.current?.abort()
     answerRequestRef.current = null
-    lifecycleRequestRef.current?.abort()
-    lifecycleRequestRef.current = null
+    lifecycleReadRequestRef.current?.abort()
+    lifecycleReadRequestRef.current = null
+    lifecycleMutationRequestRef.current?.abort()
+    lifecycleMutationRequestRef.current = null
     divisionIntentRef.current = null
     answerIntentRef.current = null
     replayIntentRef.current = null
@@ -372,6 +376,7 @@ function WebChessExperience({
     setLifecycleMode('loading')
     setLifecycleBusy(false)
     setLifecycleError('')
+    setLifecycleRetryGeneration(0)
     setActionPendingIndex(null)
     setWilburPending(false)
     setSelectedMemoryObservationIds([])
@@ -590,7 +595,10 @@ function WebChessExperience({
       ) return
 
       if (current) {
-        applyDurableGame(current)
+        applyDurableGame(current, {
+          preserveLifecycle:
+            silent && lifecycleMutationRequestRef.current !== null,
+        })
       } else {
         resetGameState()
         setGame(null)
@@ -744,7 +752,8 @@ function WebChessExperience({
     invalidateRestoreRequest()
     divisionRequestRef.current?.abort()
     answerRequestRef.current?.abort()
-    lifecycleRequestRef.current?.abort()
+    lifecycleReadRequestRef.current?.abort()
+    lifecycleMutationRequestRef.current?.abort()
     webMemoryRequestRef.current?.abort()
   }, [invalidateRestoreRequest])
 
@@ -952,9 +961,9 @@ function WebChessExperience({
   const refreshLifecycle = useCallback(async (): Promise<LifecycleAggregate | null> => {
     const current = game
     if (!current || !outcome) return null
-    lifecycleRequestRef.current?.abort()
+    lifecycleReadRequestRef.current?.abort()
     const controller = new AbortController()
-    lifecycleRequestRef.current = controller
+    lifecycleReadRequestRef.current = controller
     setLifecycleBusy(true)
     setLifecycleError('')
     try {
@@ -1042,9 +1051,9 @@ function WebChessExperience({
       )
       return null
     } finally {
-      if (lifecycleRequestRef.current === controller) {
-        lifecycleRequestRef.current = null
-        setLifecycleBusy(false)
+      if (lifecycleReadRequestRef.current === controller) {
+        lifecycleReadRequestRef.current = null
+        if (!lifecycleMutationRequestRef.current) setLifecycleBusy(false)
       }
     }
   }, [game, outcome, runtime.api, runtime.signInPath])
@@ -1072,7 +1081,7 @@ function WebChessExperience({
     if (lifecycle.state === 'charlotte_unavailable') {
       charlotteIntentRef.current = null
       lifecycleBackoffMsRef.current = 0
-      lifecycleRequestRef.current?.abort()
+      lifecycleMutationRequestRef.current?.abort()
       return
     }
 
@@ -1100,7 +1109,7 @@ function WebChessExperience({
     )
     const timer = window.setTimeout(() => {
       const controller = new AbortController()
-      lifecycleRequestRef.current = controller
+      lifecycleMutationRequestRef.current = controller
       setLifecycleBusy(true)
       const existingIntent = portiaState
         ? portiaIntentRef.current
@@ -1177,6 +1186,8 @@ function WebChessExperience({
             setAnswerError(error.message)
             setAnswerStatus('error')
             setAnswerActivity(null)
+          } else {
+            setLifecycleRetryGeneration((current) => current + 1)
           }
           return
         }
@@ -1200,6 +1211,7 @@ function WebChessExperience({
                 : 1_500,
             ),
           )
+          setLifecycleRetryGeneration((current) => current + 1)
           return
         }
         if (portiaState) portiaIntentRef.current = null
@@ -1211,9 +1223,9 @@ function WebChessExperience({
             : 'The lifecycle stage could not be completed.',
         )
       }).finally(() => {
-        if (lifecycleRequestRef.current === controller) {
-          lifecycleRequestRef.current = null
-          setLifecycleBusy(false)
+        if (lifecycleMutationRequestRef.current === controller) {
+          lifecycleMutationRequestRef.current = null
+          if (!lifecycleReadRequestRef.current) setLifecycleBusy(false)
         }
       })
     }, delay)
@@ -1225,6 +1237,7 @@ function WebChessExperience({
     lifecycleBusy,
     lifecycleError,
     lifecycleMode,
+    lifecycleRetryGeneration,
     outcome,
     runtime.api,
     stage,
@@ -1720,7 +1733,7 @@ function WebChessExperience({
       : { gameId: current.id, key: runtime.api.createIdempotencyKey() }
     answerIntentRef.current = intent
     const controller = new AbortController()
-    lifecycleRequestRef.current = controller
+    lifecycleMutationRequestRef.current = controller
     setLifecycleBusy(true)
     setLifecycleError('')
     setAnswerError('')
@@ -1756,9 +1769,9 @@ function WebChessExperience({
       setAnswerStatus('error')
       setAnswerActivity(null)
     } finally {
-      if (lifecycleRequestRef.current === controller) {
-        lifecycleRequestRef.current = null
-        setLifecycleBusy(false)
+      if (lifecycleMutationRequestRef.current === controller) {
+        lifecycleMutationRequestRef.current = null
+        if (!lifecycleReadRequestRef.current) setLifecycleBusy(false)
       }
     }
   }

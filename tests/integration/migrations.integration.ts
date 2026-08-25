@@ -29,6 +29,7 @@ const EXPECTED_MIGRATION_IDS = [
   '0016_extend_research_timeout_to_five_minutes',
   '0017_trajectory_directional_record',
   '0018_align_answer_prompt_durable_limit',
+  '0019_durable_answer_operation_deadline',
 ] as const
 
 beforeAll(async () => {
@@ -100,6 +101,122 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
       { slot: 3, enabled: true },
       { slot: 4, enabled: true },
     ])
+  })
+
+  it('backfills and guards the explicit durable Answer deadline', async () => {
+    const upgrade = await createPostgresTestDatabase(
+      'answer_operation_deadline_upgrade',
+    )
+    try {
+      const deadlineMigrationIndex = durableWebChessMigrations.findIndex(
+        (migration) =>
+          migration.id === '0019_durable_answer_operation_deadline',
+      )
+      const priorMigrations = durableWebChessMigrations.slice(
+        0,
+        deadlineMigrationIndex,
+      )
+      const deadlineMigration = durableWebChessMigrations[
+        deadlineMigrationIndex
+      ]
+      if (!deadlineMigration) {
+        throw new Error('The durable Answer deadline migration is missing.')
+      }
+      await runMigrations(upgrade.adapter, priorMigrations)
+
+      const owner = 'user_answer_deadline_upgrade'
+      const requestId = '65000000-0000-4000-8000-000000000001'
+      const leaseToken = '65000000-0000-4000-8000-000000000002'
+      const createdAt = new Date('2026-08-25T12:00:00.000Z')
+      const leaseExpiresAt = new Date(createdAt.valueOf() + 335_000)
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO user_controls (clerk_user_id)
+          VALUES ($1::text)
+        `,
+        values: [owner],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO model_requests (
+            id, clerk_user_id, operation, idempotency_key,
+            request_sha256, status, provider, model, prompt_version,
+            software_version, provider_started_at, created_at, updated_at
+          )
+          VALUES (
+            $1::uuid, $2::text, 'answer', $1::uuid,
+            repeat('a', 64), 'in_progress', 'openclaw',
+            'gpt-5.6-sol', 'answer-v1', 'upgrade-test',
+            $3::timestamptz, $3::timestamptz, $3::timestamptz
+          )
+        `,
+        values: [requestId, owner, createdAt.toISOString()],
+      })
+      await upgrade.adapter.query({
+        text: `
+          UPDATE model_concurrency_slots
+          SET request_id = $1::uuid,
+              clerk_user_id = $2::text,
+              lease_token = $3::uuid,
+              lease_expires_at = $4::timestamptz
+          WHERE slot = 1
+        `,
+        values: [
+          requestId,
+          owner,
+          leaseToken,
+          leaseExpiresAt.toISOString(),
+        ],
+      })
+
+      await expect(runMigrations(upgrade.adapter, durableWebChessMigrations))
+        .resolves.toEqual({
+          applied: ['0019_durable_answer_operation_deadline'],
+          alreadyApplied: priorMigrations.map((migration) => migration.id),
+        })
+
+      const persisted = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT operation_deadline_at
+          FROM model_requests
+          WHERE id = $1::uuid
+        `,
+        values: [requestId],
+      })
+      expect(persisted.rows).toEqual([{
+        operation_deadline_at: new Date(createdAt.valueOf() + 300_000),
+      }])
+
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE model_requests
+          SET operation_deadline_at = operation_deadline_at + interval '1 second'
+          WHERE id = $1::uuid
+        `,
+        values: [requestId],
+      })).rejects.toMatchObject({ code: '23514' })
+
+      await expect(upgrade.adapter.query({
+        text: `
+          INSERT INTO model_requests (
+            id, clerk_user_id, operation, idempotency_key,
+            request_sha256, status, provider, model, prompt_version,
+            software_version
+          )
+          VALUES (
+            '65000000-0000-4000-8000-000000000003', $1::text,
+            'answer', '65000000-0000-4000-8000-000000000003',
+            repeat('b', 64), 'reserved', 'openclaw',
+            'gpt-5.6-sol', 'answer-v1', 'upgrade-test'
+          )
+        `,
+        values: [owner],
+      })).rejects.toMatchObject({
+        constraint: 'model_requests_operation_deadline_valid',
+      })
+    } finally {
+      await upgrade.dispose()
+    }
   })
 
   it('upgrades the Gate-approved Answer prompt from 200000 to the shared 3000000-character ceiling', async () => {
@@ -186,7 +303,10 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
       await expect(
         runMigrations(upgrade.adapter, durableWebChessMigrations),
       ).resolves.toEqual({
-        applied: ['0018_align_answer_prompt_durable_limit'],
+        applied: [
+          '0018_align_answer_prompt_durable_limit',
+          '0019_durable_answer_operation_deadline',
+        ],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })
 
@@ -1089,6 +1209,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
           '0016_extend_research_timeout_to_five_minutes',
           '0017_trajectory_directional_record',
           '0018_align_answer_prompt_durable_limit',
+          '0019_durable_answer_operation_deadline',
         ],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })
@@ -1247,6 +1368,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
           '0016_extend_research_timeout_to_five_minutes',
           '0017_trajectory_directional_record',
           '0018_align_answer_prompt_durable_limit',
+          '0019_durable_answer_operation_deadline',
         ],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })

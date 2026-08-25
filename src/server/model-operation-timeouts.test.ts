@@ -11,6 +11,7 @@ import {
   MODEL_REQUEST_ENVELOPE_TIMEOUT_MS,
   MODEL_REQUEST_RESPONSE_GRACE_MS,
   MODEL_SETTLEMENT_GRACE_MS,
+  MODEL_SETTLEMENT_HEADROOM_MS,
   MODEL_TURN_TIMEOUT_MS,
 } from './model-operation-timeouts'
 
@@ -21,6 +22,7 @@ describe('model operation timeout envelope', () => {
     expect(MODEL_REQUEST_ENVELOPE_TIMEOUT_MS).toBe(300_000)
     expect(MODEL_REQUEST_RESPONSE_GRACE_MS).toBe(5_000)
     expect(MODEL_SETTLEMENT_GRACE_MS).toBe(30_000)
+    expect(MODEL_SETTLEMENT_HEADROOM_MS).toBe(35_000)
     expect(MIN_MODEL_LEASE_SECONDS).toBe(335)
   })
 
@@ -33,4 +35,5 @@ describe('model operation timeout envelope', () => {
     const source = readFileSync(resolve(process.cwd(), route), 'utf8')
     expect(source).toContain(`export const maxDuration = ${MIN_MODEL_LEASE_SECONDS}`)
   })
+
 })

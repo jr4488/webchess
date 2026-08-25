@@ -27,10 +27,12 @@ interface BeginQueryContext {
   readonly now: Date
   readonly leaseExpiresAt: Date
   readonly deletedUserKey: string
+  readonly useDatabaseClock: boolean
 }
 
 interface SettlementQueryContext {
   readonly now: Date
+  readonly useDatabaseClock: boolean
 }
 
 const RESERVATION_LOCK =
@@ -58,6 +60,13 @@ WITH
 lock_gate AS MATERIALIZED (
   SELECT ${RESERVATION_LOCK} AS held
 ),
+effective_time AS MATERIALIZED (
+  SELECT CASE
+    WHEN $2::boolean THEN clock_timestamp()
+    ELSE $1::timestamptz
+  END AS at
+  FROM lock_gate
+),
 expired AS MATERIALIZED (
   SELECT
     slots.slot,
@@ -66,14 +75,24 @@ expired AS MATERIALIZED (
     requests.clerk_user_id,
     requests.operation,
     requests.status,
-    requests.created_at
+    requests.created_at,
+    requests.operation_deadline_at
   FROM model_concurrency_slots AS slots
   JOIN model_requests AS requests ON requests.id = slots.request_id
-  CROSS JOIN lock_gate
+  CROSS JOIN effective_time
   WHERE
     slots.request_id IS NOT NULL
-    AND slots.lease_expires_at <= $1::timestamptz
     AND requests.status IN ('reserved', 'in_progress')
+    AND (
+      slots.lease_expires_at <= effective_time.at
+      OR (
+        requests.operation = 'answer'
+        -- The 300s logical Answer deadline is durable and authoritative. The
+        -- longer lease remains held only as response/settlement headroom.
+        -- Reserved work is refunded; started work settles indeterminate.
+        AND requests.operation_deadline_at <= effective_time.at
+      )
+    )
   FOR UPDATE OF slots, requests
 ),
 expired_counts AS MATERIALIZED (
@@ -94,7 +113,7 @@ refund_model AS (
       buckets.reserved - counts.reserved_count,
       0
     ),
-    updated_at = $1::timestamptz
+    updated_at = (SELECT at FROM effective_time)
   FROM (
     SELECT clerk_user_id, bucket_start, sum(reserved_count) AS reserved_count
     FROM expired_counts
@@ -115,7 +134,7 @@ refund_global_model AS (
       buckets.reserved - counts.reserved_count,
       0
     ),
-    updated_at = $1::timestamptz
+    updated_at = (SELECT at FROM effective_time)
   FROM (
     SELECT bucket_start, sum(reserved_count) AS reserved_count
     FROM expired_counts
@@ -137,7 +156,7 @@ finalize_games AS (
       buckets.reserved - counts.reserved_count - counts.started_count,
       0
     ),
-    updated_at = $1::timestamptz
+    updated_at = (SELECT at FROM effective_time)
   FROM expired_counts AS counts
   WHERE
     counts.operation = 'division'
@@ -157,11 +176,16 @@ expire_requests AS (
     END,
     failure_code = CASE
       WHEN requests.status = 'reserved'
+        AND requests.operation = 'answer'
+        THEN 'answer_operation_timeout_before_provider'
+      WHEN requests.status = 'reserved'
         THEN 'lease_expired_before_provider'
+      WHEN requests.operation = 'answer'
+        THEN 'answer_operation_timeout'
       ELSE 'provider_outcome_unknown'
     END,
-    completed_at = $1::timestamptz,
-    updated_at = $1::timestamptz
+    completed_at = (SELECT at FROM effective_time),
+    updated_at = (SELECT at FROM effective_time)
   FROM expired
   WHERE requests.id = expired.request_id
   RETURNING requests.id
@@ -187,10 +211,13 @@ SELECT
   (SELECT count(*) FROM clear_slots) AS cleared_slots
 `
 
-export function buildCleanupExpiredLeasesStatement(now: Date): SqlStatement {
+export function buildCleanupExpiredLeasesStatement(
+  now: Date,
+  useDatabaseClock = false,
+): SqlStatement {
   return {
     text: cleanupExpiredLeasesSql,
-    values: [now.toISOString()],
+    values: [now.toISOString(), useDatabaseClock],
   }
 }
 
@@ -1287,6 +1314,7 @@ inserted_request AS (
     model,
     prompt_version,
     software_version,
+    operation_deadline_at,
     created_at,
     updated_at
   )
@@ -1302,6 +1330,7 @@ inserted_request AS (
     $8::text,
     $9::text,
     $10::text,
+    $29::timestamptz,
     $13::timestamptz,
     $13::timestamptz
   FROM decision
@@ -1437,6 +1466,7 @@ export function buildReserveModelRequestStatement(
       config.hourlyGameStartLimit,
       config.hourlyIpGameStartLimit,
       input.leaseExpiresAtCap?.toISOString() ?? null,
+      input.operationDeadlineAt?.toISOString() ?? null,
     ],
   }
 }
@@ -2129,6 +2159,13 @@ WITH
 lock_gate AS MATERIALIZED (
   SELECT ${RESERVATION_LOCK} AS held
 ),
+effective_time AS MATERIALIZED (
+  SELECT CASE
+    WHEN $7::boolean THEN clock_timestamp()
+    ELSE $4::timestamptz
+  END AS at
+  FROM lock_gate
+),
 deletion_barrier AS MATERIALIZED (
   SELECT tombstones.user_key_hash
   FROM deleted_user_tombstones AS tombstones
@@ -2159,6 +2196,7 @@ request_state AS MATERIALIZED (
     requests.operation,
     requests.status,
     requests.created_at,
+    requests.operation_deadline_at,
     slots.slot,
     slots.lease_token,
     slots.lease_expires_at
@@ -2179,7 +2217,7 @@ decision AS MATERIALIZED (
       THEN 'ACCOUNT_SUSPENDED'
     WHEN
       account_state.blocked_until IS NOT NULL
-      AND account_state.blocked_until > $4::timestamptz
+      AND account_state.blocked_until > (SELECT at FROM effective_time)
       THEN 'ACCOUNT_TEMPORARILY_BLOCKED'
     WHEN NOT EXISTS (SELECT 1 FROM request_state)
       THEN 'REQUEST_NOT_FOUND'
@@ -2189,7 +2227,13 @@ decision AS MATERIALIZED (
       (SELECT lease_token FROM request_state) IS NULL
       OR (SELECT lease_token::text FROM request_state) <> $3::text
       THEN 'LEASE_MISMATCH'
-    WHEN (SELECT lease_expires_at FROM request_state) <= $4::timestamptz
+    WHEN
+      (SELECT operation FROM request_state) = 'answer'
+      AND (SELECT operation_deadline_at FROM request_state)
+        <= (SELECT at FROM effective_time)
+      THEN 'LEASE_EXPIRED'
+    WHEN (SELECT lease_expires_at FROM request_state)
+      <= (SELECT at FROM effective_time)
       THEN 'LEASE_EXPIRED'
     WHEN (SELECT status FROM request_state) = 'in_progress'
       THEN 'ALREADY_STARTED'
@@ -2202,7 +2246,7 @@ consume_model_reservation AS (
   SET
     used = buckets.used + 1,
     reserved = greatest(buckets.reserved - 1, 0),
-    updated_at = $4::timestamptz
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, decision
   WHERE
     decision.code = 'ALLOW'
@@ -2223,7 +2267,7 @@ consume_global_model_reservation AS (
   SET
     used = buckets.used + 1,
     reserved = greatest(buckets.reserved - 1, 0),
-    updated_at = $4::timestamptz
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, decision
   WHERE
     decision.code = 'ALLOW'
@@ -2243,8 +2287,11 @@ start_request AS (
   UPDATE model_requests AS requests
   SET
     status = 'in_progress',
-    provider_started_at = coalesce(provider_started_at, $4::timestamptz),
-    updated_at = $4::timestamptz
+    provider_started_at = coalesce(
+      provider_started_at,
+      (SELECT at FROM effective_time)
+    ),
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, decision
   WHERE
     decision.code IN ('ALLOW', 'ALREADY_STARTED')
@@ -2256,7 +2303,9 @@ extend_lease AS (
   SET lease_expires_at = CASE
     WHEN request_state.operation = 'answer'
       THEN request_state.lease_expires_at
-    ELSE $5::timestamptz
+    ELSE
+      (SELECT at FROM effective_time) +
+      ($5::timestamptz - $4::timestamptz)
   END
   FROM request_state, start_request
   WHERE
@@ -2290,6 +2339,7 @@ export function buildBeginProviderCallStatement(
       context.now.toISOString(),
       context.leaseExpiresAt.toISOString(),
       context.deletedUserKey,
+      context.useDatabaseClock,
     ],
   }
 }
@@ -2299,6 +2349,13 @@ WITH
 lock_gate AS MATERIALIZED (
   SELECT ${RESERVATION_LOCK} AS held
 ),
+effective_time AS MATERIALIZED (
+  SELECT CASE
+    WHEN $18::boolean THEN clock_timestamp()
+    ELSE $9::timestamptz
+  END AS at
+  FROM lock_gate
+),
 request_state AS MATERIALIZED (
   SELECT
     requests.id,
@@ -2306,6 +2363,7 @@ request_state AS MATERIALIZED (
     requests.operation,
     requests.status,
     requests.created_at,
+    requests.operation_deadline_at,
     requests.provider_response_id,
     requests.response_sha256,
     requests.failure_code,
@@ -2340,6 +2398,49 @@ other_success AS MATERIALIZED (
     AND requests.status = 'succeeded'
     AND requests.id <> request_state.id
   LIMIT 1
+),
+timeout_provenance AS MATERIALIZED (
+  SELECT
+    request_state.status = 'indeterminate'
+      AND request_state.operation = 'answer'
+      AND request_state.failure_code = 'answer_operation_timeout'
+      AS terminal_timeout,
+    request_state.provider_response_id IS NOT DISTINCT FROM $5::text
+      AND request_state.provider_http_status
+        IS NOT DISTINCT FROM $8::smallint
+      AND request_state.usage_reported = $17::boolean
+      AND request_state.input_tokens IS NOT DISTINCT FROM $10::bigint
+      AND request_state.cached_input_tokens
+        IS NOT DISTINCT FROM $11::bigint
+      AND request_state.cache_write_input_tokens
+        IS NOT DISTINCT FROM $12::bigint
+      AND request_state.output_tokens IS NOT DISTINCT FROM $13::bigint
+      AND request_state.reasoning_tokens IS NOT DISTINCT FROM $14::bigint
+      AND request_state.total_tokens IS NOT DISTINCT FROM $15::bigint
+      AS exact,
+    (
+      request_state.provider_response_id IS NULL
+      OR request_state.provider_response_id = $5::text
+    )
+      AND (
+        request_state.provider_http_status IS NULL
+        OR request_state.provider_http_status = $8::smallint
+      )
+      AND (
+        NOT request_state.usage_reported
+        OR (
+          $17::boolean
+          AND request_state.input_tokens IS NOT DISTINCT FROM $10::bigint
+          AND request_state.cached_input_tokens
+            IS NOT DISTINCT FROM $11::bigint
+          AND request_state.cache_write_input_tokens
+            IS NOT DISTINCT FROM $12::bigint
+          AND request_state.output_tokens IS NOT DISTINCT FROM $13::bigint
+          AND request_state.reasoning_tokens IS NOT DISTINCT FROM $14::bigint
+          AND request_state.total_tokens IS NOT DISTINCT FROM $15::bigint
+        )
+      ) AS compatible
+  FROM request_state
 ),
 decision AS MATERIALIZED (
   SELECT CASE
@@ -2376,6 +2477,16 @@ decision AS MATERIALIZED (
       AND (SELECT total_tokens FROM request_state)
         IS NOT DISTINCT FROM $15::bigint
       THEN 'ALREADY_SETTLED'
+    WHEN
+      (SELECT terminal_timeout FROM timeout_provenance)
+      AND (SELECT exact FROM timeout_provenance)
+      THEN 'TIMEOUT_ALREADY_RECORDED'
+    WHEN
+      (SELECT terminal_timeout FROM timeout_provenance)
+      AND (SELECT compatible FROM timeout_provenance)
+      THEN 'TIMEOUT_ENRICH'
+    WHEN (SELECT terminal_timeout FROM timeout_provenance)
+      THEN 'SETTLEMENT_CONFLICT'
     WHEN
       (SELECT status FROM request_state) = 'rejected'
       AND (SELECT failure_code FROM request_state)
@@ -2415,7 +2526,13 @@ decision AS MATERIALIZED (
     WHEN
       (SELECT lease_token::text FROM request_state) <> $3::text
       THEN 'SETTLEMENT_CONFLICT'
-    WHEN (SELECT lease_expires_at FROM request_state) <= $9::timestamptz
+    WHEN
+      (SELECT operation FROM request_state) = 'answer'
+      AND (SELECT operation_deadline_at FROM request_state)
+        <= (SELECT at FROM effective_time)
+      THEN 'LEASE_EXPIRED'
+    WHEN (SELECT lease_expires_at FROM request_state)
+      <= (SELECT at FROM effective_time)
       THEN 'LEASE_EXPIRED'
     WHEN EXISTS (SELECT 1 FROM other_success)
       THEN 'OPERATION_ALREADY_SUCCEEDED'
@@ -2427,7 +2544,7 @@ finalize_game_reservation AS (
   SET
     used = buckets.used + CASE WHEN $4::text = 'succeeded' THEN 1 ELSE 0 END,
     reserved = greatest(buckets.reserved - 1, 0),
-    updated_at = $9::timestamptz
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, decision
   WHERE
     decision.code = 'ALLOW'
@@ -2473,11 +2590,83 @@ settle_request AS (
       WHEN $4::text = 'succeeded' THEN $16::jsonb
       ELSE NULL
     END,
-    completed_at = $9::timestamptz,
-    updated_at = $9::timestamptz
+    completed_at = (SELECT at FROM effective_time),
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, decision
   WHERE
     decision.code = 'ALLOW'
+    AND requests.id = request_state.id
+  RETURNING requests.id
+),
+timeout_answer AS (
+  UPDATE model_requests AS requests
+  SET
+    status = 'indeterminate',
+    result_payload = NULL,
+    provider_response_id = $5::text,
+    response_sha256 = NULL,
+    failure_code = 'answer_operation_timeout',
+    provider_http_status = $8::smallint,
+    usage_reported = $17::boolean,
+    input_tokens = $10::bigint,
+    cached_input_tokens = $11::bigint,
+    cache_write_input_tokens = $12::bigint,
+    output_tokens = $13::bigint,
+    reasoning_tokens = $14::bigint,
+    total_tokens = $15::bigint,
+    completed_at = (SELECT at FROM effective_time),
+    updated_at = (SELECT at FROM effective_time)
+  FROM request_state, decision
+  WHERE
+    decision.code = 'LEASE_EXPIRED'
+    AND request_state.operation = 'answer'
+    AND request_state.status = 'in_progress'
+    AND request_state.operation_deadline_at
+      <= (SELECT at FROM effective_time)
+    AND requests.id = request_state.id
+  RETURNING requests.id
+),
+enrich_timeout_answer AS (
+  UPDATE model_requests AS requests
+  SET
+    status = 'indeterminate',
+    result_payload = NULL,
+    provider_response_id = coalesce(requests.provider_response_id, $5::text),
+    response_sha256 = NULL,
+    failure_code = 'answer_operation_timeout',
+    provider_http_status = coalesce(
+      requests.provider_http_status,
+      $8::smallint
+    ),
+    usage_reported = requests.usage_reported OR $17::boolean,
+    input_tokens = CASE
+      WHEN requests.usage_reported THEN requests.input_tokens
+      ELSE $10::bigint
+    END,
+    cached_input_tokens = CASE
+      WHEN requests.usage_reported THEN requests.cached_input_tokens
+      ELSE $11::bigint
+    END,
+    cache_write_input_tokens = CASE
+      WHEN requests.usage_reported THEN requests.cache_write_input_tokens
+      ELSE $12::bigint
+    END,
+    output_tokens = CASE
+      WHEN requests.usage_reported THEN requests.output_tokens
+      ELSE $13::bigint
+    END,
+    reasoning_tokens = CASE
+      WHEN requests.usage_reported THEN requests.reasoning_tokens
+      ELSE $14::bigint
+    END,
+    total_tokens = CASE
+      WHEN requests.usage_reported THEN requests.total_tokens
+      ELSE $15::bigint
+    END,
+    updated_at = (SELECT at FROM effective_time)
+  FROM request_state, decision
+  WHERE
+    decision.code = 'TIMEOUT_ENRICH'
     AND requests.id = request_state.id
   RETURNING requests.id
 ),
@@ -2497,8 +2686,8 @@ reject_duplicate_success AS (
     reasoning_tokens = $14::bigint,
     total_tokens = $15::bigint,
     failure_code = 'operation_already_succeeded',
-    completed_at = $9::timestamptz,
-    updated_at = $9::timestamptz
+    completed_at = (SELECT at FROM effective_time),
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, decision
   WHERE
     decision.code = 'OPERATION_ALREADY_SUCCEEDED'
@@ -2510,7 +2699,7 @@ release_duplicate_game_reservation AS (
   UPDATE usage_buckets AS buckets
   SET
     reserved = greatest(buckets.reserved - 1, 0),
-    updated_at = $9::timestamptz
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, reject_duplicate_success
   WHERE
     request_state.status = 'in_progress'
@@ -2530,6 +2719,8 @@ release_duplicate_game_reservation AS (
 ),
 completed_request AS (
   SELECT id FROM settle_request
+  UNION ALL
+  SELECT id FROM timeout_answer
   UNION ALL
   SELECT id FROM reject_duplicate_success
 ),
@@ -2551,6 +2742,8 @@ mutation_gate AS MATERIALIZED (
   SELECT
     (SELECT count(*) FROM finalize_game_reservation) AS finalized_games,
     (SELECT count(*) FROM settle_request) AS settled,
+    (SELECT count(*) FROM timeout_answer) AS timed_out_answers,
+    (SELECT count(*) FROM enrich_timeout_answer) AS enriched_timeouts,
     (SELECT count(*) FROM reject_duplicate_success) AS rejected_duplicates,
     (SELECT count(*) FROM release_duplicate_game_reservation)
       AS released_duplicate_games,
@@ -2591,6 +2784,7 @@ export function buildSettleModelRequestStatement(
       reportedUsage?.totalTokens ?? null,
       success ? JSON.stringify(input.resultPayload) : null,
       usage?.reported ?? false,
+      context.useDatabaseClock,
     ],
   }
 }
@@ -2600,6 +2794,13 @@ WITH
 lock_gate AS MATERIALIZED (
   SELECT ${RESERVATION_LOCK} AS held
 ),
+effective_time AS MATERIALIZED (
+  SELECT CASE
+    WHEN $6::boolean THEN clock_timestamp()
+    ELSE $4::timestamptz
+  END AS at
+  FROM lock_gate
+),
 request_state AS MATERIALIZED (
   SELECT
     requests.id,
@@ -2607,6 +2808,7 @@ request_state AS MATERIALIZED (
     requests.status,
     requests.failure_code,
     requests.created_at,
+    requests.operation_deadline_at,
     slots.slot,
     slots.lease_token
   FROM model_requests AS requests
@@ -2624,7 +2826,16 @@ decision AS MATERIALIZED (
       THEN 'REQUEST_NOT_FOUND'
     WHEN
       (SELECT status FROM request_state) = 'failed'
-      AND (SELECT failure_code FROM request_state) = $5::text
+      AND (
+        (SELECT failure_code FROM request_state) = $5::text
+        OR (
+          (SELECT operation FROM request_state) = 'answer'
+          AND (SELECT operation_deadline_at FROM request_state)
+            <= (SELECT at FROM effective_time)
+          AND (SELECT failure_code FROM request_state)
+            = 'answer_operation_timeout_before_provider'
+        )
+      )
       THEN 'ALREADY_RELEASED'
     WHEN (SELECT status FROM request_state) NOT IN ('reserved', 'in_progress')
       THEN 'INVALID_REQUEST_STATE'
@@ -2656,7 +2867,7 @@ refund_model_reservation AS (
       END,
       0
     ),
-    updated_at = $4::timestamptz
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, decision
   WHERE
     decision.code = 'ALLOW'
@@ -2689,7 +2900,7 @@ refund_global_model_reservation AS (
       END,
       0
     ),
-    updated_at = $4::timestamptz
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, decision
   WHERE
     decision.code = 'ALLOW'
@@ -2709,7 +2920,7 @@ refund_game_reservation AS (
   UPDATE usage_buckets AS buckets
   SET
     reserved = greatest(buckets.reserved - 1, 0),
-    updated_at = $4::timestamptz
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, decision
   WHERE
     decision.code = 'ALLOW'
@@ -2730,13 +2941,20 @@ release_request AS (
   UPDATE model_requests AS requests
   SET
     status = 'failed',
-    failure_code = $5::text,
+    failure_code = CASE
+      WHEN
+        request_state.operation = 'answer'
+        AND request_state.operation_deadline_at
+          <= (SELECT at FROM effective_time)
+        THEN 'answer_operation_timeout_before_provider'
+      ELSE $5::text
+    END,
     provider_started_at = CASE
       WHEN request_state.status = 'in_progress' THEN NULL
       ELSE requests.provider_started_at
     END,
-    completed_at = $4::timestamptz,
-    updated_at = $4::timestamptz
+    completed_at = (SELECT at FROM effective_time),
+    updated_at = (SELECT at FROM effective_time)
   FROM request_state, decision
   WHERE
     decision.code = 'ALLOW'
@@ -2782,6 +3000,7 @@ export function buildReleaseReservationStatement(
       input.leaseToken,
       context.now.toISOString(),
       `released_${input.reason}`,
+      context.useDatabaseClock,
     ],
   }
 }

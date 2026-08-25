@@ -99,10 +99,10 @@ lease and each single-generation route allow 35 additional seconds—335 seconds
 total: up to 5 seconds to drain the loopback response after the authenticated
 envelope, then 30 seconds for durable settlement. Neither grace period permits
 more provider work. Portia's multi-generation route remains separately bounded.
-
 One logical Answer, including its initial turn and the one correction allowed
 only for contract-invalid output, has a separate hard 300-second aggregate
-deadline. Each actual provider turn retains its 150-second ceiling, but a new
+deadline captured before route authentication, service startup, and body
+parsing. Each actual provider turn retains its 150-second ceiling, but a new
 bridge request does not restart or extend the Answer deadline. A hang,
 interruption, lost response, or timeout must settle or reconcile during the
 drain-and-settlement headroom to a visible retryable Answer failure and release
@@ -123,10 +123,10 @@ billing route is not an accepted backstop.
 
 ## Migration and runtime roles
 
-The supported OpenClaw launcher owns local bootstrap: it applies all 18
+The supported OpenClaw launcher owns local bootstrap: it applies all 19
 canonical migrations, from
 `db/migrations/0001_durable_webchess.sql` through
-`db/migrations/0018_align_answer_prompt_durable_limit.sql`, to the dedicated
+`db/migrations/0019_durable_answer_operation_deadline.sql`, to the dedicated
 loopback database and rejects an existing ledger that is not an exact checksum-
 matching prefix. A local player must not run the hosted deployment migration
 owner or supply its credentials. `npm run db:migrate` is retained solely for the
@@ -166,10 +166,12 @@ The following least-privilege role details apply to the retained hosted design;
 they are not extra setup steps for the supported local player. Its runtime
 schema check expects 20 application tables plus
 `webchess_schema_migrations`—21 total—12 contract indexes, and the
-two exact, origin-enabled, unfiltered `BEFORE INSERT OR UPDATE FOR EACH ROW`
-Wilbur trigger/function pairs, all 40 reviewed constraints—including 18
-critical Wilbur constraints, the Gate-approved Answer-prompt constraint, and
-the four trajectory-record constraints—and all five `0013` defaults. Unexpected
+three exact, origin-enabled, unfiltered trigger/function pairs: two
+`BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur guards and one model-request
+`BEFORE UPDATE FOR EACH ROW` Answer-deadline guard. It also expects all 41 reviewed
+constraints—including 18 critical Wilbur constraints, the Gate-approved
+Answer-prompt constraint, the four trajectory-record constraints, and the
+Answer-deadline constraint—and all five `0013` defaults. Unexpected
 noninternal triggers, trigger arguments/filters,
 altered constraint shape, or disabled foreign-key enforcement fail the check.
 Lifecycle runs need table-level `SELECT`, `INSERT`,
@@ -308,14 +310,17 @@ launcher at hosted or production data.
 
 ## Rollback boundary
 
-The 18-migration history is append-only. Application rollback moves code back
+The 19-migration history is append-only. Application rollback moves code back
 but never reverses migration history or drops lifecycle data. Migration `0012`
 preserves legacy null-bound rows while protecting newly stamped bindings, and
 `0013` preserves committed or denied mutation history. Migrations `0014` and
 `0015` preserve Web-memory selection and research provenance; `0016` preserves
 the five-minute Search ceiling and `0017` preserves the trajectory-direction
 record. Migration `0018` raises only the Gate-approved Answer-input persistence
-ceiling to the shared 3,000,000-character model-prompt bound. Legacy v1 and
+ceiling to the shared 3,000,000-character model-prompt bound. Migration `0019`
+stores the immutable five-minute Answer cutoff independently from the brief
+response-and-settlement fence and reconciles an interrupted request to a
+retryable terminal state at that cutoff. Legacy v1 and
 pre-v2.5 rows remain only as historical database evidence; they are not
 supported gameplay, generation, replay/import, or mutation paths.
 Current lifecycle-v2.5 games fail closed if their lifecycle authority is

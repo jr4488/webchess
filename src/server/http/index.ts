@@ -28,6 +28,7 @@ export {
 export { ApiError } from './errors'
 export type {
   AccountUsageDto,
+  AnswerCommand,
   ApiOperationContext,
   DurableGameDto,
   HttpDependencies,

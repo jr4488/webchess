@@ -33,6 +33,7 @@ import {
   generateOpenClawDivisionV2,
   generateOpenClawPortiaV2,
 } from './v2-generation'
+import { startUsageReconciliationWatchdog } from './usage-reconciliation-watchdog'
 
 export interface OpenClawDatabaseStatus {
   available: true
@@ -67,6 +68,7 @@ export class OpenClawDatabaseReadinessError extends Error {
 
 interface OpenClawServiceState {
   database: OpenClawDatabaseStatus
+  reconciliationHealth: { healthy: boolean }
   services: WebChessApiServices
 }
 
@@ -162,6 +164,12 @@ async function createServices(): Promise<OpenClawServiceState> {
     const databaseStatus = await inspectPostgres17(database)
     await assertDedicatedLocalSchema(database)
     await runMigrations(database, migrations)
+    const usage = createUsageController({ db: database, config: usageConfig })
+    // Reconcile once before exposing any route. A process interruption may
+    // outlive the originating HTTP timer, but its persisted logical deadline
+    // remains authoritative and startup must settle it without provider work.
+    await usage.reconcileExpiredLeases()
+    const reconciliationHealth = { healthy: true }
     const researchRepository = new DurableResearchRepository(database)
     const services = createApiServicesWithDependencies({
       accountExportMaxBytes: 3_000_000,
@@ -179,12 +187,24 @@ async function createServices(): Promise<OpenClawServiceState> {
       softwareVersion: `webchess@${WEBCHESS_SOFTWARE_VERSION}-openclaw`,
       sourceCommit: configuredCaseSourceCommit(),
       runtimeArtifactSha256: configuredCaseRuntimeArtifactSha256(),
-      usage: createUsageController({ db: database, config: usageConfig }),
+      usage,
       wilburStorageRowLimit: 500,
       wilburStorageTextBytesLimit: 250_000,
     })
+    startUsageReconciliationWatchdog(usage, {
+      reportFailure: () => {
+        reconciliationHealth.healthy = false
+        console.error(
+          'OpenClaw durable lease reconciliation failed; a bounded retry is scheduled.',
+        )
+      },
+      reportSuccess: () => {
+        reconciliationHealth.healthy = true
+      },
+    })
     return {
       database: databaseStatus,
+      reconciliationHealth,
       services,
     }
   } catch (error) {
@@ -193,22 +213,28 @@ async function createServices(): Promise<OpenClawServiceState> {
   }
 }
 
-export async function getOpenClawApiServices(): Promise<WebChessApiServices> {
+async function getHealthyServiceState(): Promise<OpenClawServiceState> {
   servicesPromise ??= createServices()
+  let state: OpenClawServiceState
   try {
-    return (await servicesPromise).services
+    state = await servicesPromise
   } catch (error) {
     servicesPromise = null
     throw error
   }
+  if (!state.reconciliationHealth.healthy) {
+    throw new OpenClawDatabaseReadinessError(
+      'unavailable',
+      'Durable model-request reconciliation is temporarily unavailable.',
+    )
+  }
+  return state
+}
+
+export async function getOpenClawApiServices(): Promise<WebChessApiServices> {
+  return (await getHealthyServiceState()).services
 }
 
 export async function getOpenClawDatabaseStatus(): Promise<OpenClawDatabaseStatus> {
-  servicesPromise ??= createServices()
-  try {
-    return (await servicesPromise).database
-  } catch (error) {
-    servicesPromise = null
-    throw error
-  }
+  return (await getHealthyServiceState()).database
 }

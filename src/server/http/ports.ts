@@ -63,6 +63,11 @@ export interface RevisionCommand extends ApiOperationContext {
   expectedRevision: number
 }
 
+/** Trusted server-only Answer cutoff captured before route setup begins. */
+export interface AnswerCommand extends RevisionCommand {
+  operationDeadlineAt: Date
+}
+
 export interface MoveCommand extends RevisionCommand {
   pieceId: string
   to: {
@@ -131,7 +136,7 @@ export interface WebChessApiServices {
 
   move(input: MoveCommand): Promise<DurableGameDto>
 
-  answer(input: RevisionCommand): Promise<{
+  answer(input: AnswerCommand): Promise<{
     game: DurableGameDto
     answer: GeneratedAnswer
   }>

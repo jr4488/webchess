@@ -108,6 +108,7 @@ describe('deployment database migration tooling', () => {
       '0016_extend_research_timeout_to_five_minutes',
       '0017_trajectory_directional_record',
       '0018_align_answer_prompt_durable_limit',
+      '0019_durable_answer_operation_deadline',
     ])
     expect(migrations[0].sql).toContain('CREATE TABLE IF NOT EXISTS games')
     const researchMigration = migrations.find(
@@ -145,6 +146,10 @@ describe('deployment database migration tooling', () => {
       (migration) =>
         migration.id === '0018_align_answer_prompt_durable_limit',
     )
+    const answerOperationDeadlineMigration = migrations.find(
+      (migration) =>
+        migration.id === '0019_durable_answer_operation_deadline',
+    )
     expect(researchMigration?.sql).toContain(
       'CREATE TABLE IF NOT EXISTS research_requests',
     )
@@ -157,6 +162,9 @@ describe('deployment database migration tooling', () => {
     expect(answerPromptMigration?.sql).toContain('answer_user_prompt_sha256')
     expect(answerPromptLimitMigration?.sql).toContain(
       'char_length(answer_user_prompt) BETWEEN 1 AND 3000000',
+    )
+    expect(answerOperationDeadlineMigration?.sql).toContain(
+      'ADD COLUMN operation_deadline_at timestamptz',
     )
     expect(webMemoryMigration?.sql).toContain('CREATE TABLE web_memory_links')
     expect(webMemoryMigration?.sql).toContain('ADD COLUMN follow_up_at')
@@ -247,6 +255,17 @@ describe('deployment database migration tooling', () => {
     expect(
       columns.filter(({ table_name }) => table_name === 'research_sources'),
     ).toHaveLength(11)
+    const modelRequestColumns = columns.filter(
+      ({ table_name }) => table_name === 'model_requests',
+    )
+    expect(modelRequestColumns).toHaveLength(29)
+    expect(modelRequestColumns).toContainEqual(
+      expect.objectContaining({
+        column_name: 'operation_deadline_at',
+        data_type: 'timestamp with time zone',
+        not_null: false,
+      }),
+    )
     const lifecycleColumns = columns.filter(
       ({ table_name }) => table_name === 'lifecycle_runs',
     )
@@ -383,6 +402,30 @@ describe('deployment database migration tooling', () => {
 
     expect(triggers).toEqual([
       expect.objectContaining({
+        table_name: 'model_requests',
+        trigger_name: 'model_requests_operation_deadline_guard',
+        function_name: 'webchess_guard_model_request_deadline',
+        function_config: 'search_path=pg_catalog, pg_temp',
+        security_definer: false,
+        leakproof: false,
+        function_owner_isolated: true,
+        volatility: 'v',
+        parallel_mode: 'u',
+        enabled_mode: 'O',
+        trigger_type: 19,
+        has_when_clause: false,
+        update_columns: '',
+        argument_count: 0,
+        argument_bytes: 0,
+        constraint_trigger: false,
+        trigger_deferrable: false,
+        initially_deferred: false,
+        parent_trigger: false,
+        function_source: expect.stringContaining(
+          'A model request operation deadline is immutable.',
+        ),
+      }),
+      expect.objectContaining({
         table_name: 'wilbur_actions',
         trigger_name: 'wilbur_actions_charlotte_binding_guard',
         function_name: 'webchess_guard_wilbur_charlotte_binding',
@@ -455,9 +498,10 @@ describe('deployment database migration tooling', () => {
     ])
 
     for (const [index, filename] of [
-      [0, '0014_web_memory_feedback.sql'],
-      [1, '0013_wilbur_mutation_requests.sql'],
-      [2, '0017_trajectory_directional_record.sql'],
+      [0, '0019_durable_answer_operation_deadline.sql'],
+      [1, '0014_web_memory_feedback.sql'],
+      [2, '0013_wilbur_mutation_requests.sql'],
+      [3, '0017_trajectory_directional_record.sql'],
     ]) {
       const functionBody = readFileSync(
         join(process.cwd(), 'db', 'migrations', filename),
@@ -473,9 +517,19 @@ describe('deployment database migration tooling', () => {
     expect(probe.text).toContain(
       "'gate_decisions_answer_user_prompt_valid'",
     )
-    expect(constraints).toHaveLength(40)
+    expect(probe.text).toContain(
+      "'model_requests_operation_deadline_valid'",
+    )
+    expect(constraints).toHaveLength(41)
     expect(constraints).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          table_name: 'model_requests',
+          constraint_name: 'model_requests_operation_deadline_valid',
+          definition: expect.stringContaining(
+            'operation_deadline_at IS NOT NULL',
+          ),
+        }),
         expect.objectContaining({
           table_name: 'gate_decisions',
           constraint_name: 'gate_decisions_answer_user_prompt_valid',

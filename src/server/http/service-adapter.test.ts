@@ -1766,6 +1766,9 @@ function operationInput() {
     idempotencyKey: IDEMPOTENCY_KEY,
     requestId: REQUEST_ID,
     signal: new AbortController().signal,
+    operationDeadlineAt: new Date(
+      Date.now() + ANSWER_OPERATION_TIMEOUT_MS,
+    ),
   }
 }
 
@@ -1823,6 +1826,9 @@ function answerOperationInput() {
     idempotencyKey: IDEMPOTENCY_KEY,
     requestId: REQUEST_ID,
     signal: new AbortController().signal,
+    operationDeadlineAt: new Date(
+      Date.now() + ANSWER_OPERATION_TIMEOUT_MS,
+    ),
   }
 }
 
@@ -2980,6 +2986,9 @@ describe('durable HTTP service adapter', () => {
       idempotencyKey: IDEMPOTENCY_KEY,
       requestId: REQUEST_ID,
       signal: new AbortController().signal,
+      operationDeadlineAt: new Date(
+        Date.now() + ANSWER_OPERATION_TIMEOUT_MS,
+      ),
     })
 
     expect(result.answer).toEqual(STORED_ANSWER)
@@ -3103,6 +3112,9 @@ describe('durable HTTP service adapter', () => {
     expect(dependencies.usage.reserveModelRequest).toHaveBeenCalledWith(
       expect.objectContaining({
         operation: 'answer',
+        operationDeadlineAt: new Date(
+          startedAt + ANSWER_OPERATION_TIMEOUT_MS,
+        ),
         leaseExpiresAtCap: new Date(
           startedAt +
             ANSWER_OPERATION_TIMEOUT_MS +
@@ -3627,6 +3639,9 @@ describe('durable HTTP service adapter', () => {
       idempotencyKey: IDEMPOTENCY_KEY,
       requestId: REQUEST_ID,
       signal: new AbortController().signal,
+      operationDeadlineAt: new Date(
+        Date.now() + ANSWER_OPERATION_TIMEOUT_MS,
+      ),
     })).rejects.toMatchObject({
       code: 'UPSTREAM_FAILURE',
       status: 502,
@@ -3756,6 +3771,9 @@ describe('durable HTTP service adapter', () => {
       idempotencyKey: IDEMPOTENCY_KEY,
       requestId: REQUEST_ID,
       signal: new AbortController().signal,
+      operationDeadlineAt: new Date(
+        Date.now() + ANSWER_OPERATION_TIMEOUT_MS,
+      ),
     })
 
     expect(result.game.status).toBe('answered')
@@ -3791,6 +3809,9 @@ describe('durable HTTP service adapter', () => {
         idempotencyKey: IDEMPOTENCY_KEY,
         requestId: REQUEST_ID,
         signal: new AbortController().signal,
+        operationDeadlineAt: new Date(
+          Date.now() + ANSWER_OPERATION_TIMEOUT_MS,
+        ),
       }),
     ).rejects.toMatchObject({
       code: 'INTERNAL_ERROR',
@@ -5259,6 +5280,9 @@ describe('durable HTTP service adapter', () => {
       idempotencyKey: IDEMPOTENCY_KEY,
       requestId: REQUEST_ID,
       signal: new AbortController().signal,
+      operationDeadlineAt: new Date(
+        Date.now() + ANSWER_OPERATION_TIMEOUT_MS,
+      ),
     })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
 
     expect(dependencies.lifecycleRepository?.storeGate).not.toHaveBeenCalled()
@@ -5289,6 +5313,9 @@ describe('durable HTTP service adapter', () => {
       idempotencyKey: IDEMPOTENCY_KEY,
       requestId: REQUEST_ID,
       signal: new AbortController().signal,
+      operationDeadlineAt: new Date(
+        Date.now() + ANSWER_OPERATION_TIMEOUT_MS,
+      ),
     })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
 
     expect(dependencies.lifecycleRepository?.storeGate).not.toHaveBeenCalled()

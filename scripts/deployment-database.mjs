@@ -222,6 +222,7 @@ const RUNTIME_COLUMN_CONTRACT = {
     ['provider_http_status', 'smallint', false],
     ['created_at', 'timestamp with time zone', true],
     ['updated_at', 'timestamp with time zone', true],
+    ['operation_deadline_at', 'timestamp with time zone', false],
   ],
   game_start_requests: [
     ['idempotency_key', 'uuid', true],
@@ -755,7 +756,40 @@ const TRAJECTORY_DIRECTIONAL_RECORD_FUNCTION_SOURCE = normalizeFunctionSource(`
     END
   `)
 
+const MODEL_REQUEST_DEADLINE_FUNCTION_SOURCE = normalizeFunctionSource(`
+    BEGIN
+      IF NEW.operation_deadline_at IS DISTINCT FROM OLD.operation_deadline_at THEN
+        RAISE EXCEPTION 'A model request operation deadline is immutable.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      RETURN NEW;
+    END
+  `)
+
 const RUNTIME_TRIGGER_CONTRACT = [
+  {
+    table_name: 'model_requests',
+    trigger_name: 'model_requests_operation_deadline_guard',
+    function_name: 'webchess_guard_model_request_deadline',
+    function_source: MODEL_REQUEST_DEADLINE_FUNCTION_SOURCE,
+    function_config: 'search_path=pg_catalog, pg_temp',
+    security_definer: false,
+    leakproof: false,
+    function_owner_isolated: true,
+    volatility: 'v',
+    parallel_mode: 'u',
+    enabled_mode: 'O',
+    trigger_type: 19,
+    has_when_clause: false,
+    update_columns: '',
+    argument_count: 0,
+    argument_bytes: 0,
+    constraint_trigger: false,
+    trigger_deferrable: false,
+    initially_deferred: false,
+    parent_trigger: false,
+  },
   {
     table_name: 'wilbur_actions',
     trigger_name: 'wilbur_actions_charlotte_binding_guard',
@@ -825,6 +859,16 @@ const RUNTIME_TRIGGER_CONTRACT = [
 ]
 
 const RUNTIME_CONSTRAINT_CONTRACT = [
+  {
+    table_name: 'model_requests',
+    constraint_name: 'model_requests_operation_deadline_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (operation = 'answer'::text AND operation_deadline_at IS NOT NULL OR operation <> 'answer'::text AND operation_deadline_at IS NULL)",
+  },
   {
     table_name: 'gate_decisions',
     constraint_name: 'gate_decisions_answer_user_prompt_valid',
@@ -1616,6 +1660,7 @@ const RUNTIME_COMPATIBILITY_SQL = `
         'lifecycle_runs_trajectory_directional_record_complete',
         'lifecycle_runs_trajectory_directional_record_provenance_valid',
         'lifecycle_runs_trajectory_directional_record_shape_valid',
+        'model_requests_operation_deadline_valid',
         'research_requests_consent_shape',
         'research_requests_json_shapes',
         'research_requests_opt_out_shape',

@@ -349,6 +349,7 @@ describe('reservation lifecycle', () => {
 
   it('uses an explicit fixed lease cap for an Answer reservation', async () => {
     const db = new FakeSqlAdapter()
+    const operationDeadlineAt = new Date(NOW.valueOf() + 300_000)
     const leaseExpiresAtCap = new Date(NOW.valueOf() + 335_000)
     db.transactionResults = [
       sqlResult([{ held: null }]),
@@ -377,6 +378,7 @@ describe('reservation lifecycle', () => {
       operation: 'answer',
       promptVersion: 'answer-v1',
       countsAsGameStart: false,
+      operationDeadlineAt,
       leaseExpiresAtCap,
     })).resolves.toMatchObject({
       ok: true,
@@ -385,7 +387,12 @@ describe('reservation lifecycle', () => {
     })
 
     const statement = db.transactions[0]?.statements[4]
-    expect(statement?.values?.at(-1)).toBe(leaseExpiresAtCap.toISOString())
+    expect(statement?.values?.slice(-2)).toEqual([
+      leaseExpiresAtCap.toISOString(),
+      operationDeadlineAt.toISOString(),
+    ])
+    expect(statement?.text).toContain('$29::timestamptz')
+    expect(statement?.text).toContain('operation_deadline_at')
     expect(statement?.text).toContain('$28::timestamptz')
     expect(statement?.text).toContain("WHEN $4::text = 'answer' THEN least(")
   })
@@ -445,7 +452,7 @@ describe('reservation lifecycle', () => {
     expect(db.transactions).toHaveLength(0)
   })
 
-  it('rejects an Answer reservation without a fixed recovery cap', async () => {
+  it('rejects an Answer reservation without a fixed logical deadline', async () => {
     const db = new FakeSqlAdapter()
 
     await expect(controllerWith(db).reserveModelRequest({
@@ -454,7 +461,22 @@ describe('reservation lifecycle', () => {
       operation: 'answer',
       promptVersion: 'answer-v1',
       countsAsGameStart: false,
-    })).rejects.toThrow(/fixed leaseExpiresAtCap/u)
+    })).rejects.toThrow(/fixed operationDeadlineAt/u)
+    expect(db.transactions).toHaveLength(0)
+  })
+
+  it('rejects an Answer lease cap that is not exact settlement headroom', async () => {
+    const db = new FakeSqlAdapter()
+
+    await expect(controllerWith(db).reserveModelRequest({
+      ...reserveInput(),
+      gameId: REQUEST_ID,
+      operation: 'answer',
+      promptVersion: 'answer-v1',
+      countsAsGameStart: false,
+      operationDeadlineAt: new Date(NOW.valueOf() + 300_000),
+      leaseExpiresAtCap: new Date(NOW.valueOf() + 334_999),
+    })).rejects.toThrow(/fixed settlement headroom/u)
     expect(db.transactions).toHaveLength(0)
   })
 
@@ -918,7 +940,11 @@ describe('reservation lifecycle', () => {
     ])
     expect(statement?.text).toContain("decision.code = 'ALLOW'")
     expect(statement?.text).toContain("decision.code IN ('ALLOW', 'ALREADY_STARTED')")
-    expect(statement?.text).toContain('ELSE $5::timestamptz')
+    expect(statement?.text).toContain('WHEN $7::boolean THEN clock_timestamp()')
+    expect(statement?.text).toContain(
+      '$5::timestamptz - $4::timestamptz',
+    )
+    expect(statement?.values?.[6]).toBe(false)
   })
 
   it('never extends an Answer lease during an in-progress renewal', async () => {
@@ -1028,6 +1054,7 @@ describe('reservation lifecycle', () => {
       21,
       '{"facets":[]}',
       true,
+      false,
     ])
   })
 
@@ -1054,7 +1081,56 @@ describe('reservation lifecycle', () => {
     expect(db.transactions[0]?.statements[1]?.text).toBe(
       settleModelRequestSql,
     )
+    expect(settleModelRequestSql).toContain(
+      'request_state.operation_deadline_at\n      <= (SELECT at FROM effective_time)',
+    )
+    expect(settleModelRequestSql).toContain(
+      "failure_code = 'answer_operation_timeout'",
+    )
   })
+
+  it.each(['TIMEOUT_ENRICH', 'TIMEOUT_ALREADY_RECORDED'] as const)(
+    'keeps cleanup-first late Answer provenance terminal for %s',
+    async (code) => {
+      const db = new FakeSqlAdapter()
+      db.transactionResults = [
+        sqlResult([{ held: null }]),
+        sqlResult([{ code }]),
+      ]
+
+      await expect(controllerWith(db).settleModelRequest({
+        userId: USER_ID,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+        outcome: 'succeeded',
+        providerResponseId: 'resp_after_reconciliation',
+        responseSha256: '9'.repeat(64),
+        resultPayload: { answer: 'must remain discarded' },
+        usage: {
+          reported: true,
+          inputTokens: 11,
+          cachedInputTokens: 2,
+          cacheWriteInputTokens: 1,
+          outputTokens: 7,
+          reasoningTokens: 3,
+          totalTokens: 18,
+        },
+      })).resolves.toEqual({
+        ok: false,
+        code: 'LEASE_EXPIRED',
+        httpStatus: 410,
+      })
+
+      expect(settleModelRequestSql).toContain(
+        "decision.code = 'TIMEOUT_ENRICH'",
+      )
+      expect(settleModelRequestSql).toContain(
+        'provider_response_id = coalesce(requests.provider_response_id, $5::text)',
+      )
+      expect(settleModelRequestSql).toContain('result_payload = NULL')
+      expect(settleModelRequestSql).toContain('response_sha256 = NULL')
+    },
+  )
 
   it('persists and idempotently compares a sanitized failed-response provider ID', async () => {
     const db = new FakeSqlAdapter()
@@ -1240,6 +1316,12 @@ describe('reservation lifecycle', () => {
       "WHEN request_state.status = 'in_progress' THEN 1",
     )
     expect(statement?.text).toContain('provider_started_at = CASE')
+    expect(statement?.text).toContain(
+      'request_state.operation_deadline_at\n          <= (SELECT at FROM effective_time)',
+    )
+    expect(statement?.text).toContain(
+      "THEN 'answer_operation_timeout_before_provider'",
+    )
   })
 
   it('reconciles expired leases through the durable lock protocol', async () => {
@@ -1255,6 +1337,41 @@ describe('reservation lifecycle', () => {
       expiredRequests: 2,
       clearedSlots: 2,
     })
+    const statement = db.transactions[0]?.statements[1]
+    expect(statement?.text).toBe(cleanupExpiredLeasesSql)
+    expect(statement?.text).toContain(
+      'requests.operation_deadline_at <= effective_time.at',
+    )
+    expect(statement?.values).toEqual([NOW.toISOString(), false])
+    expect(statement?.text).toContain(
+      "THEN 'answer_operation_timeout_before_provider'",
+    )
+    expect(statement?.text).toContain(
+      "THEN 'answer_operation_timeout'",
+    )
+  })
+
+  it('uses PostgreSQL wall clock after the durable lock in production', async () => {
+    const db = new FakeSqlAdapter()
+    db.transactionResults = [
+      sqlResult([{ held: null }]),
+      sqlResult([{ code: 'LEASE_EXPIRED' }]),
+    ]
+    const usage = createUsageController({
+      db,
+      config: CONFIG,
+      randomUuid: () => LEASE_TOKEN,
+    })
+
+    await expect(usage.beginProviderCall({
+      userId: USER_ID,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })).resolves.toMatchObject({ code: 'LEASE_EXPIRED' })
+
+    const statement = db.transactions[0]?.statements[1]
+    expect(statement?.values?.[6]).toBe(true)
+    expect(statement?.text).toContain('WHEN $7::boolean THEN clock_timestamp()')
   })
 
   it('blocks self deletion only for in-progress work and lets verified force win', async () => {

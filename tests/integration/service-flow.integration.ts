@@ -517,6 +517,7 @@ describe('complete API service flow against PostgreSQL', () => {
       ...operationContext(ANSWER_REQUEST_ID),
       idempotencyKey: operationId(900),
       requestId: ANSWER_REQUEST_ID,
+      operationDeadlineAt: new Date(Date.now() + 300_000),
     })
     game = answered.game
     expect(game.status).toBe('answered')

@@ -8,7 +8,6 @@ import type {
   WebChessDataControlServices,
 } from './ports'
 
-let apiServicesPromise: Promise<WebChessApiServices> | null = null
 let dataControlServicesPromise: Promise<WebChessDataControlServices> | null = null
 
 async function loadOpenClawApiServices(): Promise<WebChessApiServices> {
@@ -69,16 +68,8 @@ export async function getApiServices(
     )
   }
 
-  if (apiServicesPromise === null) {
-    apiServicesPromise = loadOpenClawApiServices()
-  }
-
-  try {
-    return await apiServicesPromise
-  } catch (error) {
-    // A missing environment variable can be fixed between local requests and a
-    // transient initialization failure must not poison a warm instance forever.
-    apiServicesPromise = null
-    throw error
-  }
+  // The OpenClaw module owns service composition caching and performs a fresh
+  // durable-reconciliation health check on every retrieval. Do not cache its
+  // resolved graph here or a later watchdog failure could be bypassed.
+  return loadOpenClawApiServices()
 }

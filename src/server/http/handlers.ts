@@ -3,6 +3,7 @@ import 'server-only'
 import type { NextRequest } from 'next/server'
 import { verifyWebhook } from '@clerk/nextjs/webhooks'
 import { requireApiUser, verifySameOriginMutation } from '@/server/auth'
+import { ANSWER_OPERATION_TIMEOUT_MS } from '@/server/model-operation-timeouts'
 import {
   appendWilburObservationBodySchema,
   caseExportBodySchema,
@@ -39,7 +40,10 @@ import {
 } from './responses'
 import { getApiServices, getDataControlServices } from './services'
 
-type HandlerDependencies = Partial<HttpDependencies>
+interface HandlerDependencies extends Partial<HttpDependencies> {
+  /** Trusted route-entry cutoff; never parsed from request JSON. */
+  operationDeadlineAt?: Date
+}
 
 interface DataControlHandlerDependencies {
   authenticate?: HttpDependencies['authenticate']
@@ -323,6 +327,8 @@ export function handleAnswerRequest(
   rawGameId: string,
   dependencies?: HandlerDependencies,
 ): Promise<Response> {
+  const operationDeadlineAt = dependencies?.operationDeadlineAt ??
+    new Date(Date.now() + ANSWER_OPERATION_TIMEOUT_MS)
   return runAuthenticated(
     request,
     true,
@@ -333,6 +339,7 @@ export function handleAnswerRequest(
         ...operationContext(scope, request),
         gameId,
         expectedRevision: body.expectedRevision,
+        operationDeadlineAt,
       })
 
       return jsonResponse(result)
