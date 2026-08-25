@@ -2,8 +2,10 @@
 
 import { describe, expect, it } from 'vitest'
 
+import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../../types'
 import {
   deletedUserTombstoneRowSchema,
+  gateDecisionRowSchema,
   gameEventRowSchema,
   gameRowSchema,
   gameStartRequestRowSchema,
@@ -35,6 +37,28 @@ function result(rows: readonly SqlRow[]): SqlResult {
 }
 
 describe('database row validators', () => {
+  it('accepts the shared durable Answer-prompt ceiling and rejects one character more', () => {
+    const row = {
+      id: REQUEST_ID,
+      clerk_user_id: 'user_test',
+      lifecycle_run_id: GAME_ID,
+      algorithm_version: 'webchess-gate-v5-directional',
+      input_digest: HASH,
+      passed: true,
+      result: {},
+      answer_user_prompt: 'x'.repeat(MAX_PERSISTED_MODEL_PROMPT_CHARS),
+      answer_user_prompt_sha256: HASH,
+      created_at: NOW,
+    }
+
+    expect(gateDecisionRowSchema.safeParse(row).success).toBe(true)
+    expect(gateDecisionRowSchema.safeParse({
+      ...row,
+      answer_user_prompt:
+        `${row.answer_user_prompt}x`,
+    }).success).toBe(false)
+  })
+
   it('normalizes timestamps and PostgreSQL bigint strings', () => {
     expect(
       deletedUserTombstoneRowSchema.parse({

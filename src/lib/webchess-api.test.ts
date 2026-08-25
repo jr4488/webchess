@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -20,6 +22,7 @@ import {
 } from './webchess-api'
 import type { DurableGame } from './webchess-api'
 import { RESEARCH_CONSENT_VERSION } from './research/contracts'
+import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../types'
 
 const GAME_ID = '123e4567-e89b-42d3-a456-426614174000'
 const IDEMPOTENCY_KEYS = [
@@ -245,6 +248,10 @@ function jsonResponse(value: unknown, status = 200, headers?: HeadersInit): Resp
       ...headers,
     },
   })
+}
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
 }
 
 function requestInit(fetchMock: ReturnType<typeof vi.fn>, call: number): RequestInit {
@@ -792,11 +799,12 @@ describe('durable WebChess browser API', () => {
   })
 
   it('accepts the exact player-visible Answer prompt with Gate provenance', async () => {
+    const answerUserPrompt = '{\n  "reviewed_prompt": "exact approved input"\n}'
     const lifecycle = {
       ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
       state: 'gate_passed',
-      answerUserPrompt: '{\n  "reviewed_prompt": "exact approved input"\n}',
-      answerUserPromptSha256: 'e'.repeat(64),
+      answerUserPrompt,
+      answerUserPromptSha256: sha256Hex(answerUserPrompt),
       gate: { passed: true },
     }
     vi.stubGlobal(
@@ -807,15 +815,74 @@ describe('durable WebChess browser API', () => {
     await expect(getGameLifecycle(GAME_ID)).resolves.toEqual(lifecycle)
   })
 
+  it('accepts a Gate-approved Answer prompt at the shared durable ceiling', async () => {
+    const answerUserPrompt = 'x'.repeat(MAX_PERSISTED_MODEL_PROMPT_CHARS)
+    const lifecycle = {
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      state: 'gate_passed',
+      answerUserPrompt,
+      answerUserPromptSha256: sha256Hex(answerUserPrompt),
+      gate: { passed: true },
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ lifecycle })),
+    )
+
+    const parsed = await getGameLifecycle(GAME_ID)
+
+    expect(parsed.answerUserPrompt).toHaveLength(
+      MAX_PERSISTED_MODEL_PROMPT_CHARS,
+    )
+    expect(parsed.answerUserPromptSha256).toBe(sha256Hex(answerUserPrompt))
+    expect(parsed.gate).toEqual({ passed: true })
+  })
+
   it.each([
+    ['empty', ''],
+    [
+      'above the shared durable ceiling',
+      'x'.repeat(MAX_PERSISTED_MODEL_PROMPT_CHARS + 1),
+    ],
+  ])('rejects a Gate-approved Answer prompt that is %s', async (_label, answerUserPrompt) => {
+    const failure = await lifecycleFailure({
+      ...CHARLOTTE_UNAVAILABLE_LIFECYCLE,
+      state: 'gate_passed',
+      answerUserPrompt,
+      answerUserPromptSha256: sha256Hex(answerUserPrompt),
+      gate: { passed: true },
+    })
+
+    expect(failure).toMatchObject({
+      kind: 'invalid-response',
+      message: 'Lifecycle player-visible answer prompt is invalid.',
+    })
+  })
+
+  it.each([
+    [
+      'malformed digest',
+      { answerUserPrompt: '{"approved":true}', answerUserPromptSha256: 'not-a-digest', gate: { passed: true } },
+      'Lifecycle player-visible answer prompt digest is invalid.',
+    ],
     [
       'missing digest',
       { answerUserPrompt: '{"approved":true}', answerUserPromptSha256: null, gate: { passed: true } },
       'Lifecycle player-visible answer prompt provenance is incomplete.',
     ],
     [
+      'detached digest',
+      { answerUserPrompt: null, answerUserPromptSha256: sha256Hex('{"approved":true}'), gate: { passed: true } },
+      'Lifecycle player-visible answer prompt provenance is incomplete.',
+    ],
+    [
+      'missing Gate',
+      { answerUserPrompt: '{"approved":true}', answerUserPromptSha256: sha256Hex('{"approved":true}'), gate: null },
+      'Lifecycle player-visible answer prompt was not authorized by the Gate.',
+    ],
+    [
       'failed Gate',
-      { answerUserPrompt: '{"approved":true}', answerUserPromptSha256: 'e'.repeat(64), gate: { passed: false } },
+      { answerUserPrompt: '{"approved":true}', answerUserPromptSha256: sha256Hex('{"approved":true}'), gate: { passed: false } },
       'Lifecycle player-visible answer prompt was not authorized by the Gate.',
     ],
   ])('rejects player-visible prompt provenance with %s', async (_label, overrides, message) => {

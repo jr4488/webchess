@@ -4,6 +4,14 @@ import {
   getLegalMoves,
   getPieceAt,
 } from '../../src/lib/game'
+import { deriveDivisionCastAssignments } from '../../src/lib/division'
+import {
+  CURRENT_LIFECYCLE_VERSIONS,
+  PORTIA_ATTACK_TYPES,
+} from '../../src/lib/lifecycle'
+import type {
+  PortiaReview,
+} from '../../src/lib/lifecycle'
 import { RESEARCH_CONSENT_VERSION } from '../../src/lib/research'
 import type { DurableGame } from '../../src/lib/webchess-api'
 import { DurableGameRepository } from '../../src/server/games'
@@ -13,16 +21,23 @@ import {
 import {
   generateAnswer,
   generateDivision,
+  generatePortiaReview,
+  orderPortiaCandidates,
 } from '../../src/server/openai'
 import type {
-  ServerDerivedEvidence,
+  PortiaInput,
+  PortiaRequestContext,
 } from '../../src/server/openai'
+import { DurableLifecycleRepository } from '../../src/server/lifecycle'
 import {
   createUsageController,
 } from '../../src/server/usage'
 import type {
   UsageConfig,
 } from '../../src/server/usage'
+import {
+  MAX_PERSISTED_MODEL_PROMPT_CHARS,
+} from '../../src/types'
 import type { ProblemFacet } from '../../src/types'
 import {
   createPostgresTestDatabase,
@@ -144,28 +159,165 @@ function nextDeterministicMove(game: DurableGame): {
 
 let database: PostgresTestDatabase
 let leaseSequence: number
-let answerEvidence: ServerDerivedEvidence | null
+let answerEvidence: Parameters<typeof generateAnswer>[0] | null
 
-const divisionGenerator: typeof generateDivision = vi.fn(async () => ({
-  providerId: 'resp_service_flow_division',
-  model: 'gpt-5.6-sol',
-  prompt: 'Deterministic service-flow division prompt.',
-  result: {
-    facets: [...FACETS],
-  },
-  usage: {
-    reported: true,
-    inputTokens: 100,
-    outputTokens: 50,
-    totalTokens: 150,
-    cachedInputTokens: 20,
-    cacheWriteInputTokens: 5,
-    reasoningOutputTokens: 20,
-  },
-}))
+const divisionGenerator: typeof generateDivision = vi.fn(async (input) => {
+  const divisionSeed = typeof input === 'string'
+    ? null
+    : input.divisionSeed ?? null
+  const assignments = divisionSeed
+    ? new Map(deriveDivisionCastAssignments(divisionSeed).map(
+        (assignment) => [assignment.id, assignment],
+      ))
+    : new Map()
+  return {
+    providerId: 'resp_service_flow_division',
+    model: 'gpt-5.6-sol',
+    prompt: 'Deterministic service-flow division prompt.',
+    result: {
+      facets: FACETS.map((facet) => ({
+        ...facet,
+        ...(divisionSeed
+          ? {
+              castApplication: `Use ${
+                assignments.get(facet.id)?.directionalCue ?? 'the fixed cast'
+              } to shape this exact service-flow facet during scrutiny.`,
+            }
+          : {}),
+      })),
+    },
+    usage: {
+      reported: true,
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 150,
+      cachedInputTokens: 20,
+      cacheWriteInputTokens: 5,
+      reasoningOutputTokens: 20,
+    },
+  }
+})
 
-const answerGenerator: typeof generateAnswer = vi.fn(async (evidence) => {
+function serviceFlowPortiaReview(input: PortiaInput): PortiaReview {
+  const directionalRecord =
+    input.answerPromptPackage.trajectoryDirectionalRecord
+  if (!directionalRecord) {
+    throw new Error(
+      'The current service-flow fixture requires a trajectory directional record.',
+    )
+  }
+  const orderedSurvivors = orderPortiaCandidates(input.survivors)
+  if (orderedSurvivors.length < 2) {
+    throw new Error('The service-flow fixture requires at least two survivors.')
+  }
+  const coverageTags = [
+    'protected_outcome',
+    'evidence_or_reality',
+    'risk_or_countercase',
+    'agency_or_action',
+  ] as const
+  return {
+    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    reviewedAnswerPromptDigest: input.answerPromptDigest,
+    directionalRecordVersion: directionalRecord.version,
+    directionalRecordDigest: directionalRecord.digest,
+    directionalSummary:
+      'The complete ordered game trajectory changed which cast-qualified directions survived scrutiny while remaining distinct from factual evidence.',
+    promptDecision: 'permit',
+    promptDecisionRationale:
+      'The exact board-derived prompt is permitted only under the recorded evidence and safety boundaries.',
+    runSummary:
+      'The deterministic service-flow Portia stub assessed every terminal survivor without claiming efficacy.',
+    assessments: orderedSurvivors.map((candidate, index) => {
+      const usable = index < 3
+      return {
+        candidateId: candidate.candidateId,
+        disposition: usable ? ('preserved' as const) : ('consumed' as const),
+        survivingInterpretation: usable
+          ? 'This candidate remains useful only as a bounded interpretation.'
+          : null,
+        requiredQualification: null,
+        redundancyClusterId: null,
+        coverageTags: index === 0 ? [...coverageTags] : [],
+        missingEvidence: [
+          'One direct observation remains necessary before expanding scope.',
+        ],
+        countercase:
+          'A contradictory direct observation would reverse this interpretation.',
+        reversalCondition:
+          'Stop when the protected outcome or declared evidence threshold fails.',
+        attackFindings: PORTIA_ATTACK_TYPES.map((attackType) => ({
+          attackType,
+          outcome: usable ? ('passed' as const) : ('failed' as const),
+          severity: usable ? ('low' as const) : ('moderate' as const),
+          finding: `The ${attackType} review preserves a bounded uncertainty.`,
+          consequence:
+            'The recommendation must remain conditional and reversible.',
+          requiredRevision: usable
+            ? null
+            : 'Do not use this consumed candidate as support.',
+        })),
+        directionalRecordDigest: directionalRecord.digest,
+        directionalSignalKeys: [
+          directionalRecord.survivingDirectionKeys[
+            index % directionalRecord.survivingDirectionKeys.length
+          ]!,
+        ],
+        directionalInterpretation:
+          `The exact ordered route and material pressure make this surviving direction relevant to candidate ${candidate.candidateId}.`,
+        directionalAmendment:
+          `Carry the trajectory-qualified direction for candidate ${candidate.candidateId} into synthesis without treating it as factual evidence.`,
+      }
+    }),
+    crossCandidateContradictions: [],
+    redundancyClusters: [],
+    missingCoverage: [],
+    unresolvedQuestions: [
+      'Which direct observation would reduce uncertainty fastest?',
+    ],
+    recommendedGateInputs: {
+      tensionCandidatePairs: [[
+        orderedSurvivors[0]!.candidateId,
+        orderedSurvivors[1]!.candidateId,
+      ]],
+      fatalContradictionIds: [],
+      fieldRepairReasons: [],
+    },
+  }
+}
+
+const portiaGenerator: typeof generatePortiaReview = vi.fn(
+  async (input: PortiaInput, context: PortiaRequestContext) => {
+    const result = serviceFlowPortiaReview(input)
+    await context.onProgress?.({
+      currentCandidateId: null,
+      completedCandidateIds: result.assessments.map(
+        (assessment) => assessment.candidateId,
+      ),
+      completedAssessments: result.assessments,
+      totalCandidateCount: input.survivors.length,
+    })
+    return {
+      providerId: 'resp_service_flow_portia',
+      model: 'gpt-5.6-sol',
+      prompt: 'Deterministic service-flow Portia prompt.',
+      result,
+      usage: {
+        reported: true,
+        inputTokens: 120,
+        outputTokens: 90,
+        totalTokens: 210,
+        cachedInputTokens: 15,
+        cacheWriteInputTokens: 0,
+        reasoningOutputTokens: 30,
+      },
+    }
+  },
+)
+
+const answerGenerator: typeof generateAnswer = vi.fn(async (evidence, context) => {
   answerEvidence = evidence
+  await context.onProviderTurnStart?.()
   return {
     providerId: 'resp_service_flow_answer',
     model: 'gpt-5.6-sol',
@@ -202,6 +354,7 @@ const answerGenerator: typeof generateAnswer = vi.fn(async (evidence) => {
 
 function createServices() {
   const repository = new DurableGameRepository(database.adapter)
+  const lifecycleRepository = new DurableLifecycleRepository(database.adapter)
   const usage = createUsageController({
     db: database.adapter,
     config: USAGE_CONFIG,
@@ -219,6 +372,8 @@ function createServices() {
       database: database.adapter,
       divisionGenerator,
       hmacSecret: HMAC_SECRET,
+      lifecycleRepository,
+      portiaGenerator,
       repository,
       softwareVersion: SOFTWARE_VERSION,
       usage,
@@ -244,6 +399,7 @@ beforeEach(async () => {
   leaseSequence = 0
   answerEvidence = null
   vi.mocked(divisionGenerator).mockClear()
+  vi.mocked(portiaGenerator).mockClear()
   vi.mocked(answerGenerator).mockClear()
 })
 
@@ -316,6 +472,44 @@ describe('complete API service flow against PostgreSQL', () => {
       clientMoveCount,
     )
 
+    const lifecycle = await services.runPortia({
+      ownerId: OWNER,
+      gameId: game.id,
+      expectedRevision: game.revision,
+      ...operationContext(operationId(899)),
+    })
+    expect(lifecycle).toMatchObject({
+      state: 'gate_passed',
+      gate: {
+        passed: true,
+        recommendedNextTransition: 'answer',
+        directionalBindingsSatisfied: true,
+      },
+      portia: {
+        contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+        directionalRecordDigest: lifecycle.trajectoryDirectionalRecord?.digest,
+      },
+    })
+    expect(portiaGenerator).toHaveBeenCalledOnce()
+    expect(lifecycle.answerUserPrompt?.length).toBeGreaterThan(200_000)
+    expect(lifecycle.answerUserPrompt?.length).toBeLessThanOrEqual(
+      MAX_PERSISTED_MODEL_PROMPT_CHARS,
+    )
+
+    const gatePrompt = await database.adapter.query({
+      text: `
+        SELECT char_length(answer_user_prompt)::integer AS prompt_characters
+        FROM gate_decisions
+        WHERE lifecycle_run_id = $1::uuid
+      `,
+      values: [lifecycle.id],
+    })
+    expect(gatePrompt.rows).toHaveLength(1)
+    expect(gatePrompt.rows[0]?.prompt_characters).toBeGreaterThan(200_000)
+    expect(gatePrompt.rows[0]?.prompt_characters).toBeLessThanOrEqual(
+      MAX_PERSISTED_MODEL_PROMPT_CHARS,
+    )
+
     const answered = await services.answer({
       ownerId: OWNER,
       gameId: game.id,
@@ -333,15 +527,31 @@ describe('complete API service flow against PostgreSQL', () => {
     })
     expect(answerGenerator).toHaveBeenCalledOnce()
     expect(answerEvidence).toMatchObject({
-      problem: PROBLEM,
-      turnCount: terminalState.completedPlies,
-      outcome: {
-        winner: terminalState.outcome?.winner,
-        reason: terminalState.outcome?.reason,
-        completedTurn: terminalState.outcome?.completedTurn,
+      plan: {
+        evidence: {
+          problem: PROBLEM,
+          turnCount: terminalState.completedPlies,
+          outcome: {
+            winner: terminalState.outcome?.winner,
+            reason: terminalState.outcome?.reason,
+            completedTurn: terminalState.outcome?.completedTurn,
+          },
+        },
+        trajectoryDirectionalRecord: {
+          digest: lifecycle.trajectoryDirectionalRecord?.digest,
+        },
+      },
+      portia: {
+        directionalRecordDigest: lifecycle.trajectoryDirectionalRecord?.digest,
+      },
+      gate: {
+        directionalRecordDigest: lifecycle.trajectoryDirectionalRecord?.digest,
       },
     })
-    expect(answerEvidence?.captures).toHaveLength(
+    if (!answerEvidence || !('plan' in answerEvidence)) {
+      throw new Error('Answer did not receive the approved current lifecycle input.')
+    }
+    expect(answerEvidence.plan.evidence.captures).toHaveLength(
       terminalState.captures.length,
     )
 
@@ -386,7 +596,7 @@ describe('complete API service flow against PostgreSQL', () => {
       }),
     ).resolves.toMatchObject({
       modelOperations: {
-        used: 2,
+        used: 3,
         reserved: 0,
         limit: USAGE_CONFIG.dailyModelRequestLimit,
       },
@@ -462,7 +672,7 @@ describe('complete API service flow against PostgreSQL', () => {
         output_tokens: 60,
         reasoning_tokens: 25,
         total_tokens: 140,
-        result_format: 'webchess-answer-result/1',
+        result_format: 'webchess-answer-result/2',
       },
       {
         operation: 'division',
@@ -473,7 +683,18 @@ describe('complete API service flow against PostgreSQL', () => {
         output_tokens: 50,
         reasoning_tokens: 20,
         total_tokens: 150,
-        result_format: 'webchess-division-result/1',
+        result_format: 'webchess-division-result/2',
+      },
+      {
+        operation: 'portia',
+        status: 'succeeded',
+        provider_response_id: 'resp_service_flow_portia',
+        usage_reported: true,
+        input_tokens: 120,
+        output_tokens: 90,
+        reasoning_tokens: 30,
+        total_tokens: 210,
+        result_format: 'webchess-portia-result/1',
       },
     ])
 
@@ -496,7 +717,7 @@ describe('complete API service flow against PostgreSQL', () => {
       {
         subject_type: 'global',
         metric: 'model_requests',
-        used: 2,
+        used: 3,
         reserved: 0,
       },
       {
@@ -508,7 +729,7 @@ describe('complete API service flow against PostgreSQL', () => {
       {
         subject_type: 'user',
         metric: 'model_requests',
-        used: 2,
+        used: 3,
         reserved: 0,
       },
     ])

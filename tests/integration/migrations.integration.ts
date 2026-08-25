@@ -28,6 +28,7 @@ const EXPECTED_MIGRATION_IDS = [
   '0015_direct_page_research_evidence',
   '0016_extend_research_timeout_to_five_minutes',
   '0017_trajectory_directional_record',
+  '0018_align_answer_prompt_durable_limit',
 ] as const
 
 beforeAll(async () => {
@@ -99,6 +100,176 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
       { slot: 3, enabled: true },
       { slot: 4, enabled: true },
     ])
+  })
+
+  it('upgrades the Gate-approved Answer prompt from 200000 to the shared 3000000-character ceiling', async () => {
+    const upgrade = await createPostgresTestDatabase(
+      'answer_prompt_durable_limit_upgrade',
+    )
+    try {
+      const limitMigrationIndex = durableWebChessMigrations.findIndex(
+        (migration) =>
+          migration.id === '0018_align_answer_prompt_durable_limit',
+      )
+      const priorMigrations = durableWebChessMigrations.slice(
+        0,
+        limitMigrationIndex,
+      )
+      await runMigrations(upgrade.adapter, priorMigrations)
+
+      const owner = 'user_answer_prompt_limit_upgrade'
+      const gameId = '64000000-0000-4000-8000-000000000001'
+      const runId = '64000000-0000-4000-8000-000000000002'
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO user_controls (clerk_user_id)
+          VALUES ($1::text)
+        `,
+        values: [owner],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO games (
+            id, clerk_user_id, status, problem, problem_sha256,
+            event_version, rules_version, engine_version, cast_version,
+            software_version
+          )
+          VALUES (
+            $1::uuid, $2::text, 'dividing',
+            'How should this upgrade preserve a complete reviewed Answer input?',
+            repeat('a', 64), 1, 'rules-test', 'engine-test',
+            'cast-test', 'software-test'
+          )
+        `,
+        values: [gameId, owner],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO lifecycle_runs (
+            id, clerk_user_id, game_id, root_run_id, state,
+            division_seed, cast_seed, trajectory_seed,
+            software_version, lifecycle_version, rules_version,
+            engine_version, cast_version, event_version,
+            portia_prompt_version, portia_contract_version,
+            gate_algorithm_version, retry_policy_version,
+            charlotte_prompt_version, charlotte_contract_version,
+            wilbur_record_version
+          )
+          VALUES (
+            $1::uuid, $2::text, $3::uuid, $1::uuid, 'gate_passed',
+            'division-seed', 'cast-seed', 'trajectory-seed',
+            'software-test', 'webchess-lifecycle-v2.4', 'rules-test',
+            'engine-test', 'cast-test', 1,
+            'portia-prompt-test', 'portia-contract-test',
+            'gate-test', 'retry-test', 'charlotte-prompt-test',
+            'charlotte-contract-test', 'wilbur-record-test'
+          )
+        `,
+        values: [runId, owner, gameId],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO gate_decisions (
+            id, clerk_user_id, lifecycle_run_id, algorithm_version,
+            input_digest, passed, result,
+            answer_user_prompt, answer_user_prompt_sha256
+          )
+          VALUES (
+            '64000000-0000-4000-8000-000000000003',
+            $1::text, $2::uuid, 'gate-test', repeat('b', 64), true,
+            '{}'::jsonb, 'reviewed prompt', repeat('c', 64)
+          )
+        `,
+        values: [owner, runId],
+      })
+
+      await expect(
+        runMigrations(upgrade.adapter, durableWebChessMigrations),
+      ).resolves.toEqual({
+        applied: ['0018_align_answer_prompt_durable_limit'],
+        alreadyApplied: priorMigrations.map((migration) => migration.id),
+      })
+
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE gate_decisions
+          SET answer_user_prompt = repeat('x', 3000000),
+              answer_user_prompt_sha256 = repeat('d', 64)
+          WHERE lifecycle_run_id = $1::uuid
+        `,
+        values: [runId],
+      })).resolves.toMatchObject({ rowCount: 1 })
+
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE gate_decisions
+          SET answer_user_prompt = repeat('x', 3000001),
+              answer_user_prompt_sha256 = repeat('e', 64)
+          WHERE lifecycle_run_id = $1::uuid
+        `,
+        values: [runId],
+      })).rejects.toMatchObject({
+        constraint: 'gate_decisions_answer_user_prompt_valid',
+      })
+
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE gate_decisions
+          SET answer_user_prompt = NULL,
+              answer_user_prompt_sha256 = repeat('f', 64)
+          WHERE lifecycle_run_id = $1::uuid
+        `,
+        values: [runId],
+      })).rejects.toMatchObject({
+        constraint: 'gate_decisions_answer_user_prompt_valid',
+      })
+
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE gate_decisions
+          SET answer_user_prompt = 'detached reviewed prompt',
+              answer_user_prompt_sha256 = NULL
+          WHERE lifecycle_run_id = $1::uuid
+        `,
+        values: [runId],
+      })).rejects.toMatchObject({
+        constraint: 'gate_decisions_answer_user_prompt_valid',
+      })
+
+      const persisted = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT
+            char_length(answer_user_prompt)::integer AS prompt_characters,
+            answer_user_prompt_sha256,
+            (
+              SELECT count(*)::integer
+              FROM pg_constraint
+              WHERE conrelid = 'lifecycle_runs'::regclass
+                AND conname LIKE
+                  'lifecycle_runs_trajectory_directional_record_%'
+            ) AS directional_constraint_count,
+            (
+              SELECT pg_get_constraintdef(oid, true)
+              FROM pg_constraint
+              WHERE conrelid = 'gate_decisions'::regclass
+                AND conname =
+                  'gate_decisions_answer_user_prompt_valid'
+            ) AS prompt_constraint
+          FROM gate_decisions
+          WHERE lifecycle_run_id = $1::uuid
+        `,
+        values: [runId],
+      })
+      expect(persisted.rows).toEqual([{
+        prompt_characters: 3_000_000,
+        answer_user_prompt_sha256: 'd'.repeat(64),
+        directional_constraint_count: 4,
+        prompt_constraint:
+          "CHECK (answer_user_prompt IS NULL AND answer_user_prompt_sha256 IS NULL OR answer_user_prompt IS NOT NULL AND answer_user_prompt_sha256 IS NOT NULL AND passed AND char_length(answer_user_prompt) >= 1 AND char_length(answer_user_prompt) <= 3000000 AND answer_user_prompt_sha256 ~ '^[0-9a-f]{64}$'::text)",
+      }])
+    } finally {
+      await upgrade.dispose()
+    }
   })
 
   it('expands the research timeout ceiling without changing the applied 0008 migration', async () => {
@@ -917,6 +1088,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
           '0015_direct_page_research_evidence',
           '0016_extend_research_timeout_to_five_minutes',
           '0017_trajectory_directional_record',
+          '0018_align_answer_prompt_durable_limit',
         ],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })
@@ -1074,6 +1246,7 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
           '0015_direct_page_research_evidence',
           '0016_extend_research_timeout_to_five_minutes',
           '0017_trajectory_directional_record',
+          '0018_align_answer_prompt_durable_limit',
         ],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })

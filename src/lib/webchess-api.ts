@@ -39,6 +39,7 @@ import type {
   ResearchRetrievedFact,
   ResearchSource,
 } from './research/contracts'
+import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../types'
 import type {
   CellCoord,
   GeneratedAnswer,
@@ -1337,7 +1338,7 @@ function parseLifecycle(value: unknown): LifecycleAggregate {
     (
       typeof lifecycle.answerUserPrompt !== 'string' ||
       lifecycle.answerUserPrompt.length < 1 ||
-      lifecycle.answerUserPrompt.length > 200_000
+      lifecycle.answerUserPrompt.length > MAX_PERSISTED_MODEL_PROMPT_CHARS
     )
   ) {
     throw invalidResponse('Lifecycle player-visible answer prompt is invalid.')

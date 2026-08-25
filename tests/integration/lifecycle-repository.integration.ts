@@ -24,6 +24,7 @@ import {
   makeProblemParts,
   makeTrajectoryDirectionalFixture,
 } from '../../src/test/fixtures'
+import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../../src/types'
 import type { DurableGameSnapshot } from '../../src/server/games'
 import { DurableLifecycleRepository } from '../../src/server/lifecycle'
 import {
@@ -35,8 +36,10 @@ const OWNER = 'user_lifecycle_repository_integration'
 const RETRY_OWNER = 'user_lifecycle_retry_lineage_integration'
 const CHARLOTTE_OWNER = 'user_lifecycle_charlotte_fence_integration'
 const DIRECTIONAL_OWNER = 'user_lifecycle_directional_record_integration'
+const GATE_PROMPT_OWNER = 'user_lifecycle_gate_prompt_integration'
 const GAME_ID = '62000000-0000-4000-8000-0000000000a1'
 const DIRECTIONAL_GAME_ID = '62000000-0000-4000-8000-0000000000d1'
+const GATE_PROMPT_GAME_ID = '66000000-0000-4000-8000-000000000001'
 const PROBLEM = 'How should this lifecycle preserve evidence while moving toward action?'
 
 function utf8Bytes(values: readonly string[]): number {
@@ -2695,6 +2698,116 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       stateTo: 'charlotte_unavailable',
       status: 'refused',
     })
+  })
+
+  it('enforces the shared durable Answer prompt boundary and Gate consistency', async () => {
+    await database.adapter.query({
+      text: `INSERT INTO user_controls (clerk_user_id) VALUES ($1::text)`,
+      values: [GATE_PROMPT_OWNER],
+    })
+    const boundedGame = await insertMappedRetryGame(
+      GATE_PROMPT_GAME_ID,
+      null,
+      'gate-answer-prompt-boundary-field',
+      GATE_PROMPT_OWNER,
+    )
+    await repository.ensureForGame({
+      ownerId: GATE_PROMPT_OWNER,
+      game: boundedGame,
+      trajectorySeed: 'gate-answer-prompt-boundary-trajectory',
+    })
+    let bounded = await markLifecycleLegacy(
+      GATE_PROMPT_OWNER,
+      GATE_PROMPT_GAME_ID,
+    )
+    for (const [to, stage, activityType] of [
+      ['chess_playing', 'chess', 'game_started'],
+      ['chess_terminal', 'chess', 'terminal_replay_verified'],
+      ['portia_pending', 'portia', 'adversarial_review_authorized'],
+      ['portia_running', 'portia', 'adversarial_review_started'],
+      ['portia_complete', 'portia', 'adversarial_review_completed'],
+    ] as const) {
+      bounded = await repository.transition({
+        ownerId: GATE_PROMPT_OWNER,
+        gameId: GATE_PROMPT_GAME_ID,
+        expectedRevision: bounded.revision,
+        to,
+        stage,
+        activityType,
+        configurationDigest: '7'.repeat(64),
+      })
+    }
+
+    const survivors = Array.from({ length: 4 }, (_, index) => survivor(index))
+    const passedGate = evaluateGate(portiaReview(
+      survivors,
+      LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+    ))
+    const failedGate = {
+      ...passedGate,
+      passed: false,
+      recommendedNextTransition: 'insufficient_basis',
+    } as const
+    const storeGateInput = {
+      ownerId: GATE_PROMPT_OWNER,
+      gameId: GATE_PROMPT_GAME_ID,
+      expectedRevision: bounded.revision,
+      result: passedGate,
+      configurationDigest: '7'.repeat(64),
+    } as const
+
+    await expect(repository.storeGate({
+      ...storeGateInput,
+      answerUserPrompt: '',
+    })).rejects.toMatchObject({ code: 'invalid-input' })
+    await expect(repository.storeGate({
+      ...storeGateInput,
+      answerUserPrompt: 'x'.repeat(MAX_PERSISTED_MODEL_PROMPT_CHARS + 1),
+    })).rejects.toMatchObject({ code: 'invalid-input' })
+    await expect(repository.storeGate({
+      ...storeGateInput,
+      result: failedGate,
+      answerUserPrompt: 'A failed Gate must not authorize Answer input.',
+    })).rejects.toMatchObject({ code: 'invalid-input' })
+    await expect(repository.storeGate({
+      ...storeGateInput,
+      answerUserPrompt: null,
+    })).rejects.toMatchObject({ code: 'invalid-input' })
+
+    const maximumPrompt = 'x'.repeat(MAX_PERSISTED_MODEL_PROMPT_CHARS)
+    bounded = await repository.storeGate({
+      ...storeGateInput,
+      answerUserPrompt: maximumPrompt,
+    })
+    expect(bounded).toMatchObject({
+      state: 'gate_passed',
+      answerUserPrompt: maximumPrompt,
+      answerUserPromptSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    })
+    await expect(repository.storeGate({
+      ...storeGateInput,
+      answerUserPrompt: maximumPrompt,
+    })).resolves.toMatchObject({
+      revision: bounded.revision,
+      answerUserPromptSha256: bounded.answerUserPromptSha256,
+    })
+    const persisted = await database.adapter.query<{
+      prompt_chars: number
+      answer_user_prompt_sha256: string
+    }>({
+      text: `
+        SELECT char_length(answer_user_prompt)::integer AS prompt_chars,
+          answer_user_prompt_sha256
+        FROM gate_decisions
+        WHERE clerk_user_id = $1::text
+          AND lifecycle_run_id = $2::uuid
+      `,
+      values: [GATE_PROMPT_OWNER, bounded.id],
+    })
+    expect(persisted.rows).toEqual([{
+      prompt_chars: MAX_PERSISTED_MODEL_PROMPT_CHARS,
+      answer_user_prompt_sha256: bounded.answerUserPromptSha256,
+    }])
   })
 
   it('is deleted through the existing owner cascade', async () => {

@@ -5,7 +5,10 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  createOpenClawBridgeRequester,
+  getOpenClawStatus,
   OpenClawCliError,
+  parseModelRunEnvelope,
   parseOpenClawWebSearchEnvelope,
   runOpenClawWebSearch,
   type OpenClawBridgeRequester,
@@ -101,6 +104,32 @@ function expectInvalidOutput(run: () => unknown): void {
   }
   expect(caught).toBeInstanceOf(OpenClawCliError)
   expect(caught).toMatchObject({ kind: 'invalid-output' })
+}
+
+function modelEnvelope(outputs: string[], input = ''): string {
+  return JSON.stringify({
+    ok: true,
+    capability: 'model.run',
+    transport: 'local',
+    provider: 'test-provider',
+    model: 'test-model',
+    inputBytes: Buffer.byteLength(input, 'utf8'),
+    inputSha256: createHash('sha256').update(input, 'utf8').digest('hex'),
+    outputs: outputs.map((text) => ({ text })),
+  })
+}
+
+function searchReadiness(available = true) {
+  return {
+    available,
+    checked: 'live-readiness-probe',
+    configurationReady: available,
+    oauthReady: available,
+    provider: 'codex',
+    providerReady: available,
+    queryExecuted: true,
+    requiredForLaunch: true,
+  }
 }
 
 describe('Codex Hosted Search CLI adapter', () => {
@@ -271,5 +300,134 @@ describe('Codex Hosted Search CLI adapter', () => {
       limit: 11,
     })).rejects.toBeInstanceOf(RangeError)
     expect(request).not.toHaveBeenCalled()
+  })
+})
+
+describe('authenticated loopback bridge failure boundaries', () => {
+  it.each([
+    ['request timeout status', 408, '{not-json', 'aborted'],
+    ['provider abort code', 400, { error: { code: 'OPENCLAW_ABORTED' } }, 'aborted'],
+    ['gateway timeout status', 504, '{not-json', 'timeout'],
+    ['provider timeout code', 400, { error: { code: 'OPENCLAW_TIMEOUT' } }, 'timeout'],
+    ['missing bridge route', 404, { error: {} }, 'not-found'],
+    ['invalid model result', 422, { error: { code: 'INVALID_MODEL_RESULT' } }, 'invalid-output'],
+    ['oversized provider result', 422, { error: { code: 'RESPONSE_TOO_LARGE' } }, 'invalid-output'],
+    ['unclassified bridge failure', 500, '{not-json', 'failed'],
+  ] as const)('classifies a %s without exposing its response', async (
+    _label,
+    status,
+    responseBody,
+    kind,
+  ) => {
+    const output = typeof responseBody === 'string'
+      ? responseBody
+      : JSON.stringify(responseBody)
+    const request = createOpenClawBridgeRequester(
+      vi.fn(async () => new Response(output, { status })),
+    )
+
+    await expect(request(
+      '/v1/model/run',
+      { prompt: 'bounded prompt' },
+      config(),
+    )).rejects.toMatchObject({
+      kind,
+      message: 'The OpenClaw plugin bridge rejected the request.',
+    })
+  })
+
+  it('rejects invalid requester options before dispatch', async () => {
+    const fetcher = vi.fn<typeof globalThis.fetch>()
+    const request = createOpenClawBridgeRequester(fetcher)
+
+    await expect(request('/v1/status', null, config(), {
+      idempotencyKey: 'model-turn-only',
+    })).rejects.toBeInstanceOf(RangeError)
+    await expect(request('/v1/status', null, config(), {
+      requestTimeoutMs: 0,
+    })).rejects.toBeInstanceOf(RangeError)
+    await expect(request('/v1/status', null, config(), {
+      requestTimeoutMs: 305_001,
+    })).rejects.toBeInstanceOf(RangeError)
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('distinguishes caller cancellation from bridge unavailability', async () => {
+    const controller = new AbortController()
+    const hangingFetch = vi.fn<typeof globalThis.fetch>(async (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        const rejectOnAbort = () => {
+          reject(new DOMException('private abort detail', 'AbortError'))
+        }
+        if (init?.signal?.aborted) rejectOnAbort()
+        else init?.signal?.addEventListener('abort', rejectOnAbort, { once: true })
+      }))
+    const request = createOpenClawBridgeRequester(hangingFetch)
+    const pending = request('/v1/status', null, config(), {
+      signal: controller.signal,
+    })
+    controller.abort()
+
+    await expect(pending).rejects.toMatchObject({
+      kind: 'aborted',
+      message: 'The local OpenClaw request was cancelled.',
+    })
+
+    const unavailable = createOpenClawBridgeRequester(
+      vi.fn(async () => Promise.reject(new TypeError('private socket detail'))),
+    )
+    await expect(unavailable('/v1/status', null, config())).rejects.toMatchObject({
+      kind: 'failed',
+      message: 'The authenticated OpenClaw plugin bridge was unavailable.',
+    })
+  })
+
+  it('accepts an empty successful GET response without inventing a body', async () => {
+    const fetcher = vi.fn<typeof globalThis.fetch>(async () => new Response(null))
+    const request = createOpenClawBridgeRequester(fetcher)
+
+    await expect(request('/v1/status', null, config())).resolves.toBe('')
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+      body: undefined,
+      method: 'GET',
+    })
+    expect(fetcher.mock.calls[0]?.[1]?.headers).toEqual({
+      Authorization: `Bearer ${'t'.repeat(43)}`,
+    })
+  })
+})
+
+describe('model and readiness envelope edge cases', () => {
+  it('rejects a structurally valid model envelope with no usable output text', () => {
+    expectInvalidOutput(() => parseModelRunEnvelope(modelEnvelope([' ', '\n\t'])))
+  })
+
+  it('retains a safe model label when another readiness requirement is absent', async () => {
+    const request = vi.fn<OpenClawBridgeRequester>(async () => JSON.stringify({
+      available: true,
+      model: 'openai/account-model',
+      protocolVersion: 1,
+      search: searchReadiness(false),
+      transport: 'local',
+      version: 'OpenClaw fixture',
+    }))
+
+    await expect(getOpenClawStatus(config(), { request })).resolves.toMatchObject({
+      available: false,
+      model: 'openai/account-model',
+      reason: 'not-configured',
+    })
+  })
+
+  it('fails closed through the default requesters when no bridge is configured', async () => {
+    const unconfigured = config({ bridgeToken: null, bridgeUrl: null })
+
+    await expect(getOpenClawStatus(unconfigured)).resolves.toMatchObject({
+      available: false,
+      reason: 'cli-not-found',
+    })
+    await expect(runOpenClawWebSearch(QUERY, unconfigured)).rejects.toMatchObject({
+      kind: 'not-found',
+    })
   })
 })

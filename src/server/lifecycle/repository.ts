@@ -44,6 +44,7 @@ import type { TrajectoryDirectionalRecord } from '../../lib/lifecycle/trajectory
 import { CURRENT_GAME_VERSIONS } from '../../lib/game-contract'
 import type { GameEvent } from '../../lib/game-contract'
 import { replayGameEvents } from '../../lib/game-replay'
+import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../../types'
 import {
   charlotteResultRowSchema,
   gameEventRowSchema,
@@ -2388,12 +2389,12 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
       (
         typeof input.answerUserPrompt !== 'string' ||
         input.answerUserPrompt.length < 1 ||
-        input.answerUserPrompt.length > 200_000
+        input.answerUserPrompt.length > MAX_PERSISTED_MODEL_PROMPT_CHARS
       )
     ) {
       throw new LifecycleRepositoryError(
         'invalid-input',
-        'The player-visible Answer prompt must contain 1 to 200000 characters.',
+        `The player-visible Answer prompt must contain 1 to ${MAX_PERSISTED_MODEL_PROMPT_CHARS} characters.`,
       )
     }
     if (

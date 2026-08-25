@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getLegalMoves, getPieceAt } from "../../src/lib/game";
+import { deriveDivisionCastAssignments } from "../../src/lib/division";
 import {
   CURRENT_LIFECYCLE_VERSIONS,
   PORTIA_ATTACK_TYPES,
@@ -25,6 +26,7 @@ import {
   generateDivision,
   generatePortiaReview,
   normalizeWebChessAnswer,
+  orderPortiaCandidates,
   renderCharlotteResult,
 } from "../../src/server/openai";
 import type {
@@ -209,19 +211,27 @@ function nextDeterministicMove(game: DurableGame): {
 }
 
 function portiaReview(input: PortiaInput, mode: PortiaMode): PortiaReview {
-  if (input.survivors.length < 3) {
+  const orderedSurvivors = orderPortiaCandidates(input.survivors);
+  if (orderedSurvivors.length < 3) {
     throw new Error(
       "The full lifecycle fixture requires at least three survivors.",
     );
   }
-  const usableLimit = mode === "pass" ? input.survivors.length : 2;
+  const directionalRecord =
+    input.answerPromptPackage.trajectoryDirectionalRecord;
+  if (!directionalRecord) {
+    throw new Error(
+      "The current full lifecycle fixture requires a trajectory directional record.",
+    );
+  }
+  const usableLimit = mode === "pass" ? orderedSurvivors.length : 2;
   const coverageTags = [
     "protected_outcome",
     "evidence_or_reality",
     "risk_or_countercase",
     "agency_or_action",
   ] as const;
-  const assessments = input.survivors.map((candidate, index) => {
+  const assessments = orderedSurvivors.map((candidate, index) => {
     const usable = index < usableLimit;
     return {
       candidateId: candidate.candidateId,
@@ -250,11 +260,25 @@ function portiaReview(input: PortiaInput, mode: PortiaMode): PortiaReview {
           ? null
           : "Do not use this consumed candidate as support.",
       })),
+      directionalRecordDigest: directionalRecord.digest,
+      directionalSignalKeys: [
+        directionalRecord.survivingDirectionKeys[
+          index % directionalRecord.survivingDirectionKeys.length
+        ]!,
+      ],
+      directionalInterpretation:
+        `The exact ordered route and material pressure make this surviving direction relevant to candidate ${candidate.candidateId}.`,
+      directionalAmendment:
+        `Carry the trajectory-qualified direction for candidate ${candidate.candidateId} into synthesis without treating it as factual evidence.`,
     };
   });
   return {
     contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
     reviewedAnswerPromptDigest: input.answerPromptDigest,
+    directionalRecordVersion: directionalRecord.version,
+    directionalRecordDigest: directionalRecord.digest,
+    directionalSummary:
+      "The complete ordered game trajectory changed which cast-qualified directions survived scrutiny while remaining distinct from external factual evidence.",
     promptDecision: "permit",
     promptDecisionRationale:
       "The exact board-derived prompt is permitted only under the recorded boundaries.",
@@ -269,7 +293,7 @@ function portiaReview(input: PortiaInput, mode: PortiaMode): PortiaReview {
     ],
     recommendedGateInputs: {
       tensionCandidatePairs: [
-        [input.survivors[0]!.candidateId, input.survivors[1]!.candidateId],
+        [orderedSurvivors[0]!.candidateId, orderedSurvivors[1]!.candidateId],
       ],
       fatalContradictionIds: [],
       fieldRepairReasons: [],
@@ -327,36 +351,62 @@ function charlotteResult(portia: PortiaReview): CharlotteResult {
 }
 
 function createProviderStubs(mode: PortiaMode): ProviderStubs {
-  const divisionGenerator: typeof generateDivision = vi.fn(async () => ({
-    providerId: `stub-division-${mode}`,
-    model: MODEL,
-    prompt: "Deterministic full-lifecycle division prompt.",
-    result: { facets: makeProblemFacets("HTTP lifecycle facet") },
-    usage: {
-      reported: true,
-      inputTokens: 64,
-      outputTokens: 64,
-      totalTokens: 128,
-      cachedInputTokens: 0,
-      cacheWriteInputTokens: 0,
-      reasoningOutputTokens: 16,
+  const divisionGenerator: typeof generateDivision = vi.fn(async (input) => {
+    const divisionSeed = typeof input === "string"
+      ? null
+      : input.divisionSeed ?? null;
+    const assignments = divisionSeed
+      ? new Map(deriveDivisionCastAssignments(divisionSeed).map(
+          (assignment) => [assignment.id, assignment],
+        ))
+      : new Map();
+    return {
+      providerId: `stub-division-${mode}`,
+      model: MODEL,
+      prompt: "Deterministic full-lifecycle division prompt.",
+      result: {
+        facets: makeProblemFacets("HTTP lifecycle facet").map((facet) => ({
+          ...facet,
+          ...(divisionSeed
+            ? {
+                castApplication: `Use ${
+                  assignments.get(facet.id)?.directionalCue ?? "the fixed cast"
+                } to shape this exact HTTP lifecycle facet during scrutiny.`,
+              }
+            : {}),
+        })),
+      },
+      usage: {
+        reported: true,
+        inputTokens: 64,
+        outputTokens: 64,
+        totalTokens: 128,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        reasoningOutputTokens: 16,
+      },
+    };
+  });
+  const answerGenerator: typeof generateAnswer = vi.fn(
+    async (_input, context) => {
+      await context.onProviderTurnStart?.();
+      return {
+        providerId: `stub-answer-${mode}`,
+        model: MODEL,
+        prompt: "Deterministic Portia-approved full-lifecycle Answer prompt.",
+        result: ANSWER_RESULT,
+        usage: {
+          reported: true,
+          inputTokens: 96,
+          outputTokens: 96,
+          totalTokens: 192,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          reasoningOutputTokens: 24,
+        },
+      };
     },
-  }));
-  const answerGenerator: typeof generateAnswer = vi.fn(async () => ({
-    providerId: `stub-answer-${mode}`,
-    model: MODEL,
-    prompt: "Deterministic Portia-approved full-lifecycle Answer prompt.",
-    result: ANSWER_RESULT,
-    usage: {
-      reported: true,
-      inputTokens: 96,
-      outputTokens: 96,
-      totalTokens: 192,
-      cachedInputTokens: 0,
-      cacheWriteInputTokens: 0,
-      reasoningOutputTokens: 24,
-    },
-  }));
+  );
   const portiaGenerator: typeof generatePortiaReview = vi.fn(
     async (input: PortiaInput, context: PortiaRequestContext) => {
       const result = portiaReview(input, mode);

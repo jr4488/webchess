@@ -6,6 +6,7 @@ import {
   LIFECYCLE_STATES,
   WILBUR_ACTION_STATUSES,
 } from '../../lib/lifecycle/contracts'
+import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../../types'
 import type { SqlResult } from './sql'
 
 const uuidSchema = z.string().uuid()
@@ -542,7 +543,11 @@ export const gateDecisionRowSchema = z.object({
   input_digest: sha256Schema,
   passed: z.boolean(),
   result: jsonObjectSchema,
-  answer_user_prompt: z.string().min(1).max(200_000).nullable(),
+  answer_user_prompt: z
+    .string()
+    .min(1)
+    .max(MAX_PERSISTED_MODEL_PROMPT_CHARS)
+    .nullable(),
   answer_user_prompt_sha256: sha256Schema.nullable(),
   created_at: timestampSchema,
 })

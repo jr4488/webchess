@@ -179,9 +179,9 @@ unsupported. The owner applies pending files atomically under an advisory lock
 and records their normalized checksums. The supported local player does not run
 that deployment command or supply its credential: the OpenClaw launcher applies
 the canonical tail to its dedicated loopback database. Both paths reject any
-existing ledger that is not an exact checksum-matching prefix of the 17
+existing ledger that is not an exact checksum-matching prefix of the 18
 canonical migrations from `0001_durable_webchess` through
-`0017_trajectory_directional_record`.
+`0018_align_answer_prompt_durable_limit`.
 
 Migration `0012` is upgrade-safe without a duplicate-data audit. It preserves
 all pre-`0012` rows with a null `charlotte_binding_version`, including duplicate
@@ -201,7 +201,10 @@ while conservatively treating historical rows as not consented. Migration
 `0016` extends only the durable Hosted Search timeout ceiling to five minutes;
 query, source, page, citation, and consent bounds are unchanged. Migration
 `0017` adds an all-or-none, version/digest/shape-checked trajectory-direction
-record to lifecycle runs while leaving legacy rows null. These migrations do
+record to lifecycle runs while leaving legacy rows null. Migration `0018`
+aligns the exact Gate-approved Answer input with the shared 3,000,000-character
+durable model-prompt ceiling, closing the earlier 200,000-character persistence
+cap without changing model, research, or evidence bounds. These migrations do
 not reinterpret missing consent as permission or old lifecycle data as a
 current directional record. Preserving rows and migration evidence is not a
 runtime compatibility promise: pre-v2.5 rows cannot authorize provider work,
@@ -234,8 +237,9 @@ and checksums; exactly 20 application tables plus the migration ledger—21 tota
 and their column names, types, and nullability; valid and ready definitions for
 all 12 contract indexes; exactly two origin-enabled, unfiltered
 `BEFORE INSERT OR UPDATE FOR EACH ROW` Wilbur trigger/function pairs, all 35
-reviewed pre-directional constraints plus the four trajectory-record
-constraints—39 total—and all 11 reviewed defaults; and the exact
+reviewed pre-directional constraints plus the Gate-approved Answer-prompt
+constraint and four trajectory-record constraints—40 total—and all 11 reviewed
+defaults; and the exact
 effective schema/table privilege allowlist, including access inherited through
 memberships or `PUBLIC`. The indexes cover the current game, succeeded
 operation, one run per game, one current-bound Wilbur action per Charlotte

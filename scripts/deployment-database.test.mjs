@@ -107,6 +107,7 @@ describe('deployment database migration tooling', () => {
       '0015_direct_page_research_evidence',
       '0016_extend_research_timeout_to_five_minutes',
       '0017_trajectory_directional_record',
+      '0018_align_answer_prompt_durable_limit',
     ])
     expect(migrations[0].sql).toContain('CREATE TABLE IF NOT EXISTS games')
     const researchMigration = migrations.find(
@@ -140,6 +141,10 @@ describe('deployment database migration tooling', () => {
     const trajectoryDirectionalRecordMigration = migrations.find(
       (migration) => migration.id === '0017_trajectory_directional_record',
     )
+    const answerPromptLimitMigration = migrations.find(
+      (migration) =>
+        migration.id === '0018_align_answer_prompt_durable_limit',
+    )
     expect(researchMigration?.sql).toContain(
       'CREATE TABLE IF NOT EXISTS research_requests',
     )
@@ -150,6 +155,9 @@ describe('deployment database migration tooling', () => {
       'CHECK (timeout_ms BETWEEN 1000 AND 120000)',
     )
     expect(answerPromptMigration?.sql).toContain('answer_user_prompt_sha256')
+    expect(answerPromptLimitMigration?.sql).toContain(
+      'char_length(answer_user_prompt) BETWEEN 1 AND 3000000',
+    )
     expect(webMemoryMigration?.sql).toContain('CREATE TABLE web_memory_links')
     expect(webMemoryMigration?.sql).toContain('ADD COLUMN follow_up_at')
     expect(webMemoryMigration?.sql).toContain(
@@ -462,9 +470,18 @@ describe('deployment database migration tooling', () => {
       expect(triggers[index].function_source).not.toBe('BEGIN RETURN NEW; END')
     }
 
-    expect(constraints).toHaveLength(39)
+    expect(probe.text).toContain(
+      "'gate_decisions_answer_user_prompt_valid'",
+    )
+    expect(constraints).toHaveLength(40)
     expect(constraints).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          table_name: 'gate_decisions',
+          constraint_name: 'gate_decisions_answer_user_prompt_valid',
+          definition:
+            "CHECK (answer_user_prompt IS NULL AND answer_user_prompt_sha256 IS NULL OR answer_user_prompt IS NOT NULL AND answer_user_prompt_sha256 IS NOT NULL AND passed AND char_length(answer_user_prompt) >= 1 AND char_length(answer_user_prompt) <= 3000000 AND answer_user_prompt_sha256 ~ '^[0-9a-f]{64}$'::text)",
+        }),
         expect.objectContaining({
           table_name: 'games',
           constraint_name: 'games_research_consent_shape',

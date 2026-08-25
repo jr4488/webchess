@@ -116,10 +116,10 @@ billing route is not an accepted backstop.
 
 ## Migration and runtime roles
 
-The supported OpenClaw launcher owns local bootstrap: it applies all 17
+The supported OpenClaw launcher owns local bootstrap: it applies all 18
 canonical migrations, from
 `db/migrations/0001_durable_webchess.sql` through
-`db/migrations/0017_trajectory_directional_record.sql`, to the dedicated
+`db/migrations/0018_align_answer_prompt_durable_limit.sql`, to the dedicated
 loopback database and rejects an existing ledger that is not an exact checksum-
 matching prefix. A local player must not run the hosted deployment migration
 owner or supply its credentials. `npm run db:migrate` is retained solely for the
@@ -160,8 +160,9 @@ they are not extra setup steps for the supported local player. Its runtime
 schema check expects 20 application tables plus
 `webchess_schema_migrations`—21 total—12 contract indexes, and the
 two exact, origin-enabled, unfiltered `BEFORE INSERT OR UPDATE FOR EACH ROW`
-Wilbur trigger/function pairs, 18 critical Wilbur constraints, and all five
-`0013` defaults, plus the four trajectory-record constraints. Unexpected
+Wilbur trigger/function pairs, all 40 reviewed constraints—including 18
+critical Wilbur constraints, the Gate-approved Answer-prompt constraint, and
+the four trajectory-record constraints—and all five `0013` defaults. Unexpected
 noninternal triggers, trigger arguments/filters,
 altered constraint shape, or disabled foreign-key enforcement fail the check.
 Lifecycle runs need table-level `SELECT`, `INSERT`,
@@ -300,14 +301,16 @@ launcher at hosted or production data.
 
 ## Rollback boundary
 
-The 17-migration history is append-only. Application rollback moves code back
+The 18-migration history is append-only. Application rollback moves code back
 but never reverses migration history or drops lifecycle data. Migration `0012`
 preserves legacy null-bound rows while protecting newly stamped bindings, and
 `0013` preserves committed or denied mutation history. Migrations `0014` and
 `0015` preserve Web-memory selection and research provenance; `0016` preserves
 the five-minute Search ceiling and `0017` preserves the trajectory-direction
-record. Legacy v1 and pre-v2.5 rows remain only as historical database evidence;
-they are not supported gameplay, generation, replay/import, or mutation paths.
+record. Migration `0018` raises only the Gate-approved Answer-input persistence
+ceiling to the shared 3,000,000-character model-prompt bound. Legacy v1 and
+pre-v2.5 rows remain only as historical database evidence; they are not
+supported gameplay, generation, replay/import, or mutation paths.
 Current lifecycle-v2.5 games fail closed if their lifecycle authority is
 unavailable; the client does not fabricate a Portia review, Gate pass,
 directional record, or legacy answer.

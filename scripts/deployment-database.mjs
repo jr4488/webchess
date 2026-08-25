@@ -826,6 +826,16 @@ const RUNTIME_TRIGGER_CONTRACT = [
 
 const RUNTIME_CONSTRAINT_CONTRACT = [
   {
+    table_name: 'gate_decisions',
+    constraint_name: 'gate_decisions_answer_user_prompt_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (answer_user_prompt IS NULL AND answer_user_prompt_sha256 IS NULL OR answer_user_prompt IS NOT NULL AND answer_user_prompt_sha256 IS NOT NULL AND passed AND char_length(answer_user_prompt) >= 1 AND char_length(answer_user_prompt) <= 3000000 AND answer_user_prompt_sha256 ~ '^[0-9a-f]{64}$'::text)",
+  },
+  {
     table_name: 'lifecycle_runs',
     constraint_name:
       'lifecycle_runs_trajectory_directional_record_binding_valid',
@@ -1601,6 +1611,7 @@ const RUNTIME_COMPATIBILITY_SQL = `
         'games_research_consent_decision_valid',
         'games_research_consent_shape',
         'games_research_consent_version_valid',
+        'gate_decisions_answer_user_prompt_valid',
         'lifecycle_runs_trajectory_directional_record_binding_valid',
         'lifecycle_runs_trajectory_directional_record_complete',
         'lifecycle_runs_trajectory_directional_record_provenance_valid',
