@@ -80,7 +80,7 @@ export function loadUsageConfig(
   )
   if (modelLeaseSeconds < MIN_MODEL_LEASE_SECONDS) {
     throw new Error(
-      `WEBCHESS_MODEL_LEASE_SECONDS must be at least ${MIN_MODEL_LEASE_SECONDS} so every bounded model turn can settle durably before the Answer lease is renewed.`,
+      `WEBCHESS_MODEL_LEASE_SECONDS must be at least ${MIN_MODEL_LEASE_SECONDS} so every bounded authenticated model envelope can settle durably before its lease expires.`,
     )
   }
 

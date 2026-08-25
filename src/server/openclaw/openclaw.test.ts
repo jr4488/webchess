@@ -1,6 +1,13 @@
 // @vitest-environment node
 
 import { createHash } from 'node:crypto'
+import { once } from 'node:events'
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -50,6 +57,21 @@ const DEV_ENVIRONMENT = {
   NODE_ENV: 'development',
   WEBCHESS_OPENCLAW_ENABLED: 'true',
 } as const
+const requesterTestServers: Server[] = []
+
+async function listenRequesterTestServer(
+  handler: (request: IncomingMessage, response: ServerResponse) => void,
+): Promise<string> {
+  const server = createServer(handler)
+  requesterTestServers.push(server)
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('Expected a TCP loopback test address.')
+  }
+  return `http://127.0.0.1:${String(address.port)}`
+}
 
 function configuredSearchReadiness(available = true) {
   return {
@@ -220,8 +242,12 @@ function completeGameEvents(): ReplayState {
   return state
 }
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers()
+  await Promise.all(requesterTestServers.splice(0).map(async (server) => {
+    server.closeAllConnections()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }))
 })
 
 describe('OpenClaw local configuration and request boundary', () => {
@@ -250,7 +276,7 @@ describe('OpenClaw local configuration and request boundary', () => {
     expect(resolveOpenClawConfig({})).toMatchObject({
       binary: 'openclaw',
       searchTimeoutMs: 300_000,
-      timeoutMs: 130_000,
+      timeoutMs: 150_000,
       transport: 'local',
     })
     expect(resolveOpenClawConfig({
@@ -388,27 +414,29 @@ describe('OpenClaw local configuration and request boundary', () => {
 describe('OpenClaw process and response boundary', () => {
   it('uses authenticated loopback JSON and never places the prompt in a URL or header', async () => {
     const prompt = `${'x'.repeat(131_072)}\nlarge prompt tail`
-    const fetcher = vi.fn<typeof globalThis.fetch>(async (input, init) => {
-      expect(String(input)).toBe('http://127.0.0.1:44123/v1/model/run')
-      expect(String(input)).not.toContain(prompt)
-      expect(init?.headers).toMatchObject({
-        Authorization: `Bearer ${'t'.repeat(43)}`,
-        'Content-Type': 'application/json',
+    const origin = await listenRequesterTestServer((incoming, response) => {
+      expect(incoming.url).toBe('/v1/model/run')
+      expect(incoming.url).not.toContain(prompt)
+      expect(incoming.headers).toMatchObject({
+        authorization: `Bearer ${'t'.repeat(43)}`,
+        'content-type': 'application/json',
       })
-      expect(JSON.stringify(init?.headers)).not.toContain(prompt)
-      const body = JSON.parse(String(init?.body)) as {
-        prompt: string
-        turnId: string
-      }
-      expect(body.prompt).toBe(prompt)
-      expect(body.turnId).toBe('stable-model-turn')
-      return new Response(modelEnvelope('ok', 'local', prompt), {
-        headers: { 'content-type': 'application/json' },
+      expect(JSON.stringify(incoming.headers)).not.toContain(prompt)
+      const chunks: Buffer[] = []
+      incoming.on('data', (chunk: Buffer) => chunks.push(chunk))
+      incoming.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+          prompt: string
+          turnId: string
+        }
+        expect(body.prompt).toBe(prompt)
+        expect(body.turnId).toBe('stable-model-turn')
+        response.end(modelEnvelope('ok', 'local', prompt))
       })
     })
-    const request = createOpenClawBridgeRequester(fetcher)
+    const request = createOpenClawBridgeRequester()
 
-    await expect(runOpenClawModel(prompt, config(), {
+    await expect(runOpenClawModel(prompt, config({ bridgeUrl: origin }), {
       idempotencyKey: 'stable-model-turn',
       request,
     }))
@@ -416,8 +444,12 @@ describe('OpenClaw process and response boundary', () => {
   })
 
   it('rejects malformed or oversized model turn identities before transport', async () => {
-    const fetcher = vi.fn<typeof globalThis.fetch>()
-    const request = createOpenClawBridgeRequester(fetcher)
+    let requests = 0
+    const origin = await listenRequesterTestServer((_incoming, response) => {
+      requests += 1
+      response.end('not reached')
+    })
+    const request = createOpenClawBridgeRequester()
 
     for (const idempotencyKey of [
       '',
@@ -425,12 +457,12 @@ describe('OpenClaw process and response boundary', () => {
       'contains\nnewline',
       'x'.repeat(256),
     ]) {
-      await expect(runOpenClawModel('bounded prompt', config(), {
+      await expect(runOpenClawModel('bounded prompt', config({ bridgeUrl: origin }), {
         idempotencyKey,
         request,
       })).rejects.toBeInstanceOf(RangeError)
     }
-    expect(fetcher).not.toHaveBeenCalled()
+    expect(requests).toBe(0)
   })
 
   it('runs the provider-start hook only after local model transport validation', async () => {
@@ -471,26 +503,22 @@ describe('OpenClaw process and response boundary', () => {
   })
 
   it('bounds bridge time and output without exposing transport details', async () => {
-    const hangingFetch = vi.fn<typeof globalThis.fetch>(async (_input, init) =>
-      new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => {
-          reject(new DOMException('private abort detail', 'AbortError'))
-        }, { once: true })
-      }))
-    const timedRequest = createOpenClawBridgeRequester(hangingFetch)
+    const hangingOrigin = await listenRequesterTestServer(() => undefined)
+    const timedRequest = createOpenClawBridgeRequester()
     await expect(timedRequest(
       '/v1/status',
       null,
-      config({ timeoutMs: 5 }),
+      config({ bridgeUrl: hangingOrigin, timeoutMs: 5 }),
     )).rejects.toMatchObject({ kind: 'timeout' })
 
-    const oversizedRequest = createOpenClawBridgeRequester(
-      vi.fn(async () => new Response('x'.repeat(1_025))),
-    )
+    const oversizedOrigin = await listenRequesterTestServer((_incoming, response) => {
+      response.end('x'.repeat(1_025))
+    })
+    const oversizedRequest = createOpenClawBridgeRequester()
     await expect(oversizedRequest(
       '/v1/status',
       null,
-      config({ maxOutputBytes: 1_024 }),
+      config({ bridgeUrl: oversizedOrigin, maxOutputBytes: 1_024 }),
     )).rejects.toMatchObject({ kind: 'invalid-output' })
   })
 
@@ -529,7 +557,7 @@ describe('OpenClaw process and response boundary', () => {
     })
     expect(request.mock.calls[0]?.[3]).toEqual({
       idempotencyKey: 'stable-model-turn',
-      requestTimeoutMs: 135_000,
+      requestTimeoutMs: 305_000,
       signal: undefined,
     })
   })

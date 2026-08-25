@@ -40,8 +40,9 @@ export interface AnswerProviderTurn {
 
 /**
  * Trusted lifecycle hook used to renew one durable Answer fence immediately
- * before each actual provider turn. Provider adapters never receive the lease
- * token itself.
+ * before each authenticated model request. Actual provider dispatch remains
+ * independently bounded inside the bridge; provider adapters never receive
+ * the lease token itself.
  */
 export interface AnswerRequestContext extends ModelRequestContext {
   readonly onProviderTurnStart?: (

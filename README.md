@@ -421,14 +421,15 @@ account/OAuth profile. Neither may use a WebChess-side, Codex, OpenAI, or other
 provider API key/token; a missing account capability must fail visibly rather
 than select a substitute.
 
-The launcher then completes two sequential authenticated readiness stages
-before it prints a browser URL: the OpenAI account model stage has one absolute
-150-second allowance, followed by a Codex Hosted Search stage with one absolute
-300-second allowance. Those ceilings include OAuth/auth checks, attestation,
-the provider probe, and postchecks. A slow but healthy authenticated readiness
-sequence can therefore take nearly 7.5 minutes, in addition to bounded local
-staging; no bridge listener is exposed until both stages pass, and an expired
-stage aborts and fails closed.
+The launcher then completes two sequential, startup-only authenticated readiness
+stages before it prints a browser URL: the OpenAI account model stage has one
+absolute 150-second allowance, followed by a Codex Hosted Search stage with one
+absolute 300-second allowance. Those startup ceilings include OAuth/auth checks,
+attestation, the provider probe, and postchecks. A slow but healthy authenticated
+readiness sequence can therefore take nearly 7.5 minutes, in addition to bounded
+local staging; no bridge listener is exposed until both stages pass, and an
+expired stage aborts and fails closed. These startup probes are separate from
+the lifecycle model-request envelope described below.
 
 WebChess includes the `openai` allowlist entry solely to activate the pinned
 OpenClaw runtime's bundled provider for the selected account/OAuth model;
@@ -601,17 +602,23 @@ therefore uses `S + 5` generations (6 to 37), while a same-field path uses
 cancellation do not earn a corrective turn, and invalid provider output is not
 copied into the corrective prompt.
 
-The complete Answer operation—not each turn separately—has one coherent
-five-minute (`300000` ms) allowance. An initial turn and its one permitted
-contract-correction turn are each capped at 150 seconds inside that aggregate
-window. The request watchdog, per-turn lease renewal, upstream HTTP route, and
-durable settlement grace are coordinated so no shorter legacy cap silently
-wins. Exceeding the aggregate window or losing the process/response persists a
-visible retryable Answer failure and releases the slot. When the provider
-outcome cannot be known, the original model-request ledger entry is marked
-`indeterminate`, so that same intent cannot duplicate its provider call. The
-repair never authorizes a silently truncated prompt or an indefinite
-`in_progress` row.
+Each lifecycle model request places one provider turn, capped at 150 seconds,
+inside a 300-second authenticated local bridge envelope for bounded preflight,
+provider work, and postflight. The per-request concurrency lease and each
+single-generation HTTP route allow 35 additional seconds—335 seconds in total:
+up to 5 seconds to drain the loopback response after the authenticated envelope,
+then 30 seconds for durable settlement. Neither grace period permits more
+provider work. Portia's multi-generation route remains separately bounded.
+
+Answer separately has one hard 300-second logical-operation deadline across its
+initial turn and one permitted contract-correction turn. Each actual provider
+turn remains capped at 150 seconds, but the per-request bridge envelope does not
+restart or extend that aggregate Answer deadline. Exceeding the Answer deadline
+or losing the process/response persists a visible retryable failure and releases
+the slot during the drain-and-settlement headroom. When the provider outcome
+cannot be known, the original model-request ledger entry is marked `indeterminate`, so
+that same intent cannot duplicate its provider call. The repair never authorizes
+a silently truncated prompt or an indefinite `in_progress` row.
 
 Failures and Gate decisions can amplify that cost:
 

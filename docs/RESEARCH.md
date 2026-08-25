@@ -81,12 +81,22 @@ provenance. A search synthesis or fetched page is untrusted material for Portia
 to scrutinize—not a verified fact, study result, or validation of WebChess.
 Opting out must leave the non-search lifecycle usable.
 
-If Search exceeds 300 seconds or its process/response is lost, the case must
-show a retryable terminal failure and close the durable claim. It must not
-retain stale `in_progress` state or duplicate the same provider request. Answer
-has the same 300-second aggregate policy across its initial and at most one
-contract-corrective turn, while each individual model turn remains bounded at
-150 seconds. These operational bounds are not study outcome measures.
+If Search exceeds its 300-second end-to-end limit or its process/response is
+lost, the case must show a retryable terminal failure and close the durable
+claim. It must not retain stale `in_progress` state or duplicate the same
+provider request.
+
+Each lifecycle model request uses a 300-second authenticated local bridge
+envelope for bounded preflight, one provider turn, and postflight; the provider
+turn itself remains capped at 150 seconds. The per-request lease and each
+single-generation route provide 35 additional seconds—335 seconds total: up to
+5 seconds to drain the loopback response after the authenticated envelope, then
+30 seconds for durable settlement. Neither grace period permits more provider
+work; Portia's multi-generation route remains separately bounded. Answer
+separately has a hard 300-second logical-operation
+deadline across its initial and at most one contract-corrective turn, and no
+bridge request restarts that deadline. These operational bounds are not study
+outcome measures.
 
 The reproducible path pins the official
 `@openclaw/codex@2026.7.1-1` provider plugin at npm integrity

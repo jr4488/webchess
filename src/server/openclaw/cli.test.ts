@@ -1,8 +1,15 @@
 // @vitest-environment node
 
 import { createHash } from 'node:crypto'
+import { once } from 'node:events'
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http'
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createOpenClawBridgeRequester,
@@ -17,6 +24,49 @@ import type { OpenClawConfig } from './config'
 
 const QUERY = 'current evidence for reversible LLM inference speedups'
 const MARKER_ID = '0123456789abcdef'
+const loopbackServers: Server[] = []
+
+interface Deferred<T> {
+  promise: Promise<T>
+  resolve(value?: T | PromiseLike<T>): void
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolvePromise!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve: (value) => resolvePromise(value as T),
+  }
+}
+
+async function listenLoopback(
+  handler: (request: IncomingMessage, response: ServerResponse) => void,
+): Promise<{ origin: string; server: Server }> {
+  const server = createServer(handler)
+  loopbackServers.push(server)
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('Expected a TCP loopback test address.')
+  }
+  return { origin: `http://127.0.0.1:${String(address.port)}`, server }
+}
+
+async function closeLoopback(server: Server): Promise<void> {
+  server.closeAllConnections()
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve())
+  })
+}
+
+afterEach(async () => {
+  vi.useRealTimers()
+  await Promise.all(loopbackServers.splice(0).map(closeLoopback))
+})
 
 function config(overrides: Partial<OpenClawConfig> = {}): OpenClawConfig {
   return {
@@ -322,14 +372,16 @@ describe('authenticated loopback bridge failure boundaries', () => {
     const output = typeof responseBody === 'string'
       ? responseBody
       : JSON.stringify(responseBody)
-    const request = createOpenClawBridgeRequester(
-      vi.fn(async () => new Response(output, { status })),
-    )
+    const { origin } = await listenLoopback((_incoming, response) => {
+      response.writeHead(status, { 'Content-Type': 'application/json' })
+      response.end(output)
+    })
+    const request = createOpenClawBridgeRequester()
 
     await expect(request(
       '/v1/model/run',
       { prompt: 'bounded prompt' },
-      config(),
+      config({ bridgeUrl: origin }),
     )).rejects.toMatchObject({
       kind,
       message: 'The OpenClaw plugin bridge rejected the request.',
@@ -337,35 +389,35 @@ describe('authenticated loopback bridge failure boundaries', () => {
   })
 
   it('rejects invalid requester options before dispatch', async () => {
-    const fetcher = vi.fn<typeof globalThis.fetch>()
-    const request = createOpenClawBridgeRequester(fetcher)
+    let requests = 0
+    const { origin } = await listenLoopback((_incoming, response) => {
+      requests += 1
+      response.end('ok')
+    })
+    const request = createOpenClawBridgeRequester()
+    const loopbackConfig = config({ bridgeUrl: origin })
 
-    await expect(request('/v1/status', null, config(), {
+    await expect(request('/v1/status', null, loopbackConfig, {
       idempotencyKey: 'model-turn-only',
     })).rejects.toBeInstanceOf(RangeError)
-    await expect(request('/v1/status', null, config(), {
+    await expect(request('/v1/status', null, loopbackConfig, {
       requestTimeoutMs: 0,
     })).rejects.toBeInstanceOf(RangeError)
-    await expect(request('/v1/status', null, config(), {
+    await expect(request('/v1/status', null, loopbackConfig, {
       requestTimeoutMs: 305_001,
     })).rejects.toBeInstanceOf(RangeError)
-    expect(fetcher).not.toHaveBeenCalled()
+    expect(requests).toBe(0)
   })
 
   it('distinguishes caller cancellation from bridge unavailability', async () => {
     const controller = new AbortController()
-    const hangingFetch = vi.fn<typeof globalThis.fetch>(async (_input, init) =>
-      new Promise<Response>((_resolve, reject) => {
-        const rejectOnAbort = () => {
-          reject(new DOMException('private abort detail', 'AbortError'))
-        }
-        if (init?.signal?.aborted) rejectOnAbort()
-        else init?.signal?.addEventListener('abort', rejectOnAbort, { once: true })
-      }))
-    const request = createOpenClawBridgeRequester(hangingFetch)
-    const pending = request('/v1/status', null, config(), {
+    const received = deferred()
+    const { origin } = await listenLoopback(() => received.resolve())
+    const request = createOpenClawBridgeRequester()
+    const pending = request('/v1/status', null, config({ bridgeUrl: origin }), {
       signal: controller.signal,
     })
+    await received.promise
     controller.abort()
 
     await expect(pending).rejects.toMatchObject({
@@ -373,27 +425,229 @@ describe('authenticated loopback bridge failure boundaries', () => {
       message: 'The local OpenClaw request was cancelled.',
     })
 
-    const unavailable = createOpenClawBridgeRequester(
-      vi.fn(async () => Promise.reject(new TypeError('private socket detail'))),
-    )
-    await expect(unavailable('/v1/status', null, config())).rejects.toMatchObject({
+    const unavailableListener = await listenLoopback((_incoming, response) => {
+      response.end('not reached')
+    })
+    const unavailableOrigin = unavailableListener.origin
+    await closeLoopback(unavailableListener.server)
+    loopbackServers.splice(loopbackServers.indexOf(unavailableListener.server), 1)
+    const unavailable = createOpenClawBridgeRequester()
+    await expect(unavailable(
+      '/v1/status',
+      null,
+      config({ bridgeUrl: unavailableOrigin }),
+    )).rejects.toMatchObject({
       kind: 'failed',
       message: 'The authenticated OpenClaw plugin bridge was unavailable.',
     })
   })
 
-  it('accepts an empty successful GET response without inventing a body', async () => {
-    const fetcher = vi.fn<typeof globalThis.fetch>(async () => new Response(null))
-    const request = createOpenClawBridgeRequester(fetcher)
+  it('uses one unpooled loopback request with an exact JSON byte length', async () => {
+    const received = deferred<{
+      body: string
+      connection: string | undefined
+      contentLength: string | undefined
+      method: string | undefined
+      path: string | undefined
+      token: string | undefined
+    }>()
+    const { origin } = await listenLoopback((incoming, response) => {
+      const chunks: Buffer[] = []
+      incoming.on('data', (chunk: Buffer) => chunks.push(chunk))
+      incoming.on('end', () => {
+        received.resolve({
+          body: Buffer.concat(chunks).toString('utf8'),
+          connection: incoming.headers.connection,
+          contentLength: incoming.headers['content-length'],
+          method: incoming.method,
+          path: incoming.url,
+          token: incoming.headers.authorization,
+        })
+        response.end('ok')
+      })
+    })
+    const request = createOpenClawBridgeRequester()
+    const prompt = 'bounded Unicode π prompt'
 
-    await expect(request('/v1/status', null, config())).resolves.toBe('')
-    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
-      body: undefined,
-      method: 'GET',
+    await expect(request(
+      '/v1/model/run',
+      { prompt },
+      config({ bridgeUrl: origin }),
+      { idempotencyKey: 'stable-turn' },
+    )).resolves.toBe('ok')
+    const observed = await received.promise
+    expect(observed).toMatchObject({
+      connection: 'close',
+      method: 'POST',
+      path: '/v1/model/run',
+      token: `Bearer ${'t'.repeat(43)}`,
     })
-    expect(fetcher.mock.calls[0]?.[1]?.headers).toEqual({
-      Authorization: `Bearer ${'t'.repeat(43)}`,
+    expect(JSON.parse(observed.body)).toEqual({
+      prompt,
+      turnId: 'stable-turn',
     })
+    expect(Number(observed.contentLength)).toBe(
+      Buffer.byteLength(observed.body, 'utf8'),
+    )
+  })
+
+  it('accepts the complete 305-second logical envelope without a hidden 300-second cap', async () => {
+    vi.useFakeTimers({ toFake: ['clearTimeout', 'setTimeout'] })
+    const received = deferred()
+    const { origin } = await listenLoopback((_incoming, response) => {
+      received.resolve()
+      setTimeout(() => response.end('ready'), 300_001)
+    })
+    const request = createOpenClawBridgeRequester()
+    const pending = request('/v1/status', null, config({ bridgeUrl: origin }), {
+      requestTimeoutMs: 305_000,
+    })
+    await received.promise
+
+    await vi.advanceTimersByTimeAsync(300_001)
+    await expect(pending).resolves.toBe('ready')
+  })
+
+  it('accepts the exact response byte bound and rejects one byte more', async () => {
+    const exact = 'x'.repeat(1_024)
+    let responseBody = exact
+    const overflowClose = deferred()
+    const { origin } = await listenLoopback((_incoming, response) => {
+      if (responseBody.length === exact.length) {
+        response.end(responseBody)
+        return
+      }
+      response.once('close', () => overflowClose.resolve())
+      response.write(responseBody)
+    })
+    const request = createOpenClawBridgeRequester()
+    const boundedConfig = config({ bridgeUrl: origin, maxOutputBytes: 1_024 })
+
+    await expect(request('/v1/status', null, boundedConfig)).resolves.toBe(exact)
+    responseBody = `${exact}x`
+    await expect(request('/v1/status', null, boundedConfig)).rejects.toMatchObject({
+      kind: 'invalid-output',
+      message: 'The OpenClaw bridge response exceeded its byte limit.',
+    })
+    await overflowClose.promise
+  })
+
+  it('refuses redirects instead of following a second request', async () => {
+    let redirectedRequests = 0
+    const redirected = await listenLoopback((_incoming, response) => {
+      redirectedRequests += 1
+      response.end('unexpected')
+    })
+    const redirecting = await listenLoopback((_incoming, response) => {
+      response.writeHead(302, { Location: `${redirected.origin}/private` })
+      response.end('redirect')
+    })
+    const request = createOpenClawBridgeRequester()
+
+    await expect(request(
+      '/v1/status',
+      null,
+      config({ bridgeUrl: redirecting.origin }),
+    )).rejects.toMatchObject({
+      kind: 'failed',
+      message: 'The OpenClaw plugin bridge rejected the request.',
+    })
+    expect(redirectedRequests).toBe(0)
+  })
+
+  it('fails closed on premature response close and settles abort-timeout races once', async () => {
+    const premature = await listenLoopback((_incoming, response) => {
+      response.writeHead(200, { 'Content-Length': '10' })
+      response.write('short')
+      response.destroy()
+    })
+    const request = createOpenClawBridgeRequester()
+    await expect(request(
+      '/v1/status',
+      null,
+      config({ bridgeUrl: premature.origin }),
+    )).rejects.toMatchObject({
+      kind: 'failed',
+      message: 'The authenticated OpenClaw plugin bridge was unavailable.',
+    })
+
+    const received = deferred()
+    const cancelledConnectionClosed = deferred()
+    const hanging = await listenLoopback((_incoming, response) => {
+      received.resolve()
+      response.once('close', () => cancelledConnectionClosed.resolve())
+    })
+    const controller = new AbortController()
+    const raced = request(
+      '/v1/status',
+      null,
+      config({ bridgeUrl: hanging.origin }),
+      { requestTimeoutMs: 20, signal: controller.signal },
+    )
+    await received.promise
+    controller.abort()
+    await expect(raced).rejects.toMatchObject({ kind: 'aborted' })
+    await cancelledConnectionClosed.promise
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    await expect(raced).rejects.toMatchObject({ kind: 'aborted' })
+  })
+
+  it('applies the same total deadline while draining a response body', async () => {
+    const bodyStarted = deferred()
+    const connectionClosed = deferred()
+    const { origin } = await listenLoopback((_incoming, response) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.write('{"partial":')
+      bodyStarted.resolve()
+      response.once('close', () => connectionClosed.resolve())
+    })
+    const request = createOpenClawBridgeRequester()
+    const pending = request(
+      '/v1/status',
+      null,
+      config({ bridgeUrl: origin }),
+      { requestTimeoutMs: 100 },
+    )
+    await bodyStarted.promise
+
+    await expect(pending).rejects.toMatchObject({
+      kind: 'timeout',
+      message: 'OpenClaw did not finish within the local request timeout.',
+    })
+    await connectionClosed.promise
+  })
+
+  it('revalidates the exact loopback origin, fixed path, and bearer characters', async () => {
+    const request = createOpenClawBridgeRequester()
+    for (const bridgeUrl of [
+      'http://localhost:44123',
+      'http://127.0.0.1:44123/',
+      'http://127.0.0.1:44123/path',
+      'https://127.0.0.1:44123',
+    ]) {
+      await expect(request(
+        '/v1/status',
+        null,
+        config({ bridgeUrl }),
+      )).rejects.toMatchObject({ kind: 'failed' })
+    }
+    await expect(request(
+      '/v1/status',
+      null,
+      config({ bridgeToken: `${'t'.repeat(43)}\r\nInjected: true` }),
+    )).rejects.toMatchObject({
+      kind: 'failed',
+      message: 'The authenticated OpenClaw plugin bridge was unavailable.',
+    })
+    await expect((request as unknown as (
+      path: string,
+      body: null,
+      value: OpenClawConfig,
+    ) => Promise<string>)(
+      '/v1/status/../model/run',
+      null,
+      config(),
+    )).rejects.toMatchObject({ kind: 'failed' })
   })
 })
 

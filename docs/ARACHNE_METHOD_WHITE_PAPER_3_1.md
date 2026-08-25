@@ -218,14 +218,22 @@ Answer output is strictly validated. If the first generation returns content
 that violates the Answer contract, WebChess may make exactly one corrective
 turn using the same approved evidence and bounded disclosure. Provider,
 transport, or cancellation failure does not earn that semantic correction.
-The complete logical Answer has one 300-second provider window; its initial and
-possible corrective turns each remain capped at 150 seconds inside that
-aggregate. The lease is renewed before each actual turn and the HTTP/watchdog
-stack preserves the full window plus settlement grace. A hang, lost response,
-process interruption, or deadline expiry therefore persists a visible
-retryable Answer failure and releases the slot. If the provider outcome is
-unknown, the original request settles `indeterminate`, preventing that durable
-intent from being called again or left indefinitely `in_progress`.
+Each lifecycle model request has a 300-second authenticated local bridge
+envelope for bounded preflight, one provider turn, and postflight. The provider
+turn itself remains capped at 150 seconds. The per-request lease and each
+single-generation route reserve 35 additional seconds—335 seconds total: up to
+5 seconds to drain the loopback response after the authenticated envelope, then
+30 seconds for durable settlement. Neither grace period permits more provider
+work; Portia's multi-generation route remains separately bounded.
+
+The complete logical Answer also has a separate hard 300-second deadline across
+its initial and possible corrective turns. Each actual provider turn retains
+its 150-second ceiling, but a new bridge request does not restart or extend that
+aggregate deadline. A hang, lost response, process interruption, or deadline
+expiry therefore persists a visible retryable Answer failure and releases the
+slot during the drain-and-settlement headroom. If the provider outcome is
+unknown, the original request settles `indeterminate`, preventing that durable intent from
+being called again or left indefinitely `in_progress`.
 The behavior is implemented in
 [`src/server/openai/answer.ts`](../src/server/openai/answer.ts) and the local
 OpenClaw adapter in

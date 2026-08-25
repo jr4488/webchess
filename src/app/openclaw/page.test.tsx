@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { PublicReleaseIdentity } from '@/lib/release-source'
 import { CURRENT_METHOD_VERSION_TUPLE } from '@/lib/lifecycle/method-versions.mjs'
-
-import { resolveOpenClawReleaseIdentity } from './page'
+import { resolveOpenClawReleaseIdentity } from '@/lib/openclaw-release-identity'
 
 const SOURCE_COMMIT = '0123456789abcdef0123456789abcdef01234567'
 const MANIFEST = {

@@ -2831,6 +2831,76 @@ describe('OpenClaw plugin runtime bridge', () => {
     expect(settled).toBe(true)
   })
 
+  it('completes preflight, provider, and postflight near the 300-second envelope', async () => {
+    let finishProvider: (() => void) | undefined
+    const complete = vi.fn<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >(async () => await new Promise<Awaited<ReturnType<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >>>((resolve) => {
+      finishProvider = () => resolve({
+        content: [{ type: 'text', text: 'provider completed inside its turn' }],
+        stopReason: 'stop',
+      })
+    }))
+    const api = fakeApi()
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    revalidate.mockClear()
+    let releasePreflight: (() => void) | undefined
+    let releasePostflight: (() => void) | undefined
+    let requestRevalidationCount = 0
+    revalidate.mockImplementation(async () => {
+      requestRevalidationCount += 1
+      if (requestRevalidationCount === 1) {
+        return await new Promise<boolean>((resolve) => {
+          releasePreflight = () => resolve(true)
+        })
+      }
+      if (requestRevalidationCount === 5) {
+        return await new Promise<boolean>((resolve) => {
+          releasePostflight = () => resolve(true)
+        })
+      }
+      return true
+    })
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawJsonRequest(bridge, '/v1/model/run', {
+      prompt: 'delayed preflight must not consume the provider turn',
+      thinking: 'medium',
+      timeoutMs: 150_000,
+      version: 1,
+    })
+    try {
+      await waitForInvocation(revalidate)
+      await vi.advanceTimersByTimeAsync(119_000)
+      releasePreflight?.()
+      await waitForInvocation(complete)
+
+      await vi.advanceTimersByTimeAsync(149_000)
+      finishProvider?.()
+      await vi.waitFor(() => expect(revalidate).toHaveBeenCalledTimes(5))
+
+      await vi.advanceTimersByTimeAsync(29_000)
+      releasePostflight?.()
+
+      await expect(pending).resolves.toMatchObject({ status: 200 })
+      expect(complete).toHaveBeenCalledTimes(1)
+    } finally {
+      releasePreflight?.()
+      releasePostflight?.()
+      finishProvider?.()
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
   it('rejects malformed model turn identities before provider execution', async () => {
     const complete = vi.fn(async () => ({
       content: [{ type: 'text', text: 'must not run' }],
@@ -2917,7 +2987,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     }
   })
 
-  it('terminates a signal-ignoring model turn after the bounded abort drain', async () => {
+  it('retains a signal-ignoring model turn concurrency slot until it settles', async () => {
     let finishCompletion: (() => void) | undefined
     const complete = vi.fn<
       SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
@@ -2930,6 +3000,7 @@ describe('OpenClaw plugin runtime bridge', () => {
       })
     }))
     const bridge = await start(fakeApi(), {
+      maxConcurrentRuns: 1,
       simpleCompletionRuntime: simpleRuntime(complete),
     })
     vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
@@ -2971,10 +3042,35 @@ describe('OpenClaw plugin runtime bridge', () => {
         turnId: 'answer-turn-that-must-remain-draining',
         version: 1,
       })).resolves.toMatchObject({
-        body: { error: { code: 'MODEL_TURN_IN_PROGRESS' } },
-        status: 409,
+        body: { error: { code: 'BRIDGE_BUSY' } },
+        status: 503,
+      })
+      await expect(rawJsonRequest(bridge, '/v1/model/run', {
+        prompt: 'a distinct unkeyed turn must not amplify provider work',
+        thinking: 'medium',
+        timeoutMs: 10_000,
+        version: 1,
+      })).resolves.toMatchObject({
+        body: { error: { code: 'BRIDGE_BUSY' } },
+        status: 503,
       })
       expect(complete).toHaveBeenCalledTimes(1)
+
+      complete.mockResolvedValue({
+        content: [{ type: 'text', text: 'fresh result after retirement' }],
+        stopReason: 'stop',
+      })
+      finishCompletion?.()
+      for (let index = 0; index < 5; index += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+      await expect(rawJsonRequest(bridge, '/v1/model/run', {
+        prompt: 'a fresh turn after the ignored provider finally settles',
+        thinking: 'medium',
+        timeoutMs: 10_000,
+        version: 1,
+      })).resolves.toMatchObject({ status: 200 })
+      expect(complete).toHaveBeenCalledTimes(2)
     } finally {
       finishCompletion?.()
       await pending.catch(() => undefined)
@@ -2983,7 +3079,85 @@ describe('OpenClaw plugin runtime bridge', () => {
     }
   })
 
-  it('bounds slow model preflight and releases the bridge slot without starting the provider', async () => {
+  it('discards a provider result completed past its absolute turn deadline', async () => {
+    let providerCompleted = false
+    const complete = vi.fn(async () => {
+      providerCompleted = true
+      return {
+        content: [{ type: 'text' as const, text: 'overdue result is discarded' }],
+        stopReason: 'stop' as const,
+      }
+    })
+    const bridge = await start(fakeApi(), {
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    const beforeProvider = Date.now()
+    const now = vi.spyOn(Date, 'now').mockImplementation(() =>
+      providerCompleted ? beforeProvider + 150_001 : beforeProvider)
+    try {
+      await expect(rawJsonRequest(bridge, '/v1/model/run', {
+        prompt: 'provider result crosses the absolute turn deadline',
+        thinking: 'medium',
+        timeoutMs: 150_000,
+        version: 1,
+      })).resolves.toMatchObject({
+        body: {
+          error: {
+            code: 'OPENCLAW_TIMEOUT',
+            message: 'The OpenClaw model run timed out.',
+          },
+        },
+        status: 504,
+      })
+      expect(complete).toHaveBeenCalledOnce()
+    } finally {
+      now.mockRestore()
+      await bridge.close()
+    }
+  })
+
+  it('closes without waiting indefinitely for a draining model provider', async () => {
+    let finishCompletion: (() => void) | undefined
+    const complete = vi.fn<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >(async () => await new Promise<Awaited<ReturnType<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >>>((resolve) => {
+      finishCompletion = () => resolve({
+        content: [{ type: 'text', text: 'late result after bridge shutdown' }],
+        stopReason: 'stop',
+      })
+    }))
+    const api = fakeApi()
+    const originalCurrent = api.runtime.config.current
+    const bridge = await start(api, {
+      maxConcurrentRuns: 1,
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawJsonRequest(bridge, '/v1/model/run', {
+      prompt: 'provider ignores cancellation through bridge shutdown',
+      thinking: 'medium',
+      timeoutMs: 10_000,
+      version: 1,
+    })
+    try {
+      await waitForInvocation(complete)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await vi.advanceTimersByTimeAsync(1_250)
+      await expect(pending).resolves.toMatchObject({ status: 504 })
+
+      await bridge.close()
+      expect(api.runtime.config.current).toBe(originalCurrent)
+      expect(complete).toHaveBeenCalledOnce()
+    } finally {
+      finishCompletion?.()
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('rejects preflight one millisecond beyond the latest safe provider start', async () => {
     const complete = vi.fn(async () => ({
       content: [{ type: 'text', text: 'bounded follow-up result' }],
       stopReason: 'stop' as const,
@@ -3008,12 +3182,12 @@ describe('OpenClaw plugin runtime bridge', () => {
     const pending = rawJsonRequest(bridge, '/v1/model/run', {
       prompt: 'model request whose attestation preflight stalls',
       thinking: 'medium',
-      timeoutMs: 10_000,
+      timeoutMs: 150_000,
       version: 1,
     })
     try {
       await waitForInvocation(revalidate)
-      await vi.advanceTimersByTimeAsync(10_000)
+      await vi.advanceTimersByTimeAsync(120_001)
       await new Promise<void>((resolve) => setImmediate(resolve))
 
       await expect(pending).resolves.toMatchObject({
@@ -3025,7 +3199,7 @@ describe('OpenClaw plugin runtime bridge', () => {
       const followUp = rawJsonRequest(bridge, '/v1/model/run', {
         prompt: 'fresh model request after bounded preflight',
         thinking: 'medium',
-        timeoutMs: 10_000,
+        timeoutMs: 150_000,
         version: 1,
       })
       await expect(followUp).resolves.toMatchObject({ status: 200 })
@@ -3062,7 +3236,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const now = vi.spyOn(Date, 'now').mockImplementation(() =>
       armDeadlineCrossing &&
         new Error().stack?.includes('raceProviderExecution')
-        ? beforeDeadline + 10_000
+        ? beforeDeadline + 260_000
         : beforeDeadline)
     try {
       const response = await rawJsonRequest(bridge, '/v1/model/run', {
@@ -3080,6 +3254,65 @@ describe('OpenClaw plugin runtime bridge', () => {
       expect(complete).not.toHaveBeenCalled()
     } finally {
       now.mockRestore()
+      await bridge.close()
+    }
+  })
+
+  it('retains bounded postflight settlement after a near-limit provider turn', async () => {
+    let finishProvider: (() => void) | undefined
+    const complete = vi.fn<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >(async () => await new Promise<Awaited<ReturnType<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >>>((resolve) => {
+      finishProvider = () => resolve({
+        content: [{ type: 'text', text: 'near-limit provider result' }],
+        stopReason: 'stop',
+      })
+    }))
+    const api = fakeApi()
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    revalidate.mockClear()
+    let requestRevalidationCount = 0
+    let releasePostflight: (() => void) | undefined
+    revalidate.mockImplementation(async () => {
+      requestRevalidationCount += 1
+      if (requestRevalidationCount === 5) {
+        return await new Promise<boolean>((resolve) => {
+          releasePostflight = () => resolve(true)
+        })
+      }
+      return true
+    })
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawJsonRequest(bridge, '/v1/model/run', {
+      prompt: 'near-limit provider result still needs postflight settlement',
+      thinking: 'medium',
+      timeoutMs: 150_000,
+      version: 1,
+    })
+    try {
+      await waitForInvocation(complete)
+      await vi.advanceTimersByTimeAsync(149_000)
+      finishProvider?.()
+      await vi.waitFor(() => expect(revalidate).toHaveBeenCalledTimes(5))
+
+      await vi.advanceTimersByTimeAsync(29_000)
+      releasePostflight?.()
+
+      await expect(pending).resolves.toMatchObject({ status: 200 })
+      expect(complete).toHaveBeenCalledTimes(1)
+    } finally {
+      finishProvider?.()
+      releasePostflight?.()
+      vi.useRealTimers()
       await bridge.close()
     }
   })
@@ -3121,7 +3354,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     try {
       await waitForInvocation(complete)
       await vi.waitFor(() => expect(revalidate).toHaveBeenCalledTimes(5))
-      await vi.advanceTimersByTimeAsync(10_000)
+      await vi.advanceTimersByTimeAsync(300_000)
       await new Promise<void>((resolve) => setImmediate(resolve))
 
       await expect(pending).resolves.toMatchObject({

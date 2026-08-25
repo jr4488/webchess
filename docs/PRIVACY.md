@@ -87,14 +87,22 @@ filtering and provenance do not prove that a source or claim is true. Opting
 out leaves the non-search lifecycle available and must not select another
 hosted search service.
 
-A consented Hosted Search may remain active for at most 300 seconds. This time
-headroom does not enlarge the one-query, result, source, page, redirect, body,
-citation, injection, or consent bounds. Answer likewise has one 300-second
-aggregate window across its initial and, only when structurally necessary,
-corrective turn; each turn remains capped at 150 seconds. Expiry or interruption
-settles visibly, closes the durable claim or releases the Answer slot as
-appropriate, and prevents a duplicate request for the same durable intent
-rather than retaining stale `in_progress` state.
+A consented Hosted Search may remain active for at most 300 seconds end to end.
+This time headroom does not enlarge the one-query, result, source, page,
+redirect, body, citation, injection, or consent bounds.
+
+Each lifecycle model request has a 300-second authenticated local bridge
+envelope for preflight, one provider turn, and postflight; the provider turn
+itself remains capped at 150 seconds. Its per-request lease and each
+single-generation route reserve 35 additional seconds—335 seconds total: up to
+5 seconds to drain the loopback response after the authenticated envelope, then
+30 seconds for durable settlement. Neither grace period permits more provider
+work; Portia's multi-generation route remains separately bounded. Answer also
+has a separate hard 300-second logical-operation
+deadline across its initial and, only when structurally necessary, corrective
+turn; a new bridge request does not extend it. Expiry or interruption settles
+visibly, releases the Answer slot, and prevents a duplicate request for the same
+durable intent rather than retaining stale `in_progress` state.
 
 ## Retired runtime privacy boundaries
 

@@ -1,6 +1,16 @@
 import { createHash } from 'node:crypto'
+import {
+  request as requestHttp,
+  type ClientRequest,
+  type IncomingMessage,
+} from 'node:http'
 
 import { z } from 'zod'
+
+import {
+  MODEL_REQUEST_ENVELOPE_TIMEOUT_MS,
+  MODEL_REQUEST_RESPONSE_GRACE_MS,
+} from '@/server/model-operation-timeouts'
 
 import {
   MAX_OPENCLAW_SEARCH_TIMEOUT_MS,
@@ -9,6 +19,18 @@ import {
 
 const MAX_MODEL_TURN_ID_CHARS = 255
 const MODEL_TURN_ID_PATTERN = /^[A-Za-z0-9._:-]+$/u
+const OPENCLAW_BRIDGE_PATHS = new Set([
+  '/v1/model/run',
+  '/v1/status',
+  '/v1/web/search',
+] as const)
+const OPENCLAW_BRIDGE_UNAVAILABLE_MESSAGE =
+  'The authenticated OpenClaw plugin bridge was unavailable.'
+
+type OpenClawBridgePath =
+  | '/v1/model/run'
+  | '/v1/status'
+  | '/v1/web/search'
 
 export type OpenClawCliFailureKind =
   | 'aborted'
@@ -30,13 +52,13 @@ export class OpenClawCliError extends Error {
 export interface OpenClawCommandOptions {
   /** Stable logical turn identity for transports that support replay safety. */
   idempotencyKey?: string
-  /** Internal response-drain ceiling; provider work remains bounded by the body. */
+  /** Total loopback connect/header/body deadline; provider work remains body-bounded. */
   requestTimeoutMs?: number
   signal?: AbortSignal
 }
 
 export type OpenClawBridgeRequester = (
-  path: '/v1/model/run' | '/v1/status' | '/v1/web/search',
+  path: OpenClawBridgePath,
   body: Record<string, unknown> | null,
   config: OpenClawConfig,
   options?: OpenClawCommandOptions,
@@ -57,8 +79,8 @@ function requireModelTurnId(value: string | undefined): string | undefined {
 }
 
 function bridgeConfig(config: OpenClawConfig): {
+  port: number
   token: string
-  url: string
 } {
   if (!config.bridgeToken || !config.bridgeUrl) {
     throw new OpenClawCliError(
@@ -66,17 +88,51 @@ function bridgeConfig(config: OpenClawConfig): {
       'The authenticated OpenClaw plugin bridge is not configured.',
     )
   }
-  return { token: config.bridgeToken, url: config.bridgeUrl }
+  if (
+    typeof config.bridgeToken !== 'string' ||
+    typeof config.bridgeUrl !== 'string'
+  ) {
+    throw new OpenClawCliError('failed', OPENCLAW_BRIDGE_UNAVAILABLE_MESSAGE)
+  }
+  const token = config.bridgeToken
+  const rawUrl = config.bridgeUrl
+  let url: URL
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    throw new OpenClawCliError('failed', OPENCLAW_BRIDGE_UNAVAILABLE_MESSAGE)
+  }
+  const port = Number(url.port)
+  if (
+    Buffer.byteLength(token, 'utf8') < 32 ||
+    Buffer.byteLength(token, 'utf8') > 512 ||
+    /[\p{C}\s]/gu.test(token) ||
+    url.protocol !== 'http:' ||
+    url.hostname !== '127.0.0.1' ||
+    !url.port ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.pathname !== '/' ||
+    url.search !== '' ||
+    url.hash !== '' ||
+    url.origin !== rawUrl ||
+    !Number.isSafeInteger(port) ||
+    port < 1 ||
+    port > 65_535
+  ) {
+    throw new OpenClawCliError('failed', OPENCLAW_BRIDGE_UNAVAILABLE_MESSAGE)
+  }
+  return { port, token }
 }
 
 function requireRequestTimeoutMs(value: number): number {
   if (
     !Number.isSafeInteger(value) ||
     value < 1 ||
-    value > MAX_OPENCLAW_SEARCH_TIMEOUT_MS + 5_000
+    value > MAX_OPENCLAW_SEARCH_TIMEOUT_MS + MODEL_REQUEST_RESPONSE_GRACE_MS
   ) {
     throw new RangeError(
-      `requestTimeoutMs must be an integer from 1 through ${MAX_OPENCLAW_SEARCH_TIMEOUT_MS + 5_000}.`,
+      `requestTimeoutMs must be an integer from 1 through ${MAX_OPENCLAW_SEARCH_TIMEOUT_MS + MODEL_REQUEST_RESPONSE_GRACE_MS}.`,
     )
   }
   return value
@@ -93,112 +149,191 @@ function bridgeFailureKind(status: number, code: unknown): OpenClawCliFailureKin
 }
 
 async function readBoundedResponse(
-  response: Response,
+  response: IncomingMessage,
   maxBytes: number,
 ): Promise<string> {
-  if (!response.body) return ''
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
+  const chunks: Buffer[] = []
   let total = 0
-  try {
-    while (true) {
-      const next = await reader.read()
-      if (next.done) break
-      total += next.value.byteLength
-      if (total > maxBytes) {
-        await reader.cancel()
-        throw new OpenClawCliError(
-          'invalid-output',
-          'The OpenClaw bridge response exceeded its byte limit.',
-        )
-      }
-      chunks.push(next.value)
+  for await (const chunk of response) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    total += bytes.byteLength
+    if (total > maxBytes) {
+      throw new OpenClawCliError(
+        'invalid-output',
+        'The OpenClaw bridge response exceeded its byte limit.',
+      )
     }
-  } finally {
-    reader.releaseLock()
+    chunks.push(bytes)
   }
-  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8')
+  if (!response.complete) {
+    throw new OpenClawCliError('failed', OPENCLAW_BRIDGE_UNAVAILABLE_MESSAGE)
+  }
+  return Buffer.concat(chunks, total).toString('utf8')
 }
 
-export function createOpenClawBridgeRequester(
-  fetcher: typeof globalThis.fetch = globalThis.fetch,
-): OpenClawBridgeRequester {
+function isOpenClawBridgePath(value: string): value is OpenClawBridgePath {
+  return OPENCLAW_BRIDGE_PATHS.has(value as OpenClawBridgePath)
+}
+
+function sanitizedTransportError(): OpenClawCliError {
+  return new OpenClawCliError('failed', OPENCLAW_BRIDGE_UNAVAILABLE_MESSAGE)
+}
+
+function requestLoopbackBridge(
+  bridge: ReturnType<typeof bridgeConfig>,
+  requestPath: OpenClawBridgePath,
+  requestBody: Buffer | null,
+  requestTimeoutMs: number,
+  maxOutputBytes: number,
+  externalSignal?: AbortSignal,
+): Promise<{ output: string; status: number }> {
+  return new Promise((resolve, reject) => {
+    let request: ClientRequest | null = null
+    let response: IncomingMessage | null = null
+    let settled = false
+    let transportDestroyed = false
+
+    const destroyTransport = () => {
+      if (transportDestroyed) return
+      transportDestroyed = true
+      if (response && !response.destroyed) response.destroy()
+      if (request && !request.destroyed) request.destroy()
+    }
+    const cleanup = () => {
+      clearTimeout(deadline)
+      externalSignal?.removeEventListener('abort', onExternalAbort)
+    }
+    const fail = (error: OpenClawCliError) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      destroyTransport()
+      reject(error)
+    }
+    const succeed = (value: { output: string; status: number }) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(value)
+    }
+    const onExternalAbort = () => {
+      fail(new OpenClawCliError(
+        'aborted',
+        'The local OpenClaw request was cancelled.',
+      ))
+    }
+    const deadline = setTimeout(() => {
+      fail(new OpenClawCliError(
+        'timeout',
+        'OpenClaw did not finish within the local request timeout.',
+      ))
+    }, requestTimeoutMs)
+
+    if (externalSignal?.aborted) {
+      onExternalAbort()
+      return
+    }
+    externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
+    if (externalSignal?.aborted) {
+      onExternalAbort()
+      return
+    }
+
+    try {
+      request = requestHttp({
+        agent: false,
+        family: 4,
+        headers: {
+          Authorization: `Bearer ${bridge.token}`,
+          Connection: 'close',
+          ...(requestBody === null
+            ? {}
+            : {
+                'Content-Length': requestBody.byteLength,
+                'Content-Type': 'application/json',
+              }),
+        },
+        hostname: '127.0.0.1',
+        method: requestBody === null ? 'GET' : 'POST',
+        path: requestPath,
+        port: bridge.port,
+        protocol: 'http:',
+        timeout: 0,
+      }, (incoming) => {
+        response = incoming
+        void readBoundedResponse(incoming, maxOutputBytes)
+          .then((output) => {
+            const status = incoming.statusCode
+            if (status === undefined) {
+              fail(sanitizedTransportError())
+              return
+            }
+            succeed({ output, status })
+          })
+          .catch((error: unknown) => {
+            fail(error instanceof OpenClawCliError
+              ? error
+              : sanitizedTransportError())
+          })
+      })
+      request.once('error', () => fail(sanitizedTransportError()))
+      request.end(requestBody ?? undefined)
+    } catch {
+      fail(sanitizedTransportError())
+    }
+  })
+}
+
+export function createOpenClawBridgeRequester(): OpenClawBridgeRequester {
   return async (requestPath, body, config, options = {}) => {
     const bridge = bridgeConfig(config)
+    if (!isOpenClawBridgePath(requestPath)) {
+      throw sanitizedTransportError()
+    }
     const modelTurnId = requireModelTurnId(options.idempotencyKey)
     if (modelTurnId !== undefined && requestPath !== '/v1/model/run') {
       throw new RangeError(
         'idempotencyKey is supported only for OpenClaw model turns.',
       )
     }
-    const requestBody = body === null
-      ? null
-      : {
-          ...body,
-          ...(modelTurnId === undefined ? {} : { turnId: modelTurnId }),
-        }
+    let requestBody: Buffer | null
+    try {
+      requestBody = body === null
+        ? null
+        : Buffer.from(JSON.stringify({
+            ...body,
+            ...(modelTurnId === undefined ? {} : { turnId: modelTurnId }),
+          }), 'utf8')
+    } catch {
+      throw sanitizedTransportError()
+    }
     const requestTimeoutMs = requireRequestTimeoutMs(
       options.requestTimeoutMs ?? config.timeoutMs,
     )
-    const timeoutController = new AbortController()
-    let timedOut = false
-    const timeout = setTimeout(() => {
-      timedOut = true
-      timeoutController.abort()
-    }, requestTimeoutMs)
-    const signal = options.signal
-      ? AbortSignal.any([options.signal, timeoutController.signal])
-      : timeoutController.signal
-    try {
-      const response = await fetcher(`${bridge.url}${requestPath}`, {
-        body: requestBody === null ? undefined : JSON.stringify(requestBody),
-        cache: 'no-store',
-        headers: {
-          Authorization: `Bearer ${bridge.token}`,
-          ...(requestBody === null ? {} : { 'Content-Type': 'application/json' }),
-        },
-        method: requestBody === null ? 'GET' : 'POST',
-        redirect: 'error',
-        signal,
-      })
-      const output = await readBoundedResponse(response, config.maxOutputBytes)
-      if (!response.ok) {
-        let code: unknown
-        try {
-          const parsed = JSON.parse(output) as {
-            error?: { code?: unknown }
-          }
-          code = parsed.error?.code
-        } catch {
-          // Only the status is needed to produce a sanitized failure.
+    const { output, status } = await requestLoopbackBridge(
+      bridge,
+      requestPath,
+      requestBody,
+      requestTimeoutMs,
+      config.maxOutputBytes,
+      options.signal,
+    )
+    if (status < 200 || status >= 300) {
+      let code: unknown
+      try {
+        const parsed = JSON.parse(output) as {
+          error?: { code?: unknown }
         }
-        throw new OpenClawCliError(
-          bridgeFailureKind(response.status, code),
-          'The OpenClaw plugin bridge rejected the request.',
-        )
-      }
-      return output
-    } catch (error) {
-      if (error instanceof OpenClawCliError) throw error
-      if (timedOut) {
-        throw new OpenClawCliError(
-          'timeout',
-          'OpenClaw did not finish within the local request timeout.',
-        )
-      }
-      if (options.signal?.aborted) {
-        throw new OpenClawCliError(
-          'aborted',
-          'The local OpenClaw request was cancelled.',
-        )
+        code = parsed.error?.code
+      } catch {
+        // Only the status is needed to produce a sanitized failure.
       }
       throw new OpenClawCliError(
-        'failed',
-        'The authenticated OpenClaw plugin bridge was unavailable.',
+        bridgeFailureKind(status, code),
+        'The OpenClaw plugin bridge rejected the request.',
       )
-    } finally {
-      clearTimeout(timeout)
     }
+    return output
   }
 }
 
@@ -235,8 +370,6 @@ const DEFAULT_OPENCLAW_WEB_SEARCH_ACTIVITIES = 24
 const MAX_OPENCLAW_WEB_SEARCH_ACTIVITIES = 64
 const DEFAULT_OPENCLAW_WEB_SEARCH_TOOK_MS = MAX_OPENCLAW_SEARCH_TIMEOUT_MS
 const DEFAULT_OPENCLAW_WEB_SEARCH_OUTPUT_BYTES = 4 * 1024 * 1024
-const OPENCLAW_BRIDGE_RESPONSE_GRACE_MS = 5_000
-
 const OpenClawWebSearchActivitySchema = z.strictObject({
   query: z.string().min(1).max(MAX_OPENCLAW_WEB_SEARCH_QUERY_CHARS).optional(),
   queries: z.array(
@@ -534,7 +667,7 @@ export async function runOpenClawModel(
   const idempotencyKey = requireModelTurnId(options.idempotencyKey)
   const request = options.request ?? requestOpenClawBridge
   const requestTimeoutMs = requireRequestTimeoutMs(
-    config.timeoutMs + OPENCLAW_BRIDGE_RESPONSE_GRACE_MS,
+    MODEL_REQUEST_ENVELOPE_TIMEOUT_MS + MODEL_REQUEST_RESPONSE_GRACE_MS,
   )
   // The production requester needs a complete authenticated loopback bridge.
   // Test-only injected requesters remain responsible for their own transport.
@@ -594,7 +727,7 @@ export async function runOpenClawWebSearch(
     config,
     {
       requestTimeoutMs:
-        config.searchTimeoutMs + OPENCLAW_BRIDGE_RESPONSE_GRACE_MS,
+        config.searchTimeoutMs + MODEL_REQUEST_RESPONSE_GRACE_MS,
       signal: options.signal,
     },
   )
@@ -652,7 +785,7 @@ export async function getOpenClawStatus(
       config,
       {
         requestTimeoutMs:
-          config.timeoutMs + OPENCLAW_BRIDGE_RESPONSE_GRACE_MS,
+          config.timeoutMs + MODEL_REQUEST_RESPONSE_GRACE_MS,
         signal: options.signal,
       },
     )

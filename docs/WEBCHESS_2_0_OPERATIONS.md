@@ -92,15 +92,22 @@ existing durable quota, rate, lease, idempotency, deletion-barrier, and
 settlement behavior. An ambiguous provider completion is reconciled through
 the durable ledger before another bounded Portia attempt can begin.
 
+Each lifecycle model request has a 300-second authenticated local bridge
+envelope spanning bounded preflight, one provider turn, and postflight. The
+provider turn itself remains capped at 150 seconds. The renewed per-request
+lease and each single-generation route allow 35 additional seconds—335 seconds
+total: up to 5 seconds to drain the loopback response after the authenticated
+envelope, then 30 seconds for durable settlement. Neither grace period permits
+more provider work. Portia's multi-generation route remains separately bounded.
+
 One logical Answer, including its initial turn and the one correction allowed
-only for contract-invalid output, has a coherent 300-second provider window.
-Each turn remains capped at 150 seconds inside that aggregate; the lease is
-renewed before each actual turn, the HTTP layer permits the full aggregate, and
-30 seconds is reserved for durable cancellation/settlement rather than more
-provider work. A hang, interruption, lost response, or timeout must settle or
-reconcile to a visible retryable Answer failure and release the slot. An unknown
-provider outcome marks the original request `indeterminate`, preventing a
-duplicate call for that intent instead of leaving `in_progress` indefinitely.
+only for contract-invalid output, has a separate hard 300-second aggregate
+deadline. Each actual provider turn retains its 150-second ceiling, but a new
+bridge request does not restart or extend the Answer deadline. A hang,
+interruption, lost response, or timeout must settle or reconcile during the
+drain-and-settlement headroom to a visible retryable Answer failure and release
+the slot. An unknown provider outcome marks the original request `indeterminate`, preventing
+a duplicate call for that intent instead of leaving `in_progress` indefinitely.
 
 One consented Hosted Search likewise has a coherent 300-second request window
 through the bridge, parser, requester, durable row, and stale-request watchdog.

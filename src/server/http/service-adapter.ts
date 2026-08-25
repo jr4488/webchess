@@ -2785,14 +2785,12 @@ export function createApiServicesWithDependencies(
     problem: string,
     memoryObservationIds: readonly string[],
     researchConsent: Omit<ResearchConsent, 'recordedAt'>,
-    divisionSeed: string,
   ) =>
     canonicalHash({
       operation: 'division/v4-web-memory-research-consent',
       problem,
       memoryObservationIds,
       researchConsent,
-      divisionSeed,
       model: modelName(dependencies),
       promptVersion: DIVISION_PROMPT_VERSION,
       softwareVersion: dependencies.softwareVersion,
@@ -2808,7 +2806,6 @@ export function createApiServicesWithDependencies(
           problem,
           memoryObservationIds,
           input.researchConsent,
-          input.requestId,
         )
         const lifecycleRepository = memoryObservationIds.length > 0
           ? requireLifecycleRepository(dependencies)
@@ -3009,6 +3006,10 @@ export function createApiServicesWithDependencies(
               leaseToken,
               error,
               signal: providerSignal,
+              // The bounded bridge owns one stable turn identity. A timeout or
+              // lost response cannot continue as a second provider call, so
+              // settle it immediately and expose a clean Division retry.
+              settleAmbiguous: true,
             })
             if (settled && shell) {
               shell = await failDivisionForOwner(
@@ -4450,7 +4451,6 @@ export function createApiServicesWithDependencies(
               memoryObservationIds: inheritedObservationIds,
               sourceGameId: terminal.id,
               fieldGeneration: lifecycle.fieldGeneration + 1,
-              divisionSeed: input.requestId,
               model: modelName(dependencies),
               promptVersion: DIVISION_PROMPT_VERSION,
               softwareVersion: dependencies.softwareVersion,
@@ -4491,7 +4491,6 @@ export function createApiServicesWithDependencies(
               memoryObservationIds: inheritedObservationIds,
               sourceGameId: terminal.id,
               fieldGeneration: lifecycle.fieldGeneration + 1,
-              divisionSeed: existingRequest.requestId,
               model: modelName(dependencies),
               promptVersion: DIVISION_PROMPT_VERSION,
               softwareVersion: dependencies.softwareVersion,
@@ -4749,6 +4748,7 @@ export function createApiServicesWithDependencies(
                   leaseToken,
                   error,
                   signal: providerSignal,
+                  settleAmbiguous: true,
                 })
                 if (settled && shell) {
                   shell = await failDivisionForOwner(

@@ -13,6 +13,10 @@ export const OPENAI_MODEL_READINESS_PROMPT = 'Reply with exactly this ASCII toke
 const MAX_CONCURRENT_RUNS = 4;
 const LOOPBACK_HOST = '127.0.0.1';
 const PROVIDER_ABORT_DRAIN_MS = 1_250;
+/** Complete authenticated model envelope; the provider turn is nested within it. */
+const MODEL_REQUEST_ENVELOPE_TIMEOUT_MS = 300_000;
+/** Reserved inside the aggregate envelope for auth revalidation and response shaping. */
+const MODEL_REQUEST_POSTFLIGHT_RESERVE_MS = 30_000;
 const MAX_MODEL_TURN_ID_CHARS = 255;
 const MAX_MODEL_TURN_RECORDS = 256;
 const MODEL_TURN_TOMBSTONE_MS = 10 * 60_000;
@@ -1669,6 +1673,7 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
         const activeControllers = new Set();
         const activeRuns = new Set();
         const drainingStatusExecutions = new Map();
+        const drainingModelExecutions = new Map();
         const drainDetachedStatusExecution = async (controller, execution) => {
             drainingStatusExecutions.set(controller, execution);
             const retire = () => {
@@ -1906,7 +1911,8 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                 const timeoutDelayMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0
                     ? timeoutMs
                     : 1;
-                const requestDeadline = Date.now() + timeoutDelayMs;
+                const requestStartedAt = Date.now();
+                let requestDeadline = requestStartedAt + timeoutDelayMs;
                 const markTimedOut = () => {
                     timedOut = true;
                     controller.abort(new Error('WebChess bridge timeout'));
@@ -1916,7 +1922,12 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                         markTimedOut();
                     return timedOut;
                 };
-                const timeout = setTimeout(markTimedOut, timeoutDelayMs);
+                let timeout = setTimeout(markTimedOut, timeoutDelayMs);
+                const resetRequestDeadline = (deadlineAt) => {
+                    clearTimeout(timeout);
+                    requestDeadline = deadlineAt;
+                    timeout = setTimeout(markTimedOut, Math.max(1, requestDeadline - Date.now()));
+                };
                 const onAborted = () => {
                     clientDisconnected = true;
                     controller.abort(new Error('WebChess bridge client disconnected'));
@@ -1934,10 +1945,34 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                 try {
                     if (request.url === '/v1/model/run') {
                         const input = parseModelRunRequest(body);
+                        const modelRequestDeadline = requestStartedAt + MODEL_REQUEST_ENVELOPE_TIMEOUT_MS;
+                        const latestProviderStartAt = modelRequestDeadline -
+                            input.timeoutMs - MODEL_REQUEST_POSTFLIGHT_RESERVE_MS;
+                        // Preflight has a bounded share of the aggregate envelope. Refuse to
+                        // start a provider turn unless its complete allowance and postflight
+                        // reserve still fit; this prevents authenticated setup from silently
+                        // shortening the provider's configured 150-second ceiling.
+                        resetRequestDeadline(latestProviderStartAt);
                         modelTurn = reserveModelTurn(input);
+                        const providerController = new AbortController();
+                        let providerTimedOut = false;
+                        let providerDeadlineAt = null;
+                        const markProviderTimedOut = () => {
+                            if (providerTimedOut)
+                                return;
+                            providerTimedOut = true;
+                            providerController.abort(new Error('WebChess bridge provider timeout'));
+                        };
+                        const providerDeadlineExpired = () => {
+                            if (!providerTimedOut && providerDeadlineAt !== null &&
+                                Date.now() >= providerDeadlineAt) {
+                                markProviderTimedOut();
+                            }
+                            return providerTimedOut;
+                        };
                         const modelAbortFailure = () => {
                             expireElapsedDeadline();
-                            return timedOut
+                            return timedOut || providerDeadlineExpired()
                                 ? new BridgeRequestError(504, 'OPENCLAW_TIMEOUT', 'The OpenClaw model run timed out.')
                                 : new BridgeRequestError(408, 'OPENCLAW_ABORTED', 'The OpenClaw model run was cancelled.');
                         };
@@ -1991,9 +2026,19 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                             : undefined;
                         let result;
                         let providerStarted = false;
+                        const providerSignal = AbortSignal.any([
+                            controller.signal,
+                            providerController.signal,
+                        ]);
+                        let providerTimeout;
                         try {
                             const completion = await raceProviderExecution(async () => {
+                                // This callback is the actual provider-dispatch boundary. Only
+                                // now does the independently bounded provider turn begin.
                                 providerStarted = true;
+                                resetRequestDeadline(modelRequestDeadline);
+                                providerDeadlineAt = Date.now() + input.timeoutMs;
+                                providerTimeout = setTimeout(markProviderTimedOut, input.timeoutMs);
                                 const execution = Promise.resolve().then(async () => await simpleCompletion.completeWithPreparedSimpleCompletionModel({
                                     auth: prepared.auth,
                                     cfg: postPrepareConfig,
@@ -2012,7 +2057,7 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                                             ? { maxTokens: prepared.model.maxTokens }
                                             : {}),
                                         reasoning: input.thinking,
-                                        signal: controller.signal,
+                                        signal: providerSignal,
                                     },
                                 }));
                                 modelProviderExecution.current = execution;
@@ -2023,6 +2068,10 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                                     if (modelTurn?.state === 'draining') {
                                         completeModelTurn(modelTurn);
                                     }
+                                    if (drainingModelExecutions.get(controller) === execution) {
+                                        drainingModelExecutions.delete(controller);
+                                        activeControllers.delete(controller);
+                                    }
                                 }, () => {
                                     if (modelProviderExecution.current === execution) {
                                         modelProviderExecution.current = null;
@@ -2030,29 +2079,44 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                                     if (modelTurn?.state === 'draining') {
                                         completeModelTurn(modelTurn);
                                     }
+                                    if (drainingModelExecutions.get(controller) === execution) {
+                                        drainingModelExecutions.delete(controller);
+                                        activeControllers.delete(controller);
+                                    }
                                 });
                                 return await execution;
-                            }, controller.signal, expireElapsedDeadline);
+                            }, providerSignal, () => providerDeadlineExpired() || expireElapsedDeadline());
                             if (completion.status === 'aborted') {
                                 throw modelAbortFailure();
                             }
                             result = completion.value;
                         }
                         catch (error) {
-                            if (providerStarted && controller.signal.aborted) {
+                            if (providerStarted && providerSignal.aborted) {
                                 await new Promise((resolve) => {
                                     setTimeout(resolve, PROVIDER_ABORT_DRAIN_MS);
                                 });
                             }
-                            if (expireElapsedDeadline())
+                            if (providerDeadlineExpired() || expireElapsedDeadline()) {
                                 throw modelAbortFailure();
-                            if (clientDisconnected || controller.signal.aborted) {
+                            }
+                            if (clientDisconnected || providerSignal.aborted) {
                                 throw modelAbortFailure();
                             }
                             throw error;
                         }
-                        if (expireElapsedDeadline())
+                        finally {
+                            if (providerTimeout !== undefined)
+                                clearTimeout(providerTimeout);
+                        }
+                        if (providerDeadlineExpired() || expireElapsedDeadline()) {
                             throw modelAbortFailure();
+                        }
+                        // The provider result crossed its absolute deadline check. Retire
+                        // that deadline now so the separately bounded postflight may use the
+                        // remaining aggregate envelope without being misclassified as late
+                        // provider work.
+                        providerDeadlineAt = null;
                         if (clientDisconnected || controller.signal.aborted) {
                             throw modelAbortFailure();
                         }
@@ -2084,8 +2148,9 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                         if (!outputText || !provider || !model) {
                             throw new BridgeRequestError(502, 'INVALID_MODEL_RESULT', 'The OpenClaw model result was incomplete.');
                         }
-                        if (expireElapsedDeadline())
+                        if (providerDeadlineExpired() || expireElapsedDeadline()) {
                             throw modelAbortFailure();
+                        }
                         if (clientDisconnected || controller.signal.aborted) {
                             throw modelAbortFailure();
                         }
@@ -2255,12 +2320,17 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                     throw new BridgeRequestError(404, 'NOT_FOUND', 'Unknown bridge endpoint.');
                 }
                 finally {
+                    let retainControllerForDrainingModel = false;
                     if (modelTurn) {
                         const currentModelTurn = modelTurn;
                         const drainingExecution = modelProviderExecution.current;
                         if (drainingExecution) {
                             currentModelTurn.state = 'draining';
-                            void drainingExecution.then(() => completeModelTurn(currentModelTurn), () => completeModelTurn(currentModelTurn));
+                            // A provider that ignores cancellation may outlive the bounded
+                            // HTTP drain. Keep its concurrency slot until the underlying work
+                            // really settles so a distinct request cannot amplify billed work.
+                            drainingModelExecutions.set(controller, drainingExecution);
+                            retainControllerForDrainingModel = true;
                         }
                         else {
                             completeModelTurn(currentModelTurn);
@@ -2269,7 +2339,9 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                     clearTimeout(timeout);
                     request.off('aborted', onAborted);
                     response.off('close', onClosed);
-                    activeControllers.delete(controller);
+                    if (!retainControllerForDrainingModel) {
+                        activeControllers.delete(controller);
+                    }
                 }
             })();
             const tracked = run.then(() => undefined, (error) => {
@@ -2304,6 +2376,13 @@ export async function startWebChessBridge(api, _runtimeRoot, options = {}) {
                     // consuming finite concurrency slots until the dependency really ends.
                     for (const controller of drainingStatusExecutions.keys()) {
                         drainingStatusExecutions.delete(controller);
+                        activeControllers.delete(controller);
+                    }
+                    // Model work that ignored cancellation retains a slot while this
+                    // bridge accepts requests. Shutdown is already exclusive (`closing`),
+                    // so retire those bookkeeping entries without waiting indefinitely.
+                    for (const controller of drainingModelExecutions.keys()) {
+                        drainingModelExecutions.delete(controller);
                         activeControllers.delete(controller);
                     }
                     await closeServer(server);

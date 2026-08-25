@@ -507,16 +507,24 @@ indeterminate provider-started attempts. Exhaustion produces
 settlement committed but final attachment was interrupted, the durable result
 payload is the recovery authority.
 
-One logical Answer operation has an aggregate 300-second provider deadline.
-The initial turn and, only after contract-invalid output, one corrective turn
-each retain a 150-second turn ceiling inside that aggregate. The lease is
-renewed immediately before each actual provider turn and includes 30 seconds
-for settlement, while the HTTP handler leaves the same settlement grace above
-the 300-second provider window. A provider hang, lost response, process
-interruption, or expired lease therefore settles or reconciles visibly,
-transitions the lifecycle to a retryable Answer failure, and releases the slot.
-An unknown provider outcome marks the original request `indeterminate`, so the
-same durable intent cannot be called again or left indefinitely `in_progress`.
+Each lifecycle model request has a 300-second authenticated local bridge
+envelope spanning bounded preflight, one provider turn, and postflight. The
+provider turn itself remains capped at 150 seconds, so preflight cannot consume
+its allowance. The renewed per-request concurrency lease and each
+single-generation HTTP route allow 35 additional seconds—335 seconds total: up
+to 5 seconds to drain the loopback response after the authenticated envelope,
+then 30 seconds for durable settlement. Neither grace period permits more
+provider work. Portia's multi-generation route remains separately bounded.
+
+Answer also has a separate hard 300-second logical-operation deadline across
+its initial turn and, only after contract-invalid output, one corrective turn.
+Each actual provider turn retains its 150-second ceiling, but neither bridge
+request restarts or extends the aggregate Answer deadline. A provider hang,
+lost response, process interruption, or expired deadline therefore settles or
+reconciles visibly during the drain-and-settlement headroom, transitions the
+lifecycle to a retryable Answer failure, and releases the slot. An unknown provider outcome
+marks the original request `indeterminate`, so the same durable intent cannot be
+called again or left indefinitely `in_progress`.
 
 The application quotas and concurrency leases bound WebChess operations, while
 the selected account's allowance and workspace controls remain external.

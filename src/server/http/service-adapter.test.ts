@@ -51,7 +51,10 @@ import {
   type LifecycleRepositoryPort,
 } from '../lifecycle'
 import { ANSWER_OPERATION_TIMEOUT_MS } from '../model-operation-timeouts'
-import { OpenClawAnswerContractError } from '../openclaw/errors'
+import {
+  OpenClawAnswerContractError,
+  OpenClawProviderError,
+} from '../openclaw/errors'
 import {
   buildBoardAnswerPromptPackage,
   buildPlayerVisibleAnswerPrompt,
@@ -1722,16 +1725,12 @@ function operationInput() {
   }
 }
 
-function currentDivisionRequestSha256(
-  seed = REQUEST_ID,
-  problem = PROBLEM,
-): string {
+function currentDivisionRequestSha256(problem = PROBLEM): string {
   return hashCanonicalJson({
     operation: 'division/v4-web-memory-research-consent',
     problem,
     memoryObservationIds: [],
     researchConsent: RESEARCH_CONSENT_CHOICE,
-    divisionSeed: seed,
     model: OPENAI_MODEL,
     promptVersion: DIVISION_PROMPT_VERSION,
     softwareVersion: 'webchess-test',
@@ -1740,7 +1739,6 @@ function currentDivisionRequestSha256(
 
 function currentFieldRetryRequestSha256(
   lifecycle: LifecycleAggregate,
-  requestId = REQUEST_ID,
   memoryObservationIds: readonly string[] = [],
   problem = PROBLEM,
 ): string {
@@ -1766,7 +1764,6 @@ function currentFieldRetryRequestSha256(
     memoryObservationIds,
     sourceGameId: GAME_ID,
     fieldGeneration: lifecycle.fieldGeneration + 1,
-    divisionSeed: requestId,
     model: OPENAI_MODEL,
     promptVersion: DIVISION_PROMPT_VERSION,
     softwareVersion: 'webchess-test',
@@ -2016,7 +2013,6 @@ describe('durable HTTP service adapter', () => {
           problem: PROBLEM,
           memoryObservationIds: [WEB_MEMORY_OBSERVATION_ID],
           researchConsent: RESEARCH_CONSENT_CHOICE,
-          divisionSeed: REQUEST_ID,
           model: OPENAI_MODEL,
           promptVersion: DIVISION_PROMPT_VERSION,
           softwareVersion: 'webchess-test',
@@ -2168,6 +2164,113 @@ describe('durable HTTP service adapter', () => {
     )
   })
 
+  it('recovers one initial Division winner when the same key arrives with a new transport request id', async () => {
+    const responseLossRequestId =
+      '22222222-2222-4222-8222-222222222229'
+    const payload = castBoundDivisionResultPayload()
+    let persistedGame: DurableGameSnapshot = snapshot({ id: REQUEST_ID })
+    let persistedRequestSha256: string | null = null
+    let reservationCount = 0
+
+    vi.mocked(dependencies.usage.reserveModelRequest).mockImplementation(
+      async (input) => {
+        reservationCount += 1
+        if (persistedRequestSha256 === null) {
+          persistedRequestSha256 = input.requestSha256
+          return {
+            ok: true,
+            kind: 'reserved',
+            requestId: REQUEST_ID,
+            gameId: null,
+            status: 'reserved',
+            leaseToken: LEASE_TOKEN,
+            leaseExpiresAt: '2026-07-26T20:03:00.000Z',
+          }
+        }
+        if (input.requestSha256 !== persistedRequestSha256) {
+          return {
+            ok: false,
+            code: 'IDEMPOTENCY_CONFLICT',
+            httpStatus: 409,
+            retryAfterSeconds: null,
+          }
+        }
+        return {
+          ok: true,
+          kind: 'existing',
+          requestId: REQUEST_ID,
+          gameId: REQUEST_ID,
+          status: 'succeeded',
+          leaseToken: null,
+          leaseExpiresAt: null,
+        }
+      },
+    )
+    vi.mocked(dependencies.repository.getOrCreateDivision).mockImplementation(
+      async () => ({
+        game: persistedGame,
+        created: persistedGame.status === 'dividing',
+      }),
+    )
+    vi.mocked(dependencies.repository.finishDivision).mockImplementation(
+      async () => {
+        persistedGame = currentMappedDivisionSnapshot(payload)
+        return persistedGame
+      },
+    )
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockImplementation(async () => ({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+      operation: 'division',
+      requestSha256: persistedRequestSha256 ?? undefined,
+      promptVersion: DIVISION_PROMPT_VERSION,
+      status: 'succeeded',
+      resultPayload: payload as unknown as ModelResultPayload,
+    }))
+
+    const services = createApiServicesWithDependencies(dependencies)
+    const first = await services.divide(operationInput())
+    const recovered = await services.divide({
+      ...operationInput(),
+      requestId: responseLossRequestId,
+    })
+    const reservations = vi.mocked(
+      dependencies.usage.reserveModelRequest,
+    ).mock.calls.map(([input]) => input)
+
+    expect(reservationCount).toBe(2)
+    expect(reservations.map((input) => input.requestId)).toEqual([
+      REQUEST_ID,
+      responseLossRequestId,
+    ])
+    expect(reservations[0]?.requestSha256).toBe(reservations[1]?.requestSha256)
+    expect(first).toMatchObject({
+      id: REQUEST_ID,
+      division: { seed: REQUEST_ID },
+    })
+    expect(recovered).toMatchObject({
+      id: REQUEST_ID,
+      division: { seed: REQUEST_ID },
+    })
+    expect(recovered.division).toEqual(first.division)
+    expect(dependencies.divisionGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.divisionGenerator).toHaveBeenCalledWith(
+      expect.objectContaining({ divisionSeed: REQUEST_ID }),
+      expect.any(Object),
+    )
+    expect(dependencies.usage.beginProviderCall).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.repository.getOrCreateDivision).toHaveBeenCalledTimes(2)
+    for (const [input] of vi.mocked(
+      dependencies.repository.getOrCreateDivision,
+    ).mock.calls) {
+      expect(input.gameId).toBe(REQUEST_ID)
+    }
+  })
+
   it('recovers only a current cast-bound Division result during GET', async () => {
     vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
       snapshot({ id: GAME_ID }),
@@ -2179,7 +2282,7 @@ describe('durable HTTP service adapter', () => {
       requestId: GAME_ID,
       gameId: GAME_ID,
       operation: 'division',
-      requestSha256: currentDivisionRequestSha256(GAME_ID),
+      requestSha256: currentDivisionRequestSha256(),
       promptVersion: DIVISION_PROMPT_VERSION,
       status: 'succeeded',
       resultPayload:
@@ -2405,7 +2508,7 @@ describe('durable HTTP service adapter', () => {
         requestId: GAME_ID,
         gameId: GAME_ID,
         operation: 'division',
-        requestSha256: currentDivisionRequestSha256(GAME_ID),
+        requestSha256: currentDivisionRequestSha256(),
         promptVersion: DIVISION_PROMPT_VERSION,
         status,
         resultPayload: null,
@@ -2437,7 +2540,7 @@ describe('durable HTTP service adapter', () => {
       requestId: GAME_ID,
       gameId: GAME_ID,
       operation: 'division',
-      requestSha256: currentDivisionRequestSha256(GAME_ID),
+      requestSha256: currentDivisionRequestSha256(),
       promptVersion: DIVISION_PROMPT_VERSION,
       status: 'rejected',
       resultPayload: null,
@@ -2472,7 +2575,7 @@ describe('durable HTTP service adapter', () => {
       requestId: GAME_ID,
       gameId: null,
       operation: 'division',
-      requestSha256: currentDivisionRequestSha256(GAME_ID),
+      requestSha256: currentDivisionRequestSha256(),
       promptVersion: DIVISION_PROMPT_VERSION,
       status: 'reserved',
       resultPayload: null,
@@ -2717,21 +2820,83 @@ describe('durable HTTP service adapter', () => {
     expect(dependencies.repository.failDivision).toHaveBeenCalledTimes(1)
   })
 
-  it('leaves an ambiguous timeout in progress for lease reconciliation', async () => {
+  it('settles a Division timeout as retryable without leaving an active lease', async () => {
     vi.mocked(dependencies.divisionGenerator).mockRejectedValue(
-      new APIConnectionTimeoutError(),
+      new OpenClawProviderError(
+        'provider_timeout',
+        true,
+        'The authenticated OpenClaw model turn timed out.',
+      ),
     )
 
+    const services = createApiServicesWithDependencies(dependencies)
+
     await expect(
-      createApiServicesWithDependencies(dependencies).divide(operationInput()),
+      services.divide(operationInput()),
     ).rejects.toMatchObject({
       code: 'UPSTREAM_TIMEOUT',
       status: 504,
     })
 
-    expect(dependencies.usage.settleModelRequest).not.toHaveBeenCalled()
-    expect(dependencies.repository.failDivision).not.toHaveBeenCalled()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'indeterminate',
+        failureCode: 'provider_timeout',
+      }),
+    )
+    expect(dependencies.repository.failDivision).toHaveBeenCalledOnce()
     expect(dependencies.usage.releaseReservation).not.toHaveBeenCalled()
+
+    vi.mocked(dependencies.usage.reserveModelRequest).mockResolvedValue({
+      ok: true,
+      kind: 'existing',
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+      status: 'indeterminate',
+      leaseToken: null,
+      leaseExpiresAt: null,
+    })
+    vi.mocked(
+      dependencies.usage.getLatestModelRequestForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+      operation: 'division',
+      requestSha256: currentDivisionRequestSha256(),
+      promptVersion: DIVISION_PROMPT_VERSION,
+      status: 'indeterminate',
+      resultPayload: null,
+    })
+    vi.mocked(
+      dependencies.usage.getModelRequestByIdempotencyKey,
+    ).mockResolvedValue({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+      operation: 'division',
+      status: 'indeterminate',
+      resultPayload: null,
+    })
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      snapshot({ id: REQUEST_ID }),
+    )
+
+    await expect(services.divide(operationInput())).rejects.toMatchObject({
+      code: 'UPSTREAM_FAILURE',
+      status: 502,
+    })
+    const recovered = await services.getDivisionIntent({
+      ownerId: OWNER_ID,
+      idempotencyKey: IDEMPOTENCY_KEY,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })
+
+    expect(recovered.status).toBe('division_failed')
+    expect(dependencies.divisionGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
   })
 
   it('releases quota and marks the shell failed when setup fails before OpenAI', async () => {
@@ -5873,7 +6038,6 @@ describe('durable HTTP service adapter', () => {
           memoryObservationIds: [WEB_MEMORY_OBSERVATION_ID],
           sourceGameId: GAME_ID,
           fieldGeneration: 2,
-          divisionSeed: REQUEST_ID,
           model: OPENAI_MODEL,
           promptVersion: DIVISION_PROMPT_VERSION,
           softwareVersion: 'webchess-test',
@@ -5947,10 +6111,14 @@ describe('durable HTTP service adapter', () => {
     },
   )
 
-  it('leaves an ambiguous Retry provider timeout for bounded lease reconciliation', async () => {
+  it('settles an ambiguous Retry timeout and fails its child without lineage', async () => {
     dependencies = currentRetryFieldDependencies().dependencies
     vi.mocked(dependencies.divisionGenerator).mockRejectedValue(
-      new APIConnectionTimeoutError(),
+      new OpenClawProviderError(
+        'provider_timeout',
+        true,
+        'The authenticated OpenClaw model turn timed out.',
+      ),
     )
 
     await expect(createApiServicesWithDependencies(dependencies)
@@ -5960,8 +6128,14 @@ describe('durable HTTP service adapter', () => {
         expectedRevision: 2,
       })).rejects.toMatchObject({ code: 'UPSTREAM_TIMEOUT', status: 504 })
 
-    expect(dependencies.usage.settleModelRequest).not.toHaveBeenCalled()
-    expect(dependencies.repository.failDivision).not.toHaveBeenCalled()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'indeterminate',
+        failureCode: 'provider_timeout',
+      }),
+    )
+    expect(dependencies.repository.failDivision).toHaveBeenCalledOnce()
     expect(dependencies.usage.releaseReservation).not.toHaveBeenCalled()
     expect(dependencies.lifecycleRepository?.createRetryRun)
       .not.toHaveBeenCalled()
@@ -6043,6 +6217,124 @@ describe('durable HTTP service adapter', () => {
       })
     expect(dependencies.lifecycleRepository?.createRetryRun)
       .toHaveBeenCalledOnce()
+  })
+
+  it('recovers one fresh-field Retry winner when the same key arrives with a new transport request id', async () => {
+    const setup = currentRetryFieldDependencies()
+    dependencies = setup.dependencies
+    const lifecycleRepository = dependencies.lifecycleRepository!
+    const responseLossRequestId =
+      '22222222-2222-4222-8222-222222222229'
+    const payload = castBoundDivisionResultPayload()
+    let persistedChild: DurableGameSnapshot = snapshot({ id: REQUEST_ID })
+    let persistedRequestSha256: string | null = null
+    let reservationCount = 0
+
+    vi.mocked(dependencies.usage.reserveModelRequest).mockImplementation(
+      async (input) => {
+        reservationCount += 1
+        if (persistedRequestSha256 === null) {
+          persistedRequestSha256 = input.requestSha256
+          return {
+            ok: true,
+            kind: 'reserved',
+            requestId: REQUEST_ID,
+            gameId: null,
+            status: 'reserved',
+            leaseToken: LEASE_TOKEN,
+            leaseExpiresAt: '2026-07-26T20:03:00.000Z',
+          }
+        }
+        if (input.requestSha256 !== persistedRequestSha256) {
+          return {
+            ok: false,
+            code: 'IDEMPOTENCY_CONFLICT',
+            httpStatus: 409,
+            retryAfterSeconds: null,
+          }
+        }
+        return {
+          ok: true,
+          kind: 'existing',
+          requestId: REQUEST_ID,
+          gameId: REQUEST_ID,
+          status: 'succeeded',
+          leaseToken: null,
+          leaseExpiresAt: null,
+        }
+      },
+    )
+    vi.mocked(dependencies.repository.getOrCreateDivision).mockImplementation(
+      async () => ({
+        game: persistedChild,
+        created: persistedChild.status === 'dividing',
+      }),
+    )
+    vi.mocked(dependencies.repository.finishDivision).mockImplementation(
+      async () => {
+        persistedChild = currentMappedDivisionSnapshot(payload, {
+          sourceGameId: GAME_ID,
+        })
+        return persistedChild
+      },
+    )
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockImplementation(async () => ({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+      operation: 'division',
+      requestSha256: persistedRequestSha256 ?? undefined,
+      promptVersion: DIVISION_PROMPT_VERSION,
+      status: 'succeeded',
+      resultPayload: payload as unknown as ModelResultPayload,
+    }))
+    vi.mocked(lifecycleRepository.createRetryRun).mockRejectedValueOnce(
+      new Error('Simulated response loss before Retry lineage committed.'),
+    )
+
+    const services = createApiServicesWithDependencies(dependencies)
+    await expect(services.retryLifecycle({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })).rejects.toMatchObject({ code: 'INTERNAL_ERROR', status: 500 })
+
+    const recovered = await services.retryLifecycle({
+      ...operationInput(),
+      requestId: responseLossRequestId,
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+    const reservations = vi.mocked(
+      dependencies.usage.reserveModelRequest,
+    ).mock.calls.map(([input]) => input)
+
+    expect(reservationCount).toBe(2)
+    expect(reservations.map((input) => input.requestId)).toEqual([
+      REQUEST_ID,
+      responseLossRequestId,
+    ])
+    expect(reservations[0]?.requestSha256).toBe(reservations[1]?.requestSha256)
+    expect(recovered.game).toMatchObject({
+      id: REQUEST_ID,
+      sourceGameId: GAME_ID,
+      division: { seed: REQUEST_ID },
+    })
+    expect(recovered.lifecycle).toMatchObject({
+      gameId: REQUEST_ID,
+      state: 'field_ready',
+      fieldRegenerationCount: 1,
+    })
+    expect(dependencies.divisionGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.divisionGenerator).toHaveBeenCalledWith(
+      expect.objectContaining({ divisionSeed: REQUEST_ID }),
+      expect.any(Object),
+    )
+    expect(dependencies.usage.beginProviderCall).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(lifecycleRepository.createRetryRun).toHaveBeenCalledTimes(2)
   })
 
   it.each([
@@ -6191,7 +6483,6 @@ describe('durable HTTP service adapter', () => {
       operation: 'division',
       requestSha256: currentFieldRetryRequestSha256(
         retryingParent,
-        REQUEST_ID,
         [],
         setup.fixture.evidence.problem,
       ),

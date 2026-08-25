@@ -177,7 +177,7 @@ describe('usage configuration', () => {
       hourlyIpWilburObservationLimit: 120,
       concurrentModelLimit: 1,
       globalModelConcurrentLimit: 4,
-      modelLeaseSeconds: 180,
+      modelLeaseSeconds: 335,
     })
     expect(usageConfigDefaults).toMatchObject({
       dailyGameLimit: 2,
@@ -197,8 +197,8 @@ describe('usage configuration', () => {
     expect(() => loadUsageConfig({
       WEBCHESS_HMAC_SECRET: HMAC_SECRET,
       WEBCHESS_DELETION_HMAC_SECRET: 'd'.repeat(48),
-      WEBCHESS_MODEL_LEASE_SECONDS: '179',
-    })).toThrow(/at least 180/u)
+      WEBCHESS_MODEL_LEASE_SECONDS: '334',
+    })).toThrow(/at least 335/u)
   })
 
   it('rejects an app concurrency value that the schema cannot enforce', () => {

@@ -9,14 +9,14 @@ export interface OpenClawConfig {
   bridgeToken: string | null
   bridgeUrl: string | null
   maxOutputBytes: number
-  /** Per-turn model ceiling. Answer may use two turns within its own aggregate window. */
+  /** Provider-only turn ceiling inside a 300-second authenticated envelope. */
   timeoutMs: number
   /** One complete consented Codex Hosted Search request. */
   searchTimeoutMs: number
   transport: OpenClawTransport
 }
 
-export const DEFAULT_OPENCLAW_TIMEOUT_MS = 130_000
+export const DEFAULT_OPENCLAW_TIMEOUT_MS = 150_000
 export const MIN_OPENCLAW_TIMEOUT_MS = 1_000
 export const MAX_OPENCLAW_TIMEOUT_MS = 150_000
 export const DEFAULT_OPENCLAW_SEARCH_TIMEOUT_MS = 300_000

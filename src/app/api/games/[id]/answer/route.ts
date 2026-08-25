@@ -2,8 +2,9 @@ import type { NextRequest } from 'next/server'
 import { handleAnswerRequest } from '@/server/http'
 
 export const dynamic = 'force-dynamic'
-// Provider work is capped at 300s; the extra 30s is settlement-only grace.
-export const maxDuration = 330
+// Answer's authenticated aggregate window is 300s; 5s drains the loopback
+// response and the final 30s is settlement-only grace.
+export const maxDuration = 335
 export const runtime = 'nodejs'
 
 interface RouteContext {

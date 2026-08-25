@@ -577,13 +577,14 @@ local-mode boundary is unavailable. A provider-key variable or API-key profile
 is a startup failure. It must not silently call a WebChess-hosted or alternate
 provider, Clerk, Neon, or a repository `.env` service.
 
-Before printing the loopback URL, the launcher runs two sequential authenticated
-readiness stages: an absolute 150-second OpenAI account model stage, then an
-absolute 300-second Codex Hosted Search stage. Each budget includes OAuth/auth
-checks, attestation, its provider probe, and postchecks. A slow healthy
-authenticated readiness sequence can therefore take nearly 7.5 minutes, in
-addition to bounded local staging; no bridge listener exists until both stages
-pass, and expiry aborts and fails closed.
+Before printing the loopback URL, the launcher runs two sequential, startup-only
+authenticated readiness stages: an absolute 150-second OpenAI account model
+stage, then an absolute 300-second Codex Hosted Search stage. Each startup budget
+includes OAuth/auth checks, attestation, its provider probe, and postchecks. A
+slow healthy authenticated readiness sequence can therefore take nearly 7.5
+minutes, in addition to bounded local staging; no bridge listener exists until
+both stages pass, and expiry aborts and fails closed. These startup probes are
+separate from lifecycle model-request timing.
 
 ## 6. Choose research-search consent separately
 
@@ -716,15 +717,22 @@ allowance use. Each Retry child inherits consent and can repeat its own bounded
 search/page transmission; a fresh field also repeats Division. No duration or
 unmetered-use promise is made.
 
-One logical Answer has a five-minute (`300000` ms) end-to-end ceiling. Its
-initial turn and at most one contract-corrective turn each remain bounded to
-150 seconds within that aggregate. The HTTP route, watchdog, per-turn lease
-renewal, and settlement grace are coordinated so no shorter upstream cap wins.
-If the five-minute window expires or the process/response is interrupted,
-WebChess persists a visible retryable Answer failure and releases the slot.
-When the provider outcome cannot be known, the original model-request row is
-marked `indeterminate`, preventing a duplicate call for that intent rather than
-leaving Answer indefinitely `in_progress`.
+Each lifecycle model request gives its actual provider turn at most 150 seconds
+inside a 300-second authenticated local bridge envelope covering bounded
+preflight, provider work, and postflight. Its per-request concurrency lease and
+each single-generation HTTP route allow 35 additional seconds—335 seconds total:
+up to 5 seconds to drain the loopback response after the authenticated envelope,
+then 30 seconds for durable settlement. Neither grace period permits more
+provider work. Portia's multi-generation route remains separately bounded.
+
+Answer separately has a hard 300-second logical-operation deadline across its
+initial turn and at most one contract-corrective turn. Each provider turn remains
+bounded to 150 seconds, but a new bridge request does not restart or extend that
+aggregate Answer deadline. If it expires or the process/response is interrupted,
+WebChess uses the drain-and-settlement headroom to persist a visible retryable
+failure and release the slot. When the provider outcome cannot be known, the
+original model-request row is marked `indeterminate`, preventing a duplicate call for
+that intent rather than leaving Answer indefinitely `in_progress`.
 
 ## 8. Interpret verification honestly
 

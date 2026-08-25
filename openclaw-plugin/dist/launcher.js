@@ -448,8 +448,9 @@ export function buildNextLaunchSpec(root, options, environment = process.env, ne
         WEBCHESS_OPENCLAW_BRIDGE_TOKEN: bridge.token,
         WEBCHESS_OPENCLAW_BRIDGE_URL: bridge.url,
         WEBCHESS_OPENCLAW_OWNER_ID: runtimeIdentity.ownerId,
-        // These are protocol policy, not user tuning: one model turn is bounded
-        // to 150 seconds while one consented Hosted Search receives five minutes.
+        // These are protocol policy, not user tuning: the provider-only portion of
+        // one model turn is bounded to 150 seconds inside its authenticated
+        // envelope, while one consented Hosted Search receives five minutes.
         WEBCHESS_OPENCLAW_TIMEOUT_MS: '150000',
         WEBCHESS_OPENCLAW_SEARCH_TIMEOUT_MS: '300000',
         WEBCHESS_OPENCLAW_TRANSPORT: 'local',
