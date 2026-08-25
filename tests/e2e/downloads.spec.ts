@@ -1,14 +1,23 @@
+import { expectedPublicRelease } from './fixtures/release'
 import { DOWNLOADS } from './fixtures/routes'
 import { expect, test } from './fixtures/test'
+
+const resolvedRelease = expectedPublicRelease()
 
 const advertisedDownloads = [
   {
     page: '/white-paper',
-    paths: [
-      '/downloads/webchess-white-paper.md',
-      '/downloads/webchess-white-paper.html',
-      '/downloads/webchess-white-paper.pdf',
-    ],
+    paths: resolvedRelease
+      ? [
+          '/downloads/webchess-white-paper.md',
+          '/downloads/webchess-white-paper.html',
+          '/downloads/webchess-white-paper.pdf',
+        ]
+      : [
+          '/downloads/webchess-white-paper-v3-historical.md',
+          '/downloads/webchess-white-paper-v3-historical.html',
+          '/downloads/webchess-white-paper-v3-historical.pdf',
+        ],
   },
   {
     page: '/install',
