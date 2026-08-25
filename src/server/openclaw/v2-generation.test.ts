@@ -584,6 +584,16 @@ describe('OpenClaw WebChess 2.2 model generation', () => {
     expect(transportPrompt).toContain(
       'For every wounded supporting candidate, add one qualifications entry',
     )
+    expect(transportPrompt).toContain(
+      '"projection_version":"webchess-directional-prompt-projection-v1"',
+    )
+    expect(transportPrompt).toContain('"supporting_captures":')
+    expect(transportPrompt).toContain('"supporting_survivors":')
+    expect(transportPrompt).not.toContain('"trajectory_directional_record"')
+    expect(transportPrompt).not.toContain('"trajectory_directional_scrutiny"')
+    expect(transportPrompt).not.toContain('"parts":')
+    expect(transportPrompt).not.toContain('"events":')
+    expect(transportPrompt).not.toContain('"directions":')
     expect(harness.runOpenClawModel.mock.calls[0]?.[2]).toMatchObject({
       idempotencyKey: 'stable-charlotte-turn',
     })

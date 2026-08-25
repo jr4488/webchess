@@ -11,8 +11,12 @@ import {
   type LegacyGateResult,
   type LegacyPromptBoundPortiaReview,
   type PortiaCandidateAssessment,
+  type TrajectoryDirectionalRecord,
 } from '../../lib/lifecycle'
-import { makeTrajectoryDirectionalFixture } from '../../test/fixtures'
+import {
+  makeTrajectoryDirectionalFixture,
+  type TrajectoryDirectionalFixture,
+} from '../../test/fixtures'
 import { hashCanonicalJson } from '../db/hash'
 import type { CanonicalJson } from '../db/hash'
 import {
@@ -32,10 +36,11 @@ import { ModelInputError } from './types'
 
 const PROBLEM =
   'How should I choose a bounded next step while the available evidence remains incomplete?'
-const REVIEWED_PROMPT_DIGEST = 'a'.repeat(64)
 
-function directionalEvidence(): ServerDerivedEvidence {
-  const { state } = makeTrajectoryDirectionalFixture()
+function directionalEvidence(
+  fixture = makeTrajectoryDirectionalFixture(),
+): ServerDerivedEvidence {
+  const { state } = fixture
   if (!state.outcome) throw new Error('Directional fixture is not terminal.')
   return {
     problem: PROBLEM,
@@ -73,8 +78,7 @@ function directionalEvidence(): ServerDerivedEvidence {
   }
 }
 
-function survivors() {
-  const fixture = makeTrajectoryDirectionalFixture()
+function survivors(fixture = makeTrajectoryDirectionalFixture()) {
   return deriveSurvivorCandidates(fixture.state, fixture.parts, {
     gameId: '10000000-0000-4000-8000-000000000001',
     attemptId: '20000000-0000-4000-8000-000000000001',
@@ -89,13 +93,13 @@ function survivors() {
 function directionalAssessment(
   candidateId: string,
   index: number,
+  record: TrajectoryDirectionalRecord,
 ): PortiaCandidateAssessment & {
   directionalRecordDigest: string
   directionalSignalKeys: string[]
   directionalInterpretation: string
   directionalAmendment: string
 } {
-  const { record } = makeTrajectoryDirectionalFixture()
   return {
     candidateId,
     disposition: 'preserved',
@@ -133,22 +137,24 @@ function directionalAssessment(
   }
 }
 
-function directionalApproval(): ApprovedBoardAnswerInput {
-  const fixture = makeTrajectoryDirectionalFixture()
-  const terminalSurvivors = survivors()
+function directionalApproval(
+  fixture: TrajectoryDirectionalFixture = makeTrajectoryDirectionalFixture(),
+): ApprovedBoardAnswerInput {
+  const terminalSurvivors = survivors(fixture)
   const plan = buildBoardAnswerPromptPackage(
-    directionalEvidence(),
+    directionalEvidence(fixture),
     terminalSurvivors,
     terminalFingerprint(terminalSurvivors),
     [],
     [],
     fixture.record,
   )
+  const reviewedPromptDigest = hashCanonicalJson(plan as unknown as CanonicalJson)
   const assessments = terminalSurvivors.map((candidate, index) =>
-    directionalAssessment(candidate.candidateId, index))
+    directionalAssessment(candidate.candidateId, index, fixture.record))
   const portia: DirectionalPortiaReview = {
     contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
-    reviewedAnswerPromptDigest: REVIEWED_PROMPT_DIGEST,
+    reviewedAnswerPromptDigest: reviewedPromptDigest,
     directionalRecordVersion: fixture.record.version,
     directionalRecordDigest: fixture.record.digest,
     directionalSummary:
@@ -196,7 +202,7 @@ function directionalApproval(): ApprovedBoardAnswerInput {
   }
   return {
     plan,
-    reviewedPromptDigest: REVIEWED_PROMPT_DIGEST,
+    reviewedPromptDigest,
     portia,
     gate,
   }
@@ -214,7 +220,10 @@ function boardAnswer() {
 function charlotteInput(
   approved: ApprovedBoardAnswerInput,
 ): CharlotteInput {
-  const answer = boardAnswer()
+  const answer = {
+    ...boardAnswer(),
+    prompt: buildApprovedBoardAnswerPrompt(approved),
+  }
   return {
     problem: PROBLEM,
     boardAnswer: answer,
@@ -244,7 +253,7 @@ function legacyApproval(): ApprovedBoardAnswerInput {
   })
   const portia: LegacyPromptBoundPortiaReview = {
     contractVersion: 'webchess-portia-review-v2',
-    reviewedAnswerPromptDigest: REVIEWED_PROMPT_DIGEST,
+    reviewedAnswerPromptDigest: current.reviewedPromptDigest,
     promptDecision: 'permit',
     promptDecisionRationale: current.portia.promptDecisionRationale,
     runSummary: current.portia.runSummary,
@@ -284,14 +293,14 @@ function legacyApproval(): ApprovedBoardAnswerInput {
       current.plan.survivors,
       current.plan.terminalFingerprint,
     ),
-    reviewedPromptDigest: REVIEWED_PROMPT_DIGEST,
+    reviewedPromptDigest: current.reviewedPromptDigest,
     portia,
     gate,
   }
 }
 
 describe('trajectory directional Answer and Charlotte prompts', () => {
-  it('carries the complete record, explanation, boundary, and exact Portia amendments', () => {
+  it('projects exactly the selected signals, explanation, boundary, and usable amendments', () => {
     const approved = directionalApproval()
     const record = approved.plan.trajectoryDirectionalRecord!
     const answerInput = JSON.parse(buildPlayerVisibleAnswerPrompt(approved))
@@ -300,22 +309,69 @@ describe('trajectory directional Answer and Charlotte prompts', () => {
     const charlotteJson = JSON.parse(buildCharlotteInput(charlotteValue))
     const charlottePrompt = buildCharlottePrompt(charlotteValue)
 
-    expect(answerInput.reviewed_prompt.trajectory_directional_record).toEqual(record)
-    expect(answerInput.trajectory_directional_scrutiny).toMatchObject({
+    const answerProjection = answerInput.trajectory_directional_projection
+    expect(answerInput.reviewed_prompt).not.toHaveProperty(
+      'trajectory_directional_record',
+    )
+    expect(answerInput).not.toHaveProperty('trajectory_directional_scrutiny')
+    expect(answerProjection).toMatchObject({
+      projection_version: 'webchess-directional-prompt-projection-v1',
       record_version: record.version,
       record_digest: record.digest,
       surviving_direction_keys: record.survivingDirectionKeys,
       human_explanation: record.explanation,
       epistemic_boundary: record.epistemicBoundary,
     })
+    expect(answerProjection.surviving_directions).toEqual(
+      record.directions.slice(0, 8),
+    )
+    expect(answerProjection.surviving_directions).toHaveLength(8)
+    const selectedSurvivorIds = new Set(
+      record.directions.slice(0, 8)
+        .flatMap((direction) => direction.survivorPieceIds),
+    )
+    const expectedSupportingSurvivors = record.survivors.filter((survivor) =>
+      selectedSurvivorIds.has(survivor.piece.pieceId))
+    const selectedCaptureIds = new Set([
+      ...record.directions.slice(0, 8)
+        .flatMap((direction) => direction.captureIds),
+      ...expectedSupportingSurvivors.flatMap((survivor) => survivor.captureIds),
+    ])
+    expect(answerProjection.supporting_captures).toEqual(
+      record.captures.filter((capture) =>
+        selectedCaptureIds.has(capture.captureId)),
+    )
+    expect(answerProjection.supporting_survivors).toEqual(
+      expectedSupportingSurvivors,
+    )
+    const projectedCaptureIds = new Set(
+      answerProjection.supporting_captures.map(
+        (capture: { captureId: string }) => capture.captureId,
+      ),
+    )
+    expect(answerProjection.supporting_survivors.every(
+      (survivor: { captureIds: string[] }) => survivor.captureIds.every(
+        (captureId) => projectedCaptureIds.has(captureId),
+      ),
+    )).toBe(true)
+    expect(answerProjection).not.toHaveProperty('field')
+    expect(answerProjection).not.toHaveProperty('trajectory')
+    expect(answerProjection).not.toHaveProperty('directions')
+    expect(JSON.stringify(answerProjection)).not.toContain('"parts":')
+    expect(JSON.stringify(answerProjection)).not.toContain('"events":')
+    expect(JSON.stringify(answerInput)).not.toContain('"parts":')
+    expect(JSON.stringify(answerInput)).not.toContain('"events":')
+    expect(JSON.stringify(answerInput)).not.toContain('"directions":')
     expect(
-      answerInput.trajectory_directional_scrutiny
+      answerProjection
         .portia_directional_amendments[0],
     ).toMatchObject({
       signal_keys: approved.portia.assessments[0]!.directionalSignalKeys,
       amendment: approved.portia.assessments[0]!.directionalAmendment,
     })
     expect(fullAnswerPrompt).toContain('mandatory directional inputs')
+    expect(fullAnswerPrompt).toContain('exact supporting_captures')
+    expect(fullAnswerPrompt).toContain('supporting_survivors referents')
     expect(fullAnswerPrompt).toContain('not external factual evidence')
     expect(fullAnswerPrompt).toContain(
       "fixed I Ching cast as a required directional lens",
@@ -323,15 +379,56 @@ describe('trajectory directional Answer and Charlotte prompts', () => {
     expect(fullAnswerPrompt).not.toContain('independently randomized')
     expect(fullAnswerPrompt).not.toContain('metaphorical attention map')
 
-    expect(charlotteJson.trajectory_directional_record).toEqual(record)
-    expect(charlotteJson.trajectory_directional_scrutiny).toMatchObject({
-      record_digest: record.digest,
-      surviving_direction_keys: record.survivingDirectionKeys,
-      human_explanation: record.explanation,
-      epistemic_boundary: record.epistemicBoundary,
-    })
-    expect(charlottePrompt).toContain('first-class directional input')
+    expect(charlotteJson).not.toHaveProperty('trajectory_directional_record')
+    expect(charlotteJson).not.toHaveProperty('trajectory_directional_scrutiny')
+    expect(charlotteJson.trajectory_directional_projection).toEqual(
+      answerProjection,
+    )
+    expect(charlotteJson.generated_board_answer).toEqual(
+      charlotteValue.boardAnswer,
+    )
+    expect(JSON.stringify(charlotteJson)).not.toContain('"parts":')
+    expect(JSON.stringify(charlotteJson)).not.toContain('"events":')
+    expect(JSON.stringify(charlotteJson)).not.toContain('"directions":')
+    expect(charlottePrompt).toContain('required first-class input')
+    expect(charlottePrompt).toContain('exact supporting_captures')
+    expect(charlottePrompt).toContain('supporting_survivors referents')
     expect(charlottePrompt).toContain('cannot override verified facts')
+  })
+
+  it('is deterministic for replay and changes for a materially different legal trajectory', () => {
+    const first = directionalApproval(
+      makeTrajectoryDirectionalFixture('first'),
+    )
+    const replay = directionalApproval(
+      structuredClone(makeTrajectoryDirectionalFixture('first')),
+    )
+    const different = directionalApproval(
+      makeTrajectoryDirectionalFixture('last'),
+    )
+
+    const firstAnswer = buildPlayerVisibleAnswerPrompt(first)
+    const replayAnswer = buildPlayerVisibleAnswerPrompt(replay)
+    const differentAnswer = buildPlayerVisibleAnswerPrompt(different)
+    const firstProjection = JSON.parse(firstAnswer)
+      .trajectory_directional_projection
+    const differentProjection = JSON.parse(differentAnswer)
+      .trajectory_directional_projection
+
+    expect(replayAnswer).toBe(firstAnswer)
+    expect(differentAnswer).not.toBe(firstAnswer)
+    expect(differentProjection.record_digest).not.toBe(
+      firstProjection.record_digest,
+    )
+    expect(differentProjection.surviving_directions).not.toEqual(
+      firstProjection.surviving_directions,
+    )
+
+    const firstCharlotte = buildCharlotteInput(charlotteInput(first))
+    const replayCharlotte = buildCharlotteInput(charlotteInput(replay))
+    const differentCharlotte = buildCharlotteInput(charlotteInput(different))
+    expect(replayCharlotte).toBe(firstCharlotte)
+    expect(differentCharlotte).not.toBe(firstCharlotte)
   })
 
   it('keeps excluded directional assessments as non-supporting audit data only', () => {
@@ -363,13 +460,13 @@ describe('trajectory directional Answer and Charlotte prompts', () => {
     expect(answerPrompt).not.toContain(excludedAmendment)
     expect(answerPrompt).not.toContain(excludedInterpretation)
     expect(
-      answerJson.trajectory_directional_scrutiny
+      answerJson.trajectory_directional_projection
         .portia_directional_amendments,
     ).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ candidate_id: excludedCandidate.candidateId }),
     ]))
     expect(
-      answerJson.trajectory_directional_scrutiny
+      answerJson.trajectory_directional_projection
         .excluded_portia_directional_assessments,
     ).toContainEqual(expect.objectContaining({
       candidate_id: excludedCandidate.candidateId,
@@ -384,13 +481,13 @@ describe('trajectory directional Answer and Charlotte prompts', () => {
     expect(charlottePrompt).not.toContain(excludedAmendment)
     expect(charlottePrompt).not.toContain(excludedInterpretation)
     expect(
-      charlotteJson.trajectory_directional_scrutiny
+      charlotteJson.trajectory_directional_projection
         .portia_directional_amendments,
     ).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ candidate_id: excludedCandidate.candidateId }),
     ]))
     expect(
-      charlotteJson.trajectory_directional_scrutiny
+      charlotteJson.trajectory_directional_projection
         .excluded_portia_directional_assessments,
     ).toContainEqual(expect.objectContaining({
       candidate_id: excludedCandidate.candidateId,
@@ -449,6 +546,9 @@ describe('trajectory directional Answer and Charlotte prompts', () => {
       'TRAJECTORY-DERIVED I CHING DIRECTION',
     )
     expect(charlotteJson).not.toHaveProperty('trajectory_directional_record')
+    expect(charlotteJson).not.toHaveProperty(
+      'trajectory_directional_projection',
+    )
     expect(buildCharlotteInstructions()).not.toContain(
       'TRAJECTORY-DERIVED I CHING DIRECTION',
     )

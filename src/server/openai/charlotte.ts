@@ -2,6 +2,7 @@ import { zodTextFormat } from 'openai/helpers/zod'
 import { z } from 'zod'
 
 import {
+  buildTrajectoryDirectionalPromptProjection,
   charlotteResultSchema,
   validateCharlotteResult,
 } from '../../lib/lifecycle'
@@ -185,8 +186,8 @@ QUALIFICATION STANDARD
   return `${legacyInstructions}
 
 TRAJECTORY-DERIVED I CHING DIRECTION
-- trajectory_directional_record is a required first-class directional input: the complete replay-derived direction for this exact game, including ordered moves and captures, piece identities and material values, survivors, terminal outcome, and the fixed cast-qualified field.
-- Preserve demonstrable influence from its exact surviving_direction_keys, human explanation, and the directional amendments attached to preserved or wounded candidates when qualifying the Answer. Do not downgrade them to optional or decorative metaphor.
+- trajectory_directional_projection is a required first-class input derived deterministically from the complete durable record for this exact game. Its record_digest binds the ordered moves and captures, piece identities and material values, survivors, terminal outcome, and fixed cast-qualified field retained for replay/export verification.
+- Preserve demonstrable influence from its exact surviving_direction_keys, matching surviving_directions with complete scoring contributions and support IDs, exact supporting_captures and supporting_survivors referents, human_explanation, and directional amendments attached to preserved or wounded candidates when qualifying the Answer. Do not downgrade them to optional or decorative metaphor.
 - Do not invent a different trajectory interpretation, change the record digest, or omit a usable candidate's Portia directional amendment. Correct the stored Answer if it failed to follow a required usable amendment.
 - Consumed and unresolved assessments are audit-only, non-supporting provenance. Never use their interpretations or amendments to shape the synthesis, even if their text appears in historical review data.
 - The directional record is not external factual evidence, a probability, a prediction, or a citation. It cannot override verified facts, consent, safety constraints, Portia qualifications, or the deterministic Gate.`
@@ -227,6 +228,26 @@ export function buildCharlotteInput(value: CharlotteInput): string {
       }
     }),
   }
+  const directionalProjection = directionalRecord === undefined
+    ? undefined
+    : {
+        ...buildTrajectoryDirectionalPromptProjection(directionalRecord),
+        portia_directional_amendments: usableAssessments.map((assessment) => ({
+          candidate_id: assessment.candidateId,
+          disposition: assessment.disposition,
+          signal_keys: assessment.directionalSignalKeys,
+          interpretation: assessment.directionalInterpretation,
+          amendment: assessment.directionalAmendment,
+        })),
+        excluded_portia_directional_assessments:
+          excludedAssessments.map((assessment) => ({
+            candidate_id: assessment.candidateId,
+            disposition: assessment.disposition,
+            signal_keys: assessment.directionalSignalKeys,
+            supporting_authority: false,
+            audit_status: 'excluded_by_portia',
+          })),
+      }
   return JSON.stringify({
     original_problem: input.problem,
     reviewed_prompt_digest: input.reviewedPromptDigest,
@@ -235,35 +256,9 @@ export function buildCharlotteInput(value: CharlotteInput): string {
     gate_result: input.gate,
     portia_review: portiaReview,
     research_evidence: input.researchEvidence ?? [],
-    ...(directionalRecord === undefined
+    ...(directionalProjection === undefined
       ? {}
-      : {
-          trajectory_directional_record: directionalRecord,
-          trajectory_directional_scrutiny: {
-            record_version: directionalRecord.version,
-            record_digest: directionalRecord.digest,
-            surviving_direction_keys:
-              directionalRecord.survivingDirectionKeys,
-            human_explanation: directionalRecord.explanation,
-            epistemic_boundary: directionalRecord.epistemicBoundary,
-            portia_directional_amendments:
-              usableAssessments.map((assessment) => ({
-                candidate_id: assessment.candidateId,
-                disposition: assessment.disposition,
-                signal_keys: assessment.directionalSignalKeys,
-                interpretation: assessment.directionalInterpretation,
-                amendment: assessment.directionalAmendment,
-              })),
-            excluded_portia_directional_assessments:
-              excludedAssessments.map((assessment) => ({
-                candidate_id: assessment.candidateId,
-                disposition: assessment.disposition,
-                signal_keys: assessment.directionalSignalKeys,
-                supporting_authority: false,
-                audit_status: 'excluded_by_portia',
-              })),
-          },
-        }),
+      : { trajectory_directional_projection: directionalProjection }),
   })
 }
 

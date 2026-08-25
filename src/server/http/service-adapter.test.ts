@@ -2996,7 +2996,7 @@ describe('durable HTTP service adapter', () => {
     const fixture = makeTrajectoryDirectionalFixture()
     expect(answerInput).toMatchObject({
       plan: {
-        promptVersion: 'webchess-answer-v4',
+        promptVersion: 'webchess-answer-v5',
         evidence: fixture.evidence,
         trajectoryDirectionalRecord: fixture.record,
       },

@@ -52,11 +52,17 @@ export interface TrajectoryDirectionalFixture {
   readonly evidence: ServerDerivedEvidence
 }
 
-let cachedTrajectoryDirectionalFixture: TrajectoryDirectionalFixture | undefined
+const cachedTrajectoryDirectionalFixtures = new Map<
+  'first' | 'last',
+  TrajectoryDirectionalFixture
+>()
 
 /** Deterministic, bounded canonical game used only by directional contract tests. */
-export function makeTrajectoryDirectionalFixture(): TrajectoryDirectionalFixture {
-  if (cachedTrajectoryDirectionalFixture) return cachedTrajectoryDirectionalFixture
+export function makeTrajectoryDirectionalFixture(
+  strategy: 'first' | 'last' = 'first',
+): TrajectoryDirectionalFixture {
+  const cached = cachedTrajectoryDirectionalFixtures.get(strategy)
+  if (cached) return cached
 
   const divisionSeedValue = 'fixture/portia-directional-record'
   const parts = makeProblemParts('portia-directional-record').map((part) => ({
@@ -66,7 +72,7 @@ export function makeTrajectoryDirectionalFixture(): TrajectoryDirectionalFixture
   }))
   let state = createReplayState()
   while (!state.outcome) {
-    const choice = state.pieces
+    const choices = state.pieces
       .filter((piece) => piece.side === state.turn)
       .sort((left, right) => left.id.localeCompare(right.id))
       .flatMap((piece) =>
@@ -74,7 +80,7 @@ export function makeTrajectoryDirectionalFixture(): TrajectoryDirectionalFixture
           .sort((left, right) =>
             left.ring - right.ring || left.sector - right.sector)
           .map((to) => ({ pieceId: piece.id, to })))
-      .at(0)
+    const choice = strategy === 'first' ? choices.at(0) : choices.at(-1)
     if (!choice) {
       throw new Error('The directional fixture has no canonical legal move.')
     }
@@ -144,7 +150,7 @@ export function makeTrajectoryDirectionalFixture(): TrajectoryDirectionalFixture
       },
     })),
   }
-  cachedTrajectoryDirectionalFixture = {
+  const fixture = {
     divisionSeed: divisionSeedValue,
     divisionDigest,
     castSeed,
@@ -156,5 +162,6 @@ export function makeTrajectoryDirectionalFixture(): TrajectoryDirectionalFixture
     terminalFingerprint: terminalFingerprint(survivors),
     evidence,
   }
-  return cachedTrajectoryDirectionalFixture
+  cachedTrajectoryDirectionalFixtures.set(strategy, fixture)
+  return fixture
 }

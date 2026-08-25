@@ -5,9 +5,11 @@ import { getLegalMoves, PIECE_VALUES } from '../game'
 import type { ReplayState } from '../game-contract'
 import { acceptMoveCommand, createReplayState } from '../game-replay'
 import {
+  buildTrajectoryDirectionalPromptProjection,
   deriveTrajectoryDirectionalRecord,
   DIRECTIONAL_EPISTEMIC_BOUNDARY,
   DIRECTIONAL_OUTCOME_WEIGHTS,
+  DIRECTIONAL_PROMPT_PROJECTION_VERSION,
   DirectionalRecordVerificationError,
   scoreDirectionalContributions,
   serializeTrajectoryDirectionalRecord,
@@ -198,6 +200,127 @@ describe('full-trajectory directional record', () => {
       direction.lens.key,
       direction.score,
     ]))
+  })
+
+  it('projects the same replay deterministically and only retains its eight selected signals', () => {
+    const record = recordFor('first')
+    const first = buildTrajectoryDirectionalPromptProjection(record)
+    const replay = buildTrajectoryDirectionalPromptProjection(
+      structuredClone(record),
+    )
+    const different = buildTrajectoryDirectionalPromptProjection(
+      recordFor('last'),
+    )
+
+    expect(JSON.stringify(replay)).toBe(JSON.stringify(first))
+    expect(first.projection_version).toBe(
+      DIRECTIONAL_PROMPT_PROJECTION_VERSION,
+    )
+    expect(first.record_version).toBe(record.version)
+    expect(first.record_digest).toBe(record.digest)
+    expect(first.surviving_direction_keys).toEqual(
+      record.survivingDirectionKeys,
+    )
+    expect(first.surviving_directions).toEqual(record.directions.slice(0, 8))
+    expect(first.surviving_directions).toHaveLength(8)
+    const selectedSurvivorIds = new Set(
+      record.directions.slice(0, 8)
+        .flatMap((direction) => direction.survivorPieceIds),
+    )
+    const expectedSupportingSurvivors = record.survivors.filter((survivor) =>
+      selectedSurvivorIds.has(survivor.piece.pieceId))
+    const selectedCaptureIds = new Set([
+      ...record.directions.slice(0, 8)
+        .flatMap((direction) => direction.captureIds),
+      ...expectedSupportingSurvivors.flatMap((survivor) => survivor.captureIds),
+    ])
+    expect(selectedCaptureIds.size).toBeGreaterThan(0)
+    expect(selectedSurvivorIds.size).toBeGreaterThan(0)
+    expect(first.supporting_captures).toEqual(
+      record.captures.filter((capture) =>
+        selectedCaptureIds.has(capture.captureId)),
+    )
+    expect(first.supporting_captures.map((capture) => capture.sequence)).toEqual(
+      [...first.supporting_captures]
+        .map((capture) => capture.sequence)
+        .sort((left, right) => left - right),
+    )
+    expect(first.supporting_survivors).toEqual(
+      expectedSupportingSurvivors,
+    )
+    expect(first.supporting_survivors.map((survivor) =>
+      survivor.piece.pieceId)).toEqual(
+      [...selectedSurvivorIds].sort(),
+    )
+    const projectedCaptureIds = new Set(
+      first.supporting_captures.map((capture) => capture.captureId),
+    )
+    expect(first.supporting_survivors.every((survivor) =>
+      survivor.captureIds.every((captureId) =>
+        projectedCaptureIds.has(captureId)),
+    )).toBe(true)
+    expect(first).not.toHaveProperty('field')
+    expect(first).not.toHaveProperty('trajectory')
+    expect(first).not.toHaveProperty('directions')
+    expect(JSON.stringify(first)).not.toContain('"parts":')
+    expect(JSON.stringify(first)).not.toContain('"events":')
+    expect(different.record_digest).not.toBe(first.record_digest)
+    expect(different.surviving_directions).not.toEqual(
+      first.surviving_directions,
+    )
+
+    const duplicateDirections = [...record.directions]
+    duplicateDirections[63] = {
+      ...duplicateDirections[63]!,
+      lens: record.directions[0]!.lens,
+    }
+    expect(() => buildTrajectoryDirectionalPromptProjection({
+      ...record,
+      directions: duplicateDirections,
+    })).toThrow(/unique ranked direction keys/u)
+  })
+
+  it('fails closed on missing or duplicate selected support referents', () => {
+    const record = recordFor('first')
+    const selected = record.directions.slice(0, 8)
+    const captureId = selected.flatMap((direction) => direction.captureIds)[0]
+    const survivorId = selected
+      .flatMap((direction) => direction.survivorPieceIds)[0]
+    if (!captureId || !survivorId || !record.captures[0] || !record.survivors[0]) {
+      throw new Error('Directional support fixture is incomplete.')
+    }
+
+    expect(() => buildTrajectoryDirectionalPromptProjection({
+      ...record,
+      captures: record.captures.filter((capture) =>
+        capture.captureId !== captureId),
+    })).toThrow(/missing capture referent/u)
+    expect(() => buildTrajectoryDirectionalPromptProjection({
+      ...record,
+      captures: [...record.captures, structuredClone(record.captures[0])],
+    })).toThrow(/unique capture referents/u)
+    expect(() => buildTrajectoryDirectionalPromptProjection({
+      ...record,
+      survivors: record.survivors.filter((survivor) =>
+        survivor.piece.pieceId !== survivorId),
+    })).toThrow(/missing survivor referent/u)
+    expect(() => buildTrajectoryDirectionalPromptProjection({
+      ...record,
+      survivors: record.survivors.map((survivor) =>
+        survivor.piece.pieceId === survivorId
+          ? {
+              ...survivor,
+              captureIds: [
+                ...survivor.captureIds,
+                'missing-supporting-survivor-capture',
+              ],
+            }
+          : survivor),
+    })).toThrow(/missing capture referent/u)
+    expect(() => buildTrajectoryDirectionalPromptProjection({
+      ...record,
+      survivors: [...record.survivors, structuredClone(record.survivors[0])],
+    })).toThrow(/unique survivor referents/u)
   })
 
   it('records captured Queen material as nine and captured Pawn material as one', () => {

@@ -23,10 +23,14 @@ I Ching cast direction per facet. After terminal play it derives one versioned,
 replay-verifiable directional record from the complete canonical trajectory:
 ordered moves and passes, capture order, exact captured-piece identities, kinds
 and values, promotions, survivors and routes, terminal outcome, and all saved
-cast applications. The record is required in Portia, Gate, Answer, Charlotte,
-the visible **What survived scrutiny** result, and case provenance. It is a
-directional method input—not factual evidence—and cannot override verified
-facts, safety constraints, or consent. Older preserved cases are labeled
+cast applications. Portia and Gate bind the complete durable record. Answer
+and Charlotte receive its versioned, digest-bound prompt projection: the exact
+eight surviving signal records and contributions, their support IDs and human
+explanation, plus usable Portia amendments. The full record remains available
+in replay/export provenance without duplicating all events, field parts, or 64
+ranked directions into later provider prompts. It is a directional method
+input—not factual evidence—and cannot override verified facts, safety
+constraints, or consent. Older preserved cases are labeled
 `legacy_pre_directional_generation`; they are not silently upgraded.
 
 The command transcript below is the reviewed Linux/bash **x86_64** candidate
@@ -47,8 +51,8 @@ The exact current method-version tuple is part of that candidate identity:
 | Portia prompt | `webchess-portia-v5` |
 | Portia review contract | `webchess-portia-review-v3` |
 | Gate algorithm | `webchess-gate-v5` |
-| Answer prompt | `webchess-answer-v4` |
-| Charlotte prompt | `webchess-charlotte-v5` |
+| Answer prompt | `webchess-answer-v5` |
+| Charlotte prompt | `webchess-charlotte-v6` |
 
 [`src/lib/lifecycle/method-versions.mjs`](src/lib/lifecycle/method-versions.mjs)
 is the dependency-free source of this tuple. The resolved release identity must
@@ -104,7 +108,7 @@ mkdir -- "$WEBCHESS_INSTALL_WORKSPACE"
 cd -- "$WEBCHESS_INSTALL_WORKSPACE"
 export WEBCHESS_IDENTITY_URL='https://webchess.anansiportia.com/downloads/webchess-release-identity.json'
 curl --fail --location --remove-on-error --output webchess-release-identity.json "$WEBCHESS_IDENTITY_URL"
-node -e 'const m=require("./webchess-release-identity.json"),v={lifecycle:"webchess-lifecycle-v2.5",divisionPrompt:"webchess-division-v5",portiaPrompt:"webchess-portia-v5",portiaReview:"webchess-portia-review-v3",gateAlgorithm:"webchess-gate-v5",answerPrompt:"webchess-answer-v4",charlottePrompt:"webchess-charlotte-v5"}; if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved"||JSON.stringify(m.release?.methodVersions)!==JSON.stringify(v)) process.exit(1)'
+node -e 'const m=require("./webchess-release-identity.json"),v={lifecycle:"webchess-lifecycle-v2.5",divisionPrompt:"webchess-division-v5",portiaPrompt:"webchess-portia-v5",portiaReview:"webchess-portia-review-v3",gateAlgorithm:"webchess-gate-v5",answerPrompt:"webchess-answer-v5",charlottePrompt:"webchess-charlotte-v6"}; if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved"||JSON.stringify(m.release?.methodVersions)!==JSON.stringify(v)) process.exit(1)'
 export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.source.commit ?? "")')"
 test "${#WEBCHESS_RELEASE_SHA}" -eq 40
 ```

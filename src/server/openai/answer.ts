@@ -14,6 +14,7 @@ import type {
   WebMemoryEvidence,
 } from '../../lib/lifecycle'
 import {
+  buildTrajectoryDirectionalPromptProjection,
   CURRENT_WEB_MEMORY_CONSENT_VERSION,
   isDirectionalGateResult,
   isDirectionalPortiaReview,
@@ -893,8 +894,8 @@ WEB MEMORY BOUNDARY
   return `${legacyInstructions}
 
 TRAJECTORY-DERIVED I CHING DIRECTION
-- trajectory_directional_record is the complete, versioned, replay-derived directional calculation for this exact game. It incorporates the ordered move and capture sequence, captured-piece identities and material values, surviving pieces, terminal outcome, and the fixed cast-qualified field.
-- Its eight surviving_direction_keys and human explanation are mandatory directional inputs. They must materially shape emphasis, synthesis, and the practical direction of the Answer; do not reduce them to decorative metaphor or merely mention them.
+- trajectory_directional_projection is the bounded, versioned projection of the complete durable replay-derived calculation for this exact game. Its record_digest binds the full ordered move and capture sequence, captured-piece identities and material values, surviving pieces, terminal outcome, and fixed cast-qualified field retained for replay/export verification.
+- Its eight surviving_direction_keys, matching surviving_directions with complete scoring contributions and support IDs, exact supporting_captures and supporting_survivors referents, and human_explanation are mandatory directional inputs. They must materially shape emphasis, synthesis, and the practical direction of the Answer; do not reduce them to decorative metaphor or merely mention them.
 - Apply every Portia directional_interpretation and directional_amendment that accompanies a usable candidate, and keep the exact record digest visible in the analytical provenance.
 - The record is not external factual evidence, a probability, a prediction, or a source citation. It cannot override verified facts, the research-consent boundary, safety constraints, Portia qualifications, or the deterministic Gate.`
 }
@@ -938,6 +939,26 @@ export function buildPlayerVisibleAnswerPrompt(
       assessment.disposition === 'consumed' ||
       assessment.disposition === 'unresolved',
   )
+  const directionalProjection = directionalRecord === undefined
+    ? undefined
+    : {
+        ...buildTrajectoryDirectionalPromptProjection(directionalRecord),
+        portia_directional_amendments: usable.map((assessment) => ({
+          candidate_id: assessment.candidateId,
+          disposition: assessment.disposition,
+          signal_keys: assessment.directionalSignalKeys,
+          interpretation: assessment.directionalInterpretation,
+          amendment: assessment.directionalAmendment,
+        })),
+        excluded_portia_directional_assessments:
+          excluded.map((assessment) => ({
+            candidate_id: assessment.candidateId,
+            disposition: assessment.disposition,
+            signal_keys: assessment.directionalSignalKeys,
+            supporting_authority: false,
+            audit_status: 'excluded_by_portia',
+          })),
+      }
   return JSON.stringify({
     reviewed_prompt: {
       digest: approved.reviewedPromptDigest,
@@ -946,9 +967,6 @@ export function buildPlayerVisibleAnswerPrompt(
       game_evidence: buildGameEvidence(approved.plan.evidence),
       research_evidence: approved.plan.researchEvidence ?? [],
       web_memory_evidence: approved.plan.webMemoryEvidence ?? [],
-      ...(directionalRecord === undefined
-        ? {}
-        : { trajectory_directional_record: directionalRecord }),
     },
     portia_authorization: {
       decision: approved.portia.promptDecision,
@@ -1025,34 +1043,9 @@ export function buildPlayerVisibleAnswerPrompt(
               directionalApproval?.gate.directionalBindingsSatisfied,
           }),
     },
-    ...(directionalRecord === undefined
+    ...(directionalProjection === undefined
       ? {}
-      : {
-          trajectory_directional_scrutiny: {
-            record_version: directionalRecord.version,
-            record_digest: directionalRecord.digest,
-            surviving_direction_keys:
-              directionalRecord.survivingDirectionKeys,
-            human_explanation: directionalRecord.explanation,
-            epistemic_boundary: directionalRecord.epistemicBoundary,
-            portia_directional_amendments:
-              usable.map((assessment) => ({
-                candidate_id: assessment.candidateId,
-                disposition: assessment.disposition,
-                signal_keys: assessment.directionalSignalKeys,
-                interpretation: assessment.directionalInterpretation,
-                amendment: assessment.directionalAmendment,
-              })),
-            excluded_portia_directional_assessments:
-              excluded.map((assessment) => ({
-                candidate_id: assessment.candidateId,
-                disposition: assessment.disposition,
-                signal_keys: assessment.directionalSignalKeys,
-                supporting_authority: false,
-                audit_status: 'excluded_by_portia',
-              })),
-          },
-        }),
+      : { trajectory_directional_projection: directionalProjection }),
   }, null, 2)
 }
 

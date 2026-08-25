@@ -26,6 +26,9 @@ export const DIRECTIONAL_RECORD_VERSION =
 
 export const DIRECTIONAL_RECORD_SELECTION_COUNT = 8 as const
 
+export const DIRECTIONAL_PROMPT_PROJECTION_VERSION =
+  'webchess-directional-prompt-projection-v1' as const
+
 export const MAX_DIRECTIONAL_RECORD_CANONICAL_BYTES = 4_000_000 as const
 
 /**
@@ -258,6 +261,229 @@ export interface TrajectoryDirectionalRecord {
   readonly survivingDirectionKeys: readonly string[]
   readonly explanation: readonly string[]
   readonly epistemicBoundary: typeof DIRECTIONAL_EPISTEMIC_BOUNDARY
+}
+
+/**
+ * Bounded provider-facing projection of the complete durable directional
+ * record. The record digest continues to bind the full field and replay while
+ * the model receives only the eight directions selected by the versioned
+ * calculation, their complete scoring/support factors, and the human-readable
+ * explanation needed to apply them.
+ */
+export interface TrajectoryDirectionalPromptProjection {
+  readonly projection_version: typeof DIRECTIONAL_PROMPT_PROJECTION_VERSION
+  readonly record_version: typeof DIRECTIONAL_RECORD_VERSION
+  readonly record_digest: string
+  readonly source_digests: {
+    readonly division: string
+    readonly cast_assignments: string
+    readonly field_parts: string
+    readonly event_stream: string
+    readonly trajectory_factors: string
+  }
+  readonly trajectory_summary: {
+    readonly completed_plies: number
+    readonly move_count: number
+    readonly forced_pass_count: number
+    readonly promotion_count: number
+    readonly outcome: DirectionalOutcome
+  }
+  readonly surviving_direction_keys: readonly string[]
+  readonly surviving_directions: readonly DirectionalSignal[]
+  readonly supporting_captures: readonly DirectionalCaptureFactor[]
+  readonly supporting_survivors: readonly DirectionalSurvivorFactor[]
+  readonly human_explanation: readonly string[]
+  readonly epistemic_boundary: typeof DIRECTIONAL_EPISTEMIC_BOUNDARY
+}
+
+function copyDirectionalLens(
+  lens: DirectionalLensReference,
+): DirectionalLensReference {
+  return {
+    ...lens,
+    coordinate: { ...lens.coordinate },
+  }
+}
+
+function copyDirectionalPiece(
+  piece: DirectionalPieceReference,
+): DirectionalPieceReference {
+  return { ...piece }
+}
+
+function copyDirectionalSignal(signal: DirectionalSignal): DirectionalSignal {
+  return {
+    rank: signal.rank,
+    lens: copyDirectionalLens(signal.lens),
+    score: signal.score,
+    contributions: { ...signal.contributions },
+    supportingPlies: [...signal.supportingPlies],
+    captureIds: [...signal.captureIds],
+    survivorPieceIds: [...signal.survivorPieceIds],
+    explanation: signal.explanation,
+  }
+}
+
+function copyDirectionalCapture(
+  capture: DirectionalCaptureFactor,
+): DirectionalCaptureFactor {
+  return {
+    sequence: capture.sequence,
+    captureId: capture.captureId,
+    ply: capture.ply,
+    attacker: copyDirectionalPiece(capture.attacker),
+    captured: copyDirectionalPiece(capture.captured),
+    cell: { ...capture.cell },
+    lens: copyDirectionalLens(capture.lens),
+    capturedMaterialValue: capture.capturedMaterialValue,
+    attackerMaterialValue: capture.attackerMaterialValue,
+    resonance: capture.resonance,
+  }
+}
+
+function copyDirectionalSurvivor(
+  survivor: DirectionalSurvivorFactor,
+): DirectionalSurvivorFactor {
+  return {
+    piece: copyDirectionalPiece(survivor.piece),
+    finalCoordinate: { ...survivor.finalCoordinate },
+    finalLens: copyDirectionalLens(survivor.finalLens),
+    route: survivor.route.map((move) => ({
+      ...move,
+      from: { ...move.from },
+      to: { ...move.to },
+    })),
+    captureIds: [...survivor.captureIds],
+    moveCount: survivor.moveCount,
+    promoted: survivor.promoted,
+  }
+}
+
+/** Build deterministic prompt bytes without copying the full replay record. */
+export function buildTrajectoryDirectionalPromptProjection(
+  record: TrajectoryDirectionalRecord,
+): TrajectoryDirectionalPromptProjection {
+  if (
+    record.survivingDirectionKeys.length !==
+      DIRECTIONAL_RECORD_SELECTION_COUNT ||
+    new Set(record.survivingDirectionKeys).size !==
+      DIRECTIONAL_RECORD_SELECTION_COUNT
+  ) {
+    throw new DirectionalRecordVerificationError(
+      'Directional prompt projection requires eight unique surviving directions.',
+    )
+  }
+
+  const directionByKey = new Map(
+    record.directions.map((direction) => [direction.lens.key, direction]),
+  )
+  if (directionByKey.size !== record.directions.length) {
+    throw new DirectionalRecordVerificationError(
+      'Directional prompt projection requires unique ranked direction keys.',
+    )
+  }
+  const survivingDirections = record.survivingDirectionKeys.map(
+    (key, index) => {
+      const direction = directionByKey.get(key)
+      if (!direction || direction.rank !== index + 1) {
+        throw new DirectionalRecordVerificationError(
+          'Directional prompt projection does not match the ranked record.',
+        )
+      }
+      return copyDirectionalSignal(direction)
+    },
+  )
+  for (const direction of survivingDirections) {
+    if (
+      new Set(direction.captureIds).size !== direction.captureIds.length ||
+      new Set(direction.survivorPieceIds).size !==
+        direction.survivorPieceIds.length
+    ) {
+      throw new DirectionalRecordVerificationError(
+        'Directional prompt projection requires unique signal support IDs.',
+      )
+    }
+  }
+
+  const survivorById = new Map(
+    record.survivors.map((survivor) => [survivor.piece.pieceId, survivor]),
+  )
+  if (survivorById.size !== record.survivors.length) {
+    throw new DirectionalRecordVerificationError(
+      'Directional prompt projection requires unique survivor referents.',
+    )
+  }
+  const supportingSurvivorIds = new Set(
+    survivingDirections.flatMap((direction) => direction.survivorPieceIds),
+  )
+  const supportingSurvivors = [...supportingSurvivorIds]
+    .sort(compareCodeUnits)
+    .map((pieceId) => {
+      const survivor = survivorById.get(pieceId)
+      if (!survivor) {
+        throw new DirectionalRecordVerificationError(
+          `Directional prompt projection is missing survivor referent ${pieceId}.`,
+        )
+      }
+      return copyDirectionalSurvivor(survivor)
+    })
+
+  const captureById = new Map(
+    record.captures.map((capture) => [capture.captureId, capture]),
+  )
+  const captureSequences = new Set(
+    record.captures.map((capture) => capture.sequence),
+  )
+  if (
+    captureById.size !== record.captures.length ||
+    captureSequences.size !== record.captures.length
+  ) {
+    throw new DirectionalRecordVerificationError(
+      'Directional prompt projection requires unique capture referents.',
+    )
+  }
+  const supportingCaptureIds = new Set([
+    ...survivingDirections.flatMap((direction) => direction.captureIds),
+    ...supportingSurvivors.flatMap((survivor) => survivor.captureIds),
+  ])
+  const supportingCaptures = [...supportingCaptureIds]
+    .map((captureId) => {
+      const capture = captureById.get(captureId)
+      if (!capture) {
+        throw new DirectionalRecordVerificationError(
+          `Directional prompt projection is missing capture referent ${captureId}.`,
+        )
+      }
+      return capture
+    })
+    .sort((left, right) => left.sequence - right.sequence)
+    .map(copyDirectionalCapture)
+
+  return {
+    projection_version: DIRECTIONAL_PROMPT_PROJECTION_VERSION,
+    record_version: record.version,
+    record_digest: record.digest,
+    source_digests: {
+      division: record.division.digest,
+      cast_assignments: record.cast.assignmentsDigest,
+      field_parts: record.field.partsDigest,
+      event_stream: record.trajectory.eventStreamDigest,
+      trajectory_factors: record.trajectory.factorDigest,
+    },
+    trajectory_summary: {
+      completed_plies: record.trajectory.completedPlies,
+      move_count: record.trajectory.moveCount,
+      forced_pass_count: record.trajectory.forcedPassCount,
+      promotion_count: record.trajectory.promotionCount,
+      outcome: { ...record.outcome },
+    },
+    surviving_direction_keys: [...record.survivingDirectionKeys],
+    surviving_directions: survivingDirections,
+    supporting_captures: supportingCaptures,
+    supporting_survivors: supportingSurvivors,
+    human_explanation: [...record.explanation],
+    epistemic_boundary: { ...record.epistemicBoundary },
+  }
 }
 
 export class DirectionalRecordVerificationError extends Error {

@@ -4,8 +4,8 @@ export declare const CURRENT_METHOD_VERSION_TUPLE: Readonly<{
   portiaPrompt: 'webchess-portia-v5'
   portiaReview: 'webchess-portia-review-v3'
   gateAlgorithm: 'webchess-gate-v5'
-  answerPrompt: 'webchess-answer-v4'
-  charlottePrompt: 'webchess-charlotte-v5'
+  answerPrompt: 'webchess-answer-v5'
+  charlottePrompt: 'webchess-charlotte-v6'
 }>
 
 export type CurrentMethodVersionTuple =

@@ -494,9 +494,9 @@ function validCharlotteModelResult(portia: PortiaReview) {
 describe('production OpenAI division service', () => {
   it('publishes stable durable prompt versions', () => {
     expect(DIVISION_PROMPT_VERSION).toBe('webchess-division-v5')
-    expect(ANSWER_PROMPT_VERSION).toBe('webchess-answer-v4')
+    expect(ANSWER_PROMPT_VERSION).toBe('webchess-answer-v5')
     expect(CURRENT_LIFECYCLE_VERSIONS.charlottePrompt).toBe(
-      'webchess-charlotte-v5',
+      'webchess-charlotte-v6',
     )
     expect(DIVISION_PROMPT_VERSION.length).toBeLessThanOrEqual(80)
     expect(ANSWER_PROMPT_VERSION.length).toBeLessThanOrEqual(80)
@@ -943,7 +943,7 @@ describe('production OpenAI answer service', () => {
       (candidate) =>
         candidate.survivor.candidateId === portia.assessments[1].candidateId,
     )
-    expect(input.reviewed_prompt.version).toBe('webchess-answer-v4')
+    expect(input.reviewed_prompt.version).toBe('webchess-answer-v5')
     expect(revisedCandidate?.portia.required_prompt_revisions).toEqual([{
       attack_type: portia.assessments[1].attackFindings[0].attackType,
       revision: REQUIRED_PROMPT_REVISION,

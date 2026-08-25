@@ -61,8 +61,8 @@ observed outcome. The exact current method-version tuple is:
 | Portia prompt | `webchess-portia-v5` |
 | Portia review contract | `webchess-portia-review-v3` |
 | Gate algorithm | `webchess-gate-v5` |
-| Answer prompt | `webchess-answer-v4` |
-| Charlotte prompt | `webchess-charlotte-v5` |
+| Answer prompt | `webchess-answer-v5` |
+| Charlotte prompt | `webchess-charlotte-v6` |
 
 The dependency-free authority is
 [`src/lib/lifecycle/method-versions.mjs`](../src/lib/lifecycle/method-versions.mjs);
@@ -110,8 +110,8 @@ are defined in
 | Portia | Apply 13 attack types to each terminal survivor, then assess the set, directional record, and exact forthcoming Answer prompt | Same-provider criticism is not independent adjudication |
 | Gate | Deterministically evaluate sufficiency, coverage, contradiction, prompt binding, and directional binding | A pass authorizes generation; it does not certify truth |
 | Retry | Permit at most two additional same-field games and one regenerated field | Exhaustion produces explicit insufficiency, not forced prose |
-| Answer | Generate from the exact prompt and directional record reviewed by Portia and approved by Gate | Answer cannot silently substitute a different evidence or direction package |
-| Charlotte | Qualify the stored Answer and its directional provenance, then produce exactly three reversible actions | Qualification cannot resurrect consumed support or erase uncertainty |
+| Answer | Generate from the exact approved prompt and a versioned projection of the complete record: its digest, eight surviving signals with contributions/support IDs, explanation, boundary, and usable Portia amendments | Answer cannot silently substitute a different evidence or direction package; the complete record remains durable for replay/export |
+| Charlotte | Qualify the stored Answer from the same directional projection, then produce exactly three reversible actions | Qualification cannot resurrect consumed support or erase uncertainty |
 | Wilbur | Let the person own an action, its status, and an observation | Model output cannot declare that reality succeeded |
 | Web | Persist genealogy, versions, provenance, feedback, and selected memory | A durable record is not causal proof or permission for surveillance |
 
