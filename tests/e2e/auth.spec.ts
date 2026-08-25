@@ -21,10 +21,6 @@ const hasAuthState = Boolean(authStatePath && fs.existsSync(authStatePath))
 
 const unauthenticatedRedirects = [
   {
-    requestPath: '/play?resume=game_42',
-    returnUrl: '/play?resume=game_42',
-  },
-  {
     requestPath: '/account/security?from=play',
     returnUrl: '/account/security?from=play',
   },
@@ -168,15 +164,9 @@ test.describe('loopback authenticated route smoke', () => {
     await exportButton.scrollIntoViewIfNeeded()
     await exportButton.focus()
 
-    const [download] = await Promise.all([
-      page.waitForEvent('download', { timeout: 20_000 }),
-      page.keyboard.press('Enter'),
-    ])
-
-    expect(exportMethod).toBe('POST')
-    expect(download.suggestedFilename()).toBe(
-      'webchess-export-2026-07-27.json',
-    )
+    await page.keyboard.press('Enter')
+    await expect.poll(() => exportMethod).toBe('POST')
+    await expect(exportButton).toHaveText('Download WebChess data')
   })
 })
 

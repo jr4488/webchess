@@ -54,15 +54,11 @@ async function expectReducedMotion(page: Page): Promise<void> {
   ).toEqual([])
 }
 
-async function prepareAuthenticatedRoute(
+async function prepareLocalRoute(
   page: Page,
-  path: '/play' | '/account',
+  path: '/openclaw' | '/account',
 ): Promise<void> {
-  await page.setExtraHTTPHeaders({
-    'x-webchess-e2e-auth': localAuthActivation,
-  })
-
-  if (path === '/play') {
+  if (path === '/openclaw') {
     await page.route('**/api/games/current', (route) =>
       route.fulfill({
         status: 200,
@@ -72,6 +68,10 @@ async function prepareAuthenticatedRoute(
     )
     return
   }
+
+  await page.setExtraHTTPHeaders({
+    'x-webchess-e2e-auth': localAuthActivation,
+  })
 
   await page.route('**/api/account/usage', (route) =>
     route.fulfill({
@@ -264,23 +264,23 @@ test.describe('reduced motion', () => {
     })
   }
 
-  test.describe('loopback authenticated routes', () => {
+  test.describe('loopback runtime routes', () => {
     test.skip(
       !localAuthEnabled,
       'The loopback-only test principal is disabled for external servers.',
     )
 
     for (const route of [
-      { path: '/play', label: 'play' },
+      { path: '/openclaw', label: 'local OpenClaw runtime' },
       { path: '/account', label: 'account' },
     ] as const) {
       test(`${route.label} honors the operating-system preference`, async ({
         page,
       }) => {
-        await prepareAuthenticatedRoute(page, route.path)
+        await prepareLocalRoute(page, route.path)
         await expectSuccessfulDocument(page, route.path)
 
-        if (route.path === '/play') {
+        if (route.path === '/openclaw') {
           await expect(
             page.getByLabel('What are you trying to understand?'),
           ).toBeVisible()

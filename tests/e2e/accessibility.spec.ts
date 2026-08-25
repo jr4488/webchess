@@ -1,6 +1,10 @@
 import type { Page } from '@playwright/test'
 
-import { PROTECTED_ROUTES, PUBLIC_ROUTES } from './fixtures/routes'
+import {
+  LOCAL_RUNTIME_ROUTES,
+  PROTECTED_ROUTES,
+  PUBLIC_ROUTES,
+} from './fixtures/routes'
 import { expect, expectWcagAA, test } from './fixtures/test'
 
 const localAuthActivation =
@@ -22,15 +26,11 @@ async function expectSuccessfulDocument(
   expect(response?.status(), `${path} returned an error`).toBeLessThan(400)
 }
 
-async function prepareAuthenticatedRoute(
+async function prepareLocalRoute(
   page: Page,
   path: string,
 ): Promise<void> {
-  await page.setExtraHTTPHeaders({
-    'x-webchess-e2e-auth': localAuthActivation,
-  })
-
-  if (path === '/play') {
+  if (path === '/openclaw') {
     await page.route('**/api/games/current', (route) =>
       route.fulfill({
         status: 200,
@@ -40,6 +40,10 @@ async function prepareAuthenticatedRoute(
     )
     return
   }
+
+  await page.setExtraHTTPHeaders({
+    'x-webchess-e2e-auth': localAuthActivation,
+  })
 
   await page.route('**/api/account/usage', (route) =>
     route.fulfill({
@@ -98,21 +102,21 @@ test.describe('WCAG AA', () => {
   }
 })
 
-test.describe('loopback authenticated WCAG AA', () => {
+test.describe('loopback runtime WCAG AA', () => {
   test.skip(
     !localAuthEnabled,
     'The loopback-only test principal is disabled for external servers.',
   )
 
-  for (const route of PROTECTED_ROUTES) {
+  for (const route of [...LOCAL_RUNTIME_ROUTES, ...PROTECTED_ROUTES]) {
     test(`${route.label} has no detectable WCAG AA violations`, async (
       { page },
       testInfo,
     ) => {
-      await prepareAuthenticatedRoute(page, route.path)
+      await prepareLocalRoute(page, route.path)
       await expectSuccessfulDocument(page, route.path)
 
-      if (route.path === '/play') {
+      if (route.path === '/openclaw') {
         await expect(
           page.getByLabel('What are you trying to understand?'),
         ).toBeVisible()

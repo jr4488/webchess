@@ -114,7 +114,7 @@ test.describe('canonical WebChess public site', () => {
     const illustrativeDisclosure = page.getByText('Illustrative sequence, not the live engine.')
     await expect(illustrativeDisclosure).toBeVisible()
     await expect(
-      illustrativeDisclosure.getByRole('link', { name: 'Install and run the working system.' }),
+      illustrativeDisclosure.getByRole('link', { name: 'Install and run the candidate system.' }),
     ).toHaveAttribute('href', '/install')
 
     await expect(page.locator('a[href^="mailto:"][href*="white%20paper"]')).toHaveCount(0)

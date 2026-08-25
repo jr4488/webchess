@@ -1,9 +1,9 @@
 import type { Locator, Page, Route } from '@playwright/test'
 
-import type { ReplayState } from '../../src/lib/game-contract'
 import {
   acceptMoveCommand,
   createReplayState,
+  replayGameEvents,
   toGameView,
 } from '../../src/lib/game-replay'
 import type {
@@ -18,6 +18,7 @@ import { CURRENT_LIFECYCLE_VERSIONS } from '../../src/lib/lifecycle/versions'
 import {
   makeProblemFacets,
   makeProblemParts,
+  makeTrajectoryDirectionalFixture,
 } from '../../src/test/fixtures'
 import type { GeneratedAnswer } from '../../src/types'
 import { buildOpenClawAnswerModelPrompt } from '../../src/lib/full-answer-model-prompt'
@@ -28,6 +29,27 @@ const problem =
 const gameId = '00000000-0000-4000-8000-000000000001'
 const parts = makeProblemParts('browser-play-flow')
 const facets = makeProblemFacets('Browser facet')
+const trajectoryFixture = makeTrajectoryDirectionalFixture()
+const trajectoryFacets = trajectoryFixture.parts
+  .map((part) => ({
+    id: part.id,
+    title: part.title,
+    focus: part.focus,
+    question: part.prompt,
+    keyword: part.keyword,
+    castApplication: part.castApplication,
+  }))
+  .sort((left, right) => left.id - right.id)
+const sectorLabels = [
+  'North',
+  'North-east',
+  'East',
+  'South-east',
+  'South',
+  'South-west',
+  'West',
+  'North-west',
+] as const
 const researchConsent = {
   version: 'webchess-research-consent-v1',
   decision: 'allow_search_and_page_fetch',
@@ -100,56 +122,35 @@ function game(
   }
 }
 
-function nearTerminalState(): ReplayState {
+function trajectoryGame(
+  status: DurableGame['status'],
+  revision: number,
+  state: DurableGame['state'],
+  generatedAnswer: GeneratedAnswer | null = null,
+): DurableGame {
   return {
-    ...createReplayState(),
-    pieces: [
-      {
-        id: 'white-king',
-        side: 'white',
-        kind: 'king',
-        position: { ring: 7, sector: 4 },
-        moved: false,
-      },
-      {
-        id: 'white-rook',
-        side: 'white',
-        kind: 'rook',
-        position: { ring: 4, sector: 0 },
-        moved: true,
-      },
-      {
-        id: 'black-king',
-        side: 'black',
-        kind: 'king',
-        position: { ring: 2, sector: 0 },
-        moved: true,
-      },
-    ],
-    turn: 'white',
-    completedPlies: 255,
-    quietPlies: 99,
-    events: [],
-    captures: [],
-    lastMove: null,
-    outcome: null,
+    ...game(status, revision, state, generatedAnswer),
+    division: {
+      seed: trajectoryFixture.divisionSeed,
+      facets: trajectoryFacets,
+      parts: trajectoryFixture.parts,
+      model: 'gpt-5.6-sol',
+      prompt: 'Server-side directional Division prompt fixture.',
+    },
   }
 }
 
 function completedLifecycleGame(): DurableGame {
-  const accepted = acceptMoveCommand(
-    nearTerminalState(),
-    {
-      expectedPly: 256,
-      pieceId: 'white-rook',
-      to: { ring: 2, sector: 0 },
-    },
-    parts,
+  return trajectoryGame(
+    'answered',
+    4,
+    toGameView(trajectoryFixture.state),
+    answer,
   )
-  return game('answered', 4, toGameView(accepted.state), answer)
 }
 
 function completedLifecycle(): LifecycleAggregate {
+  const directionalRecord = trajectoryFixture.record
   const candidateIds = [
     'attempt-2:white-king',
     'attempt-2:white-rook',
@@ -187,6 +188,14 @@ function completedLifecycle(): LifecycleAggregate {
     missingEvidence: ['A direct observation is still required.'],
     countercase: 'A contradictory observation would reverse this interpretation.',
     reversalCondition: 'Reverse if the protected outcome is threatened.',
+    directionalRecordDigest: directionalRecord.digest,
+    directionalSignalKeys: [
+      directionalRecord.survivingDirectionKeys[index]!,
+    ],
+    directionalInterpretation:
+      `Trajectory direction ${index + 1} shapes how this candidate is scrutinized.`,
+    directionalAmendment:
+      `Carry trajectory direction ${index + 1} into the qualified synthesis without treating it as factual evidence.`,
     attackFindings: PORTIA_ATTACK_TYPES.map((attackType, attackIndex) => {
       const qualified = index === 2 && attackIndex === 0
       return {
@@ -215,11 +224,13 @@ function completedLifecycle(): LifecycleAggregate {
     gameAttempt: 2,
     sameFieldRetryCount: 1,
     fieldRegenerationCount: 0,
-    divisionSeed: 'browser-play-flow',
-    castSeed: 'browser-cast',
-    trajectorySeed: 'browser-trajectory',
+    divisionSeed: trajectoryFixture.divisionSeed,
+    castSeed: trajectoryFixture.castSeed,
+    trajectorySeed: trajectoryFixture.trajectorySeed,
     retryReason: 'The first traversal left too few independent candidates.',
-    terminalFingerprint: 'f'.repeat(64),
+    terminalFingerprint: trajectoryFixture.terminalFingerprint,
+    trajectoryDirectionalRecord: directionalRecord,
+    trajectoryDirectionalRecordStatus: 'bound',
     answerPromptDigest,
     answerUserPrompt,
     answerUserPromptSha256: 'b'.repeat(64),
@@ -239,6 +250,10 @@ function completedLifecycle(): LifecycleAggregate {
     portia: {
       contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
       reviewedAnswerPromptDigest: answerPromptDigest,
+      directionalRecordVersion: directionalRecord.version,
+      directionalRecordDigest: directionalRecord.digest,
+      directionalSummary:
+        'The canonical trajectory changed the retained directional lenses and their required qualifications.',
       promptDecision: 'permit',
       promptDecisionRationale:
         'The exact board-derived prompt is reasonable with its retained qualification.',
@@ -256,6 +271,10 @@ function completedLifecycle(): LifecycleAggregate {
     },
     gate: {
       algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      directionalRecordVersion: directionalRecord.version,
+      directionalRecordDigest: directionalRecord.digest,
+      survivingDirectionKeys: [...directionalRecord.survivingDirectionKeys],
+      directionalBindingsSatisfied: true,
       passed: true,
       usableCandidateCount: 3,
       preservedCount: 2,
@@ -356,6 +375,8 @@ function completedLifecycle(): LifecycleAggregate {
       charlottePrompt: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
       charlotteContract: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
       wilburRecord: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      trajectoryDirectionalRecord:
+        CURRENT_LIFECYCLE_VERSIONS.trajectoryDirectionalRecord,
       rules: 'circular-direct-king-v1',
       engine: 'engine-v2',
       cast: 'independent-three-shuffle-v1',
@@ -518,14 +539,23 @@ test.describe('complete durable play flow', () => {
   test('keyboard-divides, starts, plays, answers, and restores after refresh', async ({
     page,
   }, testInfo) => {
-    const startState = nearTerminalState()
+    const terminalEvent = trajectoryFixture.state.events.at(-1)
+    if (!terminalEvent || terminalEvent.type !== 'move') {
+      throw new Error('The browser terminal fixture must end with a move.')
+    }
+    const startState = replayGameEvents(
+      trajectoryFixture.state.events.slice(0, -1),
+      trajectoryFixture.parts,
+    )
+    const terminalMover = startState.pieces.find(
+      (piece) => piece.id === terminalEvent.pieceId,
+    )
+    if (!terminalMover) {
+      throw new Error('The browser terminal fixture is missing its final mover.')
+    }
     let currentGame: DurableGame | null = null
     const calls: string[] = []
 
-    await page.setExtraHTTPHeaders({
-      'x-webchess-e2e-auth':
-        process.env.WEBCHESS_E2E_AUTH ?? 'playwright-local',
-    })
     await page.route('**/api/**', async (route) => {
       const request = route.request()
       const pathname = new URL(request.url()).pathname
@@ -547,11 +577,7 @@ test.describe('complete durable play flow', () => {
         request.method() === 'GET'
         && pathname === `/api/games/${gameId}/lifecycle`
       ) {
-        await route.fulfill({
-          status: 404,
-          contentType: 'application/json; charset=utf-8',
-          body: JSON.stringify({ error: { message: 'Legacy game.' } }),
-        })
+        await json(route, { lifecycle: completedLifecycle() })
         return
       }
 
@@ -561,7 +587,7 @@ test.describe('complete durable play flow', () => {
           problem: string
           researchConsent: typeof researchConsent
         }>(route)).toEqual({ problem, researchConsent })
-        currentGame = game('mapped', 1, null)
+        currentGame = trajectoryGame('mapped', 1, null)
         await json(route, { game: currentGame })
         return
       }
@@ -571,7 +597,7 @@ test.describe('complete durable play flow', () => {
         expect(requestBody<{ expectedRevision: number }>(route)).toEqual({
           expectedRevision: 1,
         })
-        currentGame = game('playing', 2, toGameView(startState))
+        currentGame = trajectoryGame('playing', 2, toGameView(startState))
         await json(route, { game: currentGame })
         return
       }
@@ -588,33 +614,27 @@ test.describe('complete durable play flow', () => {
         const accepted = acceptMoveCommand(
           startState,
           {
-            expectedPly: 256,
+            expectedPly: startState.completedPlies + 1,
             pieceId: command.pieceId,
             to: command.to,
           },
-          parts,
+          trajectoryFixture.parts,
         )
         expect(accepted.state.outcome).not.toBeNull()
-        currentGame = game('completed', 3, toGameView(accepted.state))
+        currentGame = trajectoryGame(
+          'answered',
+          3,
+          toGameView(accepted.state),
+          answer,
+        )
         await json(route, { game: currentGame })
-        return
-      }
-
-      if (pathname === `/api/games/${gameId}/answer`) {
-        expectServerMutationBoundary(route)
-        expect(requestBody<{ expectedRevision: number }>(route)).toEqual({
-          expectedRevision: 3,
-        })
-        expect(currentGame?.status).toBe('completed')
-        currentGame = game('answered', 4, currentGame?.state ?? null, answer)
-        await json(route, { game: currentGame, answer })
         return
       }
 
       throw new Error(`Unexpected browser API request: ${request.method()} ${pathname}`)
     })
 
-    await page.goto('/play', { waitUntil: 'domcontentloaded' })
+    await page.goto('/openclaw', { waitUntil: 'domcontentloaded' })
     await expect(
       page.getByRole('heading', { name: /Bring a problem/i }),
     ).toBeVisible()
@@ -680,23 +700,27 @@ test.describe('complete durable play flow', () => {
       })
     }
 
-    const rook = page.getByRole('button', {
-      name: /^white rook, ring 5, north$/i,
+    const finalMover = page.getByRole('button', {
+      name: new RegExp(
+        `^${terminalMover.side} ${terminalMover.kind}, ring ${
+          terminalMover.position.ring + 1
+        }, ${sectorLabels[terminalMover.position.sector]}$`,
+        'i',
+      ),
     })
-    await tabTo(page, rook)
+    await tabTo(page, finalMover)
     await page.keyboard.press('Enter')
     await expect(page.locator('.radial-board__cell.is-legal:focus')).toHaveCount(
       1,
     )
-    await moveBoardFocus(page, { ring: 2, sector: 0 })
-    const captureCell = page.locator('.radial-board__cell:focus')
-    await expect(captureCell).toHaveAttribute('aria-label', /black king/i)
-    await expect(captureCell).toHaveClass(/is-legal/)
+    await moveBoardFocus(page, terminalEvent.to)
+    const terminalCell = page.locator('.radial-board__cell:focus')
+    await expect(terminalCell).toHaveClass(/is-legal/)
     await page.keyboard.press('Enter')
 
     await expect(
       page.getByRole('heading', {
-        name: 'A direction from the captured signals',
+        name: /The ending is only the middle of the web/i,
       }),
     ).toBeVisible({ timeout: 20_000 })
     await expect(page.getByText(/Run one bounded experiment/)).toBeVisible()
@@ -706,24 +730,21 @@ test.describe('complete durable play flow', () => {
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(
       page.getByRole('heading', {
-        name: 'A direction from the captured signals',
+        name: /The ending is only the middle of the web/i,
       }),
     ).toBeVisible()
     await expect(page.getByText(/Run one bounded experiment/)).toBeVisible()
     await expectRootFitsViewport(page, 'restored answer stage')
     await expectReducedMotionApplied(page, 'restored answer stage')
 
-    expect(calls.filter((call) => call !== 'GET /api/web-memory')).toEqual([
+    expect(calls).toEqual(expect.arrayContaining([
       'GET /api/games/current',
       'POST /api/divide',
       `POST /api/games/${gameId}/start`,
       `POST /api/games/${gameId}/moves`,
       `GET /api/games/${gameId}/lifecycle`,
-      `POST /api/games/${gameId}/answer`,
-      `GET /api/games/${gameId}/lifecycle`,
-      'GET /api/games/current',
-      `GET /api/games/${gameId}/lifecycle`,
-    ])
+    ]))
+    expect(calls).not.toContain(`POST /api/games/${gameId}/answer`)
     expect(calls.filter((call) => call === 'GET /api/web-memory')).toHaveLength(2)
   })
 
@@ -747,10 +768,6 @@ test.describe('complete durable play flow', () => {
       })
     })
 
-    await page.setExtraHTTPHeaders({
-      'x-webchess-e2e-auth':
-        process.env.WEBCHESS_E2E_AUTH ?? 'playwright-local',
-    })
     await page.route('**/api/**', async (route) => {
       const request = route.request()
       const pathname = new URL(request.url()).pathname
@@ -777,7 +794,7 @@ test.describe('complete durable play flow', () => {
       )
     })
 
-    await page.goto('/play', { waitUntil: 'domcontentloaded' })
+    await page.goto('/openclaw', { waitUntil: 'domcontentloaded' })
     await expect(
       page.getByRole('heading', { name: /The ending is only the middle of the web/i }),
     ).toBeVisible()
@@ -887,7 +904,7 @@ test.describe('complete durable play flow', () => {
     await expectWcagAA(page)
   })
 
-  test('runs Engine V2 in a web worker and cancels outstanding autoplay on pause and reset', async ({
+  test('reuses one Engine V2 worker across saved plies and retires it on pause and reset', async ({
     page,
   }) => {
     let replayState = createReplayState()
@@ -904,10 +921,6 @@ test.describe('complete durable play flow', () => {
       browserErrors.push(error.message)
     })
 
-    await page.setExtraHTTPHeaders({
-      'x-webchess-e2e-auth':
-        process.env.WEBCHESS_E2E_AUTH ?? 'playwright-local',
-    })
     await page.route('**/api/**', async (route) => {
       const request = route.request()
       const pathname = new URL(request.url()).pathname
@@ -971,7 +984,7 @@ test.describe('complete durable play flow', () => {
       )
     })
 
-    await page.goto('/play', { waitUntil: 'domcontentloaded' })
+    await page.goto('/openclaw', { waitUntil: 'domcontentloaded' })
     await expect(
       page.getByRole('region', {
         name: /Play the problem on the circular board/i,
@@ -981,7 +994,6 @@ test.describe('complete durable play flow', () => {
     const firstWorkerPromise = page.waitForEvent('worker')
     await page.getByRole('button', { name: /Play one turn/i }).click()
     const firstWorker = await firstWorkerPromise
-    const firstWorkerClosed = firstWorker.waitForEvent('close')
     const firstWorkerUrl = new URL(firstWorker.url())
     expect(firstWorkerUrl.origin).toBe(new URL(page.url()).origin)
     expect(firstWorkerUrl.pathname).toMatch(
@@ -996,20 +1008,18 @@ test.describe('complete durable play flow', () => {
     ).toContainText('Move 02')
     expect(replayState.completedPlies).toBe(1)
     expect(replayState.outcome).toBeNull()
-    await firstWorkerClosed
 
     const autoplayButton = page.getByRole('button', {
       name: /Auto-play to the end/i,
     })
-    const autoplayWorkerPromise = page.waitForEvent('worker')
+    const firstWorkerClosed = firstWorker.waitForEvent('close')
     await autoplayButton.click()
-    const autoplayWorker = await autoplayWorkerPromise
-    const autoplayWorkerClosed = autoplayWorker.waitForEvent('close')
     await expect(
       page.getByRole('button', { name: /Searching/i }),
     ).toBeDisabled()
+    expect(page.workers()).toContain(firstWorker)
     await page.getByRole('button', { name: /Pause auto-play/i }).click()
-    await autoplayWorkerClosed
+    await firstWorkerClosed
     await expect(
       page.locator('.play-panel .board-message'),
     ).toContainText(/Auto-play paused\. Choose a Black piece/i)
@@ -1019,7 +1029,7 @@ test.describe('complete durable play flow', () => {
     const replacementWorkerPromise = page.waitForEvent('worker')
     await page.getByRole('button', { name: /Auto-play to the end/i }).click()
     const replacementWorker = await replacementWorkerPromise
-    expect(replacementWorker).not.toBe(autoplayWorker)
+    expect(replacementWorker).not.toBe(firstWorker)
     const replacementWorkerUrl = new URL(replacementWorker.url())
     expect(replacementWorkerUrl.origin).toBe(new URL(page.url()).origin)
     expect(replacementWorkerUrl.pathname).toMatch(

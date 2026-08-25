@@ -29,8 +29,11 @@ export const PUBLIC_ROUTES: readonly RouteFixture[] = [
 ] as const
 
 export const PROTECTED_ROUTES: readonly RouteFixture[] = [
-  { path: '/play', label: 'play' },
   { path: '/account', label: 'account' },
+] as const
+
+export const LOCAL_RUNTIME_ROUTES: readonly RouteFixture[] = [
+  { path: '/openclaw', label: 'local OpenClaw runtime' },
 ] as const
 
 export const DOWNLOADS: readonly DownloadFixture[] = [

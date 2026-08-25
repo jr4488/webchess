@@ -58,7 +58,7 @@ test.describe('public routes', () => {
       page.getByRole('link', { name: 'WebChess home' }),
     ).toHaveAttribute('href', '/')
     await expect(
-      page.getByRole('link', { name: 'Play WebChess' }),
-    ).toHaveAttribute('href', '/play')
+      page.getByRole('link', { name: 'Install WebChess' }),
+    ).toHaveAttribute('href', '/install')
   })
 })
