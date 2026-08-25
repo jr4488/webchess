@@ -57,7 +57,7 @@ observed outcome. The exact current method-version tuple is:
 | Boundary | Version |
 | --- | --- |
 | Lifecycle | `webchess-lifecycle-v2.5` |
-| Division prompt | `webchess-division-v4` |
+| Division prompt | `webchess-division-v5` |
 | Portia prompt | `webchess-portia-v5` |
 | Portia review contract | `webchess-portia-review-v3` |
 | Gate algorithm | `webchess-gate-v5` |
@@ -121,11 +121,14 @@ Before Division calls the model, the server derives exactly one immutable cast
 assignment for each facet ID from the durable Division seed. Each assignment
 contains the analytical dimension, movement, I Ching hexagram/name/theme, and a
 concrete directional cue. The model cannot choose, swap, or omit assignments:
-it must return the exact assigned fields and a bounded `castApplication` that
-explains how that direction materially shaped the facet. Division still
-requests exactly 64 problem-specific facets. The implementation rejects wrong
-counts, malformed or mismatched cast fields, duplicate normalized titles or
-focuses, and several explainable lexical-collapse patterns. It cannot decide
+it receives all 64 immutable assignments and returns a bounded
+`castApplication` keyed to each facet ID. The server rejects provider-supplied
+copies of its cast fields, validates every ID, and rebinds the exact assignment
+after the response, avoiding a redundant provider echo without losing
+provenance. Division still requests exactly 64 problem-specific facets. The
+implementation rejects wrong counts, missing applications, duplicate
+normalized titles or focuses, and several explainable lexical-collapse
+patterns. It cannot decide
 whether 64 is the right field size or whether a fluent directionally shaped
 facet is genuinely useful; those are evaluation questions. The generation and
 validation path is in

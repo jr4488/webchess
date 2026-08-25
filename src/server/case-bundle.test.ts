@@ -9,6 +9,7 @@ import {
 } from '../lib/game-replay'
 import {
   CURRENT_LIFECYCLE_VERSIONS,
+  CURRENT_METHOD_VERSION_TUPLE,
   deriveTrajectoryDirectionalRecord,
 } from '../lib/lifecycle'
 import {
@@ -396,7 +397,7 @@ function directionalSourceRows(): CaseBundleSourceRows {
     divisionSeed: DIRECTIONAL_DIVISION_SEED,
     divisionFacets: directionalFacets,
     problemParts: directionalParts,
-    divisionPromptVersion: 'webchess-division-v4',
+    divisionPromptVersion: CURRENT_METHOD_VERSION_TUPLE.divisionPrompt,
   }
   const lifecycleBase = {
     ...lifecycleRow(state),

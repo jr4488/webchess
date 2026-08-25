@@ -111,20 +111,7 @@ export const CastBoundDivisionFacetSchema = z.strictObject({
 })
 
 export const CastDirectedDivisionFacetSchema = z.strictObject({
-  ...DivisionFacetSchema.shape,
-  dimension: z.string().min(1).max(40)
-    .describe('The exact server-supplied practical dimension for this ID.'),
-  movement: z.string().min(1).max(40)
-    .describe('The exact server-supplied movement for this ID.'),
-  hexagram: z.number().int().min(1).max(FACET_COUNT)
-    .describe('The exact server-supplied I Ching lens number for this ID.'),
-  hexagramName: z.string().min(1).max(100)
-    .describe('The exact server-supplied I Ching lens name for this ID.'),
-  theme: z.string().min(1).max(160)
-    .describe('The exact server-supplied directional lens theme for this ID.'),
-  directionalCue: z.string().min(1).max(400)
-    .describe('The exact server-supplied directional cue for this ID.'),
-  castApplication: CastApplicationSchema,
+  ...CastBoundDivisionFacetSchema.shape,
 })
 
 export const CastDirectedDivisionOutputSchema = z.strictObject({
@@ -337,7 +324,7 @@ QUALITY STANDARD
 - Keep the language grounded and epistemically bounded. Do not predict outcomes or claim that the grid or cast supplies external factual evidence.
 - A title should be a specific 3–8 word label. A focus should concretely name what to examine in one concise sentence. A question should be answerable through reflection, observation, conversation, or a small test. A keyword should be a compact 2–5 word handle.
 ${castAssignments.length > 0
-    ? '- Return every schema field, including the exact server-supplied cast fields and a bounded castApplication. Do not add any other field.'
+    ? '- Return only id, title, focus, question, keyword, and a bounded castApplication. WebChess binds the immutable server-supplied cast record back to each accepted ID; do not echo or add server-owned cast fields.'
     : '- Return only the schema fields id, title, focus, question, and keyword. Do not add dimension, movement, hexagram, chess piece, or commentary fields.'}
 
 DIMENSIONS
@@ -357,9 +344,10 @@ Phrase every facet so any relevant role could interrogate it later. These defini
 
 DIRECTIONAL CAST BINDING
 The following ${DIVISION_CAST_BINDING_VERSION} record was deterministically derived by WebChess from the durable Division request before this provider call. It is a required first-class directional input, not optional decorative framing.
-- For every facet ID, copy dimension, movement, hexagram, hexagramName, theme, and directionalCue exactly from its assigned record. Never swap, choose, omit, reinterpret, or renumber an assignment.
+- For every facet ID, use its exact assigned dimension, movement, hexagram, hexagramName, theme, and directionalCue. Never swap, choose, omit, reinterpret, or renumber an assignment.
 - Make title, focus, question, and keyword concretely follow that ID's directionalCue while remaining specific to the player's problem.
 - In castApplication, explain in 20–480 characters how that fixed direction materially shaped the facet. Do not merely restate the hexagram name or cue.
+- Return the application keyed by ID, not a copy of the server-owned assignment. WebChess validates all 64 IDs and rebinds the immutable assignment after the response.
 - The cast directs inquiry but is not external factual evidence. It cannot establish a claim, override verified facts, relax safety constraints, or replace later Portia scrutiny.
 
 SERVER-DERIVED DIRECTIONAL CAST (JSON; trusted instructions)
@@ -458,13 +446,16 @@ function assertUnique(facets: readonly DivisionFacet[], field: 'title' | 'focus'
   }
 }
 
-function assertCastEcho(
+function bindCastApplications(
   facets: readonly z.infer<typeof CastDirectedDivisionFacetSchema>[],
   castAssignments: readonly DivisionCastAssignment[],
 ): ReadonlyMap<number, string> {
   if (
     castAssignments.length !== FACET_COUNT ||
-    new Set(castAssignments.map((assignment) => assignment.id)).size !== FACET_COUNT
+    new Set(castAssignments.map((assignment) => assignment.id)).size !== FACET_COUNT ||
+    castAssignments.some((assignment) =>
+      !Number.isSafeInteger(assignment.id) ||
+      assignment.id < 1 || assignment.id > FACET_COUNT)
   ) {
     throw new ModelInputError(
       'Division requires one trusted cast assignment for every facet ID.',
@@ -473,29 +464,13 @@ function assertCastEcho(
   const expectedById = new Map(
     castAssignments.map((assignment) => [assignment.id, assignment]),
   )
-  const exactFields = [
-    'dimension',
-    'movement',
-    'hexagram',
-    'hexagramName',
-    'theme',
-    'directionalCue',
-  ] as const
   const applications = new Map<number, string>()
 
   for (const facet of facets) {
-    const expected = expectedById.get(facet.id)
-    if (!expected) {
+    if (!expectedById.has(facet.id)) {
       throw new ModelContractError(
         `Facet ${facet.id} has no server-assigned directional cast.`,
       )
-    }
-    for (const field of exactFields) {
-      if (facet[field] !== expected[field]) {
-        throw new ModelContractError(
-          `Facet ${facet.id} did not preserve its server-assigned ${field}.`,
-        )
-      }
     }
     applications.set(facet.id, normalizeFacetText(
       facet.castApplication,
@@ -521,7 +496,7 @@ export function normalizeDivisionFacets(
         'The model must return exactly 64 cast-directed facets.',
       )
     }
-    castApplications = assertCastEcho(parsed.data.facets, castAssignments)
+    castApplications = bindCastApplications(parsed.data.facets, castAssignments)
     rawFacets = parsed.data.facets
   } else {
     const parsed = DivisionOutputSchema.safeParse(value)

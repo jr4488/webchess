@@ -43,7 +43,7 @@ The exact current method-version tuple is part of that candidate identity:
 | Boundary | Required version |
 | --- | --- |
 | Lifecycle | `webchess-lifecycle-v2.5` |
-| Division prompt | `webchess-division-v4` |
+| Division prompt | `webchess-division-v5` |
 | Portia prompt | `webchess-portia-v5` |
 | Portia review contract | `webchess-portia-review-v3` |
 | Gate algorithm | `webchess-gate-v5` |
@@ -104,7 +104,7 @@ mkdir -- "$WEBCHESS_INSTALL_WORKSPACE"
 cd -- "$WEBCHESS_INSTALL_WORKSPACE"
 export WEBCHESS_IDENTITY_URL='https://webchess.anansiportia.com/downloads/webchess-release-identity.json'
 curl --fail --location --remove-on-error --output webchess-release-identity.json "$WEBCHESS_IDENTITY_URL"
-node -e 'const m=require("./webchess-release-identity.json"),v={lifecycle:"webchess-lifecycle-v2.5",divisionPrompt:"webchess-division-v4",portiaPrompt:"webchess-portia-v5",portiaReview:"webchess-portia-review-v3",gateAlgorithm:"webchess-gate-v5",answerPrompt:"webchess-answer-v4",charlottePrompt:"webchess-charlotte-v5"}; if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved"||JSON.stringify(m.release?.methodVersions)!==JSON.stringify(v)) process.exit(1)'
+node -e 'const m=require("./webchess-release-identity.json"),v={lifecycle:"webchess-lifecycle-v2.5",divisionPrompt:"webchess-division-v5",portiaPrompt:"webchess-portia-v5",portiaReview:"webchess-portia-review-v3",gateAlgorithm:"webchess-gate-v5",answerPrompt:"webchess-answer-v4",charlottePrompt:"webchess-charlotte-v5"}; if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved"||JSON.stringify(m.release?.methodVersions)!==JSON.stringify(v)) process.exit(1)'
 export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.source.commit ?? "")')"
 test "${#WEBCHESS_RELEASE_SHA}" -eq 40
 ```

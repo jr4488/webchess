@@ -88,15 +88,9 @@ function validFacets() {
 }
 
 function validCastDirectedFacets(seed = DIVISION_SEED) {
-  const byId = new Map(
-    deriveDivisionCastAssignments(seed).map((assignment) => [
-      assignment.id,
-      assignment,
-    ]),
-  )
+  void seed
   return validFacets().map((facet) => ({
     ...facet,
-    ...byId.get(facet.id)!,
     castApplication:
       `The fixed direction changes facet ${facet.id} by selecting a concrete inquiry for this problem.`,
   }))
@@ -390,8 +384,9 @@ describe('OpenClaw WebChess 2.2 model generation', () => {
     )
   })
 
-  it('requires exact precomputed cast echoes for new durable divisions', async () => {
+  it('binds compact cast applications to server-owned assignments', async () => {
     const directed = validCastDirectedFacets()
+    const assignments = deriveDivisionCastAssignments(DIVISION_SEED)
     harness.runOpenClawModel.mockResolvedValueOnce(
       modelResult({ facets: directed }),
     )
@@ -405,23 +400,36 @@ describe('OpenClaw WebChess 2.2 model generation', () => {
       ...facet,
       castApplication: directed[index]!.castApplication,
     })))
+    expect(JSON.stringify({ facets: directed }).length).toBeLessThan(25_000)
     expect(generated.prompt).toContain('webchess-division-cast-binding-v1')
-    expect(generated.prompt).toContain(directed[0]!.directionalCue)
+    expect(generated.prompt).toContain(assignments[0]!.directionalCue)
+    expect(generated.prompt).toContain(assignments[63]!.directionalCue)
+    expect(generated.prompt).toContain('do not echo or add server-owned cast fields')
+    const transportPrompt = harness.runOpenClawModel.mock.calls[0]?.[0] ?? ''
+    const outputContract = transportPrompt.split(
+      'OPENCLAW STRUCTURED OUTPUT',
+    )[1] ?? ''
+    expect(outputContract).toContain('"castApplication"')
+    expect(outputContract).not.toContain('"directionalCue"')
     expect(harness.runOpenClawModel).toHaveBeenCalledWith(
-      expect.stringContaining('"castApplication"'),
+      expect.any(String),
       expect.any(Object),
       expect.objectContaining({ thinking: 'low' }),
     )
 
-    const mismatched = validCastDirectedFacets()
-    mismatched[9] = {
-      ...mismatched[9]!,
-      hexagram: mismatched[9]!.hexagram === 64
-        ? 63
-        : mismatched[9]!.hexagram + 1,
+    const compact = validCastDirectedFacets()
+    const providerOwnedEcho = {
+      ...compact[9]!,
+      hexagram: 63,
     }
     harness.runOpenClawModel.mockResolvedValueOnce(
-      modelResult({ facets: mismatched }),
+      modelResult({
+        facets: [
+          ...compact.slice(0, 9),
+          providerOwnedEcho,
+          ...compact.slice(10),
+        ],
+      }),
     )
     await expect(generateOpenClawDivisionV2({
       problem: PROBLEM,
@@ -430,6 +438,16 @@ describe('OpenClaw WebChess 2.2 model generation', () => {
 
     harness.runOpenClawModel.mockResolvedValueOnce(
       modelResult({ facets: validFacets() }),
+    )
+    await expect(generateOpenClawDivisionV2({
+      problem: PROBLEM,
+      divisionSeed: DIVISION_SEED,
+    }, requestContext)).rejects.toBeInstanceOf(ModelContractError)
+
+    const duplicateIds = validCastDirectedFacets()
+    duplicateIds[63] = { ...duplicateIds[63]!, id: 1 }
+    harness.runOpenClawModel.mockResolvedValueOnce(
+      modelResult({ facets: duplicateIds }),
     )
     await expect(generateOpenClawDivisionV2({
       problem: PROBLEM,

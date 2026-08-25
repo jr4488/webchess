@@ -11,9 +11,10 @@ access separate so that each has an inspectable provenance and failure mode.
    immutable I Ching direction for each of 64 facet IDs. A structured request
    proposes one bounded perspective per ID and must explain in a saved
    `castApplication` how that assigned direction materially shaped the facet.
-   Deterministic checks reject missing or mismatched cast fields and known
-   structural or lexical failures; they do not prove truth, relevance, or
-   distinctness.
+   The provider does not echo the server-owned cast fields: deterministic
+   checks validate all IDs and applications, then rebind each immutable
+   assignment by ID. They also reject known structural or lexical failures;
+   they do not prove truth, relevance, or distinctness.
 3. **Independent field cast** — the server independently permutes the accepted
    facets, cast-derived change lenses, and completed pair positions from
    recorded seeds. The exact field and provenance are persisted.

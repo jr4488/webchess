@@ -37,6 +37,9 @@ semantic quality.
 
 Current Division receives a deterministic I Ching cast direction for every
 facet ID, and each accepted facet records how that direction shaped it. At the
+provider boundary, the model returns that `castApplication` keyed by facet ID;
+WebChess retains and rebinds the immutable server-derived assignment instead
+of asking the model to echo trusted cast fields. At the
 terminal transition, WebChess derives `webchess-directional-record-v1` from the
 complete canonical game: ordered moves and forced passes, capture sequence,
 exact moving and captured-piece identities, original/current kinds and values,

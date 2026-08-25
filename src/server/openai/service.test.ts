@@ -91,15 +91,9 @@ function validFacets() {
 }
 
 function validCastDirectedFacets(seed = DIVISION_SEED) {
-  const byId = new Map(
-    deriveDivisionCastAssignments(seed).map((assignment) => [
-      assignment.id,
-      assignment,
-    ]),
-  )
+  void seed
   return validFacets().map((facet) => ({
     ...facet,
-    ...byId.get(facet.id)!,
     castApplication:
       `The fixed direction changes facet ${facet.id} by selecting a concrete inquiry for this problem.`,
   }))
@@ -499,7 +493,7 @@ function validCharlotteModelResult(portia: PortiaReview) {
 
 describe('production OpenAI division service', () => {
   it('publishes stable durable prompt versions', () => {
-    expect(DIVISION_PROMPT_VERSION).toBe('webchess-division-v4')
+    expect(DIVISION_PROMPT_VERSION).toBe('webchess-division-v5')
     expect(ANSWER_PROMPT_VERSION).toBe('webchess-answer-v4')
     expect(CURRENT_LIFECYCLE_VERSIONS.charlottePrompt).toBe(
       'webchess-charlotte-v5',
@@ -508,8 +502,9 @@ describe('production OpenAI division service', () => {
     expect(ANSWER_PROMPT_VERSION.length).toBeLessThanOrEqual(80)
   })
 
-  it('binds new Division facets to the precomputed cast and rejects a mismatched echo', async () => {
+  it('binds compact provider applications to the immutable precomputed cast', async () => {
     const directedFacets = validCastDirectedFacets()
+    const assignments = deriveDivisionCastAssignments(DIVISION_SEED)
     const { client, create } = clientReturning({ facets: directedFacets })
 
     const generated = await generateDivision({
@@ -523,13 +518,14 @@ describe('production OpenAI division service', () => {
     })))
     expect(generated.prompt).toContain(DIVISION_CAST_BINDING_VERSION)
     expect(generated.prompt).toContain('directional_input_not_factual_evidence')
-    expect(generated.prompt).toContain(directedFacets[0]!.directionalCue)
+    expect(generated.prompt).toContain(assignments[0]!.directionalCue)
     expect(generated.prompt).toContain('not optional decorative framing')
+    expect(generated.prompt).toContain('do not echo or add server-owned cast fields')
     expect(generated.prompt.length).toBeLessThan(200_000)
 
     const [body] = create.mock.calls[0] as [Record<string, unknown>]
     expect(body.input).toBe(JSON.stringify({ player_problem: PROBLEM }))
-    expect(body.instructions).toContain(directedFacets[63]!.directionalCue)
+    expect(body.instructions).toContain(assignments[63]!.directionalCue)
     const format = (
       body.text as { format: { schema: Record<string, unknown> } }
     ).format
@@ -538,19 +534,22 @@ describe('production OpenAI division service', () => {
         items: { required: string[] }
       }>).facets
     ).items
-    expect(facetSchema.required).toEqual(expect.arrayContaining([
-      'dimension',
-      'movement',
-      'hexagram',
-      'hexagramName',
-      'theme',
-      'directionalCue',
+    expect(facetSchema.required).toEqual([
+      'id',
+      'title',
+      'focus',
+      'question',
+      'keyword',
       'castApplication',
-    ]))
+    ])
 
     const mismatched = validCastDirectedFacets()
-    mismatched[0] = { ...mismatched[0]!, theme: 'provider-selected replacement' }
-    const mismatchClient = clientReturning({ facets: mismatched }).client
+    const providerOwnedEcho = {
+      ...mismatched[0]!,
+      theme: 'provider-selected replacement',
+    }
+    const echoed = [providerOwnedEcho, ...mismatched.slice(1)]
+    const mismatchClient = clientReturning({ facets: echoed }).client
     await expect(generateDivision({
       problem: PROBLEM,
       divisionSeed: DIVISION_SEED,
