@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto'
-
 import type {
   CellCoord,
   GameOutcome,
@@ -21,6 +19,7 @@ import type { DivisionCastAssignment } from '../division'
 import type { GameEvent, GameVersions } from '../game-contract'
 import { replayGameEvents } from '../game-replay'
 import { createInitialPieces, PIECE_VALUES } from '../game'
+import { sha256Utf8Hex, utf8ByteLength } from '../browser-sha256'
 
 export const DIRECTIONAL_RECORD_VERSION =
   'webchess-directional-record-v1' as const
@@ -436,15 +435,13 @@ function assertBoundedJsonTree(value: unknown): void {
   }
 
   visit(value, 0, '$')
-  if (Buffer.byteLength(serializeCanonical(value), 'utf8') > MAX_DIRECTIONAL_RECORD_CANONICAL_BYTES) {
+  if (utf8ByteLength(serializeCanonical(value)) > MAX_DIRECTIONAL_RECORD_CANONICAL_BYTES) {
     throw new Error('Directional record exceeds the canonical byte limit.')
   }
 }
 
 function digest(value: unknown): string {
-  return createHash('sha256')
-    .update(serializeCanonical(asCanonicalJson(value)), 'utf8')
-    .digest('hex')
+  return sha256Utf8Hex(serializeCanonical(asCanonicalJson(value)))
 }
 
 function cloneCoord(coord: CellCoord): CellCoord {

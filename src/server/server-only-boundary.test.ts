@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
@@ -32,4 +33,14 @@ describe('server-only module boundary', () => {
       expect(source).toMatch(/^import 'server-only'\s*$/mu)
     },
   )
+
+  it('keeps browser-side directional prompt verification free of Node built-ins', () => {
+    const source = readFileSync(
+      resolve(process.cwd(), 'src/lib/lifecycle/trajectory-direction.ts'),
+      'utf8',
+    )
+
+    expect(source).not.toMatch(/from ['"]node:/u)
+    expect(source).not.toContain('Buffer.')
+  })
 })
