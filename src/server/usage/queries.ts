@@ -2343,7 +2343,7 @@ decision AS MATERIALIZED (
           AND (SELECT response_sha256 FROM request_state) = $6::text
         )
         OR (
-          $4::text = 'failed'
+          $4::text IN ('failed', 'indeterminate')
           AND (SELECT provider_response_id FROM request_state)
             IS NOT DISTINCT FROM $5::text
           AND (SELECT failure_code FROM request_state) = $7::text
@@ -2391,7 +2391,11 @@ decision AS MATERIALIZED (
       AND (SELECT failure_code FROM request_state)
         = 'operation_already_succeeded'
       THEN 'SETTLEMENT_CONFLICT'
-    WHEN (SELECT status FROM request_state) IN ('succeeded', 'failed')
+    WHEN (SELECT status FROM request_state) IN (
+      'succeeded',
+      'failed',
+      'indeterminate'
+    )
       THEN 'SETTLEMENT_CONFLICT'
     WHEN (SELECT status FROM request_state) <> 'in_progress'
       THEN 'INVALID_REQUEST_STATE'
@@ -2440,11 +2444,11 @@ settle_request AS (
       ELSE NULL
     END,
     failure_code = CASE
-      WHEN $4::text = 'failed' THEN $7::text
+      WHEN $4::text IN ('failed', 'indeterminate') THEN $7::text
       ELSE NULL
     END,
     provider_http_status = CASE
-      WHEN $4::text = 'failed' THEN $8::smallint
+      WHEN $4::text IN ('failed', 'indeterminate') THEN $8::smallint
       ELSE NULL
     END,
     usage_reported = $17::boolean,
@@ -2611,7 +2615,11 @@ decision AS MATERIALIZED (
       (SELECT status FROM request_state) = 'failed'
       AND (SELECT failure_code FROM request_state) = $5::text
       THEN 'ALREADY_RELEASED'
-    WHEN (SELECT status FROM request_state) <> 'reserved'
+    WHEN (SELECT status FROM request_state) NOT IN ('reserved', 'in_progress')
+      THEN 'INVALID_REQUEST_STATE'
+    WHEN
+      (SELECT status FROM request_state) = 'in_progress'
+      AND $5::text <> 'released_provider_not_started'
       THEN 'INVALID_REQUEST_STATE'
     WHEN
       (SELECT lease_token FROM request_state) IS NULL
@@ -2623,7 +2631,20 @@ decision AS MATERIALIZED (
 refund_model_reservation AS (
   UPDATE usage_buckets AS buckets
   SET
-    reserved = greatest(buckets.reserved - 1, 0),
+    used = greatest(
+      buckets.used - CASE
+        WHEN request_state.status = 'in_progress' THEN 1
+        ELSE 0
+      END,
+      0
+    ),
+    reserved = greatest(
+      buckets.reserved - CASE
+        WHEN request_state.status = 'reserved' THEN 1
+        ELSE 0
+      END,
+      0
+    ),
     updated_at = $4::timestamptz
   FROM request_state, decision
   WHERE
@@ -2643,7 +2664,20 @@ refund_model_reservation AS (
 refund_global_model_reservation AS (
   UPDATE usage_buckets AS buckets
   SET
-    reserved = greatest(buckets.reserved - 1, 0),
+    used = greatest(
+      buckets.used - CASE
+        WHEN request_state.status = 'in_progress' THEN 1
+        ELSE 0
+      END,
+      0
+    ),
+    reserved = greatest(
+      buckets.reserved - CASE
+        WHEN request_state.status = 'reserved' THEN 1
+        ELSE 0
+      END,
+      0
+    ),
     updated_at = $4::timestamptz
   FROM request_state, decision
   WHERE
@@ -2686,6 +2720,10 @@ release_request AS (
   SET
     status = 'failed',
     failure_code = $5::text,
+    provider_started_at = CASE
+      WHEN request_state.status = 'in_progress' THEN NULL
+      ELSE requests.provider_started_at
+    END,
     completed_at = $4::timestamptz,
     updated_at = $4::timestamptz
   FROM request_state, decision

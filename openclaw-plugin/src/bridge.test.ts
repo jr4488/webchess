@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto'
 import { accessSync, constants as fsConstants } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
+import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -214,6 +215,7 @@ function fakeApi(
             enabled: true,
             openaiCodex: { enabled: true },
             provider: 'codex',
+            timeoutSeconds: 300,
           },
         },
       },
@@ -421,6 +423,110 @@ function headers(token = TOKEN): HeadersInit {
   }
 }
 
+function rawJsonRequest(
+  bridge: WebChessBridge,
+  pathname: string,
+  body: unknown,
+): Promise<{ readonly body: Record<string, unknown>, readonly status: number }> {
+  const payload = JSON.stringify(body)
+  const url = new URL(pathname, bridge.url)
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Length': Buffer.byteLength(payload, 'utf8'),
+        'Content-Type': 'application/json',
+      },
+      hostname: url.hostname,
+      method: 'POST',
+      path: url.pathname,
+      port: url.port,
+    }, (response) => {
+      const chunks: Buffer[] = []
+      response.on('data', (chunk: Buffer) => chunks.push(chunk))
+      response.on('end', () => {
+        try {
+          resolve({
+            body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as
+              Record<string, unknown>,
+            status: response.statusCode ?? 0,
+          })
+        } catch (error) {
+          reject(error)
+        }
+      })
+    })
+    request.on('error', reject)
+    request.end(payload)
+  })
+}
+
+function beginRawStatusRequest(bridge: WebChessBridge): {
+  abort(): void
+  response: Promise<{
+    readonly body: Record<string, unknown>
+    readonly status: number
+  }>
+} {
+  const url = new URL('/v1/status', bridge.url)
+  let request: ReturnType<typeof httpRequest>
+  const response = new Promise<{
+    readonly body: Record<string, unknown>
+    readonly status: number
+  }>((resolve, reject) => {
+    request = httpRequest({
+      headers: { Authorization: `Bearer ${TOKEN}` },
+      hostname: url.hostname,
+      method: 'GET',
+      path: url.pathname,
+      port: url.port,
+    }, (incoming) => {
+      const chunks: Buffer[] = []
+      incoming.on('data', (chunk: Buffer) => chunks.push(chunk))
+      incoming.on('end', () => {
+        try {
+          resolve({
+            body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as
+              Record<string, unknown>,
+            status: incoming.statusCode ?? 0,
+          })
+        } catch (error) {
+          reject(error)
+        }
+      })
+    })
+    request.on('error', reject)
+    request.end()
+  })
+  return {
+    abort() {
+      request.destroy()
+    },
+    response,
+  }
+}
+
+function rawStatusRequest(
+  bridge: WebChessBridge,
+): Promise<{ readonly body: Record<string, unknown>, readonly status: number }> {
+  return beginRawStatusRequest(bridge).response
+}
+
+async function waitForInvocationCount(
+  mock: { readonly mock: { readonly calls: readonly unknown[] } },
+  count: number,
+): Promise<void> {
+  await vi.waitFor(() => expect(mock.mock.calls).toHaveLength(count), {
+    timeout: 5_000,
+  })
+}
+
+async function waitForInvocation(
+  mock: { readonly mock: { readonly calls: readonly unknown[] } },
+): Promise<void> {
+  await waitForInvocationCount(mock, 1)
+}
+
 async function modelRequest(
   bridge: WebChessBridge,
   prompt: string,
@@ -440,6 +546,7 @@ async function modelRequest(
 }
 
 afterEach(async () => {
+  vi.useRealTimers()
   await Promise.all(roots.splice(0).map((root) =>
     rm(root, { force: true, recursive: true })))
 })
@@ -495,6 +602,253 @@ describe('OpenClaw plugin runtime bridge', () => {
         TEST_ENVIRONMENT,
       )
     } finally {
+      await bridge.close()
+    }
+  })
+
+  it('times out a hung status preflight at one absolute 150-second boundary', async () => {
+    const api = fakeApi()
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+      maxConcurrentRuns: 1,
+    })
+    revalidate.mockClear()
+    let releasePreflight: (() => void) | undefined
+    revalidate.mockImplementationOnce(async () =>
+      await new Promise<boolean>((resolve) => {
+        releasePreflight = () => resolve(true)
+      }))
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawStatusRequest(bridge)
+    try {
+      await waitForInvocation(revalidate)
+      await vi.advanceTimersByTimeAsync(150_000)
+      await vi.advanceTimersByTimeAsync(1_250)
+
+      await expect(pending).resolves.toMatchObject({
+        body: {
+          error: {
+            code: 'OPENCLAW_TIMEOUT',
+            message: 'The OpenClaw status check timed out.',
+          },
+        },
+        status: 504,
+      })
+      expect(revalidate).toHaveBeenCalledTimes(1)
+
+      releasePreflight?.()
+      await Promise.resolve()
+      vi.useRealTimers()
+      await expect(rawStatusRequest(bridge)).resolves.toMatchObject({
+        status: 200,
+      })
+    } finally {
+      releasePreflight?.()
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('times out hung status postflight and discards its late success', async () => {
+    const api = fakeApi()
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+      maxConcurrentRuns: 1,
+    })
+    revalidate.mockClear()
+    let requestRevalidationCount = 0
+    let releasePostflight: (() => void) | undefined
+    revalidate.mockImplementation(async () => {
+      requestRevalidationCount += 1
+      if (requestRevalidationCount === 3) {
+        return await new Promise<boolean>((resolve) => {
+          releasePostflight = () => resolve(true)
+        })
+      }
+      return true
+    })
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawStatusRequest(bridge)
+    try {
+      for (let index = 0;
+        index < 50 && revalidate.mock.calls.length < 3;
+        index += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+      expect(revalidate).toHaveBeenCalledTimes(3)
+      await vi.advanceTimersByTimeAsync(150_000)
+      await vi.advanceTimersByTimeAsync(1_250)
+
+      await expect(pending).resolves.toMatchObject({
+        body: { error: { code: 'OPENCLAW_TIMEOUT' } },
+        status: 504,
+      })
+      releasePostflight?.()
+      await Promise.resolve()
+      revalidate.mockImplementation(async () => true)
+      vi.useRealTimers()
+      await expect(rawStatusRequest(bridge)).resolves.toMatchObject({
+        status: 200,
+      })
+    } finally {
+      releasePostflight?.()
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('counts concurrent status polls against the bridge limit', async () => {
+    const api = fakeApi()
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+      maxConcurrentRuns: 1,
+    })
+    revalidate.mockClear()
+    let releaseFirst: (() => void) | undefined
+    revalidate.mockImplementationOnce(async () =>
+      await new Promise<boolean>((resolve) => {
+        releaseFirst = () => resolve(true)
+      }))
+    const first = rawStatusRequest(bridge)
+    try {
+      await waitForInvocation(revalidate)
+      const [second, third] = await Promise.all([
+        rawStatusRequest(bridge),
+        rawStatusRequest(bridge),
+      ])
+
+      expect(second).toMatchObject({
+        body: { error: { code: 'BRIDGE_BUSY' } },
+        status: 503,
+      })
+      expect(third).toMatchObject({
+        body: { error: { code: 'BRIDGE_BUSY' } },
+        status: 503,
+      })
+      expect(revalidate).toHaveBeenCalledTimes(1)
+
+      releaseFirst?.()
+      await expect(first).resolves.toMatchObject({ status: 200 })
+    } finally {
+      releaseFirst?.()
+      await bridge.close()
+    }
+  })
+
+  it('retires a status poll when its client disconnects', async () => {
+    const api = fakeApi()
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+      maxConcurrentRuns: 1,
+    })
+    revalidate.mockClear()
+    let releaseFirst: (() => void) | undefined
+    revalidate.mockImplementationOnce(async () =>
+      await new Promise<boolean>((resolve) => {
+        releaseFirst = () => resolve(true)
+      }))
+    const first = beginRawStatusRequest(bridge)
+    const firstOutcome = first.response.then(
+      () => 'response' as const,
+      () => 'aborted' as const,
+    )
+    try {
+      await waitForInvocation(revalidate)
+      first.abort()
+      expect(await firstOutcome).toBe('aborted')
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      const blocked = await Promise.all([
+        rawStatusRequest(bridge),
+        rawStatusRequest(bridge),
+      ])
+      expect(blocked).toEqual([
+        expect.objectContaining({
+          body: expect.objectContaining({
+            error: expect.objectContaining({ code: 'BRIDGE_BUSY' }),
+          }),
+          status: 503,
+        }),
+        expect.objectContaining({
+          body: expect.objectContaining({
+            error: expect.objectContaining({ code: 'BRIDGE_BUSY' }),
+          }),
+          status: 503,
+        }),
+      ])
+      expect(revalidate).toHaveBeenCalledTimes(1)
+
+      releaseFirst?.()
+      for (let index = 0; index < 5; index += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+      await expect(rawStatusRequest(bridge)).resolves.toMatchObject({ status: 200 })
+    } finally {
+      releaseFirst?.()
+      await bridge.close()
+    }
+  })
+
+  it('closes without waiting for a signal-ignoring status dependency', async () => {
+    const api = fakeApi()
+    const originalCurrent = api.runtime.config.current
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+      maxConcurrentRuns: 1,
+    })
+    revalidate.mockClear()
+    let releaseStatus: (() => void) | undefined
+    revalidate.mockImplementationOnce(async () =>
+      await new Promise<boolean>((resolve) => {
+        releaseStatus = () => resolve(true)
+      }))
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const status = beginRawStatusRequest(bridge)
+    const statusOutcome = status.response.then(
+      () => 'response' as const,
+      () => 'closed' as const,
+    )
+    try {
+      await waitForInvocation(revalidate)
+
+      let closeSettled = false
+      const close = bridge.close().then(() => {
+        closeSettled = true
+      })
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(api.runtime.config.current).not.toBe(originalCurrent)
+      await vi.advanceTimersByTimeAsync(1_249)
+      expect(closeSettled).toBe(false)
+      expect(api.runtime.config.current).not.toBe(originalCurrent)
+      await vi.advanceTimersByTimeAsync(1)
+      await close
+
+      expect(await statusOutcome).toMatch(/^(?:closed|response)$/u)
+      expect(revalidate).toHaveBeenCalledTimes(1)
+      expect(api.runtime.config.current).toBe(originalCurrent)
+    } finally {
+      releaseStatus?.()
+      vi.useRealTimers()
       await bridge.close()
     }
   })
@@ -797,6 +1151,14 @@ describe('OpenClaw plugin runtime bridge', () => {
         { query: CODEX_SEARCH_READINESS_QUERY },
         { signal: expect.any(AbortSignal) },
       )
+      expect(provider.createTool).toHaveBeenCalledWith({
+        agentDir: AGENT_DIR,
+        config: expect.any(Object),
+        searchConfig: expect.objectContaining({
+          provider: 'codex',
+          timeoutSeconds: 300,
+        }),
+      })
       expect(await first.json()).toMatchObject({
         search: {
           available: true,
@@ -857,6 +1219,140 @@ describe('OpenClaw plugin runtime bridge', () => {
 
     expect(failure.message).toMatch(/one-time authenticated Codex Hosted Search readiness probe/u)
     expect(cleanupSettled).toBe(true)
+  })
+
+  it('allows the authenticated Hosted Search readiness probe to finish after 150 seconds', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const api = fakeApi()
+    const provider = api.runtime.webSearch.listProviders()[0]
+    expect(provider).toBeDefined()
+    let readinessSignal: AbortSignal | undefined
+    const execute = vi.fn(async ({ query }, context) => {
+      readinessSignal = context?.signal
+      return await new Promise((resolve) => {
+        setTimeout(() => resolve({
+          content: 'grounded readiness result after the prior shared cap',
+          externalContent: {
+            provider: 'codex',
+            source: 'web_search',
+            untrusted: true,
+            wrapped: true,
+          },
+          model: 'gpt-5.6-sol',
+          provider: 'codex',
+          query,
+          searches: [{ query }],
+          tookMs: 180_001,
+        }), 180_001)
+      })
+    })
+    provider!.createTool = vi.fn(() => ({ execute }))
+    api.runtime.webSearch.listProviders = vi.fn(() => [provider!])
+
+    const pending = start(api)
+    await waitForInvocation(execute)
+    await vi.advanceTimersByTimeAsync(150_000)
+    expect(readinessSignal?.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(30_001)
+    const bridge = await pending
+    try {
+      expect(execute).toHaveBeenCalledTimes(1)
+      expect(readinessSignal?.aborted).toBe(false)
+    } finally {
+      await bridge.close()
+    }
+  })
+
+  it('aborts the default Hosted Search readiness stage at exactly 300 seconds without a listener', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const api = fakeApi()
+    const originalCurrent = api.runtime.config.current
+    const provider = api.runtime.webSearch.listProviders()[0]
+    expect(provider).toBeDefined()
+    let readinessSignal: AbortSignal | undefined
+    let release: (() => void) | undefined
+    const execute = vi.fn(async ({ query }, context) => {
+      readinessSignal = context?.signal
+      return await new Promise((resolve) => {
+        release = () => resolve({
+          content: 'late result that must not launch a bridge',
+          externalContent: {
+            provider: 'codex',
+            source: 'web_search',
+            untrusted: true,
+            wrapped: true,
+          },
+          model: 'gpt-5.6-sol',
+          provider: 'codex',
+          query,
+          searches: [{ query }],
+          tookMs: 300_000,
+        })
+      })
+    })
+    provider!.createTool = vi.fn(() => ({ execute }))
+    api.runtime.webSearch.listProviders = vi.fn(() => [provider!])
+
+    const pending = captureStartFailure(api)
+    await waitForInvocation(execute)
+    await vi.advanceTimersByTimeAsync(300_000)
+    await vi.advanceTimersByTimeAsync(1_250)
+    const failure = await pending
+
+    expect(failure.message).toMatch(/Codex Hosted Search readiness probe/u)
+    expect(readinessSignal?.aborted).toBe(true)
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(api.runtime.config.current).toBe(originalCurrent)
+    release?.()
+    await Promise.resolve()
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('bounds a hung post-probe Codex attestation inside the same 300-second Search stage', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const api = fakeApi()
+    const originalCurrent = api.runtime.config.current
+    const provider = api.runtime.webSearch.listProviders()[0]
+    expect(provider).toBeDefined()
+    let revalidationCount = 0
+    const revalidate = vi.fn(async () => {
+      revalidationCount += 1
+      if (revalidationCount === 7) {
+        return await new Promise<never>(() => {})
+      }
+      return true
+    })
+    const attestor: CodexPackageAttestor = vi.fn(async () => ({
+      async executeSearch(
+        params: Parameters<CodexPackageAttestation['executeSearch']>[0],
+      ) {
+        const selected = api.runtime.webSearch.listProviders()[0]
+        const tool = selected?.createTool({
+          agentDir: params.agentDir,
+          config: params.config,
+          searchConfig: params.searchConfig,
+        })
+        if (!tool) throw new Error('test provider unavailable')
+        return await tool.execute(
+          { query: params.query },
+          { signal: params.signal },
+        )
+      },
+      revalidate,
+    }))
+
+    const pending = captureStartFailure(api, {
+      codexPackageAttestor: attestor,
+    })
+    await waitForInvocationCount(revalidate, 7)
+    expect(provider!.createTool).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(300_000)
+    const failure = await pending
+
+    expect(failure.message).toMatch(/Codex Hosted Search readiness probe/u)
+    expect(provider!.createTool).toHaveBeenCalledTimes(1)
+    expect(api.runtime.config.current).toBe(originalCurrent)
   })
 
   it('runs one fixed model readiness completion per bridge launch', async () => {
@@ -928,7 +1424,82 @@ describe('OpenClaw plugin runtime bridge', () => {
     expect(failure.message).toMatch(/one-time authenticated OpenAI model readiness probe/u)
   })
 
+  it('aborts the default model readiness stage at exactly 150 seconds before Search starts', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const api = fakeApi()
+    const provider = api.runtime.webSearch.listProviders()[0]
+    expect(provider).toBeDefined()
+    const runtime = simpleRuntime()
+    let readinessSignal: AbortSignal | undefined
+    const complete = vi.fn(async (params) => {
+      readinessSignal = params.options.signal
+      return await new Promise<never>(() => {})
+    })
+    runtime.completeWithPreparedSimpleCompletionModel = complete
+
+    const pending = captureStartFailure(api, {
+      simpleCompletionRuntime: runtime,
+    })
+    await waitForInvocation(complete)
+    await vi.advanceTimersByTimeAsync(150_000)
+    await vi.advanceTimersByTimeAsync(1_250)
+    const failure = await pending
+
+    expect(failure.message).toMatch(/OpenAI model readiness probe/u)
+    expect(readinessSignal?.aborted).toBe(true)
+    expect(complete).toHaveBeenCalledTimes(1)
+    expect(provider!.createTool).not.toHaveBeenCalled()
+  })
+
+  it('bounds asynchronous model OAuth inspection inside the 150-second readiness stage', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const api = fakeApi()
+    const runtime = simpleRuntime()
+    const resolveIdentity = vi.fn<PreparedAuthAccountInspector['resolveIdentity']>(
+      async () => await new Promise<never>(() => {}),
+    )
+
+    const pending = captureStartFailure(api, {
+      preparedAuthAccountInspector: { resolveIdentity },
+      simpleCompletionRuntime: runtime,
+    })
+    await waitForInvocation(resolveIdentity)
+    await vi.advanceTimersByTimeAsync(150_000)
+    const failure = await pending
+
+    expect(failure.message).toMatch(/OpenAI model readiness probe/u)
+    expect(runtime.completeWithPreparedSimpleCompletionModel)
+      .not.toHaveBeenCalled()
+    expect(api.runtime.webSearch.listProviders).not.toHaveBeenCalled()
+  })
+
   it.each([
+    [
+      'missing five-minute provider timeout',
+      {
+        enabled: true,
+        openaiCodex: { enabled: true },
+        provider: 'codex',
+      },
+    ],
+    [
+      'shorter provider timeout',
+      {
+        enabled: true,
+        openaiCodex: { enabled: true },
+        provider: 'codex',
+        timeoutSeconds: 299,
+      },
+    ],
+    [
+      'longer provider timeout',
+      {
+        enabled: true,
+        openaiCodex: { enabled: true },
+        provider: 'codex',
+        timeoutSeconds: 301,
+      },
+    ],
     ['managed search disabled', { enabled: false, provider: 'codex' }],
     [
       'Codex Hosted Search disabled',
@@ -949,6 +1520,7 @@ describe('OpenClaw plugin runtime bridge', () => {
     const failure = await captureStartFailure(api)
 
     expect(failure.message).toMatch(/provider set to codex/u)
+    expect(failure.message).toMatch(/timeoutSeconds set to 300/u)
     expect(api.runtime.webSearch.listProviders).not.toHaveBeenCalled()
   })
 
@@ -2259,6 +2831,320 @@ describe('OpenClaw plugin runtime bridge', () => {
     expect(settled).toBe(true)
   })
 
+  it('rejects malformed model turn identities before provider execution', async () => {
+    const complete = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'must not run' }],
+      stopReason: 'stop' as const,
+    }))
+    const bridge = await start(fakeApi(), {
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    try {
+      for (const turnId of [
+        '',
+        'contains whitespace',
+        'contains\nnewline',
+        'x'.repeat(256),
+      ]) {
+        await expect(rawJsonRequest(bridge, '/v1/model/run', {
+          prompt: 'bounded provider prompt',
+          thinking: 'medium',
+          timeoutMs: 10_000,
+          turnId,
+          version: 1,
+        })).resolves.toMatchObject({
+          body: { error: { code: 'INVALID_REQUEST' } },
+          status: 400,
+        })
+      }
+      expect(complete).not.toHaveBeenCalled()
+    } finally {
+      await bridge.close()
+    }
+  })
+
+  it('rejects overlapping, conflicting, and settled reuse of one stable model turn', async () => {
+    let finishCompletion: (() => void) | undefined
+    const complete = vi.fn<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >(async () => await new Promise<Awaited<ReturnType<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >>>((resolve) => {
+      finishCompletion = () => resolve({
+        content: [{ type: 'text', text: 'one authoritative result' }],
+        stopReason: 'stop',
+      })
+    }))
+    const bridge = await start(fakeApi(), {
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    const body = {
+      prompt: 'one stable provider prompt',
+      thinking: 'medium',
+      timeoutMs: 10_000,
+      turnId: 'answer-turn-0123456789abcdef',
+      version: 1,
+    }
+    try {
+      const first = rawJsonRequest(bridge, '/v1/model/run', body)
+      await waitForInvocation(complete)
+
+      await expect(rawJsonRequest(bridge, '/v1/model/run', body))
+        .resolves.toMatchObject({
+          body: { error: { code: 'MODEL_TURN_IN_PROGRESS' } },
+          status: 409,
+        })
+      await expect(rawJsonRequest(bridge, '/v1/model/run', {
+        ...body,
+        prompt: 'different provider prompt with the same identity',
+      })).resolves.toMatchObject({
+        body: { error: { code: 'MODEL_TURN_CONFLICT' } },
+        status: 409,
+      })
+      expect(complete).toHaveBeenCalledTimes(1)
+
+      finishCompletion?.()
+      await expect(first).resolves.toMatchObject({ status: 200 })
+      await expect(rawJsonRequest(bridge, '/v1/model/run', body))
+        .resolves.toMatchObject({
+          body: { error: { code: 'MODEL_TURN_ALREADY_SETTLED' } },
+          status: 409,
+        })
+      expect(complete).toHaveBeenCalledTimes(1)
+    } finally {
+      finishCompletion?.()
+      await bridge.close()
+    }
+  })
+
+  it('terminates a signal-ignoring model turn after the bounded abort drain', async () => {
+    let finishCompletion: (() => void) | undefined
+    const complete = vi.fn<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >(async () => await new Promise<Awaited<ReturnType<
+      SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
+    >>>((resolve) => {
+      finishCompletion = () => resolve({
+        content: [{ type: 'text', text: 'late result must be discarded' }],
+        stopReason: 'stop',
+      })
+    }))
+    const bridge = await start(fakeApi(), {
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawJsonRequest(bridge, '/v1/model/run', {
+      prompt: 'provider ignores the bounded model-turn abort',
+      thinking: 'medium',
+      timeoutMs: 10_000,
+      turnId: 'answer-turn-that-must-remain-draining',
+      version: 1,
+    })
+    let settled = false
+    void pending.then(
+      () => { settled = true },
+      () => { settled = true },
+    )
+    try {
+      await waitForInvocation(complete)
+
+      await vi.advanceTimersByTimeAsync(10_000)
+      await vi.advanceTimersByTimeAsync(1_250)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      expect(settled).toBe(true)
+      await expect(pending).resolves.toMatchObject({
+        body: {
+          error: {
+            code: 'OPENCLAW_TIMEOUT',
+            message: 'The OpenClaw model run timed out.',
+          },
+        },
+        status: 504,
+      })
+      expect(complete).toHaveBeenCalledTimes(1)
+
+      await expect(rawJsonRequest(bridge, '/v1/model/run', {
+        prompt: 'provider ignores the bounded model-turn abort',
+        thinking: 'medium',
+        timeoutMs: 10_000,
+        turnId: 'answer-turn-that-must-remain-draining',
+        version: 1,
+      })).resolves.toMatchObject({
+        body: { error: { code: 'MODEL_TURN_IN_PROGRESS' } },
+        status: 409,
+      })
+      expect(complete).toHaveBeenCalledTimes(1)
+    } finally {
+      finishCompletion?.()
+      await pending.catch(() => undefined)
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('bounds slow model preflight and releases the bridge slot without starting the provider', async () => {
+    const complete = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'bounded follow-up result' }],
+      stopReason: 'stop' as const,
+    }))
+    const api = fakeApi()
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+      maxConcurrentRuns: 1,
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    revalidate.mockClear()
+    let releasePreflight: (() => void) | undefined
+    revalidate.mockImplementationOnce(async () =>
+      await new Promise<boolean>((resolve) => {
+        releasePreflight = () => resolve(true)
+      }))
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawJsonRequest(bridge, '/v1/model/run', {
+      prompt: 'model request whose attestation preflight stalls',
+      thinking: 'medium',
+      timeoutMs: 10_000,
+      version: 1,
+    })
+    try {
+      await waitForInvocation(revalidate)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      await expect(pending).resolves.toMatchObject({
+        body: { error: { code: 'OPENCLAW_TIMEOUT' } },
+        status: 504,
+      })
+      expect(complete).not.toHaveBeenCalled()
+
+      const followUp = rawJsonRequest(bridge, '/v1/model/run', {
+        prompt: 'fresh model request after bounded preflight',
+        thinking: 'medium',
+        timeoutMs: 10_000,
+        version: 1,
+      })
+      await expect(followUp).resolves.toMatchObject({ status: 200 })
+      expect(complete).toHaveBeenCalledTimes(1)
+    } finally {
+      releasePreflight?.()
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('rechecks the absolute model deadline before deferred provider start', async () => {
+    const complete = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'must not run after deadline' }],
+      stopReason: 'stop' as const,
+    }))
+    const inspector = preparedAuthInspector()
+    const resolveIdentity = vi.mocked(inspector.resolveIdentity)
+    const bridge = await start(fakeApi(), {
+      preparedAuthAccountInspector: inspector,
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    resolveIdentity.mockClear()
+    let armDeadlineCrossing = false
+    let requestInspectionCount = 0
+    resolveIdentity.mockImplementation(async (value) => {
+      requestInspectionCount += 1
+      if (requestInspectionCount === 2) armDeadlineCrossing = true
+      return typeof value === 'string'
+        ? resolveOpenAiCodexAccessTokenIdentity(value)
+        : null
+    })
+    const beforeDeadline = Date.now()
+    const now = vi.spyOn(Date, 'now').mockImplementation(() =>
+      armDeadlineCrossing &&
+        new Error().stack?.includes('raceProviderExecution')
+        ? beforeDeadline + 10_000
+        : beforeDeadline)
+    try {
+      const response = await rawJsonRequest(bridge, '/v1/model/run', {
+        prompt: 'deadline crosses between model scheduling and provider start',
+        thinking: 'medium',
+        timeoutMs: 10_000,
+        version: 1,
+      })
+
+      expect(response).toMatchObject({
+        body: { error: { code: 'OPENCLAW_TIMEOUT' } },
+        status: 504,
+      })
+      expect(requestInspectionCount).toBe(2)
+      expect(complete).not.toHaveBeenCalled()
+    } finally {
+      now.mockRestore()
+      await bridge.close()
+    }
+  })
+
+  it('bounds slow model postflight and discards the completed provider result', async () => {
+    const complete = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'completed but not yet attested' }],
+      stopReason: 'stop' as const,
+    }))
+    const api = fakeApi()
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+      maxConcurrentRuns: 1,
+      simpleCompletionRuntime: simpleRuntime(complete),
+    })
+    revalidate.mockClear()
+    let releasePostflight: (() => void) | undefined
+    let requestRevalidationCount = 0
+    revalidate.mockImplementation(async () => {
+      requestRevalidationCount += 1
+      if (requestRevalidationCount === 5) {
+        return await new Promise<boolean>((resolve) => {
+          releasePostflight = () => resolve(true)
+        })
+      }
+      return true
+    })
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawJsonRequest(bridge, '/v1/model/run', {
+      prompt: 'model request whose result attestation stalls',
+      thinking: 'medium',
+      timeoutMs: 10_000,
+      version: 1,
+    })
+    try {
+      await waitForInvocation(complete)
+      await vi.waitFor(() => expect(revalidate).toHaveBeenCalledTimes(5))
+      await vi.advanceTimersByTimeAsync(10_000)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      await expect(pending).resolves.toMatchObject({
+        body: { error: { code: 'OPENCLAW_TIMEOUT' } },
+        status: 504,
+      })
+      expect(complete).toHaveBeenCalledTimes(1)
+
+      const followUp = rawJsonRequest(bridge, '/v1/model/run', {
+        prompt: 'fresh model request after bounded postflight',
+        thinking: 'medium',
+        timeoutMs: 10_000,
+        version: 1,
+      })
+      await expect(followUp).resolves.toMatchObject({ status: 200 })
+      expect(complete).toHaveBeenCalledTimes(2)
+    } finally {
+      releasePostflight?.()
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
   it('routes hosted-search queries through the runtime API instead of argv', async () => {
     const search = vi.fn(async (params) => ({
       provider: 'codex',
@@ -2301,6 +3187,402 @@ describe('OpenClaw plugin runtime bridge', () => {
         args: { count: 4, limit: 4, query },
         providerId: 'codex',
       }))
+    } finally {
+      await bridge.close()
+    }
+  })
+
+  it('allows one Hosted Search to complete after 150 seconds but before five minutes', async () => {
+    let finishSearch: (() => void) | undefined
+    const query = 'evidence returned after the former search ceiling'
+    const search = vi.fn(async (params) => {
+      await new Promise<void>((resolve) => {
+        finishSearch = resolve
+      })
+      return {
+        provider: 'codex',
+        result: {
+          query: params.args.query,
+          provider: 'codex',
+          model: 'gpt-5.6',
+          tookMs: 180_001,
+          externalContent: {
+            untrusted: true,
+            source: 'web_search',
+            provider: 'codex',
+            wrapped: true,
+          },
+          content: 'wrapped delayed fixture',
+          searches: [{ query: params.args.query }],
+        },
+      }
+    })
+    const api = fakeApi(search)
+    const provider = api.runtime.webSearch.listProviders()[0]
+    expect(provider).toBeDefined()
+    const bridge = await start(api)
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    try {
+      const pending = rawJsonRequest(bridge, '/v1/web/search', {
+        limit: 4,
+        query,
+        timeoutMs: 300_000,
+        version: 1,
+      })
+      await waitForInvocation(search)
+
+      await vi.advanceTimersByTimeAsync(180_001)
+      finishSearch?.()
+
+      await expect(pending).resolves.toMatchObject({
+        body: {
+          capability: 'web.search',
+          provider: 'codex',
+        },
+        status: 200,
+      })
+      expect(search).toHaveBeenCalledTimes(1)
+      expect(provider!.createTool).toHaveBeenLastCalledWith({
+        agentDir: AGENT_DIR,
+        config: expect.any(Object),
+        searchConfig: expect.objectContaining({
+          provider: 'codex',
+          timeoutSeconds: 300,
+        }),
+      })
+    } finally {
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('terminates one Hosted Search at five minutes without a duplicate provider call', async () => {
+    let aborted = false
+    const search = vi.fn<
+      OpenClawBridgeApi['runtime']['webSearch']['search']
+    >(async (params) => await new Promise<never>((_resolve, reject) => {
+      params.signal.addEventListener('abort', () => {
+        aborted = true
+        reject(new Error('expected synthetic timeout abort'))
+      }, { once: true })
+    }))
+    const bridge = await start(fakeApi(search))
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    try {
+      const pending = rawJsonRequest(bridge, '/v1/web/search', {
+        limit: 4,
+        query: 'evidence that reaches the five-minute timeout boundary',
+        timeoutMs: 300_000,
+        version: 1,
+      })
+      await waitForInvocation(search)
+
+      await vi.advanceTimersByTimeAsync(300_000)
+      expect(aborted).toBe(true)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      await vi.runOnlyPendingTimersAsync()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      await expect(pending).resolves.toMatchObject({
+        body: {
+          error: {
+            code: 'OPENCLAW_TIMEOUT',
+            message: 'Codex Hosted Search timed out.',
+          },
+        },
+        status: 504,
+      })
+      expect(search).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('terminates a signal-ignoring Hosted Search after the bounded abort drain', async () => {
+    let finishSearch: (() => void) | undefined
+    const query = 'evidence from a provider that ignores the abort signal'
+    const search = vi.fn<
+      OpenClawBridgeApi['runtime']['webSearch']['search']
+    >(async (params) => await new Promise<Awaited<ReturnType<
+      OpenClawBridgeApi['runtime']['webSearch']['search']
+    >>>((resolve) => {
+      finishSearch = () => resolve({
+        provider: 'codex',
+        result: {
+          query: params.args.query,
+          provider: 'codex',
+          model: 'gpt-5.6',
+          tookMs: 300_000,
+          externalContent: {
+            untrusted: true,
+            source: 'web_search',
+            provider: 'codex',
+            wrapped: true,
+          },
+          content: 'wrapped result that must be discarded after timeout',
+          searches: [{ query: params.args.query }],
+        },
+      })
+    }))
+    const bridge = await start(fakeApi(search))
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawJsonRequest(bridge, '/v1/web/search', {
+      limit: 4,
+      query,
+      timeoutMs: 300_000,
+      version: 1,
+    })
+    let settled = false
+    void pending.then(
+      () => { settled = true },
+      () => { settled = true },
+    )
+    try {
+      await waitForInvocation(search)
+
+      await vi.advanceTimersByTimeAsync(300_000)
+      await vi.advanceTimersByTimeAsync(1_250)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      expect(settled).toBe(true)
+      await expect(pending).resolves.toMatchObject({
+        body: {
+          error: {
+            code: 'OPENCLAW_TIMEOUT',
+            message: 'Codex Hosted Search timed out.',
+          },
+        },
+        status: 504,
+      })
+      expect(search).toHaveBeenCalledTimes(1)
+    } finally {
+      finishSearch?.()
+      await vi.advanceTimersByTimeAsync(1_250)
+      await pending.catch(() => undefined)
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('bounds slow Hosted Search preflight and never starts the provider after deadline', async () => {
+    const search = vi.fn(async (params) => ({
+      provider: 'codex',
+      result: {
+        query: params.args.query,
+        provider: 'codex',
+        model: 'gpt-5.6',
+        tookMs: 1,
+        externalContent: {
+          untrusted: true,
+          source: 'web_search',
+          provider: 'codex',
+          wrapped: true,
+        },
+        content: 'wrapped fixture',
+        searches: [{ query: params.args.query }],
+      },
+    }))
+    const api = fakeApi(search)
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+      maxConcurrentRuns: 1,
+    })
+    revalidate.mockClear()
+    let releasePreflight: (() => void) | undefined
+    revalidate.mockImplementationOnce(async () => await new Promise<boolean>((resolve) => {
+      releasePreflight = () => resolve(true)
+    }))
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawJsonRequest(bridge, '/v1/web/search', {
+      limit: 4,
+      query: 'search whose attestation preflight stalls',
+      timeoutMs: 300_000,
+      version: 1,
+    })
+    try {
+      await waitForInvocation(revalidate)
+      await vi.advanceTimersByTimeAsync(300_000)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      await expect(pending).resolves.toMatchObject({
+        body: { error: { code: 'OPENCLAW_TIMEOUT' } },
+        status: 504,
+      })
+      expect(search).not.toHaveBeenCalled()
+
+      const followUp = rawJsonRequest(bridge, '/v1/web/search', {
+        limit: 4,
+        query: 'fresh request after bounded preflight',
+        timeoutMs: 300_000,
+        version: 1,
+      })
+      await expect(followUp).resolves.toMatchObject({ status: 200 })
+      expect(search).toHaveBeenCalledTimes(1)
+
+      const revalidationsBeforeRelease = revalidate.mock.calls.length
+      releasePreflight?.()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(search).toHaveBeenCalledTimes(1)
+      expect(revalidate).toHaveBeenCalledTimes(revalidationsBeforeRelease)
+    } finally {
+      releasePreflight?.()
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('rechecks the absolute deadline in the deferred provider-start microtask', async () => {
+    const search = vi.fn(async () => ({ provider: 'codex', result: {} }))
+    const api = fakeApi(search)
+    const baseAttestor = codexPackageAttestor(api)
+    const attestation = await baseAttestor(officialCodexRecord())
+    if (!attestation) throw new Error('test_attestation_missing')
+    const revalidate = vi.mocked(attestation.revalidate)
+    const bridge = await start(api, {
+      codexPackageAttestor: vi.fn(async () => attestation),
+    })
+    revalidate.mockClear()
+    let armDeadlineCrossing = false
+    let requestRevalidationCount = 0
+    revalidate.mockImplementation(async () => {
+      requestRevalidationCount += 1
+      if (requestRevalidationCount === 4) armDeadlineCrossing = true
+      return true
+    })
+    const beforeDeadline = Date.now()
+    const now = vi.spyOn(Date, 'now').mockImplementation(() =>
+      armDeadlineCrossing &&
+        new Error().stack?.includes('raceProviderExecution')
+        ? beforeDeadline + 300_000
+        : beforeDeadline)
+    try {
+      const response = await rawJsonRequest(bridge, '/v1/web/search', {
+        limit: 4,
+        query: 'deadline crosses between scheduling and provider start',
+        timeoutMs: 300_000,
+        version: 1,
+      })
+
+      expect(response).toMatchObject({
+        body: { error: { code: 'OPENCLAW_TIMEOUT' } },
+        status: 504,
+      })
+      expect(search).not.toHaveBeenCalled()
+    } finally {
+      now.mockRestore()
+      await bridge.close()
+    }
+  })
+
+  it('bounds slow Hosted Search postflight and discards late account-auth success', async () => {
+    let armPostflightDelay: () => void = () => undefined
+    let releasePostflight: (() => void) | undefined
+    let delayNextPostflight = true
+    const search = vi.fn(async (params) => {
+      if (delayNextPostflight) {
+        delayNextPostflight = false
+        armPostflightDelay()
+      }
+      return {
+        provider: 'codex',
+        result: {
+          query: params.args.query,
+          provider: 'codex',
+          model: 'gpt-5.6',
+          tookMs: 1,
+          externalContent: {
+            untrusted: true,
+            source: 'web_search',
+            provider: 'codex',
+            wrapped: true,
+          },
+          content: 'wrapped fixture',
+          searches: [{ query: params.args.query }],
+        },
+      }
+    })
+    const api = fakeApi(search)
+    const resolveAuth = vi.mocked(
+      api.runtime.modelAuth.resolveApiKeyForProvider,
+    )
+    armPostflightDelay = () => {
+      resolveAuth.mockImplementationOnce(async () =>
+        await new Promise((resolve) => {
+          releasePostflight = () => resolve({
+            mode: 'oauth' as const,
+            profileId: 'openai:account',
+            source: 'profile:openai:account',
+          })
+        }))
+    }
+    const bridge = await start(api, {
+      maxConcurrentRuns: 1,
+    })
+    resolveAuth.mockClear()
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    const pending = rawJsonRequest(bridge, '/v1/web/search', {
+      limit: 4,
+      query: 'search whose postflight account auth stalls',
+      timeoutMs: 300_000,
+      version: 1,
+    })
+    try {
+      await waitForInvocation(search)
+      await vi.advanceTimersByTimeAsync(300_000)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      await expect(pending).resolves.toMatchObject({
+        body: { error: { code: 'OPENCLAW_TIMEOUT' } },
+        status: 504,
+      })
+      expect(search).toHaveBeenCalledTimes(1)
+
+      const followUp = rawJsonRequest(bridge, '/v1/web/search', {
+        limit: 4,
+        query: 'fresh request after bounded postflight',
+        timeoutMs: 300_000,
+        version: 1,
+      })
+      await expect(followUp).resolves.toMatchObject({ status: 200 })
+      expect(search).toHaveBeenCalledTimes(2)
+
+      const authResolutionsBeforeRelease = resolveAuth.mock.calls.length
+      releasePostflight?.()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(search).toHaveBeenCalledTimes(2)
+      expect(resolveAuth).toHaveBeenCalledTimes(authResolutionsBeforeRelease)
+    } finally {
+      releasePostflight?.()
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
+  it('rejects a Hosted Search timeout above five minutes before provider execution', async () => {
+    const search = vi.fn(async () => ({ provider: 'codex', result: {} }))
+    const bridge = await start(fakeApi(search))
+    try {
+      const response = await fetch(`${bridge.url}/v1/web/search`, {
+        body: JSON.stringify({
+          limit: 4,
+          query: 'must fail at the request boundary',
+          timeoutMs: 300_001,
+          version: 1,
+        }),
+        headers: headers(),
+        method: 'POST',
+      })
+
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({
+        error: { code: 'INVALID_REQUEST' },
+      })
+      expect(search).not.toHaveBeenCalled()
     } finally {
       await bridge.close()
     }

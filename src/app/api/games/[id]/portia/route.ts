@@ -2,7 +2,8 @@ import type { NextRequest } from 'next/server'
 import { handlePortiaRequest } from '@/server/http'
 
 export const dynamic = 'force-dynamic'
-export const maxDuration = 150
+// Search may consume 300s before bounded, resumable Portia candidate turns.
+export const maxDuration = 6_000
 export const runtime = 'nodejs'
 
 interface RouteContext {

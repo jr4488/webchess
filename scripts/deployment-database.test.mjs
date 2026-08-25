@@ -105,6 +105,8 @@ describe('deployment database migration tooling', () => {
       '0013_wilbur_mutation_requests',
       '0014_web_memory_feedback',
       '0015_direct_page_research_evidence',
+      '0016_extend_research_timeout_to_five_minutes',
+      '0017_trajectory_directional_record',
     ])
     expect(migrations[0].sql).toContain('CREATE TABLE IF NOT EXISTS games')
     const researchMigration = migrations.find(
@@ -130,6 +132,13 @@ describe('deployment database migration tooling', () => {
     )
     const directPageResearchMigration = migrations.find(
       (migration) => migration.id === '0015_direct_page_research_evidence',
+    )
+    const fiveMinuteResearchTimeoutMigration = migrations.find(
+      (migration) =>
+        migration.id === '0016_extend_research_timeout_to_five_minutes',
+    )
+    const trajectoryDirectionalRecordMigration = migrations.find(
+      (migration) => migration.id === '0017_trajectory_directional_record',
     )
     expect(researchMigration?.sql).toContain(
       'CREATE TABLE IF NOT EXISTS research_requests',
@@ -162,6 +171,24 @@ describe('deployment database migration tooling', () => {
       'research_consent_version',
     )
     expect(directPageResearchMigration?.sql).toContain('fetch_failures')
+    expect(fiveMinuteResearchTimeoutMigration?.sql).toContain(
+      'CHECK (timeout_ms BETWEEN 1000 AND 300000)',
+    )
+    expect(trajectoryDirectionalRecordMigration?.sql).toContain(
+      'trajectory_directional_record_digest',
+    )
+    expect(trajectoryDirectionalRecordMigration?.sql).toContain(
+      'lifecycle_runs_trajectory_directional_record_complete',
+    )
+    expect(trajectoryDirectionalRecordMigration?.sql).toContain(
+      "trajectory_directional_record ? 'version'",
+    )
+    expect(trajectoryDirectionalRecordMigration?.sql).toContain(
+      "jsonb_typeof(trajectory_directional_record->'digest') = 'string'",
+    )
+    expect(trajectoryDirectionalRecordMigration?.sql).toContain(
+      ') IS TRUE',
+    )
   })
 
   it('pins the visible research broker runtime schema and privileges', async () => {
@@ -212,6 +239,27 @@ describe('deployment database migration tooling', () => {
     expect(
       columns.filter(({ table_name }) => table_name === 'research_sources'),
     ).toHaveLength(11)
+    const lifecycleColumns = columns.filter(
+      ({ table_name }) => table_name === 'lifecycle_runs',
+    )
+    expect(lifecycleColumns).toHaveLength(45)
+    expect(lifecycleColumns.slice(-3)).toEqual([
+      expect.objectContaining({
+        column_name: 'trajectory_directional_record_version',
+        data_type: 'text',
+        not_null: false,
+      }),
+      expect.objectContaining({
+        column_name: 'trajectory_directional_record_digest',
+        data_type: 'character(64)',
+        not_null: false,
+      }),
+      expect.objectContaining({
+        column_name: 'trajectory_directional_record',
+        data_type: 'jsonb',
+        not_null: false,
+      }),
+    ])
 
     const allowedPrivileges = (tableName) =>
       privileges
@@ -372,11 +420,36 @@ describe('deployment database migration tooling', () => {
         parent_trigger: false,
         function_source: expect.stringContaining("OLD.status <> 'pending'"),
       }),
+      expect.objectContaining({
+        table_name: 'lifecycle_runs',
+        trigger_name: 'lifecycle_runs_trajectory_directional_record_guard',
+        function_name: 'webchess_guard_trajectory_directional_record',
+        function_config: 'search_path=pg_catalog, pg_temp',
+        security_definer: false,
+        leakproof: false,
+        function_owner_isolated: true,
+        volatility: 'v',
+        parallel_mode: 'u',
+        enabled_mode: 'O',
+        trigger_type: 23,
+        has_when_clause: false,
+        update_columns: '',
+        argument_count: 0,
+        argument_bytes: 0,
+        constraint_trigger: false,
+        trigger_deferrable: false,
+        initially_deferred: false,
+        parent_trigger: false,
+        function_source: expect.stringContaining(
+          'Persisted trajectory directional and terminal evidence is immutable.',
+        ),
+      }),
     ])
 
     for (const [index, filename] of [
       [0, '0014_web_memory_feedback.sql'],
       [1, '0013_wilbur_mutation_requests.sql'],
+      [2, '0017_trajectory_directional_record.sql'],
     ]) {
       const functionBody = readFileSync(
         join(process.cwd(), 'db', 'migrations', filename),
@@ -389,7 +462,7 @@ describe('deployment database migration tooling', () => {
       expect(triggers[index].function_source).not.toBe('BEGIN RETURN NEW; END')
     }
 
-    expect(constraints).toHaveLength(35)
+    expect(constraints).toHaveLength(39)
     expect(constraints).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -397,6 +470,38 @@ describe('deployment database migration tooling', () => {
           constraint_name: 'games_research_consent_shape',
           definition: expect.stringContaining(
             'webchess-research-consent-v1',
+          ),
+        }),
+        expect.objectContaining({
+          table_name: 'lifecycle_runs',
+          constraint_name:
+            'lifecycle_runs_trajectory_directional_record_binding_valid',
+          definition: expect.stringContaining(
+            "lifecycle_version = 'webchess-lifecycle-v2.5'::text",
+          ),
+        }),
+        expect.objectContaining({
+          table_name: 'lifecycle_runs',
+          constraint_name:
+            'lifecycle_runs_trajectory_directional_record_complete',
+          definition: expect.stringContaining(
+            'trajectory_directional_record_version IS NOT NULL',
+          ),
+        }),
+        expect.objectContaining({
+          table_name: 'lifecycle_runs',
+          constraint_name:
+            'lifecycle_runs_trajectory_directional_record_provenance_valid',
+          definition: expect.stringContaining(
+            'webchess-directional-record-v1',
+          ),
+        }),
+        expect.objectContaining({
+          table_name: 'lifecycle_runs',
+          constraint_name:
+            'lifecycle_runs_trajectory_directional_record_shape_valid',
+          definition: expect.stringMatching(
+            /octet_length\(trajectory_directional_record::text\) <= 4000000.*trajectory_directional_record \? 'version'.*jsonb_typeof\(trajectory_directional_record -> 'version'.*\) = 'string'.*trajectory_directional_record_version\) IS TRUE.*trajectory_directional_record \? 'digest'.*jsonb_typeof\(trajectory_directional_record -> 'digest'.*\) = 'string'.*trajectory_directional_record_digest.*\) IS TRUE/u,
           ),
         }),
         expect.objectContaining({

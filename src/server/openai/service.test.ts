@@ -6,6 +6,10 @@ import type OpenAI from 'openai'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  deriveDivisionCastAssignments,
+  DIVISION_CAST_BINDING_VERSION,
+} from '../../lib/division'
+import {
   ANSWER_PROMPT_VERSION,
   buildApprovedBoardAnswerPrompt,
   buildBoardAnswerPromptPackage,
@@ -31,6 +35,7 @@ import {
   normalizeCharlotteGeneration,
   normalizeDivisionRepairContext,
   OPENAI_MODEL,
+  orderPortiaCandidates,
   PORTIA_MAX_OUTPUT_TOKENS,
   type OpenAIClientLike,
   type PortiaInput,
@@ -41,6 +46,7 @@ import { PORTIA_SUMMARY_MAX_OUTPUT_TOKENS } from './portia'
 import {
   CURRENT_LIFECYCLE_VERSIONS,
   evaluateGate,
+  LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
   PORTIA_ATTACK_TYPES,
   terminalFingerprint,
 } from '../../lib/lifecycle'
@@ -50,7 +56,10 @@ import type {
   PortiaReview,
   SurvivorCandidate,
 } from '../../lib/lifecycle'
-import { makeProblemParts } from '../../test/fixtures'
+import {
+  makeProblemParts,
+  makeTrajectoryDirectionalFixture,
+} from '../../test/fixtures'
 import { hashCanonicalJson } from '../db/hash'
 import type { CanonicalJson } from '../db/hash'
 
@@ -59,6 +68,7 @@ const PROBLEM =
 const SAFETY_SECRET = 'server-only-safety-secret-value!!'
 const REQUIRED_PROMPT_REVISION =
   'State the direct evidence threshold before recommending a larger commitment.'
+const DIVISION_SEED = '11111111-1111-4111-8111-111111111111'
 
 function alphabeticCode(value: number): string {
   const first = String.fromCharCode(97 + Math.floor((value - 1) / 26))
@@ -78,6 +88,21 @@ function validFacets() {
       keyword: `Marker key${code}`,
     }
   })
+}
+
+function validCastDirectedFacets(seed = DIVISION_SEED) {
+  const byId = new Map(
+    deriveDivisionCastAssignments(seed).map((assignment) => [
+      assignment.id,
+      assignment,
+    ]),
+  )
+  return validFacets().map((facet) => ({
+    ...facet,
+    ...byId.get(facet.id)!,
+    castApplication:
+      `The fixed direction changes facet ${facet.id} by selecting a concrete inquiry for this problem.`,
+  }))
 }
 
 function usage() {
@@ -271,7 +296,7 @@ function validPortiaReview(
     portiaAssessment(candidate.candidateId, index),
   )
   return {
-    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    contractVersion: LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
     reviewedAnswerPromptDigest: answerPromptDigest,
     promptDecision: 'permit',
     promptDecisionRationale:
@@ -326,6 +351,79 @@ function validPortiaInput(
     answerPromptPackage,
     answerPromptDigest: 'd'.repeat(64),
     ...overrides,
+  }
+}
+
+function directionalPortiaCase(): {
+  readonly input: PortiaInput
+  readonly review: PortiaReview
+} {
+  const fixture = makeTrajectoryDirectionalFixture()
+  const survivors = orderPortiaCandidates(fixture.survivors)
+  const answerPromptPackage = buildBoardAnswerPromptPackage(
+    fixture.evidence,
+    fixture.survivors,
+    fixture.terminalFingerprint,
+    [],
+    [],
+    fixture.record,
+  )
+  const assessments = survivors.map((candidate, index) => ({
+    ...portiaAssessment(candidate.candidateId, index),
+    coverageTags: index < 4
+      ? [[
+          'protected_outcome',
+          'evidence_or_reality',
+          'risk_or_countercase',
+          'agency_or_action',
+        ][index] as PortiaCandidateAssessment['coverageTags'][number]]
+      : [],
+    directionalRecordDigest: fixture.record.digest,
+    directionalSignalKeys: [
+      fixture.record.survivingDirectionKeys[
+        index % fixture.record.survivingDirectionKeys.length
+      ]!,
+    ],
+    directionalInterpretation:
+      `The ordered moves, material pressure, and surviving route make this direction consequential for ${candidate.candidateId}.`,
+    directionalAmendment:
+      `Carry the trajectory-qualified direction for ${candidate.candidateId} into synthesis without promoting it to factual evidence.`,
+  }))
+  return {
+    input: {
+      problem: fixture.evidence.problem,
+      survivors: fixture.survivors,
+      answerPromptPackage,
+      answerPromptDigest: 'f'.repeat(64),
+    },
+    review: {
+      contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      reviewedAnswerPromptDigest: 'f'.repeat(64),
+      directionalRecordVersion: fixture.record.version,
+      directionalRecordDigest: fixture.record.digest,
+      directionalSummary:
+        'The complete ordered trajectory changed the cast-qualified directions retained across candidate scrutiny without creating factual evidence.',
+      promptDecision: 'permit',
+      promptDecisionRationale:
+        'The exact trajectory-bound prompt is reasonable under the retained qualifications.',
+      runSummary:
+        'Portia applied every attack and retained the auditable directional amendments.',
+      assessments,
+      crossCandidateContradictions: [],
+      redundancyClusters: [],
+      missingCoverage: [],
+      unresolvedQuestions: [
+        'Which direct observation would most quickly reduce uncertainty?',
+      ],
+      recommendedGateInputs: {
+        tensionCandidatePairs: [[
+          assessments[0]!.candidateId,
+          assessments[2]!.candidateId,
+        ]],
+        fatalContradictionIds: [],
+        fieldRepairReasons: [],
+      },
+    },
   }
 }
 
@@ -401,10 +499,64 @@ function validCharlotteModelResult(portia: PortiaReview) {
 
 describe('production OpenAI division service', () => {
   it('publishes stable durable prompt versions', () => {
-    expect(DIVISION_PROMPT_VERSION).toBe('webchess-division-v3')
-    expect(ANSWER_PROMPT_VERSION).toBe('webchess-answer-v3')
+    expect(DIVISION_PROMPT_VERSION).toBe('webchess-division-v4')
+    expect(ANSWER_PROMPT_VERSION).toBe('webchess-answer-v4')
+    expect(CURRENT_LIFECYCLE_VERSIONS.charlottePrompt).toBe(
+      'webchess-charlotte-v5',
+    )
     expect(DIVISION_PROMPT_VERSION.length).toBeLessThanOrEqual(80)
     expect(ANSWER_PROMPT_VERSION.length).toBeLessThanOrEqual(80)
+  })
+
+  it('binds new Division facets to the precomputed cast and rejects a mismatched echo', async () => {
+    const directedFacets = validCastDirectedFacets()
+    const { client, create } = clientReturning({ facets: directedFacets })
+
+    const generated = await generateDivision({
+      problem: PROBLEM,
+      divisionSeed: DIVISION_SEED,
+    }, requestContext(client))
+
+    expect(generated.result.facets).toEqual(validFacets().map((facet, index) => ({
+      ...facet,
+      castApplication: directedFacets[index]!.castApplication,
+    })))
+    expect(generated.prompt).toContain(DIVISION_CAST_BINDING_VERSION)
+    expect(generated.prompt).toContain('directional_input_not_factual_evidence')
+    expect(generated.prompt).toContain(directedFacets[0]!.directionalCue)
+    expect(generated.prompt).toContain('not optional decorative framing')
+    expect(generated.prompt.length).toBeLessThan(200_000)
+
+    const [body] = create.mock.calls[0] as [Record<string, unknown>]
+    expect(body.input).toBe(JSON.stringify({ player_problem: PROBLEM }))
+    expect(body.instructions).toContain(directedFacets[63]!.directionalCue)
+    const format = (
+      body.text as { format: { schema: Record<string, unknown> } }
+    ).format
+    const facetSchema = (
+      (format.schema.properties as Record<string, {
+        items: { required: string[] }
+      }>).facets
+    ).items
+    expect(facetSchema.required).toEqual(expect.arrayContaining([
+      'dimension',
+      'movement',
+      'hexagram',
+      'hexagramName',
+      'theme',
+      'directionalCue',
+      'castApplication',
+    ]))
+
+    const mismatched = validCastDirectedFacets()
+    mismatched[0] = { ...mismatched[0]!, theme: 'provider-selected replacement' }
+    const mismatchClient = clientReturning({ facets: mismatched }).client
+    await expect(generateDivision({
+      problem: PROBLEM,
+      divisionSeed: DIVISION_SEED,
+    }, requestContext(mismatchClient))).rejects.toMatchObject({
+      status: 'schema_invalid',
+    })
   })
 
   it('uses one fixed, non-stored, strict Responses request with bounded options', async () => {
@@ -792,7 +944,7 @@ describe('production OpenAI answer service', () => {
       (candidate) =>
         candidate.survivor.candidateId === portia.assessments[1].candidateId,
     )
-    expect(input.reviewed_prompt.version).toBe('webchess-answer-v3')
+    expect(input.reviewed_prompt.version).toBe('webchess-answer-v4')
     expect(revisedCandidate?.portia.required_prompt_revisions).toEqual([{
       attack_type: portia.assessments[1].attackFindings[0].attackType,
       revision: REQUIRED_PROMPT_REVISION,
@@ -1349,6 +1501,62 @@ describe('production OpenAI Portia service', () => {
       validPortiaInput(),
       requestContext(client),
     )).rejects.toBeInstanceOf(ModelResponseError)
+  })
+
+  it('binds the full trajectory record into every Portia turn and summary', async () => {
+    const { input, review } = directionalPortiaCase()
+    const fixture = makeTrajectoryDirectionalFixture()
+    const { client, create } = clientReturningSequence(
+      portiaProviderOutputs(review),
+    )
+
+    const generated = await generatePortiaReview(
+      input,
+      requestContext(client),
+    )
+
+    expect(generated.result).toEqual(review)
+    expect(create).toHaveBeenCalledTimes(input.survivors.length + 1)
+    const candidateBody = create.mock.calls[0]![0] as Record<string, unknown>
+    expect(candidateBody.instructions).toBe(
+      buildPortiaInstructions(fixture.record),
+    )
+    expect(String(candidateBody.instructions)).toContain(
+      'not decorative or optional metaphor',
+    )
+    expect(JSON.parse(String(candidateBody.input))).toMatchObject({
+      reviewed_answer_prompt: {
+        package: {
+          trajectoryDirectionalRecord: {
+            version: fixture.record.version,
+            digest: fixture.record.digest,
+            survivingDirectionKeys: fixture.record.survivingDirectionKeys,
+          },
+        },
+      },
+    })
+    const summaryBody = create.mock.calls.at(-1)![0] as Record<string, unknown>
+    expect(summaryBody.instructions).toBe(
+      buildPortiaSummaryInstructions(fixture.record),
+    )
+    expect(JSON.parse(String(summaryBody.input))).toMatchObject({
+      trajectory_directional_record: {
+        digest: fixture.record.digest,
+      },
+    })
+    expect(generated.prompt).toContain(fixture.record.digest)
+
+    const invalidOutputs = portiaProviderOutputs(review)
+    invalidOutputs[0] = {
+      ...(invalidOutputs[0] as Record<string, unknown>),
+      directionalRecordDigest: '0'.repeat(64),
+    }
+    const invalid = clientReturningSequence(invalidOutputs)
+    await expect(generatePortiaReview(
+      input,
+      requestContext(invalid.client),
+    )).rejects.toBeInstanceOf(ModelResponseError)
+    expect(invalid.create).toHaveBeenCalledOnce()
   })
 })
 

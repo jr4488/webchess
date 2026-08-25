@@ -2,7 +2,12 @@ import { z } from 'zod'
 
 import type { CellCoord, PieceKind, ProblemPart, Side } from '../../types'
 import type { ResearchRecord } from '../research'
-import { CURRENT_LIFECYCLE_VERSIONS } from './versions'
+import {
+  CURRENT_LIFECYCLE_VERSIONS,
+  LEGACY_GATE_ALGORITHM_VERSION,
+  LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+} from './versions'
+import type { TrajectoryDirectionalRecord } from './trajectory-direction'
 
 export const LIFECYCLE_STATES = [
   'anansi_pending',
@@ -150,6 +155,11 @@ export const portiaCandidateAssessmentBaseSchema = z.strictObject({
   countercase: boundedText(8, 1_200),
   reversalCondition: boundedText(8, 1_200),
   attackFindings: z.array(attackFindingSchema).min(1).max(PORTIA_ATTACK_TYPES.length),
+  /** Required for v2.5 runs; absent only on preserved legacy reviews. */
+  directionalRecordDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  directionalSignalKeys: z.array(boundedText(3, 160)).min(1).max(8).optional(),
+  directionalInterpretation: boundedText(20, 1_500).optional(),
+  directionalAmendment: boundedText(20, 1_500).optional(),
 })
 
 export const portiaCandidateAssessmentSchema =
@@ -257,9 +267,12 @@ export const portiaRedundancyClusterSchema = z.strictObject({
   explanation: boundedText(8, 1_200),
 })
 
-export const portiaReviewSchema = z.strictObject({
+export const currentPortiaReviewSchema = z.strictObject({
   contractVersion: z.literal(CURRENT_LIFECYCLE_VERSIONS.portiaContract),
   reviewedAnswerPromptDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  directionalRecordVersion: boundedText(3, 80).optional(),
+  directionalRecordDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  directionalSummary: boundedText(20, 2_000).optional(),
   promptDecision: z.enum(['permit', 'retry_game', 'retry_field', 'deny']),
   promptDecisionRationale: boundedText(20, 2_000),
   runSummary: boundedText(20, 4_000),
@@ -277,7 +290,71 @@ export const portiaReviewSchema = z.strictObject({
   }),
 })
 
+/**
+ * Exact prompt-bound review-v2 shape used by lifecycle-v2.4. Directional
+ * fields are deliberately not accepted at the review level, and the
+ * refinement below prevents them from being smuggled into an assessment.
+ */
+export const legacyPromptBoundPortiaReviewSchema = z.strictObject({
+  contractVersion: z.literal(LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION),
+  reviewedAnswerPromptDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  promptDecision: z.enum(['permit', 'retry_game', 'retry_field', 'deny']),
+  promptDecisionRationale: boundedText(20, 2_000),
+  runSummary: boundedText(20, 4_000),
+  assessments: z.array(portiaCandidateAssessmentSchema).min(1).max(32),
+  crossCandidateContradictions: z.array(portiaContradictionSchema).max(24),
+  redundancyClusters: z.array(portiaRedundancyClusterSchema).max(32),
+  missingCoverage: z.array(z.enum(COVERAGE_TAGS)).max(COVERAGE_TAGS.length),
+  unresolvedQuestions: z.array(boundedText(5, 800)).max(24),
+  recommendedGateInputs: z.strictObject({
+    tensionCandidatePairs: z
+      .array(z.array(boundedText(3, 220)).length(2))
+      .max(16),
+    fatalContradictionIds: z.array(boundedText(1, 120)).max(24),
+    fieldRepairReasons: z.array(boundedText(5, 800)).max(24),
+  }),
+}).superRefine((review, context) => {
+  review.assessments.forEach((assessment, index) => {
+    if (
+      assessment.directionalRecordDigest !== undefined ||
+      assessment.directionalSignalKeys !== undefined ||
+      assessment.directionalInterpretation !== undefined ||
+      assessment.directionalAmendment !== undefined
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A preserved review-v2 assessment cannot claim trajectory-directional provenance.',
+        path: ['assessments', index],
+      })
+    }
+  })
+})
+
+export const portiaReviewSchema = z.union([
+  currentPortiaReviewSchema,
+  legacyPromptBoundPortiaReviewSchema,
+])
+
+export type CurrentPortiaReview = z.infer<typeof currentPortiaReviewSchema>
+export type LegacyPromptBoundPortiaReview = z.infer<
+  typeof legacyPromptBoundPortiaReviewSchema
+>
 export type PortiaReview = z.infer<typeof portiaReviewSchema>
+
+export type DirectionalPortiaCandidateAssessment =
+  PortiaCandidateAssessment & {
+    readonly directionalRecordDigest: string
+    readonly directionalSignalKeys: readonly string[]
+    readonly directionalInterpretation: string
+    readonly directionalAmendment: string
+  }
+
+export type DirectionalPortiaReview = CurrentPortiaReview & {
+  readonly directionalRecordVersion: string
+  readonly directionalRecordDigest: string
+  readonly directionalSummary: string
+  readonly assessments: readonly DirectionalPortiaCandidateAssessment[]
+}
 
 const legacyAttackFindingSchema = z.strictObject({
   attackType: z.enum(PORTIA_ATTACK_TYPES),
@@ -324,7 +401,22 @@ export type PersistedPortiaReview = PortiaReview | LegacyPortiaReview
 export function isPromptBoundPortiaReview(
   review: PersistedPortiaReview,
 ): review is PortiaReview {
-  return review.contractVersion === CURRENT_LIFECYCLE_VERSIONS.portiaContract
+  return review.contractVersion === CURRENT_LIFECYCLE_VERSIONS.portiaContract ||
+    review.contractVersion === LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION
+}
+
+export function isDirectionalPortiaReview(
+  review: PersistedPortiaReview,
+): review is DirectionalPortiaReview {
+  return review.contractVersion === CURRENT_LIFECYCLE_VERSIONS.portiaContract &&
+    typeof review.directionalRecordVersion === 'string' &&
+    typeof review.directionalRecordDigest === 'string' &&
+    typeof review.directionalSummary === 'string' &&
+    review.assessments.every((assessment) =>
+      typeof assessment.directionalRecordDigest === 'string' &&
+      Array.isArray(assessment.directionalSignalKeys) &&
+      typeof assessment.directionalInterpretation === 'string' &&
+      typeof assessment.directionalAmendment === 'string')
 }
 
 export interface SurvivorRouteStep {
@@ -370,8 +462,7 @@ export interface GateCoverageResult {
   readonly candidateIds: readonly string[]
 }
 
-export interface GateResult {
-  readonly algorithmVersion: typeof CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm
+interface GateResultBase {
   readonly passed: boolean
   readonly usableCandidateCount: number
   readonly preservedCount: number
@@ -389,6 +480,28 @@ export interface GateResult {
   readonly recommendedNextTransition: GateRecommendation
   readonly explanation: string
   readonly inputDigest: string
+}
+
+export interface DirectionalGateResult extends GateResultBase {
+  readonly algorithmVersion: typeof CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm
+  readonly directionalRecordVersion: string
+  readonly directionalRecordDigest: string
+  readonly survivingDirectionKeys: readonly string[]
+  readonly directionalBindingsSatisfied: boolean
+}
+
+/** Read-only compatibility type for immutable lifecycle-v2.4 Gate rows. */
+export interface LegacyGateResult extends GateResultBase {
+  readonly algorithmVersion: typeof LEGACY_GATE_ALGORITHM_VERSION
+}
+
+export type GateResult = DirectionalGateResult | LegacyGateResult
+
+export function isDirectionalGateResult(
+  result: GateResult,
+): result is DirectionalGateResult {
+  return result.algorithmVersion === CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm &&
+    'directionalBindingsSatisfied' in result
 }
 
 export const RETRY_MODES = [
@@ -563,6 +676,8 @@ export interface LifecycleVersions {
   readonly charlottePrompt: string
   readonly charlotteContract: string
   readonly wilburRecord: string
+  /** Null only for preserved runs created before trajectory-direction v1. */
+  readonly trajectoryDirectionalRecord: string | null
   readonly rules: string
   readonly engine: string
   readonly cast: string
@@ -585,6 +700,16 @@ export interface LifecycleRun {
   readonly trajectorySeed: string
   readonly retryReason: string | null
   readonly terminalFingerprint: string | null
+  /**
+   * Complete replay-verifiable trajectory-derived directional input. New v2.5
+   * runs bind this atomically when chess becomes terminal; older runs remain
+   * null and are labelled rather than retroactively rewritten.
+   */
+  readonly trajectoryDirectionalRecord: TrajectoryDirectionalRecord | null
+  readonly trajectoryDirectionalRecordStatus:
+    | 'not_terminal'
+    | 'bound'
+    | 'legacy_pre_directional_generation'
   /** Digest of the exact board-derived candidate prompt Portia reviewed. */
   readonly answerPromptDigest: string | null
   /**

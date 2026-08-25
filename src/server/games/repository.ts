@@ -15,7 +15,11 @@ import {
   replayGameEvents,
   toGameView,
 } from '../../lib/game-replay'
-import { composeProblemParts } from '../../lib/division'
+import {
+  composeProblemParts,
+  DIVISION_CAST_APPLICATION_MAX_CHARS,
+  DIVISION_CAST_APPLICATION_MIN_CHARS,
+} from '../../lib/division'
 import {
   LEGACY_RESEARCH_CONSENT_VERSION,
   RESEARCH_CONSENT_VERSION,
@@ -72,6 +76,10 @@ const problemFacetSchema = z.object({
   focus: z.string().trim().min(1),
   question: z.string().trim().min(1),
   keyword: z.string().trim().min(1),
+  castApplication: z.string().trim()
+    .min(DIVISION_CAST_APPLICATION_MIN_CHARS)
+    .max(DIVISION_CAST_APPLICATION_MAX_CHARS)
+    .optional(),
 })
 
 const problemPartSchema = z.object({
@@ -85,6 +93,10 @@ const problemPartSchema = z.object({
   movement: z.string().trim().min(1),
   prompt: z.string().trim().min(1),
   keyword: z.string().trim().min(1),
+  castApplication: z.string().trim()
+    .min(DIVISION_CAST_APPLICATION_MIN_CHARS)
+    .max(DIVISION_CAST_APPLICATION_MAX_CHARS)
+    .optional(),
 })
 
 const facetsSchema = z

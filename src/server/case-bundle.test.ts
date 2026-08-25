@@ -5,8 +5,17 @@ import type { GameEvent, ReplayState } from '../lib/game-contract'
 import {
   acceptMoveCommand,
   createReplayState,
+  replayGameEvents,
 } from '../lib/game-replay'
-import { makeProblemParts } from '../test/fixtures'
+import {
+  CURRENT_LIFECYCLE_VERSIONS,
+  deriveTrajectoryDirectionalRecord,
+} from '../lib/lifecycle'
+import {
+  composeProblemParts,
+  deriveDivisionCastAssignments,
+} from '../lib/division'
+import { makeProblemFacets, makeProblemParts } from '../test/fixtures'
 import {
   createCaseBundle,
   verifyCaseBundle,
@@ -27,6 +36,24 @@ const RUNTIME_ARTIFACT_SHA256 = '7'.repeat(64)
 const NOW = '2026-08-24T01:00:00.000Z'
 const PRIVATE_SENTINEL = 'PRIVATE_CASE_TEXT_MUST_BE_REDACTED'
 const parts = makeProblemParts(PRIVATE_SENTINEL)
+const DIRECTIONAL_DIVISION_SEED = 'case-bundle-directional-seed'
+const DIRECTIONAL_CAST_SEED = 'case-bundle-cast-seed'
+const DIRECTIONAL_TRAJECTORY_SEED = 'case-bundle-trajectory-seed'
+const directionalAssignments = new Map(
+  deriveDivisionCastAssignments(DIRECTIONAL_DIVISION_SEED).map(
+    (assignment) => [assignment.id, assignment],
+  ),
+)
+const directionalFacets = makeProblemFacets(PRIVATE_SENTINEL).map((facet) => ({
+  ...facet,
+  castApplication: `Apply the cast direction by asking how ${
+    directionalAssignments.get(facet.id)?.directionalCue ?? 'this lens'
+  } changes the scrutiny path.`,
+}))
+const directionalParts = composeProblemParts(
+  directionalFacets,
+  DIRECTIONAL_DIVISION_SEED,
+)
 
 let cachedTerminal: ReplayState | null = null
 let cachedKingCaptureTerminal: ReplayState | null = null
@@ -361,6 +388,76 @@ function sourceRows(): CaseBundleSourceRows {
   }
 }
 
+function directionalSourceRows(): CaseBundleSourceRows {
+  const legacy = sourceRows()
+  const state = replayGameEvents(terminalState().events, directionalParts)
+  const game = {
+    ...gameRow(state),
+    divisionSeed: DIRECTIONAL_DIVISION_SEED,
+    divisionFacets: directionalFacets,
+    problemParts: directionalParts,
+    divisionPromptVersion: 'webchess-division-v4',
+  }
+  const lifecycleBase = {
+    ...lifecycleRow(state),
+    divisionSeed: DIRECTIONAL_DIVISION_SEED,
+    castSeed: DIRECTIONAL_CAST_SEED,
+    trajectorySeed: DIRECTIONAL_TRAJECTORY_SEED,
+    softwareVersion: CURRENT_LIFECYCLE_VERSIONS.software,
+    lifecycleVersion: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+    portiaPromptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+    portiaContractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    gateAlgorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+    retryPolicyVersion: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+    charlottePromptVersion: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+    charlotteContractVersion: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+    wilburRecordVersion: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+  }
+  const record = deriveTrajectoryDirectionalRecord({
+    divisionDigest: 'd'.repeat(64),
+    divisionSeed: DIRECTIONAL_DIVISION_SEED,
+    castSeed: DIRECTIONAL_CAST_SEED,
+    trajectorySeed: DIRECTIONAL_TRAJECTORY_SEED,
+    versions: state.versions,
+    parts: directionalParts,
+    events: state.events,
+  })
+  const lifecycleRun = {
+    ...lifecycleBase,
+    trajectoryDirectionalRecordVersion: record.version,
+    trajectoryDirectionalRecordDigest: record.digest,
+    trajectoryDirectionalRecord: record,
+  }
+  return {
+    ...legacy,
+    game,
+    events: eventRows(state.events),
+    lifecycleRun,
+    portiaReviews: legacy.portiaReviews.map((review) => ({
+      ...review,
+      promptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+      contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    })),
+    gateDecisions: legacy.gateDecisions.map((decision) => ({
+      ...decision,
+      algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+    })),
+    charlotteResults: legacy.charlotteResults.map((result) => ({
+      ...result,
+      promptVersion: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+      contractVersion: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+    })),
+    modelRequests: legacy.modelRequests.map((request) => ({
+      ...request,
+      promptVersion: request.operation === 'portia'
+        ? CURRENT_LIFECYCLE_VERSIONS.portiaPrompt
+        : request.operation === 'charlotte'
+          ? CURRENT_LIFECYCLE_VERSIONS.charlottePrompt
+          : request.promptVersion,
+    })),
+  }
+}
+
 function researchFailureRows(): Pick<
   CaseBundleSourceRows,
   'researchRequests' | 'researchSources'
@@ -532,6 +629,20 @@ function bundle(
   })
 }
 
+function directionalBundle(
+  profile: 'private-full-v1' | 'research-redacted-v1' | 'metadata-only-v1',
+) {
+  return createCaseBundle({
+    ...directionalSourceRows(),
+    profile,
+    exportedAt: NOW,
+    packageName: 'webchess',
+    packageVersion: '2.2.0-rc.1',
+    sourceCommit: SOURCE_COMMIT,
+    runtimeArtifactSha256: RUNTIME_ARTIFACT_SHA256,
+  })
+}
+
 interface MutableBundle {
   format: string
   profile: string
@@ -586,6 +697,189 @@ describe('webchess-case-bundle/1', () => {
       'event-by-event canonical board reconstruction and terminal summary',
     )
     expect(result.notVerified.join(' ')).toMatch(/efficacy/u)
+  })
+
+  it('exports and independently rederives the exact private trajectory directional record', () => {
+    const created = directionalBundle('private-full-v1')
+    const result = verifyCaseBundle(created)
+    const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+    const evidence = lifecycle.trajectoryDirectionalRecord as Record<
+      string,
+      CanonicalJson
+    >
+
+    expect(result.errors).toEqual([])
+    expect(Buffer.byteLength(JSON.stringify(created), 'utf8')).toBeLessThanOrEqual(
+      3_000_000,
+    )
+    expect(evidence).toMatchObject({
+      format: 'webchess-case-trajectory-direction/1',
+      status: 'bound',
+      recordAvailability: 'exact_record_included',
+      recordOmission: null,
+      version: 'webchess-directional-record-v1',
+      digest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      fieldPartsDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      eventStreamDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      epistemicBoundary: expect.objectContaining({
+        classification: 'directional-input-not-factual-evidence',
+      }),
+    })
+    expect(evidence.record).toMatchObject({
+      digest: evidence.digest,
+      field: { partsDigest: evidence.fieldPartsDigest },
+      trajectory: { eventStreamDigest: evidence.eventStreamDigest },
+    })
+    expect(result.verified).toContain(
+      'exact trajectory directional record rederived from immutable Division parts and canonical game events',
+    )
+  })
+
+  it.each([
+    'research-redacted-v1',
+    'metadata-only-v1',
+  ] as const)('exports an explicit non-recomputable directional omission for %s', (profile) => {
+    const created = directionalBundle(profile)
+    const result = verifyCaseBundle(created)
+    const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+
+    expect(result.errors).toEqual([])
+    expect(lifecycle.trajectoryDirectionalRecord).toMatchObject({
+      status: 'bound',
+      recordAvailability: 'profile_omitted',
+      recordOmission: 'profile_omitted_exact_record',
+      version: 'webchess-directional-record-v1',
+      digest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      fieldPartsDigest: null,
+      eventStreamDigest: null,
+      record: null,
+      epistemicBoundary: expect.objectContaining({
+        classification: 'directional-input-not-factual-evidence',
+      }),
+    })
+    expect(result.notVerified.join(' ')).toMatch(
+      /directional record recomputation.*omitted/u,
+    )
+    expect(JSON.stringify(created)).not.toContain(
+      directionalParts[0]?.castApplication ?? PRIVATE_SENTINEL,
+    )
+  })
+
+  it('rejects rehashed directional digest, parts, event, seed, and version tampering', () => {
+    const mutations: readonly (readonly [
+      string,
+      (evidence: Record<string, CanonicalJson>) => void,
+    ])[] = [
+      ['digest', (evidence) => {
+        evidence.digest = 'a'.repeat(64)
+      }],
+      ['parts digest', (evidence) => {
+        evidence.fieldPartsDigest = 'a'.repeat(64)
+      }],
+      ['event-stream digest', (evidence) => {
+        evidence.eventStreamDigest = 'a'.repeat(64)
+      }],
+      ['seed', (evidence) => {
+        const record = evidence.record as Record<string, CanonicalJson>
+        const cast = record.cast as Record<string, CanonicalJson>
+        cast.lifecycleSeed = 'alternate-cast-seed'
+      }],
+      ['version', (evidence) => {
+        evidence.version = 'webchess-directional-record-v0'
+      }],
+    ]
+
+    for (const [label, mutate] of mutations) {
+      const created = structuredClone(
+        directionalBundle('private-full-v1'),
+      ) as unknown as MutableBundle
+      const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+      const evidence = lifecycle.trajectoryDirectionalRecord as Record<
+        string,
+        CanonicalJson
+      >
+      mutate(evidence)
+      rebuildManifest(created)
+
+      expect(
+        verifyCaseBundle(created).errors.join(' '),
+        label,
+      ).toMatch(/trajectory directional record/iu)
+    }
+  })
+
+  it('rejects a self-consistent alternate legal directional record for another trajectory', () => {
+    const created = structuredClone(
+      directionalBundle('private-full-v1'),
+    ) as unknown as MutableBundle
+    const alternateState = replayGameEvents(
+      kingCaptureTerminalState().events,
+      directionalParts,
+    )
+    const alternate = deriveTrajectoryDirectionalRecord({
+      divisionDigest: 'd'.repeat(64),
+      divisionSeed: DIRECTIONAL_DIVISION_SEED,
+      castSeed: DIRECTIONAL_CAST_SEED,
+      trajectorySeed: DIRECTIONAL_TRAJECTORY_SEED,
+      versions: alternateState.versions,
+      parts: directionalParts,
+      events: alternateState.events,
+    })
+    const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+    const evidence = lifecycle.trajectoryDirectionalRecord as Record<
+      string,
+      CanonicalJson
+    >
+    evidence.version = alternate.version
+    evidence.digest = alternate.digest
+    evidence.fieldPartsDigest = alternate.field.partsDigest
+    evidence.eventStreamDigest = alternate.trajectory.eventStreamDigest
+    evidence.record = alternate as unknown as CanonicalJson
+    rebuildManifest(created)
+
+    expect(verifyCaseBundle(created).errors).toContain(
+      'Trajectory directional record does not match the bundled Division parts and canonical game events.',
+    )
+  })
+
+  it('labels v2.4 cases without fabrication and accepts their pre-envelope schema', () => {
+    const created = structuredClone(
+      bundle('private-full-v1'),
+    ) as unknown as MutableBundle
+    const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+
+    expect(lifecycle.trajectoryDirectionalRecord).toMatchObject({
+      status: 'legacy_pre_directional_generation',
+      recordAvailability: 'not_generated',
+      recordOmission: 'legacy_pre_directional_generation',
+      version: null,
+      digest: null,
+      record: null,
+    })
+    expect(verifyCaseBundle(created).errors).toEqual([])
+
+    delete lifecycle.trajectoryDirectionalRecord
+    rebuildManifest(created)
+    const oldSchema = verifyCaseBundle(created)
+    expect(oldSchema.errors).toEqual([])
+    expect(oldSchema.warnings.join(' ')).toMatch(/LEGACY DIRECTIONAL WARNING/u)
+    expect(oldSchema.notVerified.join(' ')).toMatch(
+      /no directional record was generated or exported/u,
+    )
+  })
+
+  it('rejects cross-labelling a bound current record as lifecycle v2.4', () => {
+    const created = structuredClone(
+      directionalBundle('private-full-v1'),
+    ) as unknown as MutableBundle
+    const lifecycle = created.data.lifecycle as Record<string, CanonicalJson>
+    const run = lifecycle.run as Record<string, CanonicalJson>
+    run.lifecycleVersion = 'webchess-lifecycle-v2.4'
+    rebuildManifest(created)
+
+    expect(verifyCaseBundle(created).errors.join(' ')).toMatch(
+      /Bound trajectory directional record provenance is invalid|Lifecycle .* unsupported/u,
+    )
   })
 
   it.each([

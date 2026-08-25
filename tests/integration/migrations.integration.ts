@@ -26,6 +26,8 @@ const EXPECTED_MIGRATION_IDS = [
   '0013_wilbur_mutation_requests',
   '0014_web_memory_feedback',
   '0015_direct_page_research_evidence',
+  '0016_extend_research_timeout_to_five_minutes',
+  '0017_trajectory_directional_record',
 ] as const
 
 beforeAll(async () => {
@@ -282,6 +284,396 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
     }
   })
 
+  it('extends only the persisted research timeout ceiling to five minutes', async () => {
+    const upgrade = await createPostgresTestDatabase(
+      'research_timeout_five_minute_upgrade',
+    )
+    try {
+      const fiveMinuteMigrationIndex = durableWebChessMigrations.findIndex(
+        (migration) =>
+          migration.id === '0016_extend_research_timeout_to_five_minutes',
+      )
+      const priorMigrations = durableWebChessMigrations.slice(
+        0,
+        fiveMinuteMigrationIndex,
+      )
+      await runMigrations(upgrade.adapter, priorMigrations)
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO user_controls (clerk_user_id)
+          VALUES ('user_research_timeout_five_minute_upgrade')
+        `,
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO games (
+            id, clerk_user_id, status, problem, problem_sha256,
+            event_version, rules_version, engine_version, cast_version,
+            software_version
+          )
+          VALUES (
+            '65000000-0000-4000-8000-000000000021',
+            'user_research_timeout_five_minute_upgrade', 'dividing',
+            'Which facts need a bounded five-minute research allowance?',
+            repeat('c', 64), 1, 'rules-test', 'engine-test',
+            'cast-test', 'software-test'
+          )
+        `,
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO research_requests (
+            id, clerk_user_id, game_id, stage, policy_version,
+            reason, status, result_limit, source_limit, timeout_ms,
+            synthesis_character_limit, completed_at
+          )
+          VALUES (
+            '65000000-0000-4000-8000-000000000022',
+            'user_research_timeout_five_minute_upgrade',
+            '65000000-0000-4000-8000-000000000021',
+            'portia', 'research-policy-five-minute-upgrade-test',
+            'No search is needed for this migration fixture.',
+            'not_needed', 5, 5, 150000, 12000, now()
+          )
+        `,
+      })
+
+      const constraintsBefore = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT conname, pg_get_constraintdef(oid) AS definition
+          FROM pg_constraint
+          WHERE conrelid = 'research_requests'::regclass
+            AND conname <> 'research_requests_timeout_valid'
+          ORDER BY conname
+        `,
+      })
+
+      await expect(
+        runMigrations(
+          upgrade.adapter,
+          durableWebChessMigrations.slice(0, fiveMinuteMigrationIndex + 1),
+        ),
+      ).resolves.toEqual({
+        applied: ['0016_extend_research_timeout_to_five_minutes'],
+        alreadyApplied: priorMigrations.map((migration) => migration.id),
+      })
+
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            UPDATE research_requests
+            SET timeout_ms = 300000
+            WHERE id = '65000000-0000-4000-8000-000000000022'
+          `,
+        }),
+      ).resolves.toMatchObject({ rowCount: 1 })
+      await expect(
+        upgrade.adapter.query({
+          text: `
+            UPDATE research_requests
+            SET timeout_ms = 300001
+            WHERE id = '65000000-0000-4000-8000-000000000022'
+          `,
+        }),
+      ).rejects.toMatchObject({
+        constraint: 'research_requests_timeout_valid',
+      })
+
+      const constraintsAfter = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT conname, pg_get_constraintdef(oid) AS definition
+          FROM pg_constraint
+          WHERE conrelid = 'research_requests'::regclass
+            AND conname <> 'research_requests_timeout_valid'
+          ORDER BY conname
+        `,
+      })
+      expect(constraintsAfter.rows).toEqual(constraintsBefore.rows)
+
+      const persisted = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT timeout_ms
+          FROM research_requests
+          WHERE id = '65000000-0000-4000-8000-000000000022'
+        `,
+      })
+      expect(persisted.rows).toEqual([{ timeout_ms: 300000 }])
+    } finally {
+      await upgrade.dispose()
+    }
+  })
+
+  it('upgrades legacy lifecycles without relabelling them and guards current directional evidence', async () => {
+    const upgrade = await createPostgresTestDatabase(
+      'trajectory_directional_record_upgrade',
+    )
+    try {
+      const directionalMigrationIndex = durableWebChessMigrations.findIndex(
+        (migration) =>
+          migration.id === '0017_trajectory_directional_record',
+      )
+      const priorMigrations = durableWebChessMigrations.slice(
+        0,
+        directionalMigrationIndex,
+      )
+      await runMigrations(upgrade.adapter, priorMigrations)
+      const owner = 'user_directional_record_migration_upgrade'
+      await upgrade.adapter.query({
+        text: `INSERT INTO user_controls (clerk_user_id) VALUES ($1::text)`,
+        values: [owner],
+      })
+      await upgrade.adapter.query({
+        text: `
+          WITH division AS (
+            SELECT jsonb_agg('{}'::jsonb) AS items
+            FROM generate_series(1, 64)
+          )
+          INSERT INTO games (
+            id, clerk_user_id, is_current, revision, status, problem,
+            problem_sha256, division_seed, division_facets, problem_parts,
+            division_model, division_prompt_version, division_prompt_sha256,
+            division_digest, rules_version, engine_version, cast_version,
+            event_version, software_version, outcome, completed_at
+          )
+          SELECT fixture.id::uuid, $1::text, false, 1, fixture.status,
+            'How should this migration preserve exact directional provenance?',
+            repeat('a', 64), 'migration-directional-seed',
+            division.items, division.items, 'gpt-5.6-sol',
+            'webchess-division-v4', repeat('b', 64), repeat('c', 64),
+            'circular-direct-king-v1', 'engine-v2',
+            'independent-three-shuffle-v1', 1, '2.2.0-rc.1',
+            CASE WHEN fixture.status = 'completed'
+              THEN '{"winner":null,"reason":"no-progress","completedTurn":80}'::jsonb
+              ELSE NULL
+            END,
+            CASE WHEN fixture.status = 'completed' THEN now() ELSE NULL END
+          FROM division
+          CROSS JOIN (VALUES
+            ('65500000-0000-4000-8000-000000000031', 'completed'),
+            ('65500000-0000-4000-8000-000000000032', 'playing')
+          ) AS fixture(id, status)
+        `,
+        values: [owner],
+      })
+      await upgrade.adapter.query({
+        text: `
+          INSERT INTO lifecycle_runs (
+            id, clerk_user_id, game_id, root_run_id, state, revision,
+            division_seed, cast_seed, trajectory_seed, terminal_fingerprint,
+            survivor_set, software_version, lifecycle_version, rules_version,
+            engine_version, cast_version, event_version,
+            portia_prompt_version, portia_contract_version,
+            gate_algorithm_version, retry_policy_version,
+            charlotte_prompt_version, charlotte_contract_version,
+            wilbur_record_version
+          )
+          VALUES
+            ('65500000-0000-4000-8001-000000000031', $1::text,
+             '65500000-0000-4000-8000-000000000031',
+             '65500000-0000-4000-8001-000000000031', 'chess_terminal', 4,
+             'migration-directional-seed', 'migration-cast-seed',
+             'migration-trajectory-seed', repeat('f', 64), '[]'::jsonb,
+             '2.2.0-rc.1', 'webchess-lifecycle-v2.4',
+             'circular-direct-king-v1', 'engine-v2',
+             'independent-three-shuffle-v1', 1,
+             'webchess-portia-v4', 'webchess-portia-review-v2',
+             'webchess-gate-v4', 'webchess-retry-v2',
+             'webchess-charlotte-v4', 'webchess-charlotte-result-v1',
+             'webchess-wilbur-v1'),
+            ('65500000-0000-4000-8001-000000000032', $1::text,
+             '65500000-0000-4000-8000-000000000032',
+             '65500000-0000-4000-8001-000000000032', 'chess_playing', 7,
+             'migration-directional-seed', 'migration-cast-seed',
+             'migration-trajectory-seed', NULL, NULL,
+             '2.2.0-rc.1', 'webchess-lifecycle-v2.5',
+             'circular-direct-king-v1', 'engine-v2',
+             'independent-three-shuffle-v1', 1,
+             'webchess-portia-v5', 'webchess-portia-review-v3',
+             'webchess-gate-v5', 'webchess-retry-v2',
+             'webchess-charlotte-v4', 'webchess-charlotte-result-v1',
+             'webchess-wilbur-v1')
+        `,
+        values: [owner],
+      })
+
+      await expect(runMigrations(
+        upgrade.adapter,
+        durableWebChessMigrations.slice(0, directionalMigrationIndex + 1),
+      )).resolves.toEqual({
+        applied: ['0017_trajectory_directional_record'],
+        alreadyApplied: priorMigrations.map((migration) => migration.id),
+      })
+
+      const legacy = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT lifecycle_version, terminal_fingerprint,
+            trajectory_directional_record_version,
+            trajectory_directional_record_digest,
+            trajectory_directional_record
+          FROM lifecycle_runs
+          WHERE id = '65500000-0000-4000-8001-000000000031'
+        `,
+      })
+      expect(legacy.rows).toEqual([{
+        lifecycle_version: 'webchess-lifecycle-v2.4',
+        terminal_fingerprint: 'f'.repeat(64),
+        trajectory_directional_record_version: null,
+        trajectory_directional_record_digest: null,
+        trajectory_directional_record: null,
+      }])
+
+      const directionalConstraints = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT conname
+          FROM pg_constraint
+          WHERE conrelid = 'lifecycle_runs'::regclass
+            AND conname LIKE 'lifecycle_runs_trajectory_directional_record_%'
+          ORDER BY conname
+        `,
+      })
+      expect(directionalConstraints.rows.map((row) => row.conname)).toEqual([
+        'lifecycle_runs_trajectory_directional_record_binding_valid',
+        'lifecycle_runs_trajectory_directional_record_complete',
+        'lifecycle_runs_trajectory_directional_record_provenance_valid',
+        'lifecycle_runs_trajectory_directional_record_shape_valid',
+      ])
+      const lifecycleConstraintCount = await upgrade.adapter.query<SqlRow>({
+        text: `
+          SELECT count(*)::integer AS count
+          FROM pg_constraint
+          WHERE conrelid = 'lifecycle_runs'::regclass
+        `,
+      })
+      expect(lifecycleConstraintCount.rows).toEqual([{ count: 30 }])
+
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE lifecycle_runs
+          SET lifecycle_version = 'webchess-lifecycle-v2.5'
+          WHERE id = '65500000-0000-4000-8001-000000000031'
+        `,
+      })).rejects.toMatchObject({
+        constraint:
+          'lifecycle_runs_trajectory_directional_record_binding_valid',
+      })
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE lifecycle_runs
+          SET trajectory_directional_record_version =
+            'webchess-directional-record-v1'
+          WHERE id = '65500000-0000-4000-8001-000000000032'
+        `,
+      })).rejects.toMatchObject({
+        constraint: 'lifecycle_runs_trajectory_directional_record_complete',
+      })
+
+      const directionalVersion = 'webchess-directional-record-v1'
+      const directionalDigest = '2'.repeat(64)
+      const invalidDirectionalRecords = [
+        {
+          case: 'missing version',
+          record: { digest: directionalDigest },
+        },
+        {
+          case: 'missing digest',
+          record: { version: directionalVersion },
+        },
+        {
+          case: 'JSON-null version',
+          record: { version: null, digest: directionalDigest },
+        },
+        {
+          case: 'JSON-null digest',
+          record: { version: directionalVersion, digest: null },
+        },
+        {
+          case: 'non-string version',
+          record: { version: 1, digest: directionalDigest },
+        },
+        {
+          case: 'non-string digest',
+          record: { version: directionalVersion, digest: 2 },
+        },
+        {
+          case: 'mismatched version',
+          record: {
+            version: 'webchess-directional-record-v0',
+            digest: directionalDigest,
+          },
+        },
+        {
+          case: 'mismatched digest',
+          record: { version: directionalVersion, digest: '3'.repeat(64) },
+        },
+      ]
+      for (const invalid of invalidDirectionalRecords) {
+        await expect(upgrade.adapter.query({
+          text: `
+            UPDATE lifecycle_runs
+            SET state = 'chess_terminal', revision = revision + 1,
+              terminal_fingerprint = repeat('1', 64),
+              survivor_set = '[]'::jsonb,
+              trajectory_directional_record_version = $1::text,
+              trajectory_directional_record_digest = $2::char(64),
+              trajectory_directional_record = $3::jsonb
+            WHERE id = '65500000-0000-4000-8001-000000000032'
+          `,
+          values: [
+            directionalVersion,
+            directionalDigest,
+            JSON.stringify(invalid.record),
+          ],
+        }), invalid.case).rejects.toMatchObject({
+          constraint:
+            'lifecycle_runs_trajectory_directional_record_shape_valid',
+        })
+      }
+
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE lifecycle_runs
+          SET state = 'chess_terminal', revision = revision + 1,
+            terminal_fingerprint = repeat('1', 64), survivor_set = '[]'::jsonb,
+            trajectory_directional_record_version =
+              'webchess-directional-record-v1',
+            trajectory_directional_record_digest = repeat('2', 64),
+            trajectory_directional_record = jsonb_build_object(
+              'version', 'webchess-directional-record-v1',
+              'digest', repeat('2', 64),
+              'padding', repeat('x', 4000001)
+            )
+          WHERE id = '65500000-0000-4000-8001-000000000032'
+        `,
+      })).rejects.toMatchObject({
+        constraint: 'lifecycle_runs_trajectory_directional_record_shape_valid',
+      })
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE lifecycle_runs
+          SET state = 'chess_terminal', revision = revision + 1,
+            terminal_fingerprint = repeat('1', 64), survivor_set = '[]'::jsonb,
+            trajectory_directional_record_version =
+              'webchess-directional-record-v1',
+            trajectory_directional_record_digest = repeat('2', 64),
+            trajectory_directional_record = jsonb_build_object(
+              'version', 'webchess-directional-record-v1',
+              'digest', repeat('2', 64)
+            )
+          WHERE id = '65500000-0000-4000-8001-000000000032'
+        `,
+      })).resolves.toMatchObject({ rowCount: 1 })
+      await expect(upgrade.adapter.query({
+        text: `
+          UPDATE lifecycle_runs
+          SET terminal_fingerprint = repeat('3', 64)
+          WHERE id = '65500000-0000-4000-8001-000000000032'
+        `,
+      })).rejects.toMatchObject({ code: '23514' })
+    } finally {
+      await upgrade.dispose()
+    }
+  })
+
   it('backfills legacy research as opted out and enforces the 0015 consent boundary', async () => {
     const upgrade = await createPostgresTestDatabase(
       'direct_page_research_upgrade',
@@ -523,6 +915,8 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
           '0013_wilbur_mutation_requests',
           '0014_web_memory_feedback',
           '0015_direct_page_research_evidence',
+          '0016_extend_research_timeout_to_five_minutes',
+          '0017_trajectory_directional_record',
         ],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })
@@ -678,6 +1072,8 @@ describe('durable WebChess migration on PostgreSQL 17', () => {
           '0013_wilbur_mutation_requests',
           '0014_web_memory_feedback',
           '0015_direct_page_research_evidence',
+          '0016_extend_research_timeout_to_five_minutes',
+          '0017_trajectory_directional_record',
         ],
         alreadyApplied: priorMigrations.map((migration) => migration.id),
       })

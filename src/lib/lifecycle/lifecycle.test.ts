@@ -3,7 +3,10 @@ import { describe, expect, it } from 'vitest'
 import { getLegalMoves, hasLegalMove } from '../game'
 import { acceptMoveCommand, createReplayState } from '../game-replay'
 import type { ReplayState } from '../game-contract'
-import { makeProblemParts } from '../../test/fixtures'
+import {
+  makeProblemParts,
+  makeTrajectoryDirectionalFixture,
+} from '../../test/fixtures'
 import type {
   PortiaCandidateAssessment,
   PortiaReview,
@@ -23,7 +26,10 @@ import {
   deriveSurvivorCandidates,
   terminalFingerprint,
 } from './survivors'
-import { CURRENT_LIFECYCLE_VERSIONS } from './versions'
+import {
+  CURRENT_LIFECYCLE_VERSIONS,
+  LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+} from './versions'
 
 const parts = makeProblemParts('webchess-2-lifecycle')
 
@@ -90,7 +96,7 @@ function review(
   overrides: Partial<PortiaReview> = {},
 ): PortiaReview {
   return {
-    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    contractVersion: LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
     reviewedAnswerPromptDigest: 'a'.repeat(64),
     promptDecision: 'permit',
     promptDecisionRationale:
@@ -292,6 +298,132 @@ describe('Portia validation', () => {
       }),
       assessment(survivors[1].candidateId),
     ]), survivors)).toThrow(/every attack type exactly once/u)
+  })
+
+  it('requires exact per-candidate trajectory-directional bindings for review-v3', () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const directionalSurvivors = deriveSurvivorCandidates(
+      fixture.state,
+      fixture.parts,
+      {
+        gameId: '00000000-0000-4000-8000-000000000101',
+        attemptId: '00000000-0000-4000-8000-000000000102',
+        divisionDigest: fixture.divisionDigest,
+        rulesVersion: fixture.state.versions.rules,
+        engineVersion: fixture.state.versions.engine,
+        castVersion: fixture.state.versions.cast,
+        eventVersion: fixture.state.versions.event,
+      },
+    )
+    const assessments = directionalSurvivors.map((survivor, index) =>
+      assessment(survivor.candidateId, {
+        coverageTags: index < 4
+          ? [[
+              'protected_outcome',
+              'evidence_or_reality',
+              'risk_or_countercase',
+              'agency_or_action',
+            ][index] as PortiaCandidateAssessment['coverageTags'][number]]
+          : [],
+        directionalRecordDigest: fixture.record.digest,
+        directionalSignalKeys: [
+          fixture.record.survivingDirectionKeys[
+            index % fixture.record.survivingDirectionKeys.length
+          ]!,
+        ],
+        directionalInterpretation:
+          `The ordered route and material pressure make this surviving direction relevant to candidate ${survivor.candidateId}.`,
+        directionalAmendment:
+          `Carry this trajectory-qualified direction into the answer for candidate ${survivor.candidateId} without treating it as factual evidence.`,
+      }))
+    const directionalReview: PortiaReview = {
+      ...review(assessments, {
+        recommendedGateInputs: {
+          tensionCandidatePairs: [[
+            directionalSurvivors[0]!.candidateId,
+            directionalSurvivors[2]!.candidateId,
+          ]],
+          fatalContradictionIds: [],
+          fieldRepairReasons: [],
+        },
+      }),
+      contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      directionalRecordVersion: fixture.record.version,
+      directionalRecordDigest: fixture.record.digest,
+      directionalSummary:
+        'The full ordered game trajectory changed which cast-qualified directions survived scrutiny while remaining separate from factual evidence.',
+    }
+
+    expect(validatePortiaReview(
+      directionalReview,
+      directionalSurvivors,
+      directionalReview.reviewedAnswerPromptDigest,
+      fixture.record,
+    )).toEqual(directionalReview)
+
+    for (const incomplete of [
+      {
+        ...directionalReview,
+        directionalRecordDigest: 'e'.repeat(64),
+      },
+      {
+        ...directionalReview,
+        assessments: directionalReview.assessments.map((item, index) =>
+          index === 0
+            ? { ...item, directionalSignalKeys: ['unknown-direction'] }
+            : item),
+      },
+      {
+        ...directionalReview,
+        assessments: directionalReview.assessments.map((item, index) =>
+          index === 0
+            ? { ...item, directionalAmendment: undefined }
+            : item),
+      },
+    ]) {
+      expect(() => validatePortiaReview(
+        incomplete,
+        directionalSurvivors,
+        directionalReview.reviewedAnswerPromptDigest,
+        fixture.record,
+      )).toThrow(/direction|provenance/u)
+    }
+
+    const gate = evaluateGate(directionalReview, undefined, fixture.record)
+    expect(gate).toMatchObject({
+      algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      passed: true,
+      directionalRecordVersion: fixture.record.version,
+      directionalRecordDigest: fixture.record.digest,
+      survivingDirectionKeys: fixture.record.survivingDirectionKeys,
+      directionalBindingsSatisfied: true,
+    })
+
+    const incompleteGate = evaluateGate({
+      ...directionalReview,
+      assessments: directionalReview.assessments.map((item, index) =>
+        index === 0
+          ? { ...item, directionalSignalKeys: ['unknown-direction'] }
+          : item),
+    }, undefined, fixture.record)
+    expect(incompleteGate).toMatchObject({
+      passed: false,
+      directionalRecordDigest: fixture.record.digest,
+      directionalBindingsSatisfied: false,
+    })
+    expect(incompleteGate.missingRequirements[0]).toMatch(
+      /trajectory-derived directional record/u,
+    )
+    expect(incompleteGate.inputDigest).not.toBe(gate.inputDigest)
+  })
+
+  it('keeps review-v2 and Gate-v4 readable without inventing direction fields', () => {
+    const legacyReview = review(survivors.map((item) =>
+      assessment(item.candidateId)))
+    expect(validatePortiaReview(legacyReview, survivors)).toEqual(legacyReview)
+    const legacyGate = evaluateGate(legacyReview)
+    expect(legacyGate.algorithmVersion).toBe('webchess-gate-v4')
+    expect(legacyGate).not.toHaveProperty('directionalRecordDigest')
   })
 })
 
@@ -627,6 +759,13 @@ describe('Charlotte support enforcement', () => {
       supportingCandidateIds: [consumed.candidateId],
       qualificationsByCandidateId: {},
     }, portia)).toThrow(/preserved or wounded/u)
+    expect(() => validateCharlotteResult({
+      ...base,
+      qualificationsByCandidateId: {
+        ...base.qualificationsByCandidateId,
+        [preserved.candidateId]: 'A preserved candidate needs no qualification.',
+      },
+    }, portia)).toThrow(/only wounded/u)
   })
 })
 

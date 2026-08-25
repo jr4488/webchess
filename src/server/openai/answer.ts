@@ -10,9 +10,18 @@ import type {
   GateResult,
   PortiaReview,
   SurvivorCandidate,
+  TrajectoryDirectionalRecord,
   WebMemoryEvidence,
 } from '../../lib/lifecycle'
-import { CURRENT_WEB_MEMORY_CONSENT_VERSION } from '../../lib/lifecycle'
+import {
+  CURRENT_WEB_MEMORY_CONSENT_VERSION,
+  isDirectionalGateResult,
+  isDirectionalPortiaReview,
+  LEGACY_GATE_ALGORITHM_VERSION,
+  LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+  verifyTrajectoryDirectionalRecord,
+} from '../../lib/lifecycle'
+import { isCurrentGameVersions } from '../../lib/game-replay'
 import type { ResearchPromptEvidence } from '../../lib/research'
 import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../../types'
 import { resolveModelRequest } from './client'
@@ -24,7 +33,7 @@ import {
   type ModelGeneration,
   ModelContractError,
   ModelInputError,
-  type ModelRequestContext,
+  type AnswerRequestContext,
   ANSWER_PROMPT_VERSION,
   OPENAI_MODEL,
   OPENAI_REASONING_EFFORT,
@@ -407,6 +416,11 @@ export interface BoardAnswerPromptPackage extends BoardAnswerPromptPlan {
   readonly researchEvidence?: readonly ResearchPromptEvidence[]
   /** Prior Wilbur observations explicitly selected for this game. */
   readonly webMemoryEvidence?: readonly WebMemoryEvidence[]
+  /**
+   * Present for v2.5 runs. The complete replay-verifiable record is retained;
+   * it is never reduced to a decorative hexagram label or truncated summary.
+   */
+  readonly trajectoryDirectionalRecord?: TrajectoryDirectionalRecord
 }
 
 export interface ApprovedBoardAnswerInput {
@@ -434,6 +448,7 @@ export function buildBoardAnswerPromptPackage(
   terminalFingerprint: string,
   researchEvidence: readonly ResearchPromptEvidence[] = [],
   webMemoryEvidence: readonly WebMemoryEvidence[] = [],
+  trajectoryDirectionalRecord?: TrajectoryDirectionalRecord,
 ): BoardAnswerPromptPackage {
   const plan = buildBoardAnswerPromptPlan(evidenceValue)
   if (
@@ -557,12 +572,176 @@ export function buildBoardAnswerPromptPackage(
     }
     observationIds.add(evidence.observationId)
   }
+  const normalizedDirectionalRecord = trajectoryDirectionalRecord === undefined
+    ? undefined
+    : normalizeTrajectoryDirectionalRecord(
+        trajectoryDirectionalRecord,
+        plan.evidence,
+        survivors,
+      )
   return {
     ...plan,
     terminalFingerprint,
     survivors,
     ...(researchEvidence.length === 0 ? {} : { researchEvidence }),
     ...(webMemoryEvidence.length === 0 ? {} : { webMemoryEvidence }),
+    ...(normalizedDirectionalRecord === undefined
+      ? {}
+      : { trajectoryDirectionalRecord: normalizedDirectionalRecord }),
+  }
+}
+
+function normalizeTrajectoryDirectionalRecord(
+  value: TrajectoryDirectionalRecord,
+  evidence: ServerDerivedEvidence,
+  survivors: readonly SurvivorCandidate[],
+): TrajectoryDirectionalRecord {
+  try {
+    const versions = {
+      event: value.trajectory.eventVersion,
+      rules: value.trajectory.rulesVersion,
+      cast: value.cast.version,
+      engine: value.trajectory.engineVersion,
+    }
+    if (!isCurrentGameVersions(versions)) {
+      throw new Error('the embedded game versions are not current')
+    }
+    const record = verifyTrajectoryDirectionalRecord(value, {
+      divisionDigest: value.division.digest,
+      divisionSeed: value.division.seed,
+      castSeed: value.cast.lifecycleSeed,
+      trajectorySeed: value.trajectory.seed,
+      versions,
+    })
+    if (
+      record.trajectory.completedPlies !== evidence.turnCount ||
+      record.outcome.winner !== evidence.outcome.winner ||
+      record.outcome.reason !== evidence.outcome.reason ||
+      record.outcome.completedTurn !== evidence.outcome.completedTurn
+    ) {
+      throw new Error('the terminal outcome does not match the Answer evidence')
+    }
+    if (
+      record.captures.length !== evidence.captures.length ||
+      record.captures.some((capture, index) => {
+        const expected = evidence.captures[index]
+        return !expected ||
+          capture.ply !== expected.turn ||
+          capture.resonance !== expected.resonance ||
+          capture.cell.ring !== expected.cell.ring ||
+          capture.cell.sector !== expected.cell.sector ||
+          capture.attacker.side !== expected.attacker.side ||
+          capture.attacker.kind !== expected.attacker.kind ||
+          capture.captured.side !== expected.captured.side ||
+          capture.captured.kind !== expected.captured.kind ||
+          capture.lens.partId !== expected.part.id
+      })
+    ) {
+      throw new Error('the ordered captures do not match the Answer evidence')
+    }
+    const survivorByPieceId = new Map(
+      survivors.map((candidate) => [candidate.pieceId, candidate]),
+    )
+    if (
+      record.survivors.length !== survivors.length ||
+      record.survivors.some((survivor) => {
+        const expected = survivorByPieceId.get(survivor.piece.pieceId)
+        return !expected ||
+          survivor.piece.side !== expected.side ||
+          survivor.piece.kind !== expected.pieceKind ||
+          survivor.piece.originalKind !== expected.originalPieceKind ||
+          survivor.finalCoordinate.ring !== expected.finalCoordinate.ring ||
+          survivor.finalCoordinate.sector !== expected.finalCoordinate.sector ||
+          survivor.moveCount !== expected.moveCount ||
+          survivor.promoted !== expected.promoted
+      })
+    ) {
+      throw new Error('the surviving pieces do not match the terminal ecology')
+    }
+    return record
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'malformed record'
+    throw new ModelInputError(
+      `The board-derived Answer package has invalid trajectory direction: ${detail}.`,
+    )
+  }
+}
+
+function equalStrings(
+  left: readonly string[] | undefined,
+  right: readonly string[],
+): boolean {
+  return left !== undefined &&
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+}
+
+function hasDirectionalApprovalData(
+  portia: PortiaReview,
+  gate: GateResult,
+): boolean {
+  return isDirectionalPortiaReview(portia) ||
+    portia.assessments.some((assessment) =>
+      assessment.directionalRecordDigest !== undefined ||
+      assessment.directionalSignalKeys !== undefined ||
+      assessment.directionalInterpretation !== undefined ||
+      assessment.directionalAmendment !== undefined) ||
+    isDirectionalGateResult(gate)
+}
+
+/**
+ * Fail closed when an approved model stage does not bind the exact current
+ * trajectory record. Absence remains valid only for preserved pre-v2.5 runs.
+ */
+export function validateTrajectoryDirectionalApproval(
+  record: TrajectoryDirectionalRecord | undefined,
+  portia: PortiaReview,
+  gate: GateResult,
+): void {
+  if (record === undefined) {
+    if (
+      hasDirectionalApprovalData(portia, gate) ||
+      portia.contractVersion !==
+        LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION ||
+      gate.algorithmVersion !== LEGACY_GATE_ALGORITHM_VERSION
+    ) {
+      throw new ModelInputError(
+        'Directional Portia or Gate provenance is present without its trajectory record.',
+      )
+    }
+    return
+  }
+  if (
+    !isDirectionalPortiaReview(portia) ||
+    !isDirectionalGateResult(gate)
+  ) {
+    throw new ModelInputError(
+      'A current trajectory record requires the directional Portia-v3 and Gate-v5 contracts.',
+    )
+  }
+  const allowedKeys = new Set(record.survivingDirectionKeys)
+  const assessmentsAreBound = portia.assessments.every((assessment) =>
+    assessment.directionalRecordDigest === record.digest &&
+    assessment.directionalSignalKeys !== undefined &&
+    assessment.directionalSignalKeys.length > 0 &&
+    new Set(assessment.directionalSignalKeys).size ===
+      assessment.directionalSignalKeys.length &&
+    assessment.directionalSignalKeys.every((key) => allowedKeys.has(key)) &&
+    Boolean(assessment.directionalInterpretation?.trim()) &&
+    Boolean(assessment.directionalAmendment?.trim()))
+  if (
+    portia.directionalRecordVersion !== record.version ||
+    portia.directionalRecordDigest !== record.digest ||
+    !portia.directionalSummary.trim() ||
+    !assessmentsAreBound ||
+    gate.directionalRecordVersion !== record.version ||
+    gate.directionalRecordDigest !== record.digest ||
+    !equalStrings(gate.survivingDirectionKeys, record.survivingDirectionKeys) ||
+    gate.directionalBindingsSatisfied !== true
+  ) {
+    throw new ModelInputError(
+      'Answer generation requires Portia and Gate to bind the exact trajectory directional record.',
+    )
   }
 }
 
@@ -598,6 +777,7 @@ function normalizeBoardAnswerPromptPackage(
     value.terminalFingerprint,
     value.researchEvidence ?? [],
     value.webMemoryEvidence ?? [],
+    value.trajectoryDirectionalRecord,
   )
 }
 
@@ -618,6 +798,11 @@ function normalizeApprovedBoardAnswerInput(
       'Answer generation requires Portia and Gate approval for this exact prompt plan.',
     )
   }
+  validateTrajectoryDirectionalApproval(
+    plan.trajectoryDirectionalRecord,
+    value.portia,
+    value.gate,
+  )
   return { ...value, plan }
 }
 
@@ -626,11 +811,11 @@ export function buildWebChessInstructions(): string {
   return `You are the final problem-solving voice of WebChess, a reflective game inspired by principles of change in the I Ching.
 
 GOAL
-Answer the player's original problem using the separately supplied capture trail as a metaphorical attention map. Captures show which parts deserve closer consideration. Piece metaphors show what kind of consideration was active or challenged. Repeated lenses and higher attention weights deserve more emphasis, but weights are relative signals—not probabilities or proof.
+Answer the player's original problem using the separately supplied cast-qualified facets and replay-derived chess trajectory as mandatory directional method inputs. The cast and complete trajectory determine which parts receive emphasis and how their tensions are synthesized. Their weights are relative directional signals—not probabilities, predictions, or factual proof.
 
 INTERPRETATION METHOD
 - Start from each literal problem_facet: its title, concrete focus, and question are the real-world substance.
-- Treat its independently randomized iching_lens as a change metaphor that opens a perspective; it is not evidence or a prediction.
+- Treat each facet's fixed I Ching cast as a required directional lens assigned before facet prose generation. Its cast-qualified application must shape the facet and downstream synthesis; it is not external evidence, divination, or a prediction.
 - Treat White and Black as complementary directions, neither moral labels nor declarations of correctness:
   - White = outside-in evidence: facts, conditions, constraints, and feedback move from the external situation inward to test intent.
   - Black = inside-out intent: purpose, values, commitments, and desired direction move outward to engage reality.
@@ -678,8 +863,8 @@ export function buildWebChessPrompt(evidence: ServerDerivedEvidence): string {
   return buildBoardAnswerPrompt(buildBoardAnswerPromptPlan(evidence))
 }
 
-function buildApprovedAnswerInstructions(plan: BoardAnswerPromptPlan): string {
-  return `${plan.instructions}
+function buildApprovedAnswerInstructions(plan: BoardAnswerPromptPackage): string {
+  const legacyInstructions = `${plan.instructions}
 
 PORTIA AUTHORIZATION BOUNDARY
 - Portia reviewed the complete board-derived prompt plan before this generation.
@@ -704,6 +889,14 @@ WEB MEMORY BOUNDARY
 - Use it only when Portia's review permits the derived claim and the present question is sufficiently similar.
 - Preserve contradictions, adverse effects, stakeholder responses, and unresolved assumption labels.
 - Explain when new evidence is needed instead of laundering an old observation into a current fact.`
+  if (plan.trajectoryDirectionalRecord === undefined) return legacyInstructions
+  return `${legacyInstructions}
+
+TRAJECTORY-DERIVED I CHING DIRECTION
+- trajectory_directional_record is the complete, versioned, replay-derived directional calculation for this exact game. It incorporates the ordered move and capture sequence, captured-piece identities and material values, surviving pieces, terminal outcome, and the fixed cast-qualified field.
+- Its eight surviving_direction_keys and human explanation are mandatory directional inputs. They must materially shape emphasis, synthesis, and the practical direction of the Answer; do not reduce them to decorative metaphor or merely mention them.
+- Apply every Portia directional_interpretation and directional_amendment that accompanies a usable candidate, and keep the exact record digest visible in the analytical provenance.
+- The record is not external factual evidence, a probability, a prediction, or a source citation. It cannot override verified facts, the research-consent boundary, safety constraints, Portia qualifications, or the deterministic Gate.`
 }
 
 /**
@@ -718,6 +911,20 @@ export function buildPlayerVisibleAnswerPrompt(
   value: ApprovedBoardAnswerInput,
 ): string {
   const approved = normalizeApprovedBoardAnswerInput(value)
+  const directionalRecord = approved.plan.trajectoryDirectionalRecord
+  const directionalApproval = directionalRecord === undefined
+    ? undefined
+    : (() => {
+        if (
+          !isDirectionalPortiaReview(approved.portia) ||
+          !isDirectionalGateResult(approved.gate)
+        ) {
+          throw new ModelInputError(
+            'The approved directional prompt lost its Portia or Gate binding.',
+          )
+        }
+        return { portia: approved.portia, gate: approved.gate }
+      })()
   const survivorById = new Map(
     approved.plan.survivors.map((candidate) => [candidate.candidateId, candidate]),
   )
@@ -739,10 +946,22 @@ export function buildPlayerVisibleAnswerPrompt(
       game_evidence: buildGameEvidence(approved.plan.evidence),
       research_evidence: approved.plan.researchEvidence ?? [],
       web_memory_evidence: approved.plan.webMemoryEvidence ?? [],
+      ...(directionalRecord === undefined
+        ? {}
+        : { trajectory_directional_record: directionalRecord }),
     },
     portia_authorization: {
       decision: approved.portia.promptDecision,
       rationale: approved.portia.promptDecisionRationale,
+      ...(directionalRecord === undefined
+        ? {}
+        : {
+            directional_record_version:
+              directionalApproval?.portia.directionalRecordVersion,
+            directional_record_digest:
+              directionalApproval?.portia.directionalRecordDigest,
+            directional_summary: directionalApproval?.portia.directionalSummary,
+          }),
       usable_candidates: usable.map((assessment) => ({
         survivor: survivorById.get(assessment.candidateId),
         portia: {
@@ -759,6 +978,16 @@ export function buildPlayerVisibleAnswerPrompt(
           coverage_tags: assessment.coverageTags,
           missing_evidence: assessment.missingEvidence,
           reversal_condition: assessment.reversalCondition,
+          ...(directionalRecord === undefined
+            ? {}
+            : {
+                directional_record_digest:
+                  assessment.directionalRecordDigest,
+                directional_signal_keys: assessment.directionalSignalKeys,
+                directional_interpretation:
+                  assessment.directionalInterpretation,
+                directional_amendment: assessment.directionalAmendment,
+              }),
         },
       })),
       excluded_candidates: excluded.map((assessment) => ({
@@ -766,6 +995,15 @@ export function buildPlayerVisibleAnswerPrompt(
         portia: {
           disposition: assessment.disposition,
           reason: assessment.countercase,
+          ...(directionalRecord === undefined
+            ? {}
+            : {
+                directional_record_digest:
+                  assessment.directionalRecordDigest,
+                directional_signal_keys: assessment.directionalSignalKeys,
+                directional_authority: 'audit_only_non_supporting',
+                supporting_authority: false,
+              }),
         },
       })),
       unresolved_questions: approved.portia.unresolvedQuestions,
@@ -774,7 +1012,47 @@ export function buildPlayerVisibleAnswerPrompt(
       algorithm_version: approved.gate.algorithmVersion,
       input_digest: approved.gate.inputDigest,
       explanation: approved.gate.explanation,
+      ...(directionalRecord === undefined
+        ? {}
+        : {
+            directional_record_version:
+              directionalApproval?.gate.directionalRecordVersion,
+            directional_record_digest:
+              directionalApproval?.gate.directionalRecordDigest,
+            surviving_direction_keys:
+              directionalApproval?.gate.survivingDirectionKeys,
+            directional_bindings_satisfied:
+              directionalApproval?.gate.directionalBindingsSatisfied,
+          }),
     },
+    ...(directionalRecord === undefined
+      ? {}
+      : {
+          trajectory_directional_scrutiny: {
+            record_version: directionalRecord.version,
+            record_digest: directionalRecord.digest,
+            surviving_direction_keys:
+              directionalRecord.survivingDirectionKeys,
+            human_explanation: directionalRecord.explanation,
+            epistemic_boundary: directionalRecord.epistemicBoundary,
+            portia_directional_amendments:
+              usable.map((assessment) => ({
+                candidate_id: assessment.candidateId,
+                disposition: assessment.disposition,
+                signal_keys: assessment.directionalSignalKeys,
+                interpretation: assessment.directionalInterpretation,
+                amendment: assessment.directionalAmendment,
+              })),
+            excluded_portia_directional_assessments:
+              excluded.map((assessment) => ({
+                candidate_id: assessment.candidateId,
+                disposition: assessment.disposition,
+                signal_keys: assessment.directionalSignalKeys,
+                supporting_authority: false,
+                audit_status: 'excluded_by_portia',
+              })),
+          },
+        }),
   }, null, 2)
 }
 
@@ -917,7 +1195,7 @@ export function normalizeWebChessAnswer(value: unknown): AnswerResult {
 
 export async function generateAnswer(
   inputValue: AnswerGenerationInput,
-  context: ModelRequestContext,
+  context: AnswerRequestContext,
 ): Promise<ModelGeneration<AnswerResult>> {
   const approved = isApprovedBoardAnswerInput(inputValue)
     ? normalizeApprovedBoardAnswerInput(inputValue)
@@ -942,6 +1220,11 @@ export async function generateAnswer(
     )
   }
   const { client, requestOptions, safetyIdentifier } = resolveModelRequest(context)
+
+  await context.onProviderTurnStart?.({
+    index: 1,
+    idempotencyKey: context.idempotencyKey,
+  })
 
   const response = await client.responses.create({
     model: OPENAI_MODEL,

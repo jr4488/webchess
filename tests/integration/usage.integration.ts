@@ -118,6 +118,20 @@ function divisionReservation(
   }
 }
 
+function answerReservation(
+  overrides: Partial<Parameters<
+    ReturnType<typeof controller>['reserveModelRequest']
+  >[0]> = {},
+) {
+  return divisionReservation({
+    gameId: MATURE_GAME_ID,
+    operation: 'answer',
+    promptVersion: 'answer-v1',
+    countsAsGameStart: false,
+    ...overrides,
+  })
+}
+
 async function createDivisionShell(
   ownerId: string,
   gameId: string,
@@ -759,6 +773,75 @@ describe('durable usage accounting against PostgreSQL', () => {
     ])
   })
 
+  it('fenced provider-not-started rollback refunds a begun request and frees its slot idempotently', async () => {
+    const usage = controller()
+    await expect(
+      usage.reserveModelRequest(divisionReservation()),
+    ).resolves.toMatchObject({ ok: true, kind: 'reserved' })
+    await expect(usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })).resolves.toMatchObject({
+      ok: true,
+      status: 'in_progress',
+      alreadyStarted: false,
+    })
+
+    await expect(usage.releaseReservation({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      reason: 'client_disconnected',
+    })).resolves.toEqual({
+      ok: false,
+      code: 'INVALID_REQUEST_STATE',
+      httpStatus: 409,
+    })
+    await expect(usage.releaseReservation({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      reason: 'provider_not_started',
+    })).resolves.toEqual({ ok: true, released: true })
+    await expect(usage.releaseReservation({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      reason: 'provider_not_started',
+    })).resolves.toEqual({ ok: true, released: false })
+
+    await expect(usage.getUsageSummary(OWNER)).resolves.toMatchObject({
+      modelOperations: { used: 0, reserved: 0 },
+      gameStarts: { used: 0, reserved: 0 },
+      activeModelRequests: 0,
+    })
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT
+          requests.status,
+          requests.failure_code,
+          requests.provider_started_at,
+          count(slots.request_id)::integer AS occupied_slots
+        FROM model_requests AS requests
+        LEFT JOIN model_concurrency_slots AS slots
+          ON slots.request_id = requests.id
+        WHERE requests.id = $1::uuid
+        GROUP BY
+          requests.status,
+          requests.failure_code,
+          requests.provider_started_at
+      `,
+      values: [REQUEST_ID],
+    })
+    expect(persisted.rows).toEqual([{
+      status: 'failed',
+      failure_code: 'released_provider_not_started',
+      provider_started_at: null,
+      occupied_slots: 0,
+    }])
+  })
+
   it('rechecks deletion, suspension, and temporary blocks before provider work starts', async () => {
     const usage = controller()
     await usage.reserveModelRequest(divisionReservation())
@@ -974,6 +1057,278 @@ describe('durable usage accounting against PostgreSQL', () => {
       values: [OTHER_REQUEST_ID],
     })
     expect(expired.rows).toEqual([{ status: 'indeterminate' }])
+  })
+
+  it('renews one Answer request lease without consuming a second model operation', async () => {
+    let currentTime = new Date(NOW)
+    const usage = controller(
+      DEFAULT_CONFIG,
+      () => new Date(currentTime),
+    )
+    const reservationInput = answerReservation()
+    await createDivisionShell(
+      OWNER,
+      MATURE_GAME_ID,
+      'Can a two-turn Answer complete within one bounded operation?',
+    )
+
+    await expect(
+      usage.reserveModelRequest(reservationInput),
+    ).resolves.toMatchObject({
+      ok: true,
+      kind: 'reserved',
+      requestId: REQUEST_ID,
+      status: 'reserved',
+      leaseToken: LEASE_TOKEN,
+    })
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'in_progress',
+      alreadyStarted: false,
+    })
+
+    currentTime = new Date(NOW.valueOf() + 120_000)
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'in_progress',
+      alreadyStarted: true,
+    })
+
+    const renewed = await database.adapter.query({
+      text: `
+        SELECT
+          requests.status,
+          requests.provider_started_at,
+          slots.lease_expires_at
+        FROM model_requests AS requests
+        JOIN model_concurrency_slots AS slots
+          ON slots.request_id = requests.id
+        WHERE requests.id = $1::uuid
+      `,
+      values: [REQUEST_ID],
+    })
+    expect(renewed.rows).toEqual([
+      {
+        status: 'in_progress',
+        provider_started_at: NOW,
+        lease_expires_at: new Date(NOW.valueOf() + 300_000),
+      },
+    ])
+
+    currentTime = new Date(NOW.valueOf() + 240_000)
+    await expect(
+      usage.settleModelRequest({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+        outcome: 'succeeded',
+        providerResponseId: 'resp_answer_after_renewal',
+        responseSha256: 'b'.repeat(64),
+        resultPayload: {
+          kind: 'answer',
+          gameId: MATURE_GAME_ID,
+        },
+        usage: {
+          reported: true,
+          inputTokens: 200,
+          cachedInputTokens: 40,
+          cacheWriteInputTokens: 0,
+          outputTokens: 80,
+          reasoningTokens: 30,
+          totalTokens: 280,
+        },
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'succeeded',
+      alreadySettled: false,
+    })
+
+    await expect(usage.getUsageSummary(OWNER)).resolves.toMatchObject({
+      modelOperations: { used: 1, reserved: 0 },
+      gameStarts: { used: 0, reserved: 0 },
+      activeModelRequests: 0,
+    })
+    const persisted = await database.adapter.query({
+      text: `
+        SELECT
+          status,
+          provider_started_at,
+          completed_at,
+          (
+            SELECT count(*)::integer
+            FROM model_requests
+            WHERE clerk_user_id = $2::text
+          ) AS request_count,
+          (
+            SELECT count(*)::integer
+            FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+        FROM model_requests
+        WHERE id = $1::uuid
+      `,
+      values: [REQUEST_ID, OWNER],
+    })
+    expect(persisted.rows).toEqual([
+      {
+        status: 'succeeded',
+        provider_started_at: NOW,
+        completed_at: currentTime,
+        request_count: 1,
+        occupied_slots: 0,
+      },
+    ])
+  })
+
+  it('reconciles an Answer lease beyond 300 seconds without duplicate usage or stale settlement', async () => {
+    let currentTime = new Date(NOW)
+    const usage = controller(
+      DEFAULT_CONFIG,
+      () => new Date(currentTime),
+    )
+    const reservationInput = answerReservation()
+    await createDivisionShell(
+      OWNER,
+      MATURE_GAME_ID,
+      'How does an interrupted Answer release its durable slot?',
+    )
+
+    await usage.reserveModelRequest(reservationInput)
+    await usage.beginProviderCall({
+      userId: OWNER,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+    })
+    currentTime = new Date(NOW.valueOf() + 120_000)
+    await expect(
+      usage.beginProviderCall({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      status: 'in_progress',
+      alreadyStarted: true,
+    })
+
+    currentTime = new Date(NOW.valueOf() + 300_001)
+    await expect(usage.reconcileExpiredLeases()).resolves.toEqual({
+      expiredRequests: 1,
+      clearedSlots: 1,
+    })
+
+    const reconciled = await database.adapter.query({
+      text: `
+        SELECT
+          requests.status,
+          requests.failure_code,
+          requests.provider_started_at,
+          requests.completed_at,
+          (
+            SELECT count(*)::integer
+            FROM model_concurrency_slots
+            WHERE request_id IS NOT NULL
+          ) AS occupied_slots
+        FROM model_requests AS requests
+        WHERE requests.id = $1::uuid
+      `,
+      values: [REQUEST_ID],
+    })
+    expect(reconciled.rows).toEqual([
+      {
+        status: 'indeterminate',
+        failure_code: 'provider_outcome_unknown',
+        provider_started_at: NOW,
+        completed_at: currentTime,
+        occupied_slots: 0,
+      },
+    ])
+
+    await expect(
+      usage.settleModelRequest({
+        userId: OWNER,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+        outcome: 'succeeded',
+        providerResponseId: 'resp_stale_after_expiry',
+        responseSha256: 'c'.repeat(64),
+        resultPayload: {
+          kind: 'answer',
+          gameId: MATURE_GAME_ID,
+        },
+        usage: {
+          reported: true,
+          inputTokens: 200,
+          cachedInputTokens: 40,
+          cacheWriteInputTokens: 0,
+          outputTokens: 80,
+          reasoningTokens: 30,
+          totalTokens: 280,
+        },
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      code: 'SETTLEMENT_CONFLICT',
+      httpStatus: 409,
+    })
+    await expect(
+      usage.reserveModelRequest(reservationInput),
+    ).resolves.toEqual({
+      ok: true,
+      kind: 'existing',
+      requestId: REQUEST_ID,
+      gameId: MATURE_GAME_ID,
+      status: 'indeterminate',
+      leaseToken: null,
+      leaseExpiresAt: null,
+    })
+    await expect(usage.getUsageSummary(OWNER)).resolves.toMatchObject({
+      modelOperations: { used: 1, reserved: 0 },
+      gameStarts: { used: 0, reserved: 0 },
+      activeModelRequests: 0,
+    })
+
+    const accounting = await database.adapter.query({
+      text: `
+        SELECT
+          (SELECT count(*)::integer FROM model_requests) AS requests,
+          (
+            SELECT used
+            FROM usage_buckets
+            WHERE
+              subject_type = 'user'
+              AND subject_key = $1::text
+              AND metric = 'model_requests'
+          ) AS model_used,
+          (
+            SELECT max(count)::integer
+            FROM rate_buckets
+            WHERE action = 'model'
+          ) AS maximum_rate_count
+      `,
+      values: [OWNER],
+    })
+    expect(accounting.rows).toEqual([
+      {
+        requests: 1,
+        model_used: '1',
+        maximum_rate_count: 1,
+      },
+    ])
   })
 
   it('returns the same duplicate-success rejection on an exact settlement retry', async () => {

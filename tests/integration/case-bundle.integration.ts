@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { CURRENT_LIFECYCLE_VERSIONS } from '../../src/lib/lifecycle'
+import { deriveDivisionCastAssignments } from '../../src/lib/division'
 import {
   RESEARCH_CONSENT_VERSION,
   type ResearchFetchFailure,
@@ -69,21 +70,42 @@ const FACETS: readonly ProblemFacet[] = Array.from(
   }),
 )
 
-const divisionGenerator: typeof generateDivision = vi.fn(async () => ({
-  providerId: 'case-bundle-division-response',
-  model: 'configured-default',
-  prompt: `${PRIVATE_SENTINEL} division prompt`,
-  result: { facets: [...FACETS] },
-  usage: {
-    reported: false,
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-    cachedInputTokens: 0,
-    cacheWriteInputTokens: 0,
-    reasoningOutputTokens: 0,
-  },
-}))
+const divisionGenerator: typeof generateDivision = vi.fn(async (input) => {
+  const divisionSeed = typeof input === 'string'
+    ? null
+    : input.divisionSeed ?? null
+  const assignments = divisionSeed
+    ? new Map(deriveDivisionCastAssignments(divisionSeed).map(
+        (assignment) => [assignment.id, assignment],
+      ))
+    : new Map()
+  return {
+    providerId: 'case-bundle-division-response',
+    model: 'configured-default',
+    prompt: `${PRIVATE_SENTINEL} division prompt`,
+    result: {
+      facets: FACETS.map((facet) => ({
+        ...facet,
+        ...(divisionSeed
+          ? {
+              castApplication: `Use ${
+                assignments.get(facet.id)?.directionalCue ?? 'the fixed cast'
+              } to shape this exact facet during scrutiny.`,
+            }
+          : {}),
+      })),
+    },
+    usage: {
+      reported: false,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      reasoningOutputTokens: 0,
+    },
+  }
+})
 
 let database: PostgresTestDatabase | null = null
 
@@ -590,6 +612,22 @@ describe('single-lifecycle case export against PostgreSQL', () => {
       .not.toContain(PRIVATE_FAILURE_URL)
     expect(exportedByProfile.get('private-full-v1')).toMatchObject({
       data: {
+        lifecycle: {
+          trajectoryDirectionalRecord: {
+            status: 'bound',
+            recordAvailability: 'exact_record_included',
+            recordOmission: null,
+            version: 'webchess-directional-record-v1',
+            digest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+            fieldPartsDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+            eventStreamDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+            record: expect.any(Object),
+          },
+        },
+      },
+    })
+    expect(exportedByProfile.get('private-full-v1')).toMatchObject({
+      data: {
         game: {
           record: {
             researchConsentVersion: RESEARCH_CONSENT_VERSION,
@@ -623,6 +661,16 @@ describe('single-lifecycle case export against PostgreSQL', () => {
             },
           },
           lifecycle: {
+            trajectoryDirectionalRecord: {
+              status: 'bound',
+              recordAvailability: 'profile_omitted',
+              recordOmission: 'profile_omitted_exact_record',
+              version: 'webchess-directional-record-v1',
+              digest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+              fieldPartsDigest: null,
+              eventStreamDigest: null,
+              record: null,
+            },
             researchRequests: [{
               researchConsentVersion: RESEARCH_CONSENT_VERSION,
               researchConsentDecision: 'allow_search_and_page_fetch',

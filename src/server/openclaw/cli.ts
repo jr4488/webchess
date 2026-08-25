@@ -2,7 +2,13 @@ import { createHash } from 'node:crypto'
 
 import { z } from 'zod'
 
-import type { OpenClawConfig } from './config'
+import {
+  MAX_OPENCLAW_SEARCH_TIMEOUT_MS,
+  type OpenClawConfig,
+} from './config'
+
+const MAX_MODEL_TURN_ID_CHARS = 255
+const MODEL_TURN_ID_PATTERN = /^[A-Za-z0-9._:-]+$/u
 
 export type OpenClawCliFailureKind =
   | 'aborted'
@@ -24,6 +30,8 @@ export class OpenClawCliError extends Error {
 export interface OpenClawCommandOptions {
   /** Stable logical turn identity for transports that support replay safety. */
   idempotencyKey?: string
+  /** Internal response-drain ceiling; provider work remains bounded by the body. */
+  requestTimeoutMs?: number
   signal?: AbortSignal
 }
 
@@ -33,6 +41,20 @@ export type OpenClawBridgeRequester = (
   config: OpenClawConfig,
   options?: OpenClawCommandOptions,
 ) => Promise<string>
+
+function requireModelTurnId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  if (
+    value.length < 1 ||
+    value.length > MAX_MODEL_TURN_ID_CHARS ||
+    !MODEL_TURN_ID_PATTERN.test(value)
+  ) {
+    throw new RangeError(
+      `idempotencyKey must contain 1 through ${MAX_MODEL_TURN_ID_CHARS} bounded identifier characters.`,
+    )
+  }
+  return value
+}
 
 function bridgeConfig(config: OpenClawConfig): {
   token: string
@@ -45,6 +67,19 @@ function bridgeConfig(config: OpenClawConfig): {
     )
   }
   return { token: config.bridgeToken, url: config.bridgeUrl }
+}
+
+function requireRequestTimeoutMs(value: number): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > MAX_OPENCLAW_SEARCH_TIMEOUT_MS + 5_000
+  ) {
+    throw new RangeError(
+      `requestTimeoutMs must be an integer from 1 through ${MAX_OPENCLAW_SEARCH_TIMEOUT_MS + 5_000}.`,
+    )
+  }
+  return value
 }
 
 function bridgeFailureKind(status: number, code: unknown): OpenClawCliFailureKind {
@@ -90,24 +125,39 @@ export function createOpenClawBridgeRequester(
 ): OpenClawBridgeRequester {
   return async (requestPath, body, config, options = {}) => {
     const bridge = bridgeConfig(config)
+    const modelTurnId = requireModelTurnId(options.idempotencyKey)
+    if (modelTurnId !== undefined && requestPath !== '/v1/model/run') {
+      throw new RangeError(
+        'idempotencyKey is supported only for OpenClaw model turns.',
+      )
+    }
+    const requestBody = body === null
+      ? null
+      : {
+          ...body,
+          ...(modelTurnId === undefined ? {} : { turnId: modelTurnId }),
+        }
+    const requestTimeoutMs = requireRequestTimeoutMs(
+      options.requestTimeoutMs ?? config.timeoutMs,
+    )
     const timeoutController = new AbortController()
     let timedOut = false
     const timeout = setTimeout(() => {
       timedOut = true
       timeoutController.abort()
-    }, config.timeoutMs)
+    }, requestTimeoutMs)
     const signal = options.signal
       ? AbortSignal.any([options.signal, timeoutController.signal])
       : timeoutController.signal
     try {
       const response = await fetcher(`${bridge.url}${requestPath}`, {
-        body: body === null ? undefined : JSON.stringify(body),
+        body: requestBody === null ? undefined : JSON.stringify(requestBody),
         cache: 'no-store',
         headers: {
           Authorization: `Bearer ${bridge.token}`,
-          ...(body === null ? {} : { 'Content-Type': 'application/json' }),
+          ...(requestBody === null ? {} : { 'Content-Type': 'application/json' }),
         },
-        method: body === null ? 'GET' : 'POST',
+        method: requestBody === null ? 'GET' : 'POST',
         redirect: 'error',
         signal,
       })
@@ -183,8 +233,9 @@ const DEFAULT_OPENCLAW_WEB_SEARCH_CONTENT_CHARS = 32 * 1024
 const MAX_OPENCLAW_WEB_SEARCH_CONTENT_CHARS = 128 * 1024
 const DEFAULT_OPENCLAW_WEB_SEARCH_ACTIVITIES = 24
 const MAX_OPENCLAW_WEB_SEARCH_ACTIVITIES = 64
-const DEFAULT_OPENCLAW_WEB_SEARCH_TOOK_MS = 150_000
+const DEFAULT_OPENCLAW_WEB_SEARCH_TOOK_MS = MAX_OPENCLAW_SEARCH_TIMEOUT_MS
 const DEFAULT_OPENCLAW_WEB_SEARCH_OUTPUT_BYTES = 4 * 1024 * 1024
+const OPENCLAW_BRIDGE_RESPONSE_GRACE_MS = 5_000
 
 const OpenClawWebSearchActivitySchema = z.strictObject({
   query: z.string().min(1).max(MAX_OPENCLAW_WEB_SEARCH_QUERY_CHARS).optional(),
@@ -474,11 +525,22 @@ export async function runOpenClawModel(
   options: {
     request?: OpenClawBridgeRequester
     idempotencyKey?: string
+    /** Runs only after all local request checks and immediately before dispatch. */
+    onRequestStart?: () => Promise<void>
     signal?: AbortSignal
     thinking?: 'low' | 'medium'
   } = {},
 ): Promise<ModelRunResult> {
-  const stdout = await (options.request ?? requestOpenClawBridge)(
+  const idempotencyKey = requireModelTurnId(options.idempotencyKey)
+  const request = options.request ?? requestOpenClawBridge
+  const requestTimeoutMs = requireRequestTimeoutMs(
+    config.timeoutMs + OPENCLAW_BRIDGE_RESPONSE_GRACE_MS,
+  )
+  // The production requester needs a complete authenticated loopback bridge.
+  // Test-only injected requesters remain responsible for their own transport.
+  if (options.request === undefined) bridgeConfig(config)
+  await options.onRequestStart?.()
+  const stdout = await request(
     '/v1/model/run',
     {
       prompt,
@@ -488,7 +550,8 @@ export async function runOpenClawModel(
     },
     config,
     {
-      idempotencyKey: options.idempotencyKey,
+      idempotencyKey,
+      requestTimeoutMs,
       signal: options.signal,
     },
   )
@@ -525,17 +588,21 @@ export async function runOpenClawWebSearch(
     {
       limit,
       query,
-      timeoutMs: config.timeoutMs,
+      timeoutMs: config.searchTimeoutMs,
       version: 1,
     },
     config,
-    { signal: options.signal },
+    {
+      requestTimeoutMs:
+        config.searchTimeoutMs + OPENCLAW_BRIDGE_RESPONSE_GRACE_MS,
+      signal: options.signal,
+    },
   )
   return parseOpenClawWebSearchEnvelope(stdout, query, {
     maxContentChars,
     maxOutputBytes: config.maxOutputBytes,
     maxSearchActivities,
-    maxTookMs: config.timeoutMs,
+    maxTookMs: config.searchTimeoutMs,
   })
 }
 
@@ -583,7 +650,11 @@ export async function getOpenClawStatus(
       '/v1/status',
       null,
       config,
-      { signal: options.signal },
+      {
+        requestTimeoutMs:
+          config.timeoutMs + OPENCLAW_BRIDGE_RESPONSE_GRACE_MS,
+        signal: options.signal,
+      },
     )
     const parsed = z.strictObject({
       available: z.boolean(),

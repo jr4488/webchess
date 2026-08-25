@@ -3,11 +3,13 @@ import type {
   PortiaReview,
   SurvivorCandidate,
 } from './contracts'
+import type { TrajectoryDirectionalRecord } from './trajectory-direction'
 import {
   PORTIA_ATTACK_TYPES,
   portiaCandidateAssessmentSchema,
   portiaReviewSchema,
 } from './contracts'
+import { CURRENT_LIFECYCLE_VERSIONS } from './versions'
 
 function duplicateValues(values: readonly string[]): string[] {
   const seen = new Set<string>()
@@ -22,6 +24,7 @@ function duplicateValues(values: readonly string[]): string[] {
 export function validatePortiaCandidateAssessment(
   value: unknown,
   survivor: SurvivorCandidate,
+  directionalRecord?: TrajectoryDirectionalRecord,
 ): PortiaCandidateAssessment {
   const assessment = portiaCandidateAssessmentSchema.parse(value)
   if (assessment.candidateId !== survivor.candidateId) {
@@ -48,6 +51,36 @@ export function validatePortiaCandidateAssessment(
   if (duplicateValues(assessment.missingEvidence).length > 0) {
     throw new Error('A Portia candidate repeats a missing-evidence item.')
   }
+  const hasAnyDirectionalBinding =
+    assessment.directionalRecordDigest !== undefined ||
+    assessment.directionalSignalKeys !== undefined ||
+    assessment.directionalInterpretation !== undefined ||
+    assessment.directionalAmendment !== undefined
+  if (directionalRecord) {
+    if (
+      assessment.directionalRecordDigest !== directionalRecord.digest ||
+      assessment.directionalInterpretation === undefined ||
+      assessment.directionalAmendment === undefined ||
+      assessment.directionalSignalKeys === undefined
+    ) {
+      throw new Error(
+        'Portia must bind every current assessment to the trajectory directional record.',
+      )
+    }
+    const allowedKeys = new Set(directionalRecord.survivingDirectionKeys)
+    if (
+      duplicateValues(assessment.directionalSignalKeys).length > 0 ||
+      assessment.directionalSignalKeys.some((key) => !allowedKeys.has(key))
+    ) {
+      throw new Error(
+        'Portia referenced a repeated or non-surviving trajectory direction.',
+      )
+    }
+  } else if (hasAnyDirectionalBinding) {
+    throw new Error(
+      'Portia cannot claim trajectory-directional provenance without the exact record.',
+    )
+  }
   return assessment
 }
 
@@ -55,6 +88,7 @@ export function validatePortiaReview(
   value: unknown,
   survivors: readonly SurvivorCandidate[],
   reviewedAnswerPromptDigest?: string,
+  directionalRecord?: TrajectoryDirectionalRecord,
 ): PortiaReview {
   const parsed = portiaReviewSchema.parse(value)
   if (
@@ -62,6 +96,22 @@ export function validatePortiaReview(
     parsed.reviewedAnswerPromptDigest !== reviewedAnswerPromptDigest
   ) {
     throw new Error('Portia reviewed a different answer prompt than requested.')
+  }
+  if (directionalRecord) {
+    if (
+      parsed.contractVersion !== CURRENT_LIFECYCLE_VERSIONS.portiaContract ||
+      parsed.directionalRecordVersion !== directionalRecord.version ||
+      parsed.directionalRecordDigest !== directionalRecord.digest ||
+      parsed.directionalSummary === undefined
+    ) {
+      throw new Error(
+        'Portia must retain the exact trajectory directional provenance.',
+      )
+    }
+  } else if (parsed.contractVersion === CURRENT_LIFECYCLE_VERSIONS.portiaContract) {
+    throw new Error(
+      'A current Portia review requires the exact trajectory directional record.',
+    )
   }
   const expectedIds = survivors.map((candidate) => candidate.candidateId).sort()
   const actualIds = parsed.assessments.map((assessment) => assessment.candidateId).sort()
@@ -117,7 +167,7 @@ export function validatePortiaReview(
     const survivor = survivors.find(
       (candidate) => candidate.candidateId === assessment.candidateId,
     )!
-    validatePortiaCandidateAssessment(assessment, survivor)
+    validatePortiaCandidateAssessment(assessment, survivor, directionalRecord)
     if (
       assessment.redundancyClusterId !== null &&
       !clusterIds.has(assessment.redundancyClusterId)

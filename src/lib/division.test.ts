@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { makeProblemFacets } from '../test/fixtures'
 import {
   composeProblemParts,
+  deriveDivisionCastAssignments,
   divisionSeed,
 } from './division'
 import { deterministicShuffle, HEXAGRAM_LENSES } from './problem'
@@ -40,6 +41,51 @@ describe('semantic problem division', () => {
 
     expect(replay).toEqual(first)
     expect(newDivision).not.toEqual(first)
+  })
+
+  it('precomputes the exact ID-to-lens assignments used by the board cast', () => {
+    const seed = 'durable-division-request-id'
+    const assignments = deriveDivisionCastAssignments(seed)
+    const byId = new Map(assignments.map((assignment) => [assignment.id, assignment]))
+    const parts = composeProblemParts(makeProblemFacets(), seed)
+
+    expect(assignments.map((assignment) => assignment.id)).toEqual(
+      Array.from({ length: 64 }, (_, index) => index + 1),
+    )
+    for (const part of parts) {
+      expect(byId.get(part.id)).toMatchObject({
+        dimension: part.dimension,
+        movement: part.movement,
+        hexagram: part.hexagram,
+        hexagramName: part.hexagramName,
+        theme: part.theme,
+      })
+    }
+    expect(assignments[0]?.directionalCue).toContain(
+      `${assignments[0]?.dimension} × ${assignments[0]?.movement}`,
+    )
+    expect(deriveDivisionCastAssignments(seed)).toEqual(assignments)
+    expect(deriveDivisionCastAssignments('different-request-id')).not.toEqual(assignments)
+  })
+
+  it('preserves bounded v4 cast applications while keeping legacy facets valid', () => {
+    const castDirected = makeProblemFacets().map((facet) => ({
+      ...facet,
+      castApplication:
+        `The fixed direction shapes facet ${facet.id} into a concrete inquiry.`,
+    }))
+    const directedParts = composeProblemParts(castDirected, 'cast-application-seed')
+    const legacyParts = composeProblemParts(
+      makeProblemFacets(),
+      'cast-application-seed',
+    )
+
+    expect(directedParts).toEqual(legacyParts.map((part) => ({
+      ...part,
+      castApplication:
+        `The fixed direction shapes facet ${part.id} into a concrete inquiry.`,
+    })))
+    expect(legacyParts.every((part) => part.castApplication === undefined)).toBe(true)
   })
 
   it('keeps dimension and movement metadata tied to each facet id original slot', () => {

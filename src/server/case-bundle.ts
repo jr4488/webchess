@@ -4,8 +4,11 @@ import {
 import { replayGameEvents } from '../lib/game-replay'
 import {
   CURRENT_LIFECYCLE_VERSIONS,
+  DIRECTIONAL_EPISTEMIC_BOUNDARY,
+  DIRECTIONAL_RECORD_VERSION,
   LIFECYCLE_STATES,
   canTransitionLifecycle,
+  deriveTrajectoryDirectionalRecord,
 } from '../lib/lifecycle'
 import {
   WEBCHESS_CASE_BUNDLE_FORMAT,
@@ -32,6 +35,23 @@ const MIGRATION_ID_PATTERN = /^\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*$/u
 const DIRECT_PAGE_MAX_RAW_BYTES = 1_048_576
 const DIRECT_PAGE_FAILURE_MAX_RAW_BYTES = DIRECT_PAGE_MAX_RAW_BYTES + 65_536
 const DIRECT_PAGE_MAX_ACCEPTED_CHARACTERS = 6_000
+const CASE_DIRECTIONAL_RECORD_BINDING_FORMAT =
+  'webchess-case-trajectory-direction/1' as const
+const LEGACY_DIRECTIONAL_LIFECYCLE_VERSION =
+  'webchess-lifecycle-v2.4' as const
+const LEGACY_DIRECTIONAL_VERSION_BINDINGS = Object.freeze({
+  softwareVersion: '2.2.0-rc.1',
+  lifecycleVersion: LEGACY_DIRECTIONAL_LIFECYCLE_VERSION,
+  portiaPromptVersion: 'webchess-portia-v4',
+  portiaContractVersion: 'webchess-portia-review-v2',
+  gateAlgorithmVersion: 'webchess-gate-v4',
+  retryPolicyVersion: 'webchess-retry-v2',
+  charlottePromptVersion: 'webchess-charlotte-v4',
+  charlotteContractVersion: 'webchess-charlotte-result-v1',
+  wilburRecordVersion: 'webchess-wilbur-v1',
+})
+const DIRECTIONAL_RECORD_VERIFICATION_BOUNDARY =
+  'Private-full verification replays the exported canonical events against the exact exported Division parts and independently rederives the directional record. Redacted profiles retain only the version, digest, and epistemic boundary, so their omitted record cannot be recomputed offline.'
 
 const PORTIA_EVIDENCE_STATES = new Set<string>([
   'portia_complete',
@@ -1247,6 +1267,185 @@ function normalizedTimestamp(value: string, label: string): string {
   return new Date(milliseconds).toISOString()
 }
 
+function currentDirectionalSource(
+  game: SqlRow,
+  lifecycleRun: SqlRow,
+  parts: readonly ProblemPart[],
+  events: readonly unknown[],
+) {
+  const gameDivisionSeed = game.divisionSeed
+  const lifecycleDivisionSeed = lifecycleRun.divisionSeed
+  if (
+    (typeof gameDivisionSeed !== 'string' &&
+      typeof gameDivisionSeed !== 'number') ||
+    gameDivisionSeed !== lifecycleDivisionSeed
+  ) {
+    throw new TypeError(
+      'The game and lifecycle Division seeds do not match for directional replay.',
+    )
+  }
+  if (
+    game.rulesVersion !== CURRENT_GAME_VERSIONS.rules ||
+    game.engineVersion !== CURRENT_GAME_VERSIONS.engine ||
+    game.castVersion !== CURRENT_GAME_VERSIONS.cast ||
+    game.eventVersion !== CURRENT_GAME_VERSIONS.event ||
+    lifecycleRun.rulesVersion !== CURRENT_GAME_VERSIONS.rules ||
+    lifecycleRun.engineVersion !== CURRENT_GAME_VERSIONS.engine ||
+    lifecycleRun.castVersion !== CURRENT_GAME_VERSIONS.cast ||
+    lifecycleRun.eventVersion !== CURRENT_GAME_VERSIONS.event
+  ) {
+    throw new TypeError(
+      'The trajectory directional record uses game versions unsupported by this verifier.',
+    )
+  }
+  const divisionDigest = requiredString(game, 'divisionDigest', 'game')
+  if (!SHA256_PATTERN.test(divisionDigest)) {
+    throw new TypeError('The game Division digest is invalid.')
+  }
+  return {
+    divisionDigest,
+    divisionSeed: gameDivisionSeed,
+    castSeed: requiredString(lifecycleRun, 'castSeed', 'lifecycleRun'),
+    trajectorySeed: requiredString(
+      lifecycleRun,
+      'trajectorySeed',
+      'lifecycleRun',
+    ),
+    versions: CURRENT_GAME_VERSIONS,
+    parts,
+    events,
+  } as const
+}
+
+function trajectoryDirectionalRecordEvidence(
+  input: CreateCaseBundleInput,
+  profile: WebChessCaseProfile,
+  originalParts: readonly CanonicalJson[],
+  canonicalEvents: readonly JsonObject[],
+): JsonObject {
+  const lifecycleVersion = requiredString(
+    input.lifecycleRun,
+    'lifecycleVersion',
+    'lifecycleRun',
+  )
+  const state = requiredString(input.lifecycleRun, 'state', 'lifecycleRun')
+  const terminal = TERMINAL_EVIDENCE_STATES.has(state)
+  const storedVersion = optionalString(
+    input.lifecycleRun,
+    'trajectoryDirectionalRecordVersion',
+  )
+  const storedDigest = optionalString(
+    input.lifecycleRun,
+    'trajectoryDirectionalRecordDigest',
+  )
+  const storedRecord = input.lifecycleRun.trajectoryDirectionalRecord ?? null
+  const hasRecord = storedRecord !== null
+  if (
+    Number(storedVersion !== null) +
+      Number(storedDigest !== null) +
+      Number(hasRecord) !== 0 &&
+    Number(storedVersion !== null) +
+      Number(storedDigest !== null) +
+      Number(hasRecord) !== 3
+  ) {
+    throw new TypeError(
+      'The trajectory directional record version, digest, and payload must be all present or all absent.',
+    )
+  }
+
+  if (!hasRecord) {
+    if (lifecycleVersion === CURRENT_LIFECYCLE_VERSIONS.lifecycle && terminal) {
+      throw new TypeError(
+        'A current terminal lifecycle requires a trajectory directional record.',
+      )
+    }
+    if (
+      lifecycleVersion !== CURRENT_LIFECYCLE_VERSIONS.lifecycle &&
+      lifecycleVersion !== LEGACY_DIRECTIONAL_LIFECYCLE_VERSION
+    ) {
+      throw new TypeError(
+        'The lifecycle version is unsupported for directional case export.',
+      )
+    }
+    const legacy = lifecycleVersion === LEGACY_DIRECTIONAL_LIFECYCLE_VERSION
+    return {
+      format: CASE_DIRECTIONAL_RECORD_BINDING_FORMAT,
+      status: legacy
+        ? 'legacy_pre_directional_generation'
+        : 'not_terminal',
+      recordAvailability: 'not_generated',
+      recordOmission: legacy
+        ? 'legacy_pre_directional_generation'
+        : 'not_terminal',
+      version: null,
+      digest: null,
+      fieldPartsDigest: null,
+      eventStreamDigest: null,
+      record: null,
+      epistemicBoundary: null,
+      verificationBoundary: DIRECTIONAL_RECORD_VERIFICATION_BOUNDARY,
+    }
+  }
+
+  if (!terminal) {
+    throw new TypeError(
+      'A nonterminal lifecycle cannot contain a trajectory directional record.',
+    )
+  }
+  if (lifecycleVersion !== CURRENT_LIFECYCLE_VERSIONS.lifecycle) {
+    throw new TypeError(
+      'A legacy lifecycle cannot be relabelled with a trajectory directional record.',
+    )
+  }
+  if (
+    storedVersion !== DIRECTIONAL_RECORD_VERSION ||
+    typeof storedDigest !== 'string' ||
+    !SHA256_PATTERN.test(storedDigest)
+  ) {
+    throw new TypeError(
+      'The stored trajectory directional record identity is invalid.',
+    )
+  }
+  const events = canonicalEvents.map((row) => row.event)
+  const recomputed = deriveTrajectoryDirectionalRecord(
+    currentDirectionalSource(
+      input.game,
+      input.lifecycleRun,
+      originalParts as unknown as readonly ProblemPart[],
+      events,
+    ),
+  )
+  if (
+    recomputed.version !== storedVersion ||
+    recomputed.digest !== storedDigest ||
+    !sameCanonicalJson(recomputed, storedRecord)
+  ) {
+    throw new TypeError(
+      'The stored trajectory directional record does not match the exported Division parts and canonical game events.',
+    )
+  }
+  const exactRecord = profile === 'private-full-v1'
+  return {
+    format: CASE_DIRECTIONAL_RECORD_BINDING_FORMAT,
+    status: 'bound',
+    recordAvailability: exactRecord
+      ? 'exact_record_included'
+      : 'profile_omitted',
+    recordOmission: exactRecord ? null : 'profile_omitted_exact_record',
+    version: recomputed.version,
+    digest: recomputed.digest,
+    fieldPartsDigest: exactRecord ? recomputed.field.partsDigest : null,
+    eventStreamDigest: exactRecord
+      ? recomputed.trajectory.eventStreamDigest
+      : null,
+    record: exactRecord
+      ? jsonValue(recomputed, 'trajectoryDirectionalRecord')
+      : null,
+    epistemicBoundary: jsonValue(recomputed.epistemicBoundary),
+    verificationBoundary: DIRECTIONAL_RECORD_VERIFICATION_BOUNDARY,
+  }
+}
+
 export function createCaseBundle(input: CreateCaseBundleInput): WebChessCaseBundle {
   const profile = input.profile
   const policy = PROFILE_FIELD_POLICIES[profile]
@@ -1279,6 +1478,12 @@ export function createCaseBundle(input: CreateCaseBundleInput): WebChessCaseBund
       `eventProvenance[${index}]`,
     ),
   }))
+  const trajectoryDirectionalRecord = trajectoryDirectionalRecordEvidence(
+    input,
+    profile,
+    originalParts,
+    gameEvents,
+  )
   const migrations = input.migrations.map((row, index) => pick(
     row,
     ['id', 'checksum', 'appliedAt'],
@@ -1332,6 +1537,7 @@ export function createCaseBundle(input: CreateCaseBundleInput): WebChessCaseBund
     },
     lifecycle: {
       run: pick(input.lifecycleRun, policy.lifecycleRun, 'lifecycleRun'),
+      trajectoryDirectionalRecord,
       researchRequests: pickRows(
         input.researchRequests,
         policy.researchRequests,
@@ -2483,10 +2689,17 @@ function verifyProfileShape(
   }
 
   const lifecycle = objectAt(data.lifecycle, 'data.lifecycle')
+  const hasTrajectoryDirectionalRecord = Object.hasOwn(
+    lifecycle,
+    'trajectoryDirectionalRecord',
+  )
   exactKeys(
     lifecycle,
     [
       'run',
+      ...(hasTrajectoryDirectionalRecord
+        ? ['trajectoryDirectionalRecord']
+        : []),
       'researchRequests',
       'researchSources',
       'portiaReviews',
@@ -2702,6 +2915,249 @@ function verifyProfileShape(
     errors.push('data.verificationBoundary does not match the canonical format boundary.')
   }
   return legacy
+}
+
+function verifyTrajectoryDirectionalEvidence(
+  data: Record<string, unknown>,
+  profile: WebChessCaseProfile,
+  replayParts: readonly ProblemPart[],
+  replayEvents: readonly unknown[],
+  replayTerminal: boolean,
+  errors: string[],
+  warnings: string[],
+  verified: string[],
+  notVerified: string[],
+): void {
+  const game = objectAt(
+    objectAt(data.game, 'data.game').record,
+    'data.game.record',
+  )
+  const lifecycle = objectAt(data.lifecycle, 'data.lifecycle')
+  const run = objectAt(lifecycle.run, 'data.lifecycle.run')
+  const lifecycleVersion = stringAt(
+    run.lifecycleVersion,
+    'data.lifecycle.run.lifecycleVersion',
+  )
+  const seedBoundary = objectAt(
+    lifecycle.seedBoundary,
+    'data.lifecycle.seedBoundary',
+  )
+  for (const field of [
+    'divisionSeed',
+    'castSeed',
+    'trajectorySeed',
+  ] as const) {
+    if (seedBoundary[field] !== run[field]) {
+      errors.push(
+        `Directional source seed ${field} does not match lifecycle.run.`,
+      )
+    }
+  }
+  if (
+    Object.hasOwn(game, 'divisionSeed') &&
+    game.divisionSeed !== run.divisionSeed
+  ) {
+    errors.push(
+      'Directional source Division seed does not match the bundled game.',
+    )
+  }
+
+  if (!Object.hasOwn(lifecycle, 'trajectoryDirectionalRecord')) {
+    if (lifecycleVersion !== LEGACY_DIRECTIONAL_LIFECYCLE_VERSION) {
+      errors.push(
+        'A current lifecycle bundle is missing trajectoryDirectionalRecord evidence.',
+      )
+    } else {
+      warnings.push(
+        'LEGACY DIRECTIONAL WARNING: this same-format v2.4 bundle predates the explicit trajectory-directional-record export envelope.',
+      )
+      notVerified.push(
+        'trajectory-derived I Ching direction for this legacy v2.4 bundle, because no directional record was generated or exported',
+      )
+    }
+    return
+  }
+
+  const evidence = objectAt(
+    lifecycle.trajectoryDirectionalRecord,
+    'data.lifecycle.trajectoryDirectionalRecord',
+  )
+  exactKeys(evidence, [
+    'format',
+    'status',
+    'recordAvailability',
+    'recordOmission',
+    'version',
+    'digest',
+    'fieldPartsDigest',
+    'eventStreamDigest',
+    'record',
+    'epistemicBoundary',
+    'verificationBoundary',
+  ], 'data.lifecycle.trajectoryDirectionalRecord')
+  if (
+    evidence.format !== CASE_DIRECTIONAL_RECORD_BINDING_FORMAT ||
+    evidence.verificationBoundary !==
+      DIRECTIONAL_RECORD_VERIFICATION_BOUNDARY
+  ) {
+    errors.push('Trajectory directional record boundary metadata is invalid.')
+  }
+
+  if (evidence.status === 'legacy_pre_directional_generation') {
+    if (
+      lifecycleVersion !== LEGACY_DIRECTIONAL_LIFECYCLE_VERSION ||
+      evidence.recordAvailability !== 'not_generated' ||
+      evidence.recordOmission !== 'legacy_pre_directional_generation' ||
+      evidence.version !== null ||
+      evidence.digest !== null ||
+      evidence.fieldPartsDigest !== null ||
+      evidence.eventStreamDigest !== null ||
+      evidence.record !== null ||
+      evidence.epistemicBoundary !== null
+    ) {
+      errors.push(
+        'Legacy trajectory directional record status is inconsistent.',
+      )
+    } else {
+      verified.push(
+        'explicit legacy_pre_directional_generation lifecycle status',
+      )
+      notVerified.push(
+        'trajectory-derived I Ching direction for this legacy v2.4 run, because it was not generated and was not retroactively fabricated',
+      )
+    }
+    return
+  }
+
+  if (evidence.status === 'not_terminal') {
+    if (
+      lifecycleVersion !== CURRENT_LIFECYCLE_VERSIONS.lifecycle ||
+      replayTerminal ||
+      evidence.recordAvailability !== 'not_generated' ||
+      evidence.recordOmission !== 'not_terminal' ||
+      evidence.version !== null ||
+      evidence.digest !== null ||
+      evidence.fieldPartsDigest !== null ||
+      evidence.eventStreamDigest !== null ||
+      evidence.record !== null ||
+      evidence.epistemicBoundary !== null
+    ) {
+      errors.push(
+        'Nonterminal trajectory directional record status is inconsistent.',
+      )
+    } else {
+      verified.push('explicit not-terminal directional-record status')
+    }
+    return
+  }
+
+  if (evidence.status !== 'bound') {
+    errors.push('Trajectory directional record status is unsupported.')
+    return
+  }
+  if (
+    lifecycleVersion !== CURRENT_LIFECYCLE_VERSIONS.lifecycle ||
+    !replayTerminal ||
+    evidence.version !== DIRECTIONAL_RECORD_VERSION ||
+    typeof evidence.digest !== 'string' ||
+    !SHA256_PATTERN.test(evidence.digest) ||
+    !sameCanonicalJson(
+      evidence.epistemicBoundary,
+      DIRECTIONAL_EPISTEMIC_BOUNDARY,
+    )
+  ) {
+    errors.push('Bound trajectory directional record provenance is invalid.')
+    return
+  }
+
+  if (profile !== 'private-full-v1') {
+    if (
+      evidence.recordAvailability !== 'profile_omitted' ||
+      evidence.recordOmission !== 'profile_omitted_exact_record' ||
+      evidence.fieldPartsDigest !== null ||
+      evidence.eventStreamDigest !== null ||
+      evidence.record !== null
+    ) {
+      errors.push(
+        'Redacted trajectory directional record omission is inconsistent.',
+      )
+    } else {
+      verified.push(
+        'directional record version, digest, epistemic boundary, and explicit profile omission',
+      )
+      notVerified.push(
+        'trajectory directional record recomputation, because the exact record and mapped Division parts are omitted by this profile',
+      )
+    }
+    return
+  }
+
+  if (
+    evidence.recordAvailability !== 'exact_record_included' ||
+    evidence.recordOmission !== null ||
+    typeof evidence.fieldPartsDigest !== 'string' ||
+    !SHA256_PATTERN.test(evidence.fieldPartsDigest) ||
+    typeof evidence.eventStreamDigest !== 'string' ||
+    !SHA256_PATTERN.test(evidence.eventStreamDigest) ||
+    evidence.record === null
+  ) {
+    errors.push(
+      'Private-full trajectory directional record availability is invalid.',
+    )
+    return
+  }
+
+  try {
+    const record = objectAt(
+      evidence.record,
+      'data.lifecycle.trajectoryDirectionalRecord.record',
+    )
+    const field = objectAt(
+      record.field,
+      'data.lifecycle.trajectoryDirectionalRecord.record.field',
+    )
+    const trajectory = objectAt(
+      record.trajectory,
+      'data.lifecycle.trajectoryDirectionalRecord.record.trajectory',
+    )
+    if (
+      record.version !== evidence.version ||
+      record.digest !== evidence.digest ||
+      field.partsDigest !== evidence.fieldPartsDigest ||
+      trajectory.eventStreamDigest !== evidence.eventStreamDigest
+    ) {
+      errors.push(
+        'Trajectory directional record identity does not match its export envelope.',
+      )
+      return
+    }
+    const recomputed = deriveTrajectoryDirectionalRecord(
+      currentDirectionalSource(
+        game,
+        run,
+        replayParts,
+        replayEvents,
+      ),
+    )
+    if (!sameCanonicalJson(recomputed, record)) {
+      errors.push(
+        'Trajectory directional record does not match the bundled Division parts and canonical game events.',
+      )
+      return
+    }
+    verified.push(
+      'exact trajectory directional record rederived from immutable Division parts and canonical game events',
+    )
+    verified.push(
+      'directional record digest, event-stream digest, parts digest, versions, and seeds',
+    )
+  } catch (error) {
+    errors.push(
+      `Trajectory directional record replay failed: ${
+        error instanceof Error ? error.message : 'invalid record'
+      }`,
+    )
+  }
 }
 
 function addUniqueId(
@@ -3023,17 +3479,21 @@ function checkLifecycleSemantics(
     errors.push(`Unsupported lifecycle state: ${state}.`)
   }
 
-  const lifecycleVersionFields = [
-    ['softwareVersion', CURRENT_LIFECYCLE_VERSIONS.software],
-    ['lifecycleVersion', CURRENT_LIFECYCLE_VERSIONS.lifecycle],
-    ['portiaPromptVersion', CURRENT_LIFECYCLE_VERSIONS.portiaPrompt],
-    ['portiaContractVersion', CURRENT_LIFECYCLE_VERSIONS.portiaContract],
-    ['gateAlgorithmVersion', CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm],
-    ['retryPolicyVersion', CURRENT_LIFECYCLE_VERSIONS.retryPolicy],
-    ['charlottePromptVersion', CURRENT_LIFECYCLE_VERSIONS.charlottePrompt],
-    ['charlotteContractVersion', CURRENT_LIFECYCLE_VERSIONS.charlotteContract],
-    ['wilburRecordVersion', CURRENT_LIFECYCLE_VERSIONS.wilburRecord],
-  ] as const
+  const versionBinding = run.lifecycleVersion ===
+      LEGACY_DIRECTIONAL_LIFECYCLE_VERSION
+    ? LEGACY_DIRECTIONAL_VERSION_BINDINGS
+    : {
+        softwareVersion: CURRENT_LIFECYCLE_VERSIONS.software,
+        lifecycleVersion: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+        portiaPromptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+        portiaContractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+        gateAlgorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+        retryPolicyVersion: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+        charlottePromptVersion: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+        charlotteContractVersion: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+        wilburRecordVersion: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      }
+  const lifecycleVersionFields = Object.entries(versionBinding)
   for (const [field, expected] of lifecycleVersionFields) {
     if (run[field] !== expected) {
       errors.push(`Lifecycle ${field} is unsupported by this verifier.`)
@@ -3519,6 +3979,18 @@ export function verifyCaseBundle(
       warnings.push('Board geometry and event legality were replayed with deterministic neutral problem parts because mapped text was redacted.')
     }
 
+    verifyTrajectoryDirectionalEvidence(
+      data,
+      bundle.profile,
+      parts as unknown as ProblemPart[],
+      events,
+      state.outcome !== null,
+      errors,
+      warnings,
+      verified,
+      notVerified,
+    )
+
     const migrationShapeErrorCount = errors.length
     const migrations = migrationLedger(data, errors)
     if (errors.length === migrationShapeErrorCount) {
@@ -3634,6 +4106,9 @@ export function caseBundleStatements(
           division_seed AS "divisionSeed", cast_seed AS "castSeed",
           trajectory_seed AS "trajectorySeed", retry_reason AS "retryReason",
           terminal_fingerprint AS "terminalFingerprint",
+          trajectory_directional_record_version AS "trajectoryDirectionalRecordVersion",
+          trajectory_directional_record_digest AS "trajectoryDirectionalRecordDigest",
+          trajectory_directional_record AS "trajectoryDirectionalRecord",
           answer_prompt_digest AS "answerPromptDigest",
           survivor_set AS survivors,
           portia_current_candidate_id AS "portiaCurrentCandidateId",

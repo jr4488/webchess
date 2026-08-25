@@ -13,6 +13,7 @@ export function validateCharlotteResult(
     portia.assessments.map((assessment) => [assessment.candidateId, assessment]),
   )
   const supportIds = new Set<string>()
+  const woundedSupportIds = new Set<string>()
 
   for (const candidateId of parsed.supportingCandidateIds) {
     if (supportIds.has(candidateId)) {
@@ -30,6 +31,7 @@ export function validateCharlotteResult(
       throw new Error('Charlotte may support claims only with preserved or wounded candidates.')
     }
     if (assessment.disposition === 'wounded') {
+      woundedSupportIds.add(candidateId)
       const retained = parsed.qualificationsByCandidateId[candidateId]
       if (!retained || retained !== assessment.requiredQualification) {
         throw new Error(
@@ -40,8 +42,12 @@ export function validateCharlotteResult(
   }
 
   for (const candidateId of Object.keys(parsed.qualificationsByCandidateId)) {
-    if (!supportIds.has(candidateId)) {
-      throw new Error('Charlotte included a qualification for an unsupported candidate.')
+    if (!woundedSupportIds.has(candidateId)) {
+      throw new Error(
+        supportIds.has(candidateId)
+          ? 'Charlotte may qualify only wounded supporting candidates.'
+          : 'Charlotte included a qualification for an unsupported candidate.',
+      )
     }
   }
 

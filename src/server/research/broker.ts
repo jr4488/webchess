@@ -29,11 +29,8 @@ import type {
   ResearchRequestContext,
 } from './types'
 import {
-  DIRECT_PAGE_DIGEST_ALGORITHM,
-  DIRECT_PAGE_EXTRACTOR_VERSION,
   DIRECT_PAGE_FETCH_TIMEOUT_MS,
   DIRECT_PAGE_FETCH_VERSION,
-  DIRECT_PAGE_RAW_DIGEST_ALGORITHM,
   SecureDirectPageFetcher,
   isResearchFetchFailure,
   normalizePublicHttpsUrl,
@@ -91,31 +88,6 @@ function sourcesToFetch(
       return left.ordinal - right.ordinal
     })
     .slice(0, RESEARCH_PAGE_FETCH_LIMIT)
-}
-
-function pageBudgetFailure(
-  source: Omit<ResearchSource, 'id' | 'createdAt'>,
-): ResearchFetchFailure {
-  return {
-    citationId: source.citationId,
-    requestedUrl: source.url,
-    finalUrl: null,
-    status: 'timed_out',
-    failureCode: 'page_fetch_budget_exhausted',
-    httpStatus: null,
-    fetchVersion: DIRECT_PAGE_FETCH_VERSION,
-    extractor: DIRECT_PAGE_EXTRACTOR_VERSION,
-    rawByteLength: 0,
-    rawContentDigest: null,
-    rawDigestAlgorithm: DIRECT_PAGE_RAW_DIGEST_ALGORITHM,
-    acceptedCharacterLength: 0,
-    truncated: false,
-    contentDigest: null,
-    digestAlgorithm: DIRECT_PAGE_DIGEST_ALGORITHM,
-    redirectChain: [source.url],
-    injectionSignalsDetected: [],
-    retrievedAt: new Date().toISOString(),
-  }
 }
 
 function cleanTitle(value: string, hostname: string): string {
@@ -273,10 +245,43 @@ export function normalizeCodexSearch(
   }
 }
 
+class DurableResearchDeadlineError extends Error {
+  override name = 'DurableResearchDeadlineError'
+}
+
+function durableResearchDeadline(record: ResearchRecord): number {
+  const startedAt = record.startedAt
+    ? new Date(record.startedAt).getTime()
+    : Number.NaN
+  if (!Number.isFinite(startedAt)) {
+    throw new DurableResearchDeadlineError(
+      'durable_research_deadline_invalid',
+    )
+  }
+  return startedAt + record.bounds.timeoutMs
+}
+
+function remainingResearchBudget(deadline: number): number {
+  return Math.max(0, Math.floor(deadline - Date.now()))
+}
+
+function assertResearchBudget(deadline: number): number {
+  const remainingMs = remainingResearchBudget(deadline)
+  if (remainingMs < 1) {
+    throw new DurableResearchDeadlineError(
+      'durable_research_deadline_expired',
+    )
+  }
+  return remainingMs
+}
+
 function failureStatus(error: unknown): {
   readonly code: string
   readonly status: 'failed' | 'refused' | 'timed_out'
 } {
+  if (error instanceof DurableResearchDeadlineError) {
+    return { code: error.message, status: 'timed_out' }
+  }
   if (error instanceof OpenClawCliError) {
     if (error.kind === 'timeout') {
       return { code: 'codex_search_timeout', status: 'timed_out' }
@@ -332,8 +337,9 @@ function configurationDigest(
 
 function staleSearching(record: ResearchRecord): boolean {
   if (record.status !== 'searching' || !record.startedAt) return false
-  return Date.now() - new Date(record.startedAt).getTime() >
-    record.bounds.timeoutMs + 5_000
+  const startedAt = new Date(record.startedAt).getTime()
+  if (!Number.isFinite(startedAt)) return true
+  return Date.now() >= startedAt + record.bounds.timeoutMs
 }
 
 export class DurableResearchBroker implements ResearchBrokerPort {
@@ -419,7 +425,7 @@ export class DurableResearchBroker implements ResearchBrokerPort {
       })
     }
     const effectiveTimeoutMs = Math.min(
-      configured.timeoutMs,
+      configured.searchTimeoutMs,
       RESEARCH_BOUNDS.timeoutMs,
     )
     const appliedConfigurationDigest = configurationDigest(
@@ -438,41 +444,52 @@ export class DurableResearchBroker implements ResearchBrokerPort {
     if (!claim.created) return claim.record
     const started = claim.record
     if (started.status !== 'searching') return started
-
-    const researchConfig = {
-      ...configured,
-      maxOutputBytes: Math.min(configured.maxOutputBytes, RESEARCH_MAX_OUTPUT_BYTES),
-      timeoutMs: effectiveTimeoutMs,
-      transport: 'local' as const,
-    }
     try {
-      const brokerStartedAt = Date.now()
+      // The database timestamp and persisted bound form the one durable
+      // operation deadline. Time spent returning the winning claim therefore
+      // consumes provider headroom instead of silently restarting the clock.
+      const operationDeadline = durableResearchDeadline(started)
+      const searchHeadroomMs = assertResearchBudget(operationDeadline)
+      if (searchHeadroomMs < 1_000) {
+        throw new DurableResearchDeadlineError(
+          'durable_research_deadline_expired',
+        )
+      }
+      const researchConfig = {
+        ...configured,
+        maxOutputBytes: Math.min(
+          configured.maxOutputBytes,
+          RESEARCH_MAX_OUTPUT_BYTES,
+        ),
+        searchTimeoutMs: Math.min(effectiveTimeoutMs, searchHeadroomMs),
+        transport: 'local' as const,
+      }
       const result = await runOpenClawWebSearch(decision.query, researchConfig, {
         limit: RESEARCH_BOUNDS.resultLimit,
         maxContentChars: RESEARCH_BOUNDS.synthesisCharacterLimit + 512,
         maxSearchActivities: RESEARCH_MAX_SEARCH_ACTIVITIES,
       })
+      assertResearchBudget(operationDeadline)
       const normalized = normalizeCodexSearch(result)
+      assertResearchBudget(operationDeadline)
       const retrievedFacts: ResearchRetrievedFact[] = []
       const fetchFailures: ResearchFetchFailure[] = []
       const injectionSignalsDetected = new Set(
         normalized.injectionSignalsDetected,
       )
       for (const source of sourcesToFetch(normalized.sources)) {
-        const remainingMs = effectiveTimeoutMs - (Date.now() - brokerStartedAt)
-        if (remainingMs < 1) {
-          fetchFailures.push(pageBudgetFailure(source))
-          continue
-        }
+        const remainingMs = assertResearchBudget(operationDeadline)
         try {
           const fetched = await this.pageFetcher.fetch(
             source,
             Math.min(DIRECT_PAGE_FETCH_TIMEOUT_MS, remainingMs),
           )
+          assertResearchBudget(operationDeadline)
           retrievedFacts.push(fetched.fact)
           fetched.injectionSignalsDetected.forEach((signal) =>
             injectionSignalsDetected.add(signal))
         } catch (error) {
+          assertResearchBudget(operationDeadline)
           if (!isResearchFetchFailure(error)) throw error
           fetchFailures.push(error)
           error.injectionSignalsDetected.forEach((signal) =>
@@ -485,6 +502,7 @@ export class DurableResearchBroker implements ResearchBrokerPort {
         retrievedFacts,
         fetchFailures,
       }))
+      assertResearchBudget(operationDeadline)
       return this.repository.complete({
         ownerId: input.ownerId,
         requestId: started.id,

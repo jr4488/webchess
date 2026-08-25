@@ -9,13 +9,18 @@ export interface OpenClawConfig {
   bridgeToken: string | null
   bridgeUrl: string | null
   maxOutputBytes: number
+  /** Per-turn model ceiling. Answer may use two turns within its own aggregate window. */
   timeoutMs: number
+  /** One complete consented Codex Hosted Search request. */
+  searchTimeoutMs: number
   transport: OpenClawTransport
 }
 
 export const DEFAULT_OPENCLAW_TIMEOUT_MS = 130_000
 export const MIN_OPENCLAW_TIMEOUT_MS = 1_000
 export const MAX_OPENCLAW_TIMEOUT_MS = 150_000
+export const DEFAULT_OPENCLAW_SEARCH_TIMEOUT_MS = 300_000
+export const MAX_OPENCLAW_SEARCH_TIMEOUT_MS = 300_000
 export const MAX_OPENCLAW_OUTPUT_BYTES = 4 * 1024 * 1024
 
 export class OpenClawConfigurationError extends Error {
@@ -49,6 +54,24 @@ function resolveTimeout(value: string | undefined): number {
   ) {
     throw new OpenClawConfigurationError(
       `WEBCHESS_OPENCLAW_TIMEOUT_MS must be an integer from ${MIN_OPENCLAW_TIMEOUT_MS} through ${MAX_OPENCLAW_TIMEOUT_MS}.`,
+    )
+  }
+  return timeout
+}
+
+function resolveSearchTimeout(value: string | undefined): number {
+  if (value === undefined || value.trim() === '') {
+    return DEFAULT_OPENCLAW_SEARCH_TIMEOUT_MS
+  }
+
+  const timeout = Number(value)
+  if (
+    !Number.isInteger(timeout) ||
+    timeout < MIN_OPENCLAW_TIMEOUT_MS ||
+    timeout > MAX_OPENCLAW_SEARCH_TIMEOUT_MS
+  ) {
+    throw new OpenClawConfigurationError(
+      `WEBCHESS_OPENCLAW_SEARCH_TIMEOUT_MS must be an integer from ${MIN_OPENCLAW_TIMEOUT_MS} through ${MAX_OPENCLAW_SEARCH_TIMEOUT_MS}.`,
     )
   }
   return timeout
@@ -127,6 +150,9 @@ export function resolveOpenClawConfig(
     binary,
     ...resolveBridge(environment),
     maxOutputBytes: MAX_OPENCLAW_OUTPUT_BYTES,
+    searchTimeoutMs: resolveSearchTimeout(
+      environment.WEBCHESS_OPENCLAW_SEARCH_TIMEOUT_MS,
+    ),
     timeoutMs: resolveTimeout(environment.WEBCHESS_OPENCLAW_TIMEOUT_MS),
     transport: resolveTransport(environment.WEBCHESS_OPENCLAW_TRANSPORT),
   }

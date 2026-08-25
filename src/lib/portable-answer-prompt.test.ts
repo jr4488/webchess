@@ -5,17 +5,26 @@ import {
   type GameView,
 } from './game-contract'
 import type {
+  DirectionalGateResult,
+  DirectionalPortiaReview,
   LifecycleAggregate,
   PortiaReview,
 } from './lifecycle/contracts'
-import { CURRENT_LIFECYCLE_VERSIONS } from './lifecycle/versions'
+import {
+  CURRENT_LIFECYCLE_VERSIONS,
+  LEGACY_GATE_ALGORITHM_VERSION,
+  LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+} from './lifecycle/versions'
 import { buildPortableAnswerPrompt } from './portable-answer-prompt'
 import {
   RESEARCH_CONSENT_VERSION,
   type ResearchRecord,
 } from './research/contracts'
 import type { DurableGame } from './webchess-api'
-import { makeProblemParts } from '../test/fixtures'
+import {
+  makeProblemParts,
+  makeTrajectoryDirectionalFixture,
+} from '../test/fixtures'
 import type { CaptureRecord, Piece } from '../types'
 
 const GAME_ID = '10000000-0000-4000-8000-000000000001'
@@ -124,7 +133,7 @@ function makeGame(): DurableGame {
 
 function makePortiaReview(): PortiaReview {
   return {
-    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    contractVersion: LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
     reviewedAnswerPromptDigest: ANSWER_PROMPT_DIGEST,
     promptDecision: 'permit',
     promptDecisionRationale:
@@ -308,6 +317,8 @@ function makeLifecycle(
     trajectorySeed: 'TRAJECTORY_SEED_MUST_NOT_LEAK',
     retryReason: 'The first board lacked an evidence-bearing countercase.',
     terminalFingerprint: TERMINAL_FINGERPRINT,
+    trajectoryDirectionalRecord: null,
+    trajectoryDirectionalRecordStatus: 'legacy_pre_directional_generation',
     answerPromptDigest: ANSWER_PROMPT_DIGEST,
     answerUserPrompt: EXACT_ANSWER_USER_PROMPT,
     answerUserPromptSha256: ANSWER_USER_PROMPT_SHA256,
@@ -323,7 +334,7 @@ function makeLifecycle(
     },
     portia: makePortiaReview(),
     gate: {
-      algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      algorithmVersion: LEGACY_GATE_ALGORITHM_VERSION,
       passed: true,
       usableCandidateCount: 1,
       preservedCount: 0,
@@ -359,14 +370,15 @@ function makeLifecycle(
     wilburObservations: [],
     versions: {
       software: CURRENT_LIFECYCLE_VERSIONS.software,
-      lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
-      portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
-      portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
-      gateAlgorithm: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      lifecycle: 'webchess-lifecycle-v2.4',
+      portiaPrompt: 'webchess-portia-v4',
+      portiaContract: LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+      gateAlgorithm: LEGACY_GATE_ALGORITHM_VERSION,
       retryPolicy: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
       charlottePrompt: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
       charlotteContract: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
       wilburRecord: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      trajectoryDirectionalRecord: null,
       rules: CURRENT_GAME_VERSIONS.rules,
       engine: CURRENT_GAME_VERSIONS.engine,
       cast: CURRENT_GAME_VERSIONS.cast,
@@ -434,7 +446,8 @@ describe('buildPortableAnswerPrompt', () => {
     }
 
     expect(prompt).toContain('Answer the original question directly')
-    expect(prompt).toContain('attention metaphor—not proof, prophecy')
+    expect(prompt).toContain('mandatory directional method inputs')
+    expect(prompt).toContain('not proof, prophecy')
     expect(prompt).toContain('Honor Portia exactly')
     expect(prompt).toContain(
       'model-generated search synthesis from bounded direct-page text',
@@ -561,6 +574,174 @@ describe('buildPortableAnswerPrompt', () => {
 
     expect(payload.game.researchConsent).toEqual(game.researchConsent)
     expect(payload.visibleResearch).toEqual([])
+  })
+
+  it('exports the complete current trajectory direction and its scrutiny binding', () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const legacyPortia = makePortiaReview()
+    const directionalPortia: DirectionalPortiaReview = {
+      ...legacyPortia,
+      contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      directionalRecordVersion: fixture.record.version,
+      directionalRecordDigest: fixture.record.digest,
+      directionalSummary:
+        'The canonical replay retained eight cast-qualified directions for scrutiny.',
+      assessments: [
+        ...legacyPortia.assessments.map((assessment) => ({
+          ...assessment,
+          directionalRecordDigest: fixture.record.digest,
+          directionalSignalKeys: [fixture.record.survivingDirectionKeys[0]!],
+          directionalInterpretation:
+            'The replay-ranked direction changes which bounded observation matters first.',
+          directionalAmendment:
+            'Make the replay-ranked direction materially shape the reversible next step.',
+        })),
+        {
+          ...legacyPortia.assessments[0]!,
+          candidateId: 'candidate-excluded-directional-audit',
+          disposition: 'consumed',
+          requiredQualification: null,
+          directionalRecordDigest: fixture.record.digest,
+          directionalSignalKeys: [fixture.record.survivingDirectionKeys[1]!],
+          directionalInterpretation:
+            'EXCLUDED_PORTABLE_INTERPRETATION_MUST_NOT_SHAPE_SYNTHESIS',
+          directionalAmendment:
+            'EXCLUDED_PORTABLE_AMENDMENT_MUST_NOT_SHAPE_SYNTHESIS',
+        },
+      ],
+    }
+    const legacyLifecycle = makeLifecycle()
+    const legacyGate = legacyLifecycle.gate!
+    const directionalGate: DirectionalGateResult = {
+      ...legacyGate,
+      algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      directionalRecordVersion: fixture.record.version,
+      directionalRecordDigest: fixture.record.digest,
+      survivingDirectionKeys: [...fixture.record.survivingDirectionKeys],
+      directionalBindingsSatisfied: true,
+    }
+    const game: DurableGame = {
+      ...makeGame(),
+      revision: fixture.state.completedPlies,
+      status: 'answered',
+      division: {
+        seed: fixture.divisionSeed,
+        facets: fixture.parts.map((part) => ({
+          id: part.id,
+          title: part.title,
+          focus: part.focus,
+          question: part.prompt,
+          keyword: part.keyword,
+          castApplication: part.castApplication,
+        })),
+        parts: fixture.parts,
+        model: 'gpt-5.6-sol',
+      },
+      state: fixture.state,
+    }
+    const lifecycle = makeLifecycle({
+      divisionSeed: fixture.divisionSeed,
+      castSeed: fixture.castSeed,
+      trajectorySeed: fixture.trajectorySeed,
+      trajectoryDirectionalRecord: fixture.record,
+      trajectoryDirectionalRecordStatus: 'bound',
+      portia: directionalPortia,
+      gate: directionalGate,
+      versions: {
+        ...legacyLifecycle.versions,
+        lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+        portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+        portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+        gateAlgorithm: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+        trajectoryDirectionalRecord: fixture.record.version,
+      },
+    })
+
+    const prompt = buildPortableAnswerPrompt(game, lifecycle)
+    const payload = extractPayload(prompt) as {
+      trajectoryDirectionalRecord: typeof fixture.record
+      trajectoryDirectionalScrutiny: {
+        recordDigest: string
+        survivingDirectionKeys: string[]
+        humanExplanation: string[]
+        epistemicBoundary: typeof fixture.record.epistemicBoundary
+        portiaDirectionalAmendments: Array<{ amendment: string }>
+        excludedPortiaDirectionalAssessments: Array<{
+          candidateId: string
+          supportingAuthority: boolean
+          auditStatus: string
+        }>
+      }
+      portiaFinalReview: {
+        assessments: Array<Record<string, unknown>>
+      }
+    }
+
+    expect(prompt).toContain('required, first-class directional input')
+    expect(prompt).toContain('not external factual evidence')
+    expect(prompt).toContain('mandatory directional method inputs')
+    expect(prompt).not.toContain(
+      'EXCLUDED_PORTABLE_INTERPRETATION_MUST_NOT_SHAPE_SYNTHESIS',
+    )
+    expect(prompt).not.toContain(
+      'EXCLUDED_PORTABLE_AMENDMENT_MUST_NOT_SHAPE_SYNTHESIS',
+    )
+    expect(payload.trajectoryDirectionalRecord).toEqual(fixture.record)
+    expect(payload.trajectoryDirectionalScrutiny).toMatchObject({
+      recordDigest: fixture.record.digest,
+      survivingDirectionKeys: fixture.record.survivingDirectionKeys,
+      humanExplanation: fixture.record.explanation,
+      epistemicBoundary: fixture.record.epistemicBoundary,
+    })
+    expect(
+      payload.trajectoryDirectionalScrutiny.portiaDirectionalAmendments[0]
+        ?.amendment,
+    ).toBe(directionalPortia.assessments[0]?.directionalAmendment)
+    expect(
+      payload.trajectoryDirectionalScrutiny.portiaDirectionalAmendments,
+    ).toHaveLength(1)
+    expect(
+      payload.trajectoryDirectionalScrutiny
+        .excludedPortiaDirectionalAssessments,
+    ).toContainEqual({
+      candidateId: 'candidate-excluded-directional-audit',
+      disposition: 'consumed',
+      signalKeys: [fixture.record.survivingDirectionKeys[1]],
+      supportingAuthority: false,
+      auditStatus: 'excluded_by_portia',
+    })
+    expect(payload.portiaFinalReview.assessments[1]).toMatchObject({
+      candidateId: 'candidate-excluded-directional-audit',
+      disposition: 'consumed',
+      directionalAuthority: 'audit_only_non_supporting',
+    })
+    expect(payload.portiaFinalReview.assessments[1]).not.toHaveProperty(
+      'directionalAmendment',
+    )
+
+    for (const versions of [
+      {
+        ...lifecycle.versions,
+        lifecycle: 'webchess-lifecycle-v2.4',
+      },
+      {
+        ...lifecycle.versions,
+        portiaPrompt: 'webchess-portia-v4',
+      },
+      {
+        ...lifecycle.versions,
+        portiaContract: LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+      },
+      {
+        ...lifecycle.versions,
+        gateAlgorithm: LEGACY_GATE_ALGORITHM_VERSION,
+      },
+    ]) {
+      expect(() => buildPortableAnswerPrompt(game, {
+        ...lifecycle,
+        versions,
+      } as LifecycleAggregate)).toThrow(/version tuple/u)
+    }
   })
 
   it('does not copy provider prompts, generated output, request ids, seeds, activities, or unknown fields', () => {

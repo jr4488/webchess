@@ -300,7 +300,8 @@ export interface SettleModelRequestSuccess extends SettleModelRequestBase {
 }
 
 export interface SettleModelRequestFailure extends SettleModelRequestBase {
-  readonly outcome: 'failed'
+  /** Indeterminate means provider work began but no trustworthy result exists. */
+  readonly outcome: 'failed' | 'indeterminate'
   readonly failureCode: string
   readonly providerResponseId?: string
   readonly providerHttpStatus?: number
@@ -320,7 +321,7 @@ export type SettleModelRequestCode =
 export type SettleModelRequestResult =
   | {
       readonly ok: true
-      readonly status: 'succeeded' | 'failed'
+      readonly status: 'succeeded' | 'failed' | 'indeterminate'
       readonly alreadySettled: boolean
     }
   | {

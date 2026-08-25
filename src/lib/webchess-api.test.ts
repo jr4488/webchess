@@ -154,6 +154,8 @@ const CHARLOTTE_UNAVAILABLE_LIFECYCLE = {
   trajectorySeed: 'trajectory-seed',
   retryReason: null,
   terminalFingerprint: 'f'.repeat(64),
+  trajectoryDirectionalRecord: null,
+  trajectoryDirectionalRecordStatus: 'legacy_pre_directional_generation',
   answerPromptDigest: 'd'.repeat(64),
   answerUserPrompt: null,
   answerUserPromptSha256: null,
@@ -178,7 +180,10 @@ const CHARLOTTE_UNAVAILABLE_LIFECYCLE = {
   webMemoryEvidence: [],
   activities: [],
   research: [],
-  versions: {},
+  versions: {
+    lifecycle: 'webchess-lifecycle-v2.4',
+    trajectoryDirectionalRecord: null,
+  },
   createdAt: '2026-08-02T18:00:00.000Z',
   updatedAt: '2026-08-02T18:03:00.000Z',
 }

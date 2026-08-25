@@ -119,6 +119,7 @@ describe('data-control-only service adapter', () => {
     ])
     const outsideBoundary = graph.filter((filePath) =>
       filePath !== 'src/types.ts' &&
+      filePath !== 'src/server/model-operation-timeouts.ts' &&
       !filePath.startsWith('src/server/db/') &&
       !filePath.startsWith('src/server/usage/') &&
       !allowedHttpModules.has(filePath),

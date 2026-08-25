@@ -3,12 +3,19 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 
 import {
+  COVERAGE_TAGS,
   CURRENT_LIFECYCLE_VERSIONS,
   CURRENT_WEB_MEMORY_CONSENT_VERSION,
   CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
+  GATE_RECOMMENDATIONS,
+  LEGACY_GATE_ALGORITHM_VERSION,
+  LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
   assertLifecycleTransition,
   canReopenInsufficientBasis,
   charlotteResultSchema,
+  currentPortiaReviewSchema,
+  deriveSurvivorCandidates,
+  legacyPromptBoundPortiaReviewSchema,
   legacyPortiaReviewSchema,
   portiaCandidateAssessmentSchema,
   portiaReviewSchema,
@@ -30,7 +37,16 @@ import type {
   WilburObservation,
 } from '../../lib/lifecycle'
 import {
+  DIRECTIONAL_RECORD_VERSION,
+  verifyTrajectoryDirectionalRecord,
+} from '../../lib/lifecycle/trajectory-direction'
+import type { TrajectoryDirectionalRecord } from '../../lib/lifecycle/trajectory-direction'
+import { CURRENT_GAME_VERSIONS } from '../../lib/game-contract'
+import type { GameEvent } from '../../lib/game-contract'
+import { replayGameEvents } from '../../lib/game-replay'
+import {
   charlotteResultRowSchema,
+  gameEventRowSchema,
   gateDecisionRowSchema,
   hashCanonicalJson,
   lifecycleEventRowSchema,
@@ -44,6 +60,8 @@ import {
 } from '../db'
 import type {
   CharlotteResultRow,
+  CanonicalJson,
+  GameEventRow,
   GateDecisionRow,
   LifecycleEventRow,
   LifecycleRunRow,
@@ -89,6 +107,352 @@ import type {
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SHA256_PATTERN = /^[0-9a-f]{64}$/
+const gateResultBaseShape = {
+  passed: z.boolean(),
+  usableCandidateCount: z.number().int().nonnegative(),
+  preservedCount: z.number().int().nonnegative(),
+  woundedCount: z.number().int().nonnegative(),
+  consumedCount: z.number().int().nonnegative(),
+  unresolvedCount: z.number().int().nonnegative(),
+  independentClusterCount: z.number().int().nonnegative(),
+  coverageResults: z.array(z.strictObject({
+    tag: z.enum(COVERAGE_TAGS),
+    satisfied: z.boolean(),
+    candidateIds: z.array(z.string().min(3).max(220)).max(32),
+  })).length(COVERAGE_TAGS.length),
+  severeUnresolvedObjectionCount: z.number().int().nonnegative(),
+  contradictionResults: z.strictObject({
+    fatalUnaddressedIds: z.array(z.string().min(1).max(120)).max(24),
+    tensionCandidatePairs: z.array(
+      z.tuple([
+        z.string().min(3).max(220),
+        z.string().min(3).max(220),
+      ]),
+    ).max(16),
+  }),
+  missingRequirements: z.array(z.string().min(1).max(2_000)).max(64),
+  recommendedNextTransition: z.enum(GATE_RECOMMENDATIONS),
+  explanation: z.string().min(1).max(8_000),
+  inputDigest: z.string().regex(SHA256_PATTERN),
+}
+const legacyGateResultSchema = z.strictObject({
+  algorithmVersion: z.literal(LEGACY_GATE_ALGORITHM_VERSION),
+  ...gateResultBaseShape,
+})
+const currentGateResultSchema = z.strictObject({
+  algorithmVersion: z.literal(CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm),
+  ...gateResultBaseShape,
+  directionalRecordVersion: z.string().min(3).max(80),
+  directionalRecordDigest: z.string().regex(SHA256_PATTERN),
+  survivingDirectionKeys: z.array(z.string().min(1).max(160)).min(1).max(64),
+  directionalBindingsSatisfied: z.boolean(),
+})
+const persistedGateResultSchema = z.discriminatedUnion('algorithmVersion', [
+  legacyGateResultSchema,
+  currentGateResultSchema,
+])
+const directionalSourceRowSchema = z.object({
+  division_seed: z.string().min(1).max(512),
+  division_digest: z.string().regex(SHA256_PATTERN),
+  problem_parts: z.array(z.unknown()).length(64),
+  status: z.string().min(1).max(40),
+  outcome: z.record(z.string(), z.unknown()).nullable(),
+  event_version: z.number().int().positive(),
+  rules_version: z.string().min(1).max(80),
+  engine_version: z.string().min(1).max(80),
+  cast_version: z.string().min(1).max(80),
+})
+type DirectionalSourceRow = z.infer<typeof directionalSourceRowSchema>
+
+interface TrustedDirectionalSource {
+  readonly row: DirectionalSourceRow
+  readonly events: readonly GameEvent[]
+}
+
+function directionalCanonicalHash(value: unknown): string {
+  return hashCanonicalJson(JSON.parse(json(value)) as CanonicalJson)
+}
+
+function directionalRecordExpectedSource(
+  row: LifecycleRunRow,
+  divisionDigest: string,
+) {
+  if (row.lifecycle_version !== CURRENT_LIFECYCLE_VERSIONS.lifecycle) {
+    throw new LifecycleRepositoryError(
+      'invalid-state',
+      'A legacy lifecycle cannot be relabelled with a current trajectory directional record.',
+    )
+  }
+  if (
+    row.event_version !== CURRENT_GAME_VERSIONS.event ||
+    row.rules_version !== CURRENT_GAME_VERSIONS.rules ||
+    row.engine_version !== CURRENT_GAME_VERSIONS.engine ||
+    row.cast_version !== CURRENT_GAME_VERSIONS.cast
+  ) {
+    throw new LifecycleRepositoryError(
+      'invalid-state',
+      'Trajectory directional record v1 cannot relabel a legacy game version.',
+    )
+  }
+  return {
+    divisionDigest,
+    divisionSeed: row.division_seed,
+    castSeed: row.cast_seed,
+    trajectorySeed: row.trajectory_seed,
+    versions: CURRENT_GAME_VERSIONS,
+  }
+}
+
+function directionalEventFromRow(row: GameEventRow): GameEvent {
+  if (row.kind === 'pass') {
+    return {
+      version: CURRENT_GAME_VERSIONS.event,
+      type: 'forced-pass',
+      ply: row.ply,
+      side: row.side,
+      reason: 'no-legal-move',
+    }
+  }
+  if (
+    row.piece_id === null ||
+    row.from_ring === null ||
+    row.from_sector === null ||
+    row.to_ring === null ||
+    row.to_sector === null
+  ) {
+    throw new LifecycleRepositoryError(
+      'invalid-state',
+      `Trusted game event ${row.ply} is incomplete.`,
+    )
+  }
+  return {
+    version: CURRENT_GAME_VERSIONS.event,
+    type: 'move',
+    ply: row.ply,
+    side: row.side,
+    pieceId: row.piece_id,
+    from: { ring: row.from_ring, sector: row.from_sector },
+    to: { ring: row.to_ring, sector: row.to_sector },
+    ...(row.captured_piece_id === null
+      ? {}
+      : { capturedPieceId: row.captured_piece_id }),
+    ...(row.promoted_to === null ? {} : { promotedTo: row.promoted_to }),
+  }
+}
+
+function directionalSourceFromResults(
+  gameResult: SqlResult,
+  eventResult: SqlResult,
+): TrustedDirectionalSource {
+  let row: DirectionalSourceRow | undefined
+  let events: readonly GameEventRow[]
+  try {
+    row = parseOptionalResultRow(gameResult, directionalSourceRowSchema)
+    events = parseResultRows(eventResult, gameEventRowSchema)
+  } catch (error) {
+    throw new LifecycleRepositoryError(
+      'integrity-error',
+      'The trusted game source for the trajectory directional record is invalid.',
+      { cause: error },
+    )
+  }
+  if (!row) {
+    throw new LifecycleRepositoryError(
+      'not-found',
+      'The trusted game source for the trajectory directional record was not found.',
+    )
+  }
+  return {
+    row,
+    events: events.map(directionalEventFromRow),
+  }
+}
+
+function directionalRecordSourceMatches(
+  record: TrajectoryDirectionalRecord,
+  source: TrustedDirectionalSource,
+): boolean {
+  if (
+    !['completed', 'answering', 'answer_failed', 'answered'].includes(
+      source.row.status,
+    ) ||
+    source.row.outcome === null
+  ) {
+    return false
+  }
+  const embeddedParts = record.field.parts.map((entry) => entry.part)
+  const embeddedEvents = record.trajectory.events.map((entry) => entry.event)
+  const expectedOutcome = {
+    winner: record.outcome.winner,
+    reason: record.outcome.reason,
+    completedTurn: record.outcome.completedTurn,
+    ...(record.outcome.terminalCaptureId === null
+      ? {}
+      : {
+          terminalCapture: {
+            id: record.outcome.terminalCaptureId,
+          },
+        }),
+  }
+  const persistedOutcome = source.row.outcome
+  const persistedTerminalCapture = persistedOutcome.terminalCapture
+  const persistedOutcomeProjection = {
+    winner: persistedOutcome.winner,
+    reason: persistedOutcome.reason,
+    completedTurn: persistedOutcome.completedTurn,
+    ...(persistedTerminalCapture && typeof persistedTerminalCapture === 'object'
+      ? {
+          terminalCapture: {
+            id: (persistedTerminalCapture as Record<string, unknown>).id,
+          },
+        }
+      : {}),
+  }
+  return (
+    record.division.digest === source.row.division_digest &&
+    String(record.division.seed) === source.row.division_seed &&
+    directionalCanonicalHash(embeddedParts) ===
+      directionalCanonicalHash(source.row.problem_parts) &&
+    directionalCanonicalHash(embeddedEvents) ===
+      directionalCanonicalHash(source.events) &&
+    directionalCanonicalHash(expectedOutcome) ===
+      directionalCanonicalHash(persistedOutcomeProjection)
+  )
+}
+
+function verifyDirectionalRecordAgainstTrustedSource(
+  value: unknown,
+  lifecycle: LifecycleRunRow,
+  source: TrustedDirectionalSource,
+  errorCode: 'invalid-input' | 'invalid-state',
+): TrajectoryDirectionalRecord {
+  if (
+    source.row.division_seed !== lifecycle.division_seed ||
+    source.row.event_version !== lifecycle.event_version ||
+    source.row.rules_version !== lifecycle.rules_version ||
+    source.row.engine_version !== lifecycle.engine_version ||
+    source.row.cast_version !== lifecycle.cast_version
+  ) {
+    throw new LifecycleRepositoryError(
+      errorCode,
+      'The lifecycle provenance does not match its trusted game source.',
+    )
+  }
+
+  let record: TrajectoryDirectionalRecord
+  try {
+    record = verifyTrajectoryDirectionalRecord(
+      value,
+      directionalRecordExpectedSource(
+        lifecycle,
+        source.row.division_digest,
+      ),
+    )
+  } catch (error) {
+    throw new LifecycleRepositoryError(
+      errorCode,
+      'The trajectory directional record failed replay verification.',
+      { cause: error },
+    )
+  }
+  if (
+    record.version !== DIRECTIONAL_RECORD_VERSION ||
+    !directionalRecordSourceMatches(record, source)
+  ) {
+    throw new LifecycleRepositoryError(
+      errorCode,
+      'The trajectory directional record does not match the trusted game field and event log.',
+    )
+  }
+  return record
+}
+
+function assertDirectionalSurvivorBinding(
+  record: TrajectoryDirectionalRecord,
+  survivors: readonly SurvivorCandidate[],
+  fingerprint: string,
+  lifecycle: LifecycleRunRow,
+  source: TrustedDirectionalSource,
+  errorCode: 'invalid-input' | 'invalid-state' = 'invalid-input',
+): void {
+  if (
+    survivors.length === 0 ||
+    stableTerminalFingerprint(survivors) !== fingerprint
+  ) {
+    throw new LifecycleRepositoryError(
+      errorCode,
+      'The terminal fingerprint does not match the supplied survivor ecology.',
+    )
+  }
+  let expected: readonly SurvivorCandidate[]
+  try {
+    const parts = record.field.parts.map((entry) => entry.part)
+    const replay = replayGameEvents(source.events, parts)
+    expected = deriveSurvivorCandidates(replay, parts, {
+      gameId: lifecycle.game_id,
+      attemptId: lifecycle.id,
+      divisionDigest: source.row.division_digest,
+      rulesVersion: lifecycle.rules_version,
+      engineVersion: lifecycle.engine_version,
+      castVersion: lifecycle.cast_version,
+      eventVersion: lifecycle.event_version,
+    })
+  } catch (error) {
+    throw new LifecycleRepositoryError(
+      errorCode,
+      'The canonical terminal survivor ecology could not be rederived.',
+      { cause: error },
+    )
+  }
+  if (
+    directionalCanonicalHash(survivors) !==
+    directionalCanonicalHash(expected)
+  ) {
+    throw new LifecycleRepositoryError(
+      errorCode,
+      'The survivor ecology does not match the exact trusted terminal replay.',
+    )
+  }
+}
+
+/**
+ * PostgreSQL jsonb deliberately does not preserve object-key insertion order.
+ * Rebuild the nested objects in the server extractor's canonical field order
+ * before checking the historical terminal-fingerprint algorithm.
+ */
+function stableTerminalFingerprint(
+  candidates: readonly SurvivorCandidate[],
+): string {
+  return terminalFingerprint(candidates.map((candidate) => ({
+    ...candidate,
+    finalCoordinate: {
+      ring: candidate.finalCoordinate.ring,
+      sector: candidate.finalCoordinate.sector,
+    },
+    facet: {
+      id: candidate.facet.id,
+      title: candidate.facet.title,
+      focus: candidate.facet.focus,
+      hexagram: candidate.facet.hexagram,
+      hexagramName: candidate.facet.hexagramName,
+      theme: candidate.facet.theme,
+      dimension: candidate.facet.dimension,
+      movement: candidate.facet.movement,
+      prompt: candidate.facet.prompt,
+      keyword: candidate.facet.keyword,
+      ...(candidate.facet.castApplication === undefined
+        ? {}
+        : { castApplication: candidate.facet.castApplication }),
+    },
+    route: candidate.route.map((step) => ({
+      ply: step.ply,
+      from: { ring: step.from.ring, sector: step.from.sector },
+      to: { ring: step.to.ring, sector: step.to.sector },
+      capturedPieceId: step.capturedPieceId,
+      promotedTo: step.promotedTo,
+    })),
+  })))
+}
 
 const SELECT_RUN_COLUMNS = `
   id,
@@ -107,6 +471,9 @@ const SELECT_RUN_COLUMNS = `
   trajectory_seed,
   retry_reason,
   terminal_fingerprint,
+  trajectory_directional_record_version,
+  trajectory_directional_record_digest,
+  trajectory_directional_record,
   answer_prompt_digest,
   survivor_set,
   portia_current_candidate_id,
@@ -133,6 +500,37 @@ const SELECT_RUN_COLUMNS = `
   wilbur_record_version,
   created_at,
   updated_at
+`
+
+const SELECT_DIRECTIONAL_SOURCE_COLUMNS = `
+  division_seed,
+  division_digest,
+  problem_parts,
+  status,
+  outcome,
+  event_version,
+  rules_version,
+  engine_version,
+  cast_version
+`
+
+const SELECT_GAME_EVENT_COLUMNS = `
+  game_id,
+  ply,
+  kind,
+  source,
+  side,
+  piece_id,
+  captured_piece_id,
+  promoted_to,
+  from_ring,
+  from_sector,
+  to_ring,
+  to_sector,
+  idempotency_key,
+  request_sha256,
+  game_revision,
+  created_at
 `
 
 const SELECT_PORTIA_COLUMNS = `
@@ -387,14 +785,19 @@ function portiaFromRow(
   row: PortiaReviewRow | undefined,
 ): PersistedPortiaReview | null {
   if (!row) return null
-  const parsed = row.contract_version === 'webchess-portia-review-v1'
-    ? legacyPortiaReviewSchema.safeParse(row.review)
-    : portiaReviewSchema.safeParse(row.review)
-  if (!parsed.success) {
+  const schema = row.contract_version === 'webchess-portia-review-v1'
+    ? legacyPortiaReviewSchema
+    : row.contract_version === LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION
+      ? legacyPromptBoundPortiaReviewSchema
+      : row.contract_version === CURRENT_LIFECYCLE_VERSIONS.portiaContract
+        ? currentPortiaReviewSchema
+        : null
+  const parsed = schema?.safeParse(row.review)
+  if (!parsed || !parsed.success) {
     throw new LifecycleRepositoryError(
       'integrity-error',
       'The stored Portia review violates its versioned contract.',
-      { cause: parsed.error },
+      { cause: parsed?.error },
     )
   }
   return parsed.data
@@ -416,7 +819,15 @@ function gateFromRow(row: GateDecisionRow | undefined): GateResult | null {
       'The stored player-visible Answer prompt failed its immutable provenance check.',
     )
   }
-  const result = row.result as Partial<GateResult>
+  const parsed = persistedGateResultSchema.safeParse(row.result)
+  if (!parsed.success) {
+    throw new LifecycleRepositoryError(
+      'integrity-error',
+      'The stored Gate result violates its versioned contract.',
+      { cause: parsed.error },
+    )
+  }
+  const result = parsed.data
   if (
     result.algorithmVersion !== row.algorithm_version ||
     result.inputDigest !== row.input_digest ||
@@ -428,7 +839,7 @@ function gateFromRow(row: GateDecisionRow | undefined): GateResult | null {
       'The stored Gate result is inconsistent with its immutable columns.',
     )
   }
-  return result as GateResult
+  return result
 }
 
 function charlotteFromRow(
@@ -586,7 +997,52 @@ function runFromRows(
   researchSources: readonly ResearchSourceRow[],
   activities: readonly LifecycleEventRow[],
   webMemoryEvidence: readonly WebMemoryEvidenceRow[],
+  directionalSource: TrustedDirectionalSource,
 ): LifecycleAggregate {
+  let trajectoryDirectionalRecord: TrajectoryDirectionalRecord | null = null
+  if (row.trajectory_directional_record !== null) {
+    trajectoryDirectionalRecord = verifyDirectionalRecordAgainstTrustedSource(
+      row.trajectory_directional_record,
+      row,
+      directionalSource,
+      'invalid-state',
+    )
+    if (
+      row.trajectory_directional_record_version !==
+        trajectoryDirectionalRecord.version ||
+      row.trajectory_directional_record_digest !==
+        trajectoryDirectionalRecord.digest
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-state',
+        'The saved trajectory directional record provenance is inconsistent.',
+      )
+    }
+    if (row.terminal_fingerprint === null) {
+      throw new LifecycleRepositoryError(
+        'invalid-state',
+        'The saved trajectory directional record is missing terminal evidence.',
+      )
+    }
+    assertDirectionalSurvivorBinding(
+      trajectoryDirectionalRecord,
+      survivorArray(row.survivor_set),
+      row.terminal_fingerprint,
+      row,
+      directionalSource,
+      'invalid-state',
+    )
+  }
+  if (
+    row.lifecycle_version === CURRENT_LIFECYCLE_VERSIONS.lifecycle &&
+    row.terminal_fingerprint !== null &&
+    trajectoryDirectionalRecord === null
+  ) {
+    throw new LifecycleRepositoryError(
+      'invalid-state',
+      'A current terminal lifecycle is missing its trajectory directional record.',
+    )
+  }
   const run: LifecycleRun = {
     id: row.id,
     rootRunId: row.root_run_id,
@@ -603,6 +1059,12 @@ function runFromRows(
     trajectorySeed: row.trajectory_seed,
     retryReason: row.retry_reason,
     terminalFingerprint: row.terminal_fingerprint,
+    trajectoryDirectionalRecord,
+    trajectoryDirectionalRecordStatus: trajectoryDirectionalRecord
+      ? 'bound'
+      : row.terminal_fingerprint === null
+        ? 'not_terminal'
+        : 'legacy_pre_directional_generation',
     answerPromptDigest: row.answer_prompt_digest,
     answerUserPrompt: gate?.answer_user_prompt ?? null,
     answerUserPromptSha256: gate?.answer_user_prompt_sha256 ?? null,
@@ -638,6 +1100,8 @@ function runFromRows(
       charlottePrompt: row.charlotte_prompt_version,
       charlotteContract: row.charlotte_contract_version,
       wilburRecord: row.wilbur_record_version,
+      trajectoryDirectionalRecord:
+        row.trajectory_directional_record_version,
       rules: row.rules_version,
       engine: row.engine_version,
       cast: row.cast_version,
@@ -745,6 +1209,26 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     return row
   }
 
+  private async trustedDirectionalSource(
+    ownerId: string,
+    gameId: string,
+  ): Promise<TrustedDirectionalSource> {
+    const results = await this.database.transaction(
+      [
+        {
+          text: `SELECT ${SELECT_DIRECTIONAL_SOURCE_COLUMNS} FROM games WHERE clerk_user_id = $1::text AND id = $2::uuid`,
+          values: [assertOwner(ownerId), assertUuid(gameId, 'Game id')],
+        },
+        {
+          text: `SELECT ${SELECT_GAME_EVENT_COLUMNS} FROM game_events WHERE game_id = $1::uuid ORDER BY ply`,
+          values: [assertUuid(gameId, 'Game id')],
+        },
+      ],
+      { isolationLevel: 'RepeatableRead', readOnly: true },
+    )
+    return directionalSourceFromResults(results[0]!, results[1]!)
+  }
+
   async getForGame(
     ownerId: string,
     gameId: string,
@@ -811,6 +1295,14 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
           `,
           values: [owner, id],
         },
+        {
+          text: `SELECT ${SELECT_DIRECTIONAL_SOURCE_COLUMNS} FROM games WHERE clerk_user_id = $1::text AND id = $2::uuid`,
+          values: [owner, id],
+        },
+        {
+          text: `SELECT ${SELECT_GAME_EVENT_COLUMNS} FROM game_events WHERE game_id = $1::uuid ORDER BY ply`,
+          values: [id],
+        },
       ],
       { isolationLevel: 'RepeatableRead', readOnly: true },
     )
@@ -828,6 +1320,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         parseResultRows(results[7]!, researchSourceRowSchema),
         parseResultRows(results[8]!, lifecycleEventRowSchema),
         parseResultRows(results[9]!, webMemoryEvidenceRowSchema),
+        directionalSourceFromResults(results[10]!, results[11]!),
       )
     } catch (error) {
       if (error instanceof LifecycleRepositoryError) throw error
@@ -1264,8 +1757,52 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     const expectedRevision = assertRevision(input.expectedRevision)
     assertDigest(input.configurationDigest, 'Configuration digest')
     const before = await this.ownedRun(owner, gameId)
+    if (input.terminalFingerprint !== undefined) {
+      assertDigest(input.terminalFingerprint, 'Terminal fingerprint')
+    }
+    let trustedDirectionalSource: TrustedDirectionalSource | null = null
+    let trajectoryDirectionalRecord: TrajectoryDirectionalRecord | null = null
+    if (input.trajectoryDirectionalRecord !== undefined) {
+      if (input.to !== 'chess_terminal' || input.terminalFingerprint === undefined) {
+        throw new LifecycleRepositoryError(
+          'invalid-input',
+          'A trajectory directional record may only be bound atomically at the terminal chess transition.',
+        )
+      }
+      trustedDirectionalSource = await this.trustedDirectionalSource(
+        owner,
+        gameId,
+      )
+      trajectoryDirectionalRecord = verifyDirectionalRecordAgainstTrustedSource(
+        input.trajectoryDirectionalRecord,
+        before,
+        trustedDirectionalSource,
+        'invalid-input',
+      )
+      assertDirectionalSurvivorBinding(
+        trajectoryDirectionalRecord,
+        input.survivors ?? [],
+        input.terminalFingerprint,
+        before,
+        trustedDirectionalSource,
+      )
+    }
     if (before.state === input.to) {
-      return (await this.getForGame(owner, gameId))!
+      const current = (await this.getForGame(owner, gameId))!
+      if (
+        trajectoryDirectionalRecord !== null &&
+        (
+          current.trajectoryDirectionalRecord?.digest !==
+            trajectoryDirectionalRecord.digest ||
+          current.terminalFingerprint !== input.terminalFingerprint
+        )
+      ) {
+        throw new LifecycleRepositoryError(
+          'conflict',
+          'The terminal lifecycle was already bound to different immutable evidence.',
+        )
+      }
+      return current
     }
     if (revisionNumber(before.revision) !== expectedRevision) {
       throw new LifecycleRepositoryError(
@@ -1298,8 +1835,15 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         { cause: error },
       )
     }
-    if (input.terminalFingerprint !== undefined) {
-      assertDigest(input.terminalFingerprint, 'Terminal fingerprint')
+    if (
+      before.lifecycle_version === CURRENT_LIFECYCLE_VERSIONS.lifecycle &&
+      input.to === 'chess_terminal' &&
+      trajectoryDirectionalRecord === null
+    ) {
+      throw new LifecycleRepositoryError(
+        'invalid-input',
+        'Current lifecycle runs require a trajectory directional record at terminal settlement.',
+      )
     }
 
     const result = await this.database.query({
@@ -1334,11 +1878,72 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
               END,
               terminal_fingerprint = CASE WHEN $14::boolean THEN $12::char(64) ELSE terminal_fingerprint END,
               survivor_set = CASE WHEN $14::boolean THEN $13::jsonb ELSE survivor_set END,
+              trajectory_directional_record_version = CASE WHEN $18::boolean THEN $15::text ELSE trajectory_directional_record_version END,
+              trajectory_directional_record_digest = CASE WHEN $18::boolean THEN $16::char(64) ELSE trajectory_directional_record_digest END,
+              trajectory_directional_record = CASE WHEN $18::boolean THEN $17::jsonb ELSE trajectory_directional_record END,
               updated_at = now()
           WHERE clerk_user_id = $1::text
             AND game_id = $2::uuid
             AND revision = $3::bigint
             AND state = $4::text
+            AND (
+              NOT $18::boolean
+              OR EXISTS (
+                SELECT 1
+                FROM games AS trusted_game
+                WHERE trusted_game.id = lifecycle_runs.game_id
+                  AND trusted_game.clerk_user_id = lifecycle_runs.clerk_user_id
+                  AND trusted_game.status IN (
+                    'completed', 'answering', 'answer_failed', 'answered'
+                  )
+                  AND trusted_game.division_seed = lifecycle_runs.division_seed
+                  AND trusted_game.division_digest = $19::char(64)
+                  AND trusted_game.problem_parts = $20::jsonb
+                  AND trusted_game.outcome = $21::jsonb
+                  AND trusted_game.event_version = lifecycle_runs.event_version
+                  AND trusted_game.rules_version = lifecycle_runs.rules_version
+                  AND trusted_game.engine_version = lifecycle_runs.engine_version
+                  AND trusted_game.cast_version = lifecycle_runs.cast_version
+                  AND coalesce(
+                    (
+                      SELECT jsonb_agg(
+                        CASE
+                          WHEN trusted_event.kind = 'pass' THEN
+                            jsonb_build_object(
+                              'version', trusted_game.event_version,
+                              'type', 'forced-pass',
+                              'ply', trusted_event.ply,
+                              'side', trusted_event.side,
+                              'reason', 'no-legal-move'
+                            )
+                          ELSE
+                            jsonb_strip_nulls(jsonb_build_object(
+                              'version', trusted_game.event_version,
+                              'type', 'move',
+                              'ply', trusted_event.ply,
+                              'side', trusted_event.side,
+                              'pieceId', trusted_event.piece_id,
+                              'from', jsonb_build_object(
+                                'ring', trusted_event.from_ring,
+                                'sector', trusted_event.from_sector
+                              ),
+                              'to', jsonb_build_object(
+                                'ring', trusted_event.to_ring,
+                                'sector', trusted_event.to_sector
+                              ),
+                              'capturedPieceId', trusted_event.captured_piece_id,
+                              'promotedTo', trusted_event.promoted_to
+                            ))
+                        END
+                        ORDER BY trusted_event.ply
+                      )
+                      FROM game_events AS trusted_event
+                      WHERE trusted_event.game_id = trusted_game.id
+                    ),
+                    '[]'::jsonb
+                  ) = $22::jsonb
+              )
+            )
           RETURNING ${SELECT_RUN_COLUMNS}
         ),
         activity AS (
@@ -1353,7 +1958,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
             coalesce((SELECT max(sequence) + 1 FROM lifecycle_events WHERE lifecycle_run_id = advanced.id), 1),
             $6::text, $7::text, $4::text, $5::text,
             $8::jsonb, $9::jsonb, $10::jsonb, $11::char(64),
-            $15::text, $16::smallint
+            $23::text, $24::smallint
           FROM advanced
           RETURNING lifecycle_run_id
         )
@@ -1374,6 +1979,14 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         input.terminalFingerprint ?? null,
         json(input.survivors ?? []),
         input.terminalFingerprint !== undefined,
+        trajectoryDirectionalRecord?.version ?? null,
+        trajectoryDirectionalRecord?.digest ?? null,
+        json(trajectoryDirectionalRecord),
+        trajectoryDirectionalRecord !== null,
+        trustedDirectionalSource?.row.division_digest ?? null,
+        json(trustedDirectionalSource?.row.problem_parts ?? null),
+        json(trustedDirectionalSource?.row.outcome ?? null),
+        json(trustedDirectionalSource?.events ?? null),
         input.status ?? 'completed',
         CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
       ],
@@ -1752,7 +2365,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         input.inputDigest,
         input.outputDigest,
         CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
-        CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+        review.contractVersion,
         json(review),
         input.configurationDigest,
         CURRENT_LIFECYCLE_VERSIONS.lifecycleEvent,
@@ -2327,7 +2940,9 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
         input.trajectorySeed,
         input.reason,
         CURRENT_LIFECYCLE_VERSIONS.software,
-        CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+        sameField
+          ? parent.versions.lifecycle
+          : CURRENT_LIFECYCLE_VERSIONS.lifecycle,
         input.childGame.game.versions.rules,
         input.childGame.game.versions.engine,
         input.childGame.game.versions.cast,
@@ -2381,7 +2996,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
     const currentRow = result.rows.find((row) => row.id === excludedId)
     if (currentRow?.survivor_set) {
       acceptedFingerprints.add(
-        terminalFingerprint(survivorArray(currentRow.survivor_set)),
+        stableTerminalFingerprint(survivorArray(currentRow.survivor_set)),
       )
     }
 
@@ -2395,7 +3010,7 @@ export class DurableLifecycleRepository implements LifecycleRepositoryPort {
       }
       if (!row.survivor_set) return false
       return acceptedFingerprints.has(
-        terminalFingerprint(survivorArray(row.survivor_set)),
+        stableTerminalFingerprint(survivorArray(row.survivor_set)),
       )
     })
   }

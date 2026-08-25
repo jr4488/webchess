@@ -1,6 +1,7 @@
 import 'server-only'
 
 import type { UsageConfig } from './types'
+import { MIN_MODEL_LEASE_SECONDS } from '../model-operation-timeouts'
 
 const DEFAULTS = {
   dailyGameLimit: 2,
@@ -20,7 +21,7 @@ const DEFAULTS = {
   hourlyIpWilburObservationLimit: 120,
   concurrentModelLimit: 1,
   globalModelConcurrentLimit: 4,
-  modelLeaseSeconds: 180,
+  modelLeaseSeconds: MIN_MODEL_LEASE_SECONDS,
 } as const
 
 function readPositiveInteger(
@@ -77,9 +78,9 @@ export function loadUsageConfig(
     DEFAULTS.modelLeaseSeconds,
     900,
   )
-  if (modelLeaseSeconds < 150) {
+  if (modelLeaseSeconds < MIN_MODEL_LEASE_SECONDS) {
     throw new Error(
-      'WEBCHESS_MODEL_LEASE_SECONDS must be at least 150 so it exceeds the production OpenAI timeout with a safety margin.',
+      `WEBCHESS_MODEL_LEASE_SECONDS must be at least ${MIN_MODEL_LEASE_SECONDS} so every bounded model turn can settle durably before the Answer lease is renewed.`,
     )
   }
 

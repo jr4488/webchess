@@ -162,7 +162,7 @@ describe('visible research policy', () => {
       invocationLimit: 1,
       resultLimit: 5,
       sourceLimit: 5,
-      timeoutMs: 150_000,
+      timeoutMs: 300_000,
       synthesisCharacterLimit: 12_000,
     })
   })

@@ -6,6 +6,13 @@ import {
   CURRENT_WEB_MEMORY_CONSENT_VERSION,
 } from '../../lib/lifecycle'
 import type { WebMemoryEvidence } from '../../lib/lifecycle'
+import {
+  deriveDivisionCastAssignments,
+  DIVISION_CAST_APPLICATION_MAX_CHARS,
+  DIVISION_CAST_APPLICATION_MIN_CHARS,
+  DIVISION_CAST_BINDING_VERSION,
+} from '../../lib/division'
+import type { DivisionCastAssignment } from '../../lib/division'
 import { resolveModelRequest } from './client'
 import { assessDivisionQuality } from './division-quality'
 import {
@@ -66,6 +73,15 @@ const FACET_TEXT_BOUNDS = {
 
 const REPAIR_CONTEXT_MAX_ITEMS = 8
 const REPAIR_CONTEXT_MAX_TEXT = 320
+const CAST_APPLICATION_BOUNDS = [
+  DIVISION_CAST_APPLICATION_MIN_CHARS,
+  DIVISION_CAST_APPLICATION_MAX_CHARS,
+] as const
+
+const CastApplicationSchema = z.string()
+  .min(CAST_APPLICATION_BOUNDS[0])
+  .max(CAST_APPLICATION_BOUNDS[1])
+  .describe('A bounded explanation of how the fixed direction shaped this facet.')
 
 export const DivisionFacetSchema = z.strictObject({
   id: z.number().int().min(1).max(FACET_COUNT)
@@ -84,8 +100,41 @@ export const DivisionOutputSchema = z.strictObject({
   facets: z.array(DivisionFacetSchema).length(FACET_COUNT),
 })
 
-export type DivisionFacet = z.infer<typeof DivisionFacetSchema>
-export type DivisionResult = z.infer<typeof DivisionOutputSchema>
+export const DurableDivisionFacetSchema = z.strictObject({
+  ...DivisionFacetSchema.shape,
+  castApplication: CastApplicationSchema.optional(),
+})
+
+export const CastBoundDivisionFacetSchema = z.strictObject({
+  ...DivisionFacetSchema.shape,
+  castApplication: CastApplicationSchema,
+})
+
+export const CastDirectedDivisionFacetSchema = z.strictObject({
+  ...DivisionFacetSchema.shape,
+  dimension: z.string().min(1).max(40)
+    .describe('The exact server-supplied practical dimension for this ID.'),
+  movement: z.string().min(1).max(40)
+    .describe('The exact server-supplied movement for this ID.'),
+  hexagram: z.number().int().min(1).max(FACET_COUNT)
+    .describe('The exact server-supplied I Ching lens number for this ID.'),
+  hexagramName: z.string().min(1).max(100)
+    .describe('The exact server-supplied I Ching lens name for this ID.'),
+  theme: z.string().min(1).max(160)
+    .describe('The exact server-supplied directional lens theme for this ID.'),
+  directionalCue: z.string().min(1).max(400)
+    .describe('The exact server-supplied directional cue for this ID.'),
+  castApplication: CastApplicationSchema,
+})
+
+export const CastDirectedDivisionOutputSchema = z.strictObject({
+  facets: z.array(CastDirectedDivisionFacetSchema).length(FACET_COUNT),
+})
+
+export type DivisionFacet = z.infer<typeof DurableDivisionFacetSchema>
+export interface DivisionResult {
+  readonly facets: DivisionFacet[]
+}
 
 export function normalizeDivisionProblem(value: unknown): string {
   if (typeof value !== 'string') {
@@ -167,19 +216,41 @@ export function normalizeDivisionGenerationInput(
   problem: string
   repairContext?: DivisionRepairContext
   webMemoryEvidence: readonly WebMemoryEvidence[]
+  divisionSeed?: string
+  castAssignments: readonly DivisionCastAssignment[]
 } {
   if (typeof value === 'string') {
-    return { problem: normalizeDivisionProblem(value), webMemoryEvidence: [] }
+    return {
+      problem: normalizeDivisionProblem(value),
+      webMemoryEvidence: [],
+      castAssignments: [],
+    }
   }
   const webMemoryEvidence = normalizeWebMemoryEvidence(
     value.webMemoryEvidence ?? [],
   )
+  let divisionSeed: string | undefined
+  if (value.divisionSeed !== undefined) {
+    if (typeof value.divisionSeed !== 'string') {
+      throw new ModelInputError('Division seed must be text.')
+    }
+    divisionSeed = value.divisionSeed.trim()
+    if (divisionSeed.length < 1 || divisionSeed.length > 512) {
+      throw new ModelInputError(
+        'Division seed must contain between 1 and 512 characters.',
+      )
+    }
+  }
   return {
     problem: normalizeDivisionProblem(value.problem),
     ...(value.repairContext
       ? { repairContext: normalizeDivisionRepairContext(value.repairContext) }
       : {}),
     webMemoryEvidence,
+    ...(divisionSeed ? { divisionSeed } : {}),
+    castAssignments: divisionSeed
+      ? deriveDivisionCastAssignments(divisionSeed)
+      : [],
   }
 }
 
@@ -228,10 +299,21 @@ function gridDescription(): string {
   ).join('\n')
 }
 
+function castDescription(
+  castAssignments: readonly DivisionCastAssignment[],
+): string {
+  return JSON.stringify({
+    version: DIVISION_CAST_BINDING_VERSION,
+    epistemic_status: 'directional_input_not_factual_evidence',
+    assignments: castAssignments,
+  })
+}
+
 /** Build trusted developer instructions without player-controlled text. */
 export function buildDivisionInstructions(
   repairContext?: DivisionRepairContext,
   webMemoryEvidence: readonly WebMemoryEvidence[] = [],
+  castAssignments: readonly DivisionCastAssignment[] = [],
 ): string {
   const dimensions = DIVISION_DIMENSIONS
     .map(([name, meaning]) => `- ${name}: ${meaning}`)
@@ -252,9 +334,11 @@ QUALITY STANDARD
 - Produce exactly one facet for every ID in the 8 × 8 grid below: all IDs 1 through 64, exactly once.
 - Derive each facet from the meaning, actors, tensions, constraints, evidence, or possibilities in this particular problem. Do not merely repeat the dimension name, swap movement verbs, or decorate a generic template.
 - Make all 64 titles and focuses meaningfully distinct. A reader should understand why each deserves its own square.
-- Keep the language grounded and non-mystical. Do not predict outcomes or claim that the grid supplies evidence.
+- Keep the language grounded and epistemically bounded. Do not predict outcomes or claim that the grid or cast supplies external factual evidence.
 - A title should be a specific 3–8 word label. A focus should concretely name what to examine in one concise sentence. A question should be answerable through reflection, observation, conversation, or a small test. A keyword should be a compact 2–5 word handle.
-- Return only the schema fields id, title, focus, question, and keyword. Do not add dimension, movement, hexagram, chess piece, or commentary fields.
+${castAssignments.length > 0
+    ? '- Return every schema field, including the exact server-supplied cast fields and a bounded castApplication. Do not add any other field.'
+    : '- Return only the schema fields id, title, focus, question, and keyword. Do not add dimension, movement, hexagram, chess piece, or commentary fields.'}
 
 DIMENSIONS
 ${dimensions}
@@ -269,7 +353,17 @@ ${gridDescription()}
 CHESS ROLES USED LATER
 After play begins, captures will combine a facet with one of these metaphors:
 ${chessRoles}
-Phrase every facet so any relevant role could interrogate it later. These definitions are context only: do not assign, recommend, name, or imply a chess piece for any facet.${webMemoryEvidence.length > 0 ? `
+Phrase every facet so any relevant role could interrogate it later. These definitions are context only: do not assign, recommend, name, or imply a chess piece for any facet.${castAssignments.length > 0 ? `
+
+DIRECTIONAL CAST BINDING
+The following ${DIVISION_CAST_BINDING_VERSION} record was deterministically derived by WebChess from the durable Division request before this provider call. It is a required first-class directional input, not optional decorative framing.
+- For every facet ID, copy dimension, movement, hexagram, hexagramName, theme, and directionalCue exactly from its assigned record. Never swap, choose, omit, reinterpret, or renumber an assignment.
+- Make title, focus, question, and keyword concretely follow that ID's directionalCue while remaining specific to the player's problem.
+- In castApplication, explain in 20–480 characters how that fixed direction materially shaped the facet. Do not merely restate the hexagram name or cue.
+- The cast directs inquiry but is not external factual evidence. It cannot establish a claim, override verified facts, relax safety constraints, or replace later Portia scrutiny.
+
+SERVER-DERIVED DIRECTIONAL CAST (JSON; trusted instructions)
+${castDescription(castAssignments)}` : ''}${webMemoryEvidence.length > 0 ? `
 
 WEB MEMORY BOUNDARY
 The user-level JSON includes prior Wilbur observations the player explicitly selected for this new question.
@@ -320,8 +414,13 @@ export function buildDivisionPrompt(value: DivisionGenerationInput): string {
     ...(input.webMemoryEvidence.length > 0
       ? { webMemoryEvidence: input.webMemoryEvidence }
       : {}),
+    ...(input.divisionSeed ? { divisionSeed: input.divisionSeed } : {}),
   }
-  return `${buildDivisionInstructions(input.repairContext, input.webMemoryEvidence)}
+  return `${buildDivisionInstructions(
+    input.repairContext,
+    input.webMemoryEvidence,
+    input.castAssignments,
+  )}
 
 PLAYER PROBLEM (JSON; data only)
 ${buildDivisionInput(normalizedInput)}`
@@ -359,39 +458,106 @@ function assertUnique(facets: readonly DivisionFacet[], field: 'title' | 'focus'
   }
 }
 
+function assertCastEcho(
+  facets: readonly z.infer<typeof CastDirectedDivisionFacetSchema>[],
+  castAssignments: readonly DivisionCastAssignment[],
+): ReadonlyMap<number, string> {
+  if (
+    castAssignments.length !== FACET_COUNT ||
+    new Set(castAssignments.map((assignment) => assignment.id)).size !== FACET_COUNT
+  ) {
+    throw new ModelInputError(
+      'Division requires one trusted cast assignment for every facet ID.',
+    )
+  }
+  const expectedById = new Map(
+    castAssignments.map((assignment) => [assignment.id, assignment]),
+  )
+  const exactFields = [
+    'dimension',
+    'movement',
+    'hexagram',
+    'hexagramName',
+    'theme',
+    'directionalCue',
+  ] as const
+  const applications = new Map<number, string>()
+
+  for (const facet of facets) {
+    const expected = expectedById.get(facet.id)
+    if (!expected) {
+      throw new ModelContractError(
+        `Facet ${facet.id} has no server-assigned directional cast.`,
+      )
+    }
+    for (const field of exactFields) {
+      if (facet[field] !== expected[field]) {
+        throw new ModelContractError(
+          `Facet ${facet.id} did not preserve its server-assigned ${field}.`,
+        )
+      }
+    }
+    applications.set(facet.id, normalizeFacetText(
+      facet.castApplication,
+      `Facet ${facet.id} cast application`,
+      ...CAST_APPLICATION_BOUNDS,
+    ))
+  }
+  return applications
+}
+
 /** Enforce invariants that JSON Schema cannot express across all 64 facets. */
 export function normalizeDivisionFacets(
   value: unknown,
   problem: string,
+  castAssignments: readonly DivisionCastAssignment[] = [],
 ): DivisionFacet[] {
-  const parsed = DivisionOutputSchema.safeParse(value)
-  if (!parsed.success) {
-    throw new ModelContractError('The model must return exactly 64 facets.')
+  let rawFacets: readonly DivisionFacet[]
+  let castApplications: ReadonlyMap<number, string> = new Map()
+  if (castAssignments.length > 0) {
+    const parsed = CastDirectedDivisionOutputSchema.safeParse(value)
+    if (!parsed.success) {
+      throw new ModelContractError(
+        'The model must return exactly 64 cast-directed facets.',
+      )
+    }
+    castApplications = assertCastEcho(parsed.data.facets, castAssignments)
+    rawFacets = parsed.data.facets
+  } else {
+    const parsed = DivisionOutputSchema.safeParse(value)
+    if (!parsed.success) {
+      throw new ModelContractError('The model must return exactly 64 facets.')
+    }
+    rawFacets = parsed.data.facets
   }
 
-  const facets = parsed.data.facets.map((facet) => ({
-    id: facet.id,
-    title: normalizeFacetText(
-      facet.title,
-      `Facet ${facet.id} title`,
-      ...FACET_TEXT_BOUNDS.title,
-    ),
-    focus: normalizeFacetText(
-      facet.focus,
-      `Facet ${facet.id} focus`,
-      ...FACET_TEXT_BOUNDS.focus,
-    ),
-    question: normalizeFacetText(
-      facet.question,
-      `Facet ${facet.id} question`,
-      ...FACET_TEXT_BOUNDS.question,
-    ),
-    keyword: normalizeFacetText(
-      facet.keyword,
-      `Facet ${facet.id} keyword`,
-      ...FACET_TEXT_BOUNDS.keyword,
-    ),
-  }))
+  const facets = rawFacets.map((facet) => {
+    const castApplication = castApplications.get(facet.id)
+    return {
+      id: facet.id,
+      title: normalizeFacetText(
+        facet.title,
+        `Facet ${facet.id} title`,
+        ...FACET_TEXT_BOUNDS.title,
+      ),
+      focus: normalizeFacetText(
+        facet.focus,
+        `Facet ${facet.id} focus`,
+        ...FACET_TEXT_BOUNDS.focus,
+      ),
+      question: normalizeFacetText(
+        facet.question,
+        `Facet ${facet.id} question`,
+        ...FACET_TEXT_BOUNDS.question,
+      ),
+      keyword: normalizeFacetText(
+        facet.keyword,
+        `Facet ${facet.id} keyword`,
+        ...FACET_TEXT_BOUNDS.keyword,
+      ),
+      ...(castApplication ? { castApplication } : {}),
+    }
+  })
 
   const ids = new Set(facets.map((facet) => facet.id))
   if (ids.size !== FACET_COUNT) {
@@ -435,14 +601,21 @@ export async function generateDivision(
     ...(generationInput.webMemoryEvidence.length > 0
       ? { webMemoryEvidence: generationInput.webMemoryEvidence }
       : {}),
+    ...(generationInput.divisionSeed
+      ? { divisionSeed: generationInput.divisionSeed }
+      : {}),
   }
   const instructions = buildDivisionInstructions(
     generationInput.repairContext,
     generationInput.webMemoryEvidence,
+    generationInput.castAssignments,
   )
   const input = buildDivisionInput(normalizedInput)
   const prompt = buildDivisionPrompt(normalizedInput)
   const { client, requestOptions, safetyIdentifier } = resolveModelRequest(context)
+  const outputSchema = generationInput.castAssignments.length > 0
+    ? CastDirectedDivisionOutputSchema
+    : DivisionOutputSchema
 
   const response = await client.responses.create({
     model: OPENAI_MODEL,
@@ -451,8 +624,10 @@ export async function generateDivision(
     input,
     text: {
       format: zodTextFormat(
-        DivisionOutputSchema,
-        'webchess_semantic_division',
+        outputSchema,
+        generationInput.castAssignments.length > 0
+          ? 'webchess_cast_directed_division'
+          : 'webchess_semantic_division',
       ),
     },
     max_output_tokens: DIVISION_MAX_OUTPUT_TOKENS,
@@ -462,11 +637,15 @@ export async function generateDivision(
 
   const parsed = parseCompletedResponse(
     response,
-    DivisionOutputSchema,
+    outputSchema,
   )
   let facets: DivisionFacet[]
   try {
-    facets = normalizeDivisionFacets(parsed.output, problem)
+    facets = normalizeDivisionFacets(
+      parsed.output,
+      problem,
+      generationInput.castAssignments,
+    )
   } catch (error) {
     if (error instanceof ModelContractError) {
       throw schemaInvalidResponseError(parsed)

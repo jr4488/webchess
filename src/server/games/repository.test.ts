@@ -483,6 +483,56 @@ describe('durable game lifecycle', () => {
     })
   })
 
+  it('persists and reloads optional v4 cast applications without changing legacy shapes', async () => {
+    const facets = FACETS.map((facet) => ({
+      ...facet,
+      castApplication:
+        `The fixed direction shapes repository facet ${facet.id} into a concrete inquiry.`,
+    }))
+    const parts = composeProblemParts(facets, SEED)
+    const promptVersion = 'webchess-division-v4'
+    const digest = computeDivisionDigest({
+      problemSha256: sha256Hex(PROBLEM),
+      seed: SEED,
+      facets,
+      parts,
+      model: MODEL,
+      promptVersion,
+      promptSha256: sha256Hex(PROMPT),
+    })
+    const mapped = gameRow({
+      revision: '1',
+      status: 'mapped',
+      division_facets: facets,
+      problem_parts: parts,
+      division_prompt_version: promptVersion,
+      division_digest: digest,
+    })
+    const database = new ScriptedAdapter([
+      { includes: 'FROM games', rows: [dividingRow()] },
+      { includes: "status = 'mapped'", rows: [mapped] },
+      { includes: 'FROM game_events', rows: [] },
+    ])
+
+    const finished = await new DurableGameRepository(database).finishDivision({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      expectedRevision: 0,
+      analysis: { facets, seed: SEED, model: MODEL, prompt: PROMPT },
+      parts,
+      promptVersion,
+    })
+
+    expect(JSON.parse(String(database.calls[1]?.values?.[4]))).toEqual(facets)
+    expect(JSON.parse(String(database.calls[1]?.values?.[5]))).toEqual(parts)
+    expect(finished.division?.facets[0]?.castApplication).toBe(
+      facets[0]!.castApplication,
+    )
+    expect(finished.division?.parts[0]?.castApplication).toBe(
+      parts[0]!.castApplication,
+    )
+  })
+
   it('stores an answer only after replaying a terminal game', async () => {
     const terminal = terminalFixture()
     const rows = eventRows(

@@ -1242,6 +1242,87 @@ function parseLifecycle(value: unknown): LifecycleAggregate {
   for (const field of ['versions'] as const) {
     recordOf(lifecycle[field], `Lifecycle ${field}`)
   }
+  const lifecycleVersions = lifecycle.versions as Record<string, unknown>
+  const directionalStatus = lifecycle.trajectoryDirectionalRecordStatus
+  if (
+    directionalStatus !== 'not_terminal' &&
+    directionalStatus !== 'bound' &&
+    directionalStatus !== 'legacy_pre_directional_generation'
+  ) {
+    throw invalidResponse('Lifecycle trajectory directional status is invalid.')
+  }
+  const directionalValue = lifecycle.trajectoryDirectionalRecord
+  const terminalFingerprintValue = lifecycle.terminalFingerprint
+  if (
+    terminalFingerprintValue !== null &&
+    (
+      typeof terminalFingerprintValue !== 'string' ||
+      !/^[0-9a-f]{64}$/u.test(terminalFingerprintValue)
+    )
+  ) {
+    throw invalidResponse('Lifecycle terminal fingerprint is invalid.')
+  }
+  if (
+    (directionalStatus === 'not_terminal') !==
+      (terminalFingerprintValue === null) ||
+    (
+      directionalStatus === 'legacy_pre_directional_generation' &&
+      lifecycleVersions.lifecycle === CURRENT_LIFECYCLE_VERSIONS.lifecycle
+    )
+  ) {
+    throw invalidResponse('Lifecycle directional status contradicts terminal provenance.')
+  }
+  if (directionalValue === null) {
+    if (directionalStatus === 'bound') {
+      throw invalidResponse('Lifecycle directional provenance is incomplete.')
+    }
+    if (lifecycleVersions.trajectoryDirectionalRecord !== null) {
+      throw invalidResponse('Lifecycle directional version is present without a record.')
+    }
+  } else {
+    if (directionalStatus !== 'bound') {
+      throw invalidResponse('Lifecycle directional record is not labelled as bound.')
+    }
+    const directional = recordOf(
+      directionalValue,
+      'Lifecycle trajectory directional record',
+    )
+    if (
+      directional.version !==
+        CURRENT_LIFECYCLE_VERSIONS.trajectoryDirectionalRecord ||
+      lifecycleVersions.trajectoryDirectionalRecord !== directional.version ||
+      typeof directional.digest !== 'string' ||
+      !/^[0-9a-f]{64}$/u.test(directional.digest)
+    ) {
+      throw invalidResponse('Lifecycle directional record identity is invalid.')
+    }
+    const field = recordOf(directional.field, 'Lifecycle directional field')
+    const trajectory = recordOf(
+      directional.trajectory,
+      'Lifecycle directional trajectory',
+    )
+    const boundary = recordOf(
+      directional.epistemicBoundary,
+      'Lifecycle directional epistemic boundary',
+    )
+    if (
+      !Array.isArray(field.parts) ||
+      field.parts.length !== 64 ||
+      !Array.isArray(trajectory.events) ||
+      trajectory.events.length < 1 ||
+      trajectory.events.length > 256 ||
+      !Array.isArray(directional.directions) ||
+      directional.directions.length !== 64 ||
+      !Array.isArray(directional.survivingDirectionKeys) ||
+      directional.survivingDirectionKeys.length !== 8 ||
+      !Array.isArray(directional.explanation) ||
+      directional.explanation.length < 1 ||
+      boundary.classification !== 'directional-input-not-factual-evidence' ||
+      JSON.stringify(directionalValue).length > 4_000_000
+    ) {
+      throw invalidResponse('Lifecycle directional record shape is invalid.')
+    }
+  }
   if (
     lifecycle.answerPromptDigest !== null &&
     (

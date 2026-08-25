@@ -152,6 +152,7 @@ function config(
     bridgeToken: 't'.repeat(43),
     bridgeUrl: 'http://127.0.0.1:44123',
     maxOutputBytes: 4 * 1024 * 1024,
+    searchTimeoutMs: 300_000,
     timeoutMs: 130_000,
     transport: 'local',
     ...overrides,
@@ -248,15 +249,18 @@ describe('OpenClaw local configuration and request boundary', () => {
   it('defaults to local transport and rejects every alternate label', () => {
     expect(resolveOpenClawConfig({})).toMatchObject({
       binary: 'openclaw',
+      searchTimeoutMs: 300_000,
       timeoutMs: 130_000,
       transport: 'local',
     })
     expect(resolveOpenClawConfig({
       WEBCHESS_OPENCLAW_BIN: '/opt/openclaw/bin/openclaw',
+      WEBCHESS_OPENCLAW_SEARCH_TIMEOUT_MS: '240000',
       WEBCHESS_OPENCLAW_TRANSPORT: 'local',
       WEBCHESS_OPENCLAW_TIMEOUT_MS: '90000',
     })).toMatchObject({
       binary: '/opt/openclaw/bin/openclaw',
+      searchTimeoutMs: 240_000,
       timeoutMs: 90_000,
       transport: 'local',
     })
@@ -268,6 +272,9 @@ describe('OpenClaw local configuration and request boundary', () => {
     expect(() => resolveOpenClawConfig({
       WEBCHESS_OPENCLAW_TIMEOUT_MS: '0',
     })).toThrow(/must be an integer/u)
+    expect(() => resolveOpenClawConfig({
+      WEBCHESS_OPENCLAW_SEARCH_TIMEOUT_MS: '300001',
+    })).toThrow(/SEARCH_TIMEOUT_MS must be an integer/u)
     expect(() => resolveOpenClawConfig({
       WEBCHESS_OPENCLAW_BIN: 'open\0claw',
     })).toThrow(/invalid character/u)
@@ -389,16 +396,78 @@ describe('OpenClaw process and response boundary', () => {
         'Content-Type': 'application/json',
       })
       expect(JSON.stringify(init?.headers)).not.toContain(prompt)
-      const body = JSON.parse(String(init?.body)) as { prompt: string }
+      const body = JSON.parse(String(init?.body)) as {
+        prompt: string
+        turnId: string
+      }
       expect(body.prompt).toBe(prompt)
+      expect(body.turnId).toBe('stable-model-turn')
       return new Response(modelEnvelope('ok', 'local', prompt), {
         headers: { 'content-type': 'application/json' },
       })
     })
     const request = createOpenClawBridgeRequester(fetcher)
 
-    await expect(runOpenClawModel(prompt, config(), { request }))
+    await expect(runOpenClawModel(prompt, config(), {
+      idempotencyKey: 'stable-model-turn',
+      request,
+    }))
       .resolves.toMatchObject({ outputText: 'ok' })
+  })
+
+  it('rejects malformed or oversized model turn identities before transport', async () => {
+    const fetcher = vi.fn<typeof globalThis.fetch>()
+    const request = createOpenClawBridgeRequester(fetcher)
+
+    for (const idempotencyKey of [
+      '',
+      'contains whitespace',
+      'contains\nnewline',
+      'x'.repeat(256),
+    ]) {
+      await expect(runOpenClawModel('bounded prompt', config(), {
+        idempotencyKey,
+        request,
+      })).rejects.toBeInstanceOf(RangeError)
+    }
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('runs the provider-start hook only after local model transport validation', async () => {
+    const onRequestStart = vi.fn(async () => undefined)
+
+    await expect(runOpenClawModel('bounded prompt', config({
+      bridgeToken: null,
+      bridgeUrl: null,
+    }), {
+      idempotencyKey: 'stable-model-turn',
+      onRequestStart,
+    })).rejects.toMatchObject({ kind: 'not-found' })
+    expect(onRequestStart).not.toHaveBeenCalled()
+
+    const request = modelRequester({ answer: 'fixture' })
+    await expect(runOpenClawModel('bounded prompt', config(), {
+      idempotencyKey: 'invalid turn id',
+      onRequestStart,
+      request,
+    })).rejects.toBeInstanceOf(RangeError)
+    expect(onRequestStart).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
+
+    const order: string[] = []
+    const orderedRequest = vi.fn<OpenClawBridgeRequester>(async (_path, body) => {
+      order.push('request')
+      const prompt = typeof body?.prompt === 'string' ? body.prompt : ''
+      return modelEnvelope({ answer: 'fixture' }, 'local', prompt)
+    })
+    await expect(runOpenClawModel('bounded prompt', config(), {
+      idempotencyKey: 'stable-model-turn',
+      onRequestStart: async () => {
+        order.push('hook')
+      },
+      request: orderedRequest,
+    })).resolves.toMatchObject({ outputText: JSON.stringify({ answer: 'fixture' }) })
+    expect(order).toEqual(['hook', 'request'])
   })
 
   it('bounds bridge time and output without exposing transport details', async () => {
@@ -460,6 +529,7 @@ describe('OpenClaw process and response boundary', () => {
     })
     expect(request.mock.calls[0]?.[3]).toEqual({
       idempotencyKey: 'stable-model-turn',
+      requestTimeoutMs: 135_000,
       signal: undefined,
     })
   })
@@ -499,7 +569,8 @@ describe('OpenClaw process and response boundary', () => {
       version: '2026.7.1-2',
     }))
 
-    const status = await getOpenClawStatus(config(), { request })
+    const statusConfig = config({ timeoutMs: 150_000 })
+    const status = await getOpenClawStatus(statusConfig, { request })
     expect(status).toEqual({
       available: true,
       model: 'provider/configured-model',
@@ -509,6 +580,12 @@ describe('OpenClaw process and response boundary', () => {
     })
     expect(JSON.stringify(status)).not.toMatch(
       /private|account-label|configPath|token|secret/u,
+    )
+    expect(request).toHaveBeenCalledWith(
+      '/v1/status',
+      null,
+      statusConfig,
+      { requestTimeoutMs: 155_000, signal: undefined },
     )
   })
 

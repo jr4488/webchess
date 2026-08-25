@@ -21,6 +21,7 @@ function config(overrides: Partial<OpenClawConfig> = {}): OpenClawConfig {
     bridgeToken: 't'.repeat(43),
     bridgeUrl: 'http://127.0.0.1:44123',
     maxOutputBytes: 64 * 1024,
+    searchTimeoutMs: 300_000,
     timeoutMs: 45_000,
     transport: 'local',
     ...overrides,
@@ -121,11 +122,14 @@ describe('Codex Hosted Search CLI adapter', () => {
     expect(request.mock.calls[0]?.[1]).toEqual({
       limit: 4,
       query: QUERY,
-      timeoutMs: 45_000,
+      timeoutMs: 300_000,
       version: 1,
     })
     expect(request.mock.calls[0]?.[2]).toEqual(researchConfig)
-    expect(request.mock.calls[0]?.[3]).toEqual({ signal })
+    expect(request.mock.calls[0]?.[3]).toEqual({
+      requestTimeoutMs: 305_000,
+      signal,
+    })
     expect(result).toMatchObject({
       query: QUERY,
       provider: 'codex',

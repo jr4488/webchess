@@ -33,9 +33,15 @@ export const OPENAI_MODEL_READINESS_PROMPT =
   'Reply with exactly this ASCII token and nothing else: WEBCHESS_READY'
 const MAX_CONCURRENT_RUNS = 4
 const LOOPBACK_HOST = '127.0.0.1'
-const CODEX_SEARCH_ABORT_DRAIN_MS = 1_250
-const CODEX_SEARCH_READINESS_TIMEOUT_MS = 45_000
-const OPENAI_MODEL_READINESS_TIMEOUT_MS = 45_000
+const PROVIDER_ABORT_DRAIN_MS = 1_250
+const MAX_MODEL_TURN_ID_CHARS = 255
+const MAX_MODEL_TURN_RECORDS = 256
+const MODEL_TURN_TOMBSTONE_MS = 10 * 60_000
+const MODEL_TURN_ID_PATTERN = /^[A-Za-z0-9._:-]+$/u
+const CODEX_SEARCH_READINESS_TIMEOUT_MS = 300_000
+const CODEX_SEARCH_TIMEOUT_SECONDS = 300
+const OPENAI_MODEL_READINESS_TIMEOUT_MS = 150_000
+const OPENCLAW_STATUS_TIMEOUT_MS = 150_000
 const OPENAI_MODEL_READINESS_RESPONSE = 'WEBCHESS_READY'
 const PINNED_OPENCLAW_RUNTIME_VERSION = '2026.7.1-2'
 const OPENCLAW_LOCAL_MODEL_RUN_SYSTEM_PROMPT =
@@ -55,7 +61,7 @@ const OPENAI_ACCOUNT_TRANSPORT_ERROR =
 const OPENCLAW_RUNTIME_VERSION_ERROR =
   'WebChess requires the pinned OpenClaw 2026.7.1-2 runtime for its private account-auth and transport contracts. Install that exact OpenClaw version, then relaunch WebChess.'
 const CODEX_SEARCH_CONFIG_ERROR =
-  'WebChess requires OpenClaw web search to stay enabled, Codex Hosted Search to stay enabled, and tools.web.search.provider set to codex.'
+  'WebChess requires OpenClaw web search to stay enabled, Codex Hosted Search to stay enabled, tools.web.search.provider set to codex, and tools.web.search.timeoutSeconds set to 300.'
 const CODEX_SEARCH_PROVIDER_ERROR =
   'OpenClaw needs the codex plugin installed and enabled before WebChess can launch. Install or enable the codex plugin, then relaunch WebChess.'
 const CODEX_SEARCH_ATTESTATION_ERROR =
@@ -68,6 +74,108 @@ const CODEX_SEARCH_RUNTIME_ERROR =
   'WebChess requires the official Codex Hosted Search managed app-server in private stdio, agent-scoped mode. Remove custom Codex app-server command, argument, transport, URL, header, token, or user-home overrides, then relaunch WebChess.'
 const OPENCLAW_PLUGIN_CONFIG_ERROR =
   'WebChess requires plugins.allow to contain exactly codex, openai, and webchess, with no custom plugin load paths or additional plugin entries. Restore the dedicated WebChess OpenClaw profile, then relaunch WebChess.'
+
+type ProviderExecutionOutcome<T> =
+  | { readonly status: 'completed', readonly value: T }
+  | { readonly status: 'aborted' }
+
+/**
+ * Signal propagation asks the pinned provider runtime to cancel its worker.
+ * This outer race also bounds the bridge when a dependency fails to settle its
+ * JavaScript promise after cancellation, so the owning request cannot linger.
+ */
+async function raceProviderExecution<T>(
+  execute: () => Promise<T>,
+  signal: AbortSignal,
+  deadlineExpired?: () => boolean,
+): Promise<ProviderExecutionOutcome<T>> {
+  let removeAbortListener: (() => void) | undefined
+  const aborted = new Promise<ProviderExecutionOutcome<T>>((resolve) => {
+    const onAbort = () => resolve({ status: 'aborted' })
+    if (signal.aborted) {
+      onAbort()
+      return
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+  })
+  const execution = Promise.resolve().then(async () => {
+    // The abort promise may already be resolved before this microtask runs.
+    // Recheck here so a queued provider factory can never begin after expiry.
+    if (signal.aborted || deadlineExpired?.()) {
+      return { status: 'aborted' as const }
+    }
+    return {
+      status: 'completed' as const,
+      value: await execute(),
+    }
+  })
+  try {
+    return await Promise.race([execution, aborted])
+  } finally {
+    removeAbortListener?.()
+  }
+}
+
+class StartupReadinessDeadlineError extends Error {
+  constructor(readonly publicMessage: string) {
+    super(publicMessage)
+    this.name = 'StartupReadinessDeadlineError'
+  }
+}
+
+interface StartupReadinessDeadline {
+  readonly deadlineAt: number
+  readonly signal: AbortSignal
+  assertBeforeDeadline(): void
+  run<T>(execute: () => Promise<T>): Promise<T>
+}
+
+function createStartupReadinessDeadline(
+  timeoutMs: number,
+  publicMessage: string,
+): StartupReadinessDeadline {
+  const controller = new AbortController()
+  const deadlineAt = Date.now() + timeoutMs
+  const expired = () => Date.now() >= deadlineAt
+  const assertBeforeDeadline = () => {
+    if (!controller.signal.aborted && !expired()) return
+    if (!controller.signal.aborted) controller.abort()
+    throw new StartupReadinessDeadlineError(publicMessage)
+  }
+  return {
+    deadlineAt,
+    signal: controller.signal,
+    assertBeforeDeadline,
+    async run<T>(execute: () => Promise<T>): Promise<T> {
+      assertBeforeDeadline()
+      const remainingMs = Math.max(1, deadlineAt - Date.now())
+      const timeout = setTimeout(() => controller.abort(), remainingMs)
+      try {
+        let outcome: ProviderExecutionOutcome<T>
+        try {
+          outcome = await raceProviderExecution(
+            execute,
+            controller.signal,
+            expired,
+          )
+        } catch (error) {
+          if (!controller.signal.aborted && !expired()) throw error
+          if (!controller.signal.aborted) controller.abort()
+          throw new StartupReadinessDeadlineError(publicMessage)
+        }
+        if (outcome.status === 'aborted' || expired()) {
+          if (!controller.signal.aborted) controller.abort()
+          throw new StartupReadinessDeadlineError(publicMessage)
+        }
+        return outcome.value
+      } finally {
+        clearTimeout(timeout)
+      }
+    },
+  }
+}
+
 const OPENCLAW_AUTO_CA_MARKER = 'OPENCLAW_NODE_EXTRA_CA_CERTS_READY'
 const LINUX_SYSTEM_CA_PATHS = [
   '/etc/ssl/certs/ca-certificates.crt',
@@ -594,7 +702,15 @@ interface ModelRunRequest {
   prompt: string
   thinking: ThinkingLevel
   timeoutMs: number
+  turnId: string | null
   version: 1
+}
+
+interface ModelTurnRecord {
+  readonly digest: string
+  readonly turnId: string
+  expiresAt: number | null
+  state: 'active' | 'draining' | 'terminal'
 }
 
 interface WebSearchRequest {
@@ -766,15 +882,22 @@ async function hasBoundPreparedOpenAiAccount(
   prepared: PreparedSimpleCompletionModel,
   expectedOAuthIdentity: Readonly<Record<string, unknown>>,
   inspector: PreparedAuthAccountInspector,
+  signal?: AbortSignal,
 ): Promise<boolean> {
-  if (!hasStableOAuthIdentity(expectedOAuthIdentity)) return false
-  const preparedIdentity = await inspector.resolveIdentity(
-    prepared.auth.apiKey,
-  )
-  if (!preparedIdentity) return false
-  return preparedIdentity.accountId === expectedOAuthIdentity.accountId &&
-    preparedIdentity.subjectSha256 ===
-      expectedOAuthIdentity.oauthSubjectSha256
+  if (signal?.aborted || !hasStableOAuthIdentity(expectedOAuthIdentity)) {
+    return false
+  }
+  try {
+    const preparedIdentity = await inspector.resolveIdentity(
+      prepared.auth.apiKey,
+    )
+    if (signal?.aborted || !preparedIdentity) return false
+    return preparedIdentity.accountId === expectedOAuthIdentity.accountId &&
+      preparedIdentity.subjectSha256 ===
+        expectedOAuthIdentity.oauthSubjectSha256
+  } catch {
+    return false
+  }
 }
 
 function isOpenAiAccountModel(
@@ -918,6 +1041,7 @@ function hasCompatibleCodexSearchConfig(
     'enabled',
     'openaiCodex',
     'provider',
+    'timeoutSeconds',
   ])) return false
   const openaiCodex = search.openaiCodex
   if (openaiCodex !== undefined) {
@@ -930,7 +1054,8 @@ function hasCompatibleCodexSearchConfig(
     : ''
   return search?.enabled !== false &&
     openaiCodex?.enabled !== false &&
-    provider === 'codex'
+    provider === 'codex' &&
+    search.timeoutSeconds === CODEX_SEARCH_TIMEOUT_SECONDS
 }
 
 function isBlankOptionalString(value: unknown): boolean {
@@ -1017,8 +1142,9 @@ async function hasOpenAiAccountSearchAuth(
   agentDir: string,
   expectedProfileId: string,
   expectedOAuthIdentity?: Readonly<Record<string, unknown>>,
+  signal?: AbortSignal,
 ): Promise<boolean> {
-  if (!hasExactOpenAiAccountAuthState(
+  if (signal?.aborted || !hasExactOpenAiAccountAuthState(
     authRuntime,
     config,
     agentDir,
@@ -1035,7 +1161,8 @@ async function hasOpenAiAccountSearchAuth(
         profileId: expectedProfileId,
         provider: 'openai',
       })
-    return mode === 'oauth' &&
+    return !signal?.aborted &&
+      mode === 'oauth' &&
       profileId === expectedProfileId &&
       source === `profile:${expectedProfileId}` &&
       hasExactOpenAiAccountAuthState(
@@ -1426,8 +1553,12 @@ async function resolveBoundCodexSearchProvider(
   stateDir: string,
   workspaceDir: string,
   emptyEnvironmentNames: readonly string[],
+  signal?: AbortSignal,
 ): Promise<BoundCodexResolution> {
   try {
+    if (signal?.aborted) {
+      return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
+    }
     // The pinned runtime cold-loads provider plugins with activate:false and
     // returns shallow clones. It intentionally does not commit that registry
     // globally, so source provenance comes from the exact pinned OpenClaw
@@ -1439,11 +1570,15 @@ async function resolveBoundCodexSearchProvider(
       workspaceDir,
       emptyEnvironmentNames,
     )
-    if (!record || !isOfficialCodexPluginRecord(record)) {
+    if (signal?.aborted || !record || !isOfficialCodexPluginRecord(record)) {
       return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
     }
     const attestation = await attestor(record)
-    if (!attestation || !await attestation.revalidate()) {
+    if (signal?.aborted || !attestation) {
+      return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
+    }
+    const initiallyValid = await attestation.revalidate()
+    if (signal?.aborted || !initiallyValid) {
       return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
     }
     const listed = api.runtime.webSearch.listProviders({ config })
@@ -1455,8 +1590,12 @@ async function resolveBoundCodexSearchProvider(
       return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
     }
     const [provider] = listed
-    if (!provider || !isExactCodexProviderContract(provider) ||
-      !await attestation.revalidate()) {
+    if (signal?.aborted || !provider ||
+      !isExactCodexProviderContract(provider)) {
+      return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
+    }
+    const finallyValid = await attestation.revalidate()
+    if (signal?.aborted || !finallyValid) {
       return { bound: null, error: CODEX_SEARCH_ATTESTATION_ERROR }
     }
     return {
@@ -1476,16 +1615,21 @@ async function revalidateBoundCodexSearchProvider(
   api: OpenClawBridgeApi,
   config: OpenClawRuntimeConfig,
   bound: BoundCodexSearchProvider,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   try {
+    if (signal?.aborted) return false
     if (!isOfficialCodexPluginRecord(bound.pluginRecord) ||
       !isExactCodexProviderContract(bound.provider) ||
       !await bound.attestation.revalidate()) return false
+    if (signal?.aborted) return false
     const listed = api.runtime.webSearch.listProviders({ config })
       .filter((provider) => provider.id === 'codex')
-    return listed.length === 1 && Boolean(listed[0]) &&
-      hasSameCodexProviderContract(bound.provider, listed[0]!) &&
-      await bound.attestation.revalidate()
+    if (listed.length !== 1 || !listed[0] ||
+      !hasSameCodexProviderContract(bound.provider, listed[0]) ||
+      signal?.aborted) return false
+    const revalidated = await bound.attestation.revalidate()
+    return revalidated && !signal?.aborted
   } catch {
     return false
   }
@@ -1514,19 +1658,10 @@ async function runCodexSearchReadinessProbe(
   agentDir: string,
   authProfileId: string,
   authProfileStore: Record<string, unknown>,
-  timeoutMs: number,
+  deadline: StartupReadinessDeadline,
 ): Promise<boolean> {
-  const controller = new AbortController()
-  const timedOut = Symbol('codex-search-readiness-timeout')
-  let timeout: ReturnType<typeof setTimeout> | undefined
   try {
-    const timeoutResult = new Promise<typeof timedOut>((resolve) => {
-      timeout = setTimeout(() => {
-        controller.abort()
-        resolve(timedOut)
-      }, timeoutMs)
-    })
-    const execution = Promise.resolve().then(async () =>
+    const result = await deadline.run(async () =>
       await bound.attestation.executeSearch({
         agentDir,
         authProfileId,
@@ -1535,28 +1670,20 @@ async function runCodexSearchReadinessProbe(
         query: CODEX_SEARCH_READINESS_QUERY,
         searchConfig: config.tools?.web?.search as
           Record<string, unknown> | undefined,
-        signal: controller.signal,
+        signal: deadline.signal,
       }))
-    const result = await Promise.race([
-      execution,
-      timeoutResult,
-    ])
-    if (result === timedOut) {
-      // The pinned stdio client escalates close to process-group SIGKILL after
-      // one second. Always keep this owning process alive for the complete
-      // reviewed drain window, even when the JS task rejects first.
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, CODEX_SEARCH_ABORT_DRAIN_MS)
-      })
-      return false
-    }
-    return result !== timedOut &&
-      !controller.signal.aborted &&
+    return !deadline.signal.aborted &&
       isValidCodexSearchResult(result, CODEX_SEARCH_READINESS_QUERY)
-  } catch {
+  } catch (error) {
+    if (error instanceof StartupReadinessDeadlineError) {
+      // The pinned stdio client escalates close to process-group SIGKILL after
+      // one second. Keep this owning process alive for the reviewed drain
+      // window, but never resume startup work after the absolute deadline.
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, PROVIDER_ABORT_DRAIN_MS)
+      })
+    }
     return false
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout)
   }
 }
 
@@ -1564,20 +1691,11 @@ async function runOpenAiModelReadinessProbe(
   simpleCompletion: SimpleCompletionRuntime,
   prepared: PreparedSimpleCompletionModel,
   config: OpenClawRuntimeConfig,
-  timeoutMs: number,
+  deadline: StartupReadinessDeadline,
 ): Promise<boolean> {
-  const controller = new AbortController()
-  const timedOut = Symbol('openai-model-readiness-timeout')
-  let timeout: ReturnType<typeof setTimeout> | undefined
   try {
-    const timeoutResult = new Promise<typeof timedOut>((resolve) => {
-      timeout = setTimeout(() => {
-        controller.abort()
-        resolve(timedOut)
-      }, timeoutMs)
-    })
-    const result = await Promise.race([
-      simpleCompletion.completeWithPreparedSimpleCompletionModel({
+    const result = await deadline.run(async () =>
+      await simpleCompletion.completeWithPreparedSimpleCompletionModel({
         auth: prepared.auth,
         cfg: config,
         context: {
@@ -1592,22 +1710,23 @@ async function runOpenAiModelReadinessProbe(
         options: {
           maxTokens: 16,
           reasoning: 'low',
-          signal: controller.signal,
+          signal: deadline.signal,
         },
-      }),
-      timeoutResult,
-    ])
-    if (result === timedOut || controller.signal.aborted ||
+      }))
+    if (deadline.signal.aborted ||
       result.stopReason !== 'stop' || result.errorMessage) return false
     const output = result.content.map((block) =>
       block.type === 'text' && typeof block.text === 'string'
         ? block.text
         : '').join('')
     return output === OPENAI_MODEL_READINESS_RESPONSE
-  } catch {
+  } catch (error) {
+    if (error instanceof StartupReadinessDeadlineError) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, PROVIDER_ABORT_DRAIN_MS)
+      })
+    }
     return false
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout)
   }
 }
 
@@ -1712,9 +1831,13 @@ async function prepareOpenAiAccountModel(
   agentDir: string,
   expectedProfileId?: string,
   expectedOAuthIdentity?: Readonly<Record<string, unknown>>,
+  signal?: AbortSignal,
 ): Promise<AccountModelPreparation> {
   let prepared: PreparedSimpleCompletionModel | { error: string }
   try {
+    if (signal?.aborted) {
+      return { message: OPENAI_MODEL_PROBE_ERROR, ok: false }
+    }
     prepared = await simpleCompletion.prepareSimpleCompletionModelForAgent({
       agentId,
       agentDir,
@@ -1725,7 +1848,7 @@ async function prepareOpenAiAccountModel(
   } catch {
     return { message: OPENAI_ACCOUNT_AUTH_ERROR, ok: false }
   }
-  if ('error' in prepared ||
+  if (signal?.aborted || 'error' in prepared ||
     !isOpenAiAccountModel(prepared, config, expectedProfileId)) {
     return { message: OPENAI_ACCOUNT_AUTH_ERROR, ok: false }
   }
@@ -1736,11 +1859,12 @@ async function prepareOpenAiAccountModel(
     prepared,
     expectedOAuthIdentity,
     preparedAuthAccountInspector,
+    signal,
   )) {
     return { message: OPENAI_ACCOUNT_AUTH_ERROR, ok: false }
   }
   const profileId = prepared.auth.profileId?.trim()
-  if (!profileId || !hasExactOpenAiAccountAuthState(
+  if (signal?.aborted || !profileId || !hasExactOpenAiAccountAuthState(
     authRuntime,
     config,
     agentDir,
@@ -1780,11 +1904,17 @@ function requireInteger(
 function parseModelRunRequest(value: unknown): ModelRunRequest {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ['prompt', 'thinking', 'timeoutMs', 'version']) ||
+    !hasOnlyKeys(value, ['prompt', 'thinking', 'timeoutMs', 'turnId', 'version']) ||
     value.version !== BRIDGE_PROTOCOL_VERSION ||
     typeof value.prompt !== 'string' ||
     value.prompt.trim().length === 0 ||
     value.prompt.length > MAX_BRIDGE_PROMPT_CHARS ||
+    (value.turnId !== undefined && (
+      typeof value.turnId !== 'string' ||
+      value.turnId.length < 1 ||
+      value.turnId.length > MAX_MODEL_TURN_ID_CHARS ||
+      !MODEL_TURN_ID_PATTERN.test(value.turnId)
+    )) ||
     (value.thinking !== 'low' && value.thinking !== 'medium')
   ) {
     throw new BridgeRequestError(
@@ -1797,8 +1927,18 @@ function parseModelRunRequest(value: unknown): ModelRunRequest {
     prompt: value.prompt,
     thinking: value.thinking,
     timeoutMs: requireInteger(value.timeoutMs, 1_000, 150_000, 'timeoutMs'),
+    turnId: typeof value.turnId === 'string' ? value.turnId : null,
     version: 1,
   }
+}
+
+function modelTurnRequestDigest(input: ModelRunRequest): string {
+  return sha256(JSON.stringify({
+    prompt: input.prompt,
+    thinking: input.thinking,
+    timeoutMs: input.timeoutMs,
+    version: input.version,
+  }))
 }
 
 function parseWebSearchRequest(value: unknown): WebSearchRequest {
@@ -1821,7 +1961,7 @@ function parseWebSearchRequest(value: unknown): WebSearchRequest {
   return {
     limit: requireInteger(value.limit, 1, 10, 'limit'),
     query: value.query,
-    timeoutMs: requireInteger(value.timeoutMs, 1_000, 150_000, 'timeoutMs'),
+    timeoutMs: requireInteger(value.timeoutMs, 1_000, 300_000, 'timeoutMs'),
     version: 1,
   }
 }
@@ -2007,19 +2147,16 @@ export async function startWebChessBridge(
   const maxResponseBytes = options.maxResponseBytes ?? MAX_BRIDGE_RESPONSE_BYTES
   const maxConcurrentRuns = options.maxConcurrentRuns ?? MAX_CONCURRENT_RUNS
   const requestedReadinessTimeout = options.readinessProbeTimeoutMs
-  const readinessProbeTimeoutMs =
+  const hasRequestedReadinessTimeout =
     typeof requestedReadinessTimeout === 'number' &&
     Number.isSafeInteger(requestedReadinessTimeout) &&
     requestedReadinessTimeout > 0
-      ? Math.min(
-          requestedReadinessTimeout,
-          OPENAI_MODEL_READINESS_TIMEOUT_MS,
-          CODEX_SEARCH_READINESS_TIMEOUT_MS,
-        )
-      : Math.min(
-          OPENAI_MODEL_READINESS_TIMEOUT_MS,
-          CODEX_SEARCH_READINESS_TIMEOUT_MS,
-        )
+  const modelReadinessTimeoutMs = hasRequestedReadinessTimeout
+    ? Math.min(requestedReadinessTimeout, OPENAI_MODEL_READINESS_TIMEOUT_MS)
+    : OPENAI_MODEL_READINESS_TIMEOUT_MS
+  const searchReadinessTimeoutMs = hasRequestedReadinessTimeout
+    ? Math.min(requestedReadinessTimeout, CODEX_SEARCH_READINESS_TIMEOUT_MS)
+    : CODEX_SEARCH_READINESS_TIMEOUT_MS
   const token = options.token ?? randomBytes(32).toString('base64url')
   if (Buffer.byteLength(token, 'utf8') < 32) {
     throw new Error('The WebChess bridge bearer must contain at least 32 bytes.')
@@ -2038,14 +2175,23 @@ export async function startWebChessBridge(
     environment,
   )
   if (initialFailure) throw new Error(initialFailure)
+  const modelReadinessDeadline = createStartupReadinessDeadline(
+    modelReadinessTimeoutMs,
+    OPENAI_MODEL_PROBE_ERROR,
+  )
 
-  let agentAuthRuntime: OpenClawAgentAuthRuntime
+  const agentAuthRuntime = options.agentAuthRuntime ??
+    await modelReadinessDeadline.run(async () => {
+      try {
+        return await loadAgentAuthRuntime()
+      } catch {
+        throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
+      }
+    })
   let agentId = ''
   let agentDir = ''
   let agentWorkspaceDir: string
   try {
-    agentAuthRuntime = options.agentAuthRuntime ??
-      await loadAgentAuthRuntime()
     agentId = agentAuthRuntime.resolveDefaultAgentId(startupConfig).trim()
     agentDir = agentAuthRuntime.resolveAgentDir(
       startupConfig,
@@ -2094,31 +2240,6 @@ export async function startWebChessBridge(
   }
 
   try {
-    let stateDir: string
-    try {
-      stateDir = api.runtime.state.resolveStateDir(environment)
-    } catch {
-      throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
-    }
-    const boundResolution = await resolveBoundCodexSearchProvider(
-      api,
-      runtimeConfigGuard.executionConfig,
-      options.codexPackageAttestor ?? attestOfficialCodexPackage,
-      options.codexPluginRecordResolver ??
-        resolveRuntimeSelectedOfficialCodexPluginRecord,
-      environment,
-      stateDir,
-      agentWorkspaceDir,
-      clearEnv,
-    )
-    if (!boundResolution.bound) throw new Error(boundResolution.error)
-    const boundCodexProvider = boundResolution.bound
-    if (!await revalidateBoundCodexSearchProvider(
-      api,
-      runtimeConfigGuard.executionConfig,
-      boundCodexProvider,
-    )) throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
-
   const accountProfileId = runtimeConfigGuard.executionConfig.auth
     ?.order?.openai?.[0]?.trim()
   const hasBaselineAuthState = accountProfileId
@@ -2151,41 +2272,42 @@ export async function startWebChessBridge(
       accountOAuthIdentity,
     )) throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
 
-  let simpleCompletion: SimpleCompletionRuntime
-  let preparedAuthAccountInspector: PreparedAuthAccountInspector
-  try {
-    simpleCompletion = options.simpleCompletionRuntime ??
-      await loadSimpleCompletionRuntime()
-    preparedAuthAccountInspector = options.preparedAuthAccountInspector ??
-      await attestPinnedOpenClawPreparedAuthAccountInspector() as
-        PreparedAuthAccountInspector
-    if (!preparedAuthAccountInspector) {
-      throw new Error('Prepared OAuth account inspection is unavailable.')
-    }
-  } catch {
+  const simpleCompletion = options.simpleCompletionRuntime ??
+    await modelReadinessDeadline.run(async () => {
+      try {
+        return await loadSimpleCompletionRuntime()
+      } catch {
+        throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
+      }
+    })
+  const inspectedPreparedAuthAccount = options.preparedAuthAccountInspector ??
+    await modelReadinessDeadline.run(async () => {
+      try {
+        return await attestPinnedOpenClawPreparedAuthAccountInspector()
+      } catch {
+        throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
+      }
+    })
+  if (!inspectedPreparedAuthAccount) {
     throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
   }
-  const preflightResult = await prepareOpenAiAccountModel(
-    simpleCompletion,
-    preparedAuthAccountInspector,
-    agentAuthRuntime,
-    runtimeConfigGuard.executionConfig,
-    agentId,
-    agentDir,
-    accountProfileId,
-    accountOAuthIdentity,
-  )
-  if (!preflightResult.ok) throw new Error(preflightResult.message)
-  const preflight = preflightResult.prepared
-  if (preflight.auth.profileId?.trim() !== accountProfileId ||
-    !await hasOpenAiAccountSearchAuth(
-      api,
+  const preparedAuthAccountInspector: PreparedAuthAccountInspector =
+    inspectedPreparedAuthAccount
+  const preflightResult = await modelReadinessDeadline.run(async () =>
+    await prepareOpenAiAccountModel(
+      simpleCompletion,
+      preparedAuthAccountInspector,
       agentAuthRuntime,
       runtimeConfigGuard.executionConfig,
+      agentId,
       agentDir,
       accountProfileId,
       accountOAuthIdentity,
-    )) {
+      modelReadinessDeadline.signal,
+    ))
+  if (!preflightResult.ok) throw new Error(preflightResult.message)
+  const preflight = preflightResult.prepared
+  if (preflight.auth.profileId?.trim() !== accountProfileId) {
     throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
   }
   const currentStartupConfig = runtimeConfigGuard.readValidated()
@@ -2203,11 +2325,13 @@ export async function startWebChessBridge(
     currentStartupConfig,
     accountProfileId,
   ) || !hasCanonicalOpenAiAccountModelTransport(preflight) ||
-    !await hasBoundPreparedOpenAiAccount(
-      preflight,
-      accountOAuthIdentity,
-      preparedAuthAccountInspector,
-    ) ||
+    !await modelReadinessDeadline.run(async () =>
+      await hasBoundPreparedOpenAiAccount(
+        preflight,
+        accountOAuthIdentity,
+        preparedAuthAccountInspector,
+        modelReadinessDeadline.signal,
+      )) ||
     !hasExactOpenAiAccountAuthState(
       agentAuthRuntime,
       currentStartupConfig,
@@ -2221,7 +2345,7 @@ export async function startWebChessBridge(
     simpleCompletion,
     preflight,
     currentStartupConfig,
-    readinessProbeTimeoutMs,
+    modelReadinessDeadline,
   )) {
     throw new Error(OPENAI_MODEL_PROBE_ERROR)
   }
@@ -2235,19 +2359,50 @@ export async function startWebChessBridge(
     agentId,
   )
   if (postModelProbeFailure) throw new Error(postModelProbeFailure)
-  if (!await revalidateBoundCodexSearchProvider(
-    api,
-    postModelProbeConfig,
-    boundCodexProvider,
-  )) throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
-  if (!await hasOpenAiAccountSearchAuth(
-    api,
-    agentAuthRuntime,
-    postModelProbeConfig,
-    agentDir,
-    accountProfileId,
-    accountOAuthIdentity,
-  )) {
+  modelReadinessDeadline.assertBeforeDeadline()
+
+  const searchReadinessDeadline = createStartupReadinessDeadline(
+    searchReadinessTimeoutMs,
+    CODEX_SEARCH_PROBE_ERROR,
+  )
+  let stateDir: string
+  try {
+    stateDir = api.runtime.state.resolveStateDir(environment)
+  } catch {
+    throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
+  }
+  const boundResolution = await searchReadinessDeadline.run(async () =>
+    await resolveBoundCodexSearchProvider(
+      api,
+      runtimeConfigGuard.executionConfig,
+      options.codexPackageAttestor ?? attestOfficialCodexPackage,
+      options.codexPluginRecordResolver ??
+        resolveRuntimeSelectedOfficialCodexPluginRecord,
+      environment,
+      stateDir,
+      agentWorkspaceDir,
+      clearEnv,
+      searchReadinessDeadline.signal,
+    ))
+  if (!boundResolution.bound) throw new Error(boundResolution.error)
+  const boundCodexProvider = boundResolution.bound
+  if (!await searchReadinessDeadline.run(async () =>
+    await revalidateBoundCodexSearchProvider(
+      api,
+      runtimeConfigGuard.executionConfig,
+      boundCodexProvider,
+      searchReadinessDeadline.signal,
+    ))) throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
+  if (!await searchReadinessDeadline.run(async () =>
+    await hasOpenAiAccountSearchAuth(
+      api,
+      agentAuthRuntime,
+      runtimeConfigGuard.executionConfig,
+      agentDir,
+      accountProfileId,
+      accountOAuthIdentity,
+      searchReadinessDeadline.signal,
+    ))) {
     throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
   }
   const searchProbeConfig = runtimeConfigGuard.readValidated()
@@ -2265,11 +2420,13 @@ export async function startWebChessBridge(
     searchProbeConfig,
     accountProfileId,
   ) || !hasCanonicalOpenAiAccountModelTransport(preflight) ||
-    !await hasBoundPreparedOpenAiAccount(
-      preflight,
-      accountOAuthIdentity,
-      preparedAuthAccountInspector,
-    ) ||
+    !await searchReadinessDeadline.run(async () =>
+      await hasBoundPreparedOpenAiAccount(
+        preflight,
+        accountOAuthIdentity,
+        preparedAuthAccountInspector,
+        searchReadinessDeadline.signal,
+      )) ||
     !hasExactOpenAiAccountAuthState(
       agentAuthRuntime,
       searchProbeConfig,
@@ -2279,11 +2436,13 @@ export async function startWebChessBridge(
   )) {
     throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
   }
-  if (!await revalidateBoundCodexSearchProvider(
-    api,
-    searchProbeConfig,
-    boundCodexProvider,
-  )) throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
+  if (!await searchReadinessDeadline.run(async () =>
+    await revalidateBoundCodexSearchProvider(
+      api,
+      searchProbeConfig,
+      boundCodexProvider,
+      searchReadinessDeadline.signal,
+    ))) throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
   const readinessAuthStore = loadBoundOpenAiOAuthStore(
     agentAuthRuntime,
     searchProbeConfig,
@@ -2298,7 +2457,7 @@ export async function startWebChessBridge(
     agentDir,
     accountProfileId,
     readinessAuthStore,
-    readinessProbeTimeoutMs,
+    searchReadinessDeadline,
   )) {
     throw new Error(CODEX_SEARCH_PROBE_ERROR)
   }
@@ -2312,19 +2471,23 @@ export async function startWebChessBridge(
     agentId,
   )
   if (postProbeFailure) throw new Error(postProbeFailure)
-  if (!await revalidateBoundCodexSearchProvider(
-    api,
-    postProbeConfig,
-    boundCodexProvider,
-  )) throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
-  if (!await hasOpenAiAccountSearchAuth(
-    api,
-    agentAuthRuntime,
-    postProbeConfig,
-    agentDir,
-    accountProfileId,
-    accountOAuthIdentity,
-  )) {
+  if (!await searchReadinessDeadline.run(async () =>
+    await revalidateBoundCodexSearchProvider(
+      api,
+      postProbeConfig,
+      boundCodexProvider,
+      searchReadinessDeadline.signal,
+    ))) throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
+  if (!await searchReadinessDeadline.run(async () =>
+    await hasOpenAiAccountSearchAuth(
+      api,
+      agentAuthRuntime,
+      postProbeConfig,
+      agentDir,
+      accountProfileId,
+      accountOAuthIdentity,
+      searchReadinessDeadline.signal,
+    ))) {
     throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
   }
   const finalStartupConfig = runtimeConfigGuard.readValidated()
@@ -2337,32 +2500,134 @@ export async function startWebChessBridge(
     agentId,
   )
   if (finalStartupFailure) throw new Error(finalStartupFailure)
-  if (!await revalidateBoundCodexSearchProvider(
-    api,
-    finalStartupConfig,
-    boundCodexProvider,
-  )) throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
+  if (!await searchReadinessDeadline.run(async () =>
+    await revalidateBoundCodexSearchProvider(
+      api,
+      finalStartupConfig,
+      boundCodexProvider,
+      searchReadinessDeadline.signal,
+    ))) throw new Error(CODEX_SEARCH_ATTESTATION_ERROR)
+  if (!await searchReadinessDeadline.run(async () =>
+    await hasOpenAiAccountSearchAuth(
+      api,
+      agentAuthRuntime,
+      finalStartupConfig,
+      agentDir,
+      accountProfileId,
+      accountOAuthIdentity,
+      searchReadinessDeadline.signal,
+    ))) {
+    throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
+  }
   if (!isOpenAiAccountModel(
     preflight,
     finalStartupConfig,
     accountProfileId,
   ) || !hasCanonicalOpenAiAccountModelTransport(preflight) ||
-    !await hasBoundPreparedOpenAiAccount(
-      preflight,
-      accountOAuthIdentity,
-      preparedAuthAccountInspector,
-    ) ||
+    !await searchReadinessDeadline.run(async () =>
+      await hasBoundPreparedOpenAiAccount(
+        preflight,
+        accountOAuthIdentity,
+        preparedAuthAccountInspector,
+        searchReadinessDeadline.signal,
+      )) ||
     !hasExactOpenAiAccountAuthState(
       agentAuthRuntime,
       finalStartupConfig,
       agentDir,
       accountProfileId,
       accountOAuthIdentity,
-    )) {
+  )) {
     throw new Error(OPENAI_ACCOUNT_AUTH_ERROR)
   }
+  searchReadinessDeadline.assertBeforeDeadline()
   const activeControllers = new Set<AbortController>()
   const activeRuns = new Set<Promise<void>>()
+  const drainingStatusExecutions = new Map<
+    AbortController,
+    Promise<unknown>
+  >()
+  const drainDetachedStatusExecution = async (
+    controller: AbortController,
+    execution: Promise<unknown>,
+  ): Promise<void> => {
+    drainingStatusExecutions.set(controller, execution)
+    const retire = () => {
+      if (drainingStatusExecutions.get(controller) !== execution) return
+      drainingStatusExecutions.delete(controller)
+      activeControllers.delete(controller)
+    }
+    const retirement = execution.then(retire, retire)
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        retirement,
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(resolve, PROVIDER_ABORT_DRAIN_MS)
+        }),
+      ])
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout)
+    }
+  }
+  const modelTurns = new Map<string, ModelTurnRecord>()
+  const completeModelTurn = (record: ModelTurnRecord): void => {
+    if (modelTurns.get(record.turnId) !== record || record.state === 'terminal') {
+      return
+    }
+    record.state = 'terminal'
+    record.expiresAt = Date.now() + MODEL_TURN_TOMBSTONE_MS
+  }
+  const reserveModelTurn = (input: ModelRunRequest): ModelTurnRecord | null => {
+    if (input.turnId === null) return null
+    const now = Date.now()
+    for (const [turnId, record] of modelTurns) {
+      if (record.state === 'terminal' &&
+        record.expiresAt !== null && record.expiresAt <= now) {
+        modelTurns.delete(turnId)
+      }
+    }
+    const digest = modelTurnRequestDigest(input)
+    const existing = modelTurns.get(input.turnId)
+    if (existing) {
+      if (existing.digest !== digest) {
+        throw new BridgeRequestError(
+          409,
+          'MODEL_TURN_CONFLICT',
+          'The model turn identity was already bound to different input.',
+        )
+      }
+      throw new BridgeRequestError(
+        409,
+        existing.state === 'terminal'
+          ? 'MODEL_TURN_ALREADY_SETTLED'
+          : 'MODEL_TURN_IN_PROGRESS',
+        existing.state === 'terminal'
+          ? 'The model turn was already settled.'
+          : 'The model turn is already running.',
+      )
+    }
+    while (modelTurns.size >= MAX_MODEL_TURN_RECORDS) {
+      const oldestTerminal = [...modelTurns.entries()].find(([, record]) =>
+        record.state === 'terminal')
+      if (!oldestTerminal) {
+        throw new BridgeRequestError(
+          503,
+          'MODEL_TURN_REGISTRY_FULL',
+          'The model turn registry is at its safe in-process limit.',
+        )
+      }
+      modelTurns.delete(oldestTerminal[0])
+    }
+    const record: ModelTurnRecord = {
+      digest,
+      expiresAt: null,
+      state: 'active',
+      turnId: input.turnId,
+    }
+    modelTurns.set(record.turnId, record)
+    return record
+  }
   let expectedHost = ''
   let closing = false
 
@@ -2380,6 +2645,91 @@ export async function startWebChessBridge(
         throw new BridgeRequestError(503, 'BRIDGE_BUSY', 'The bridge is at its concurrency limit.')
       }
       if (request.method === 'GET' && request.url === '/v1/status') {
+        const controller = new AbortController()
+        activeControllers.add(controller)
+        let timedOut = false
+        let clientDisconnected = false
+        const requestDeadline = Date.now() + OPENCLAW_STATUS_TIMEOUT_MS
+        const markTimedOut = () => {
+          timedOut = true
+          controller.abort(new Error('WebChess bridge status timeout'))
+        }
+        const expireElapsedDeadline = () => {
+          if (!timedOut && Date.now() >= requestDeadline) markTimedOut()
+          return timedOut
+        }
+        const timeout = setTimeout(markTimedOut, OPENCLAW_STATUS_TIMEOUT_MS)
+        const onAborted = () => {
+          clientDisconnected = true
+          controller.abort(
+            new Error('WebChess bridge status client disconnected'),
+          )
+        }
+        const onClosed = () => {
+          if (!response.writableEnded) onAborted()
+        }
+        request.once('aborted', onAborted)
+        response.once('close', onClosed)
+        if (request.aborted || response.destroyed) onAborted()
+        const statusDependencyExecution: {
+          current: Promise<unknown> | null
+        } = { current: null }
+        const statusAbortFailure = () => {
+          expireElapsedDeadline()
+          return timedOut
+            ? new BridgeRequestError(
+                504,
+                'OPENCLAW_TIMEOUT',
+                'The OpenClaw status check timed out.',
+              )
+            : new BridgeRequestError(
+                408,
+                'OPENCLAW_ABORTED',
+                'The OpenClaw status check was cancelled.',
+              )
+        }
+        const runStatusStage = async <T>(
+          execute: () => Promise<T>,
+        ): Promise<T> => {
+          if (expireElapsedDeadline() || controller.signal.aborted) {
+            throw statusAbortFailure()
+          }
+          let outcome: ProviderExecutionOutcome<T>
+          try {
+            outcome = await raceProviderExecution(
+              () => {
+                const execution = execute()
+                statusDependencyExecution.current = execution
+                void execution.then(
+                  () => {
+                    if (statusDependencyExecution.current === execution) {
+                      statusDependencyExecution.current = null
+                    }
+                  },
+                  () => {
+                    if (statusDependencyExecution.current === execution) {
+                      statusDependencyExecution.current = null
+                    }
+                  },
+                )
+                return execution
+              },
+              controller.signal,
+              expireElapsedDeadline,
+            )
+          } catch (error) {
+            if (!expireElapsedDeadline() && !controller.signal.aborted) {
+              throw error
+            }
+            throw statusAbortFailure()
+          }
+          if (outcome.status === 'aborted' ||
+            expireElapsedDeadline() || controller.signal.aborted) {
+            throw statusAbortFailure()
+          }
+          return outcome.value
+        }
+        try {
         const statusConfig = runtimeConfigGuard.readValidated()
         if (!statusConfig) {
           throw new BridgeRequestError(
@@ -2402,27 +2752,31 @@ export async function startWebChessBridge(
             statusFailure,
           )
         }
-        if (!await revalidateBoundCodexSearchProvider(
-          api,
-          statusConfig,
-          boundCodexProvider,
-        )) {
+        if (!await runStatusStage(async () =>
+          await revalidateBoundCodexSearchProvider(
+            api,
+            statusConfig,
+            boundCodexProvider,
+            controller.signal,
+          ))) {
           throw new BridgeRequestError(
             503,
             'OPENCLAW_NOT_READY',
             CODEX_SEARCH_ATTESTATION_ERROR,
           )
         }
-        const statusModelResult = await prepareOpenAiAccountModel(
-          simpleCompletion,
-          preparedAuthAccountInspector,
-          agentAuthRuntime,
-          statusConfig,
-          agentId,
-          agentDir,
-          accountProfileId,
-          accountOAuthIdentity,
-        )
+        const statusModelResult = await runStatusStage(async () =>
+          await prepareOpenAiAccountModel(
+            simpleCompletion,
+            preparedAuthAccountInspector,
+            agentAuthRuntime,
+            statusConfig,
+            agentId,
+            agentDir,
+            accountProfileId,
+            accountOAuthIdentity,
+            controller.signal,
+          ))
         if (!statusModelResult.ok) {
           throw new BridgeRequestError(
             503,
@@ -2430,14 +2784,16 @@ export async function startWebChessBridge(
             statusModelResult.message,
           )
         }
-        if (!await hasOpenAiAccountSearchAuth(
-          api,
-          agentAuthRuntime,
-          statusConfig,
-          agentDir,
-          accountProfileId,
-          accountOAuthIdentity,
-        )) {
+        if (!await runStatusStage(async () =>
+          await hasOpenAiAccountSearchAuth(
+            api,
+            agentAuthRuntime,
+            statusConfig,
+            agentDir,
+            accountProfileId,
+            accountOAuthIdentity,
+            controller.signal,
+          ))) {
           throw new BridgeRequestError(
             503,
             'OPENCLAW_NOT_READY',
@@ -2466,11 +2822,13 @@ export async function startWebChessBridge(
             postStatusFailure,
           )
         }
-        if (!await revalidateBoundCodexSearchProvider(
-          api,
-          postStatusConfig,
-          boundCodexProvider,
-        )) {
+        if (!await runStatusStage(async () =>
+          await revalidateBoundCodexSearchProvider(
+            api,
+            postStatusConfig,
+            boundCodexProvider,
+            controller.signal,
+          ))) {
           throw new BridgeRequestError(
             503,
             'OPENCLAW_NOT_READY',
@@ -2482,11 +2840,13 @@ export async function startWebChessBridge(
           statusPrepared,
           postStatusConfig,
           accountProfileId,
-        ) || !await hasBoundPreparedOpenAiAccount(
-          statusPrepared,
-          accountOAuthIdentity,
-          preparedAuthAccountInspector,
-        ) || !hasExactOpenAiAccountAuthState(
+        ) || !await runStatusStage(async () =>
+          await hasBoundPreparedOpenAiAccount(
+            statusPrepared,
+            accountOAuthIdentity,
+            preparedAuthAccountInspector,
+            controller.signal,
+          )) || !hasExactOpenAiAccountAuthState(
           agentAuthRuntime,
           postStatusConfig,
           agentDir,
@@ -2506,6 +2866,10 @@ export async function startWebChessBridge(
             OPENAI_ACCOUNT_TRANSPORT_ERROR,
           )
         }
+        if (expireElapsedDeadline() || clientDisconnected ||
+          controller.signal.aborted) {
+          throw statusAbortFailure()
+        }
         sendJson(response, 200, {
           available: true,
           model: `${statusPrepared.selection.provider}/${statusPrepared.selection.modelId}`,
@@ -2524,6 +2888,20 @@ export async function startWebChessBridge(
           protocolVersion: BRIDGE_PROTOCOL_VERSION,
         }, maxResponseBytes)
         return
+        } finally {
+          clearTimeout(timeout)
+          request.off('aborted', onAborted)
+          response.off('close', onClosed)
+          const detachedExecution = statusDependencyExecution.current
+          if (detachedExecution) {
+            await drainDetachedStatusExecution(
+              controller,
+              detachedExecution,
+            )
+          } else {
+            activeControllers.delete(controller)
+          }
+        }
       }
       if (request.method !== 'POST') {
         throw new BridgeRequestError(404, 'NOT_FOUND', 'Unknown bridge endpoint.')
@@ -2537,10 +2915,19 @@ export async function startWebChessBridge(
       const timeoutMs = isRecord(body) && typeof body.timeoutMs === 'number'
         ? body.timeoutMs
         : 0
-      const timeout = setTimeout(() => {
+      const timeoutDelayMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0
+        ? timeoutMs
+        : 1
+      const requestDeadline = Date.now() + timeoutDelayMs
+      const markTimedOut = () => {
         timedOut = true
         controller.abort(new Error('WebChess bridge timeout'))
-      }, Math.max(1, timeoutMs))
+      }
+      const expireElapsedDeadline = () => {
+        if (!timedOut && Date.now() >= requestDeadline) markTimedOut()
+        return timedOut
+      }
+      const timeout = setTimeout(markTimedOut, timeoutDelayMs)
       const onAborted = () => {
         clientDisconnected = true
         controller.abort(new Error('WebChess bridge client disconnected'))
@@ -2551,9 +2938,45 @@ export async function startWebChessBridge(
       request.once('aborted', onAborted)
       response.once('close', onClosed)
 
+      let modelTurn: ModelTurnRecord | null = null
+      const modelProviderExecution: { current: Promise<unknown> | null } = {
+        current: null,
+      }
       try {
         if (request.url === '/v1/model/run') {
           const input = parseModelRunRequest(body)
+          modelTurn = reserveModelTurn(input)
+          const modelAbortFailure = () => {
+            expireElapsedDeadline()
+            return timedOut
+              ? new BridgeRequestError(
+                  504,
+                  'OPENCLAW_TIMEOUT',
+                  'The OpenClaw model run timed out.',
+                )
+              : new BridgeRequestError(
+                  408,
+                  'OPENCLAW_ABORTED',
+                  'The OpenClaw model run was cancelled.',
+                )
+          }
+          const runModelStage = async <T>(
+            execute: () => Promise<T>,
+          ): Promise<T> => {
+            if (expireElapsedDeadline() || controller.signal.aborted) {
+              throw modelAbortFailure()
+            }
+            const outcome = await raceProviderExecution(
+              execute,
+              controller.signal,
+              expireElapsedDeadline,
+            )
+            if (outcome.status === 'aborted' ||
+              expireElapsedDeadline() || controller.signal.aborted) {
+              throw modelAbortFailure()
+            }
+            return outcome.value
+          }
           const requestConfig = runtimeConfigGuard.readValidated()
           if (!requestConfig) {
             throw new BridgeRequestError(
@@ -2576,33 +2999,30 @@ export async function startWebChessBridge(
               requestFailure,
             )
           }
-          if (!await revalidateBoundCodexSearchProvider(
-            api,
-            requestConfig,
-            boundCodexProvider,
-          )) {
+          if (!await runModelStage(async () =>
+            await revalidateBoundCodexSearchProvider(
+              api,
+              requestConfig,
+              boundCodexProvider,
+              controller.signal,
+            ))) {
             throw new BridgeRequestError(
               503,
               'OPENCLAW_MODEL_NOT_READY',
               CODEX_SEARCH_ATTESTATION_ERROR,
             )
           }
-          const preparedResult = await prepareOpenAiAccountModel(
-            simpleCompletion,
-            preparedAuthAccountInspector,
-            agentAuthRuntime,
-            requestConfig,
-            agentId,
-            agentDir,
-            accountProfileId,
-            accountOAuthIdentity,
-          )
-          if (timedOut) {
-            throw new BridgeRequestError(504, 'OPENCLAW_TIMEOUT', 'OpenClaw model preparation timed out.')
-          }
-          if (clientDisconnected || controller.signal.aborted) {
-            throw new BridgeRequestError(408, 'OPENCLAW_ABORTED', 'The OpenClaw model run was cancelled.')
-          }
+          const preparedResult = await runModelStage(async () =>
+            await prepareOpenAiAccountModel(
+              simpleCompletion,
+              preparedAuthAccountInspector,
+              agentAuthRuntime,
+              requestConfig,
+              agentId,
+              agentDir,
+              accountProfileId,
+              accountOAuthIdentity,
+            ))
           if (!preparedResult.ok) {
             throw new BridgeRequestError(
               503,
@@ -2633,26 +3053,30 @@ export async function startWebChessBridge(
               postPrepareFailure,
             )
           }
-          if (!await revalidateBoundCodexSearchProvider(
-            api,
-            postPrepareConfig,
-            boundCodexProvider,
-          )) {
+          if (!await runModelStage(async () =>
+            await revalidateBoundCodexSearchProvider(
+              api,
+              postPrepareConfig,
+              boundCodexProvider,
+              controller.signal,
+            ))) {
             throw new BridgeRequestError(
               503,
               'OPENCLAW_MODEL_NOT_READY',
               CODEX_SEARCH_ATTESTATION_ERROR,
             )
           }
+          const preparedAccountBound = await runModelStage(async () =>
+            await hasBoundPreparedOpenAiAccount(
+              prepared,
+              accountOAuthIdentity,
+              preparedAuthAccountInspector,
+            ))
           if (!isOpenAiAccountModel(
             prepared,
             postPrepareConfig,
             accountProfileId,
-          ) || !await hasBoundPreparedOpenAiAccount(
-            prepared,
-            accountOAuthIdentity,
-            preparedAuthAccountInspector,
-          ) || !hasExactOpenAiAccountAuthState(
+          ) || !preparedAccountBound || !hasExactOpenAiAccountAuthState(
             agentAuthRuntime,
             postPrepareConfig,
             agentDir,
@@ -2678,43 +3102,76 @@ export async function startWebChessBridge(
           let result: Awaited<ReturnType<
             SimpleCompletionRuntime['completeWithPreparedSimpleCompletionModel']
           >>
+          let providerStarted = false
           try {
-            result = await simpleCompletion
-              .completeWithPreparedSimpleCompletionModel({
-                auth: prepared.auth,
-                cfg: postPrepareConfig,
-                context: {
-                  messages: [{
-                    content: input.prompt,
-                    role: 'user',
-                    timestamp: Date.now(),
-                  }],
-                  ...(systemPrompt ? { systemPrompt } : {}),
-                },
-                model: prepared.model,
-                options: {
-                  ...(typeof prepared.model.maxTokens === 'number' &&
-                    Number.isFinite(prepared.model.maxTokens)
-                    ? { maxTokens: prepared.model.maxTokens }
-                    : {}),
-                  reasoning: input.thinking,
-                  signal: controller.signal,
-                },
-              })
-          } catch (error) {
-            if (timedOut) {
-              throw new BridgeRequestError(504, 'OPENCLAW_TIMEOUT', 'The OpenClaw model run timed out.')
+            const completion = await raceProviderExecution(
+              async () => {
+                providerStarted = true
+                const execution = Promise.resolve().then(async () =>
+                  await simpleCompletion.completeWithPreparedSimpleCompletionModel({
+                    auth: prepared.auth,
+                    cfg: postPrepareConfig,
+                    context: {
+                      messages: [{
+                        content: input.prompt,
+                        role: 'user',
+                        timestamp: Date.now(),
+                      }],
+                      ...(systemPrompt ? { systemPrompt } : {}),
+                    },
+                    model: prepared.model,
+                    options: {
+                      ...(typeof prepared.model.maxTokens === 'number' &&
+                        Number.isFinite(prepared.model.maxTokens)
+                        ? { maxTokens: prepared.model.maxTokens }
+                        : {}),
+                      reasoning: input.thinking,
+                      signal: controller.signal,
+                    },
+                  }))
+                modelProviderExecution.current = execution
+                void execution.then(
+                  () => {
+                    if (modelProviderExecution.current === execution) {
+                      modelProviderExecution.current = null
+                    }
+                    if (modelTurn?.state === 'draining') {
+                      completeModelTurn(modelTurn)
+                    }
+                  },
+                  () => {
+                    if (modelProviderExecution.current === execution) {
+                      modelProviderExecution.current = null
+                    }
+                    if (modelTurn?.state === 'draining') {
+                      completeModelTurn(modelTurn)
+                    }
+                  },
+                )
+                return await execution
+              },
+              controller.signal,
+              expireElapsedDeadline,
+            )
+            if (completion.status === 'aborted') {
+              throw modelAbortFailure()
             }
+            result = completion.value
+          } catch (error) {
+            if (providerStarted && controller.signal.aborted) {
+              await new Promise<void>((resolve) => {
+                setTimeout(resolve, PROVIDER_ABORT_DRAIN_MS)
+              })
+            }
+            if (expireElapsedDeadline()) throw modelAbortFailure()
             if (clientDisconnected || controller.signal.aborted) {
-              throw new BridgeRequestError(408, 'OPENCLAW_ABORTED', 'The OpenClaw model run was cancelled.')
+              throw modelAbortFailure()
             }
             throw error
           }
-          if (timedOut) {
-            throw new BridgeRequestError(504, 'OPENCLAW_TIMEOUT', 'The OpenClaw model run timed out.')
-          }
+          if (expireElapsedDeadline()) throw modelAbortFailure()
           if (clientDisconnected || controller.signal.aborted) {
-            throw new BridgeRequestError(408, 'OPENCLAW_ABORTED', 'The OpenClaw model run was cancelled.')
+            throw modelAbortFailure()
           }
           const postCompletionConfig = runtimeConfigGuard.readValidated()
           if (!postCompletionConfig) {
@@ -2738,26 +3195,30 @@ export async function startWebChessBridge(
               postCompletionFailure,
             )
           }
-          if (!await revalidateBoundCodexSearchProvider(
-            api,
-            postCompletionConfig,
-            boundCodexProvider,
-          )) {
+          if (!await runModelStage(async () =>
+            await revalidateBoundCodexSearchProvider(
+              api,
+              postCompletionConfig,
+              boundCodexProvider,
+              controller.signal,
+            ))) {
             throw new BridgeRequestError(
               503,
               'OPENCLAW_MODEL_NOT_READY',
               CODEX_SEARCH_ATTESTATION_ERROR,
             )
           }
+          const completedAccountBound = await runModelStage(async () =>
+            await hasBoundPreparedOpenAiAccount(
+              prepared,
+              accountOAuthIdentity,
+              preparedAuthAccountInspector,
+            ))
           if (!isOpenAiAccountModel(
             prepared,
             postCompletionConfig,
             accountProfileId,
-          ) || !await hasBoundPreparedOpenAiAccount(
-            prepared,
-            accountOAuthIdentity,
-            preparedAuthAccountInspector,
-          ) || !hasExactOpenAiAccountAuthState(
+          ) || !completedAccountBound || !hasExactOpenAiAccountAuthState(
             agentAuthRuntime,
             postCompletionConfig,
             agentDir,
@@ -2791,6 +3252,10 @@ export async function startWebChessBridge(
           if (!outputText || !provider || !model) {
             throw new BridgeRequestError(502, 'INVALID_MODEL_RESULT', 'The OpenClaw model result was incomplete.')
           }
+          if (expireElapsedDeadline()) throw modelAbortFailure()
+          if (clientDisconnected || controller.signal.aborted) {
+            throw modelAbortFailure()
+          }
           sendJson(response, 200, {
             ok: true,
             capability: 'model.run',
@@ -2811,6 +3276,37 @@ export async function startWebChessBridge(
 
         if (request.url === '/v1/web/search') {
           const input = parseWebSearchRequest(body)
+          const searchAbortFailure = () => {
+            expireElapsedDeadline()
+            return timedOut
+              ? new BridgeRequestError(
+                  504,
+                  'OPENCLAW_TIMEOUT',
+                  'Codex Hosted Search timed out.',
+                )
+              : new BridgeRequestError(
+                  408,
+                  'OPENCLAW_ABORTED',
+                  'Codex Hosted Search was cancelled.',
+                )
+          }
+          const runSearchStage = async <T>(
+            execute: () => Promise<T>,
+          ): Promise<T> => {
+            if (expireElapsedDeadline() || controller.signal.aborted) {
+              throw searchAbortFailure()
+            }
+            const outcome = await raceProviderExecution(
+              execute,
+              controller.signal,
+              expireElapsedDeadline,
+            )
+            if (outcome.status === 'aborted' ||
+              expireElapsedDeadline() || controller.signal.aborted) {
+              throw searchAbortFailure()
+            }
+            return outcome.value
+          }
           const requestConfig = runtimeConfigGuard.readValidated()
           if (!requestConfig) {
             throw new BridgeRequestError(
@@ -2833,25 +3329,28 @@ export async function startWebChessBridge(
               requestFailure,
             )
           }
-          if (!await revalidateBoundCodexSearchProvider(
-            api,
-            requestConfig,
-            boundCodexProvider,
-          )) {
+          if (!await runSearchStage(async () =>
+            await revalidateBoundCodexSearchProvider(
+              api,
+              requestConfig,
+              boundCodexProvider,
+              controller.signal,
+            ))) {
             throw new BridgeRequestError(
               503,
               'OPENCLAW_SEARCH_NOT_READY',
               CODEX_SEARCH_ATTESTATION_ERROR,
             )
           }
-          if (!await hasOpenAiAccountSearchAuth(
-            api,
-            agentAuthRuntime,
-            requestConfig,
-            agentDir,
-            accountProfileId,
-            accountOAuthIdentity,
-          )) {
+          if (!await runSearchStage(async () =>
+            await hasOpenAiAccountSearchAuth(
+              api,
+              agentAuthRuntime,
+              requestConfig,
+              agentDir,
+              accountProfileId,
+              accountOAuthIdentity,
+            ))) {
             throw new BridgeRequestError(
               503,
               'OPENCLAW_SEARCH_NOT_READY',
@@ -2880,11 +3379,13 @@ export async function startWebChessBridge(
               postAuthFailure,
             )
           }
-          if (!await revalidateBoundCodexSearchProvider(
-            api,
-            postAuthConfig,
-            boundCodexProvider,
-          )) {
+          if (!await runSearchStage(async () =>
+            await revalidateBoundCodexSearchProvider(
+              api,
+              postAuthConfig,
+              boundCodexProvider,
+              controller.signal,
+            ))) {
             throw new BridgeRequestError(
               503,
               'OPENCLAW_SEARCH_NOT_READY',
@@ -2920,16 +3421,18 @@ export async function startWebChessBridge(
           }
           let rawSearchResult: unknown
           try {
-            rawSearchResult = await boundCodexProvider.attestation.executeSearch({
-              agentDir,
-              authProfileId: accountProfileId,
-              authProfileStore: boundAuthStore,
-              config: postAuthConfig as unknown as Record<string, unknown>,
-              query: input.query,
-              searchConfig: postAuthConfig.tools?.web?.search as
-                Record<string, unknown> | undefined,
-              signal: controller.signal,
-            })
+            rawSearchResult = await runSearchStage(
+              async () => await boundCodexProvider.attestation.executeSearch({
+                  agentDir,
+                  authProfileId: accountProfileId,
+                  authProfileStore: boundAuthStore,
+                  config: postAuthConfig as unknown as Record<string, unknown>,
+                  query: input.query,
+                  searchConfig: postAuthConfig.tools?.web?.search as
+                    Record<string, unknown> | undefined,
+                  signal: controller.signal,
+                }),
+            )
           } catch (error) {
             if (controller.signal.aborted) {
               // The pinned Codex worker schedules a process-group SIGKILL one
@@ -2937,9 +3440,9 @@ export async function startWebChessBridge(
               // enough for that cleanup; this is not a provider-side billing
               // cancellation acknowledgement.
               await new Promise((resolve) =>
-                setTimeout(resolve, CODEX_SEARCH_ABORT_DRAIN_MS))
+                setTimeout(resolve, PROVIDER_ABORT_DRAIN_MS))
             }
-            if (timedOut) {
+            if (expireElapsedDeadline()) {
               throw new BridgeRequestError(504, 'OPENCLAW_TIMEOUT', 'Codex Hosted Search timed out.')
             }
             if (clientDisconnected || controller.signal.aborted) {
@@ -2947,7 +3450,7 @@ export async function startWebChessBridge(
             }
             throw error
           }
-          if (timedOut) {
+          if (expireElapsedDeadline()) {
             throw new BridgeRequestError(504, 'OPENCLAW_TIMEOUT', 'Codex Hosted Search timed out.')
           }
           if (clientDisconnected || controller.signal.aborted) {
@@ -2975,25 +3478,28 @@ export async function startWebChessBridge(
               postSearchFailure,
             )
           }
-          if (!await revalidateBoundCodexSearchProvider(
-            api,
-            postSearchConfig,
-            boundCodexProvider,
-          )) {
+          if (!await runSearchStage(async () =>
+            await revalidateBoundCodexSearchProvider(
+              api,
+              postSearchConfig,
+              boundCodexProvider,
+              controller.signal,
+            ))) {
             throw new BridgeRequestError(
               503,
               'OPENCLAW_SEARCH_NOT_READY',
               CODEX_SEARCH_ATTESTATION_ERROR,
             )
           }
-          if (!await hasOpenAiAccountSearchAuth(
-            api,
-            agentAuthRuntime,
-            postSearchConfig,
-            agentDir,
-            accountProfileId,
-            accountOAuthIdentity,
-          )) {
+          if (!await runSearchStage(async () =>
+            await hasOpenAiAccountSearchAuth(
+              api,
+              agentAuthRuntime,
+              postSearchConfig,
+              agentDir,
+              accountProfileId,
+              accountOAuthIdentity,
+            ))) {
             throw new BridgeRequestError(
               503,
               'OPENCLAW_SEARCH_NOT_READY',
@@ -3013,7 +3519,7 @@ export async function startWebChessBridge(
               OPENAI_ACCOUNT_AUTH_ERROR,
             )
           }
-          if (timedOut) {
+          if (expireElapsedDeadline()) {
             throw new BridgeRequestError(504, 'OPENCLAW_TIMEOUT', 'Codex Hosted Search timed out.')
           }
           if (clientDisconnected || controller.signal.aborted) {
@@ -3041,11 +3547,13 @@ export async function startWebChessBridge(
               finalSearchFailure,
             )
           }
-          if (!await revalidateBoundCodexSearchProvider(
-            api,
-            finalSearchConfig,
-            boundCodexProvider,
-          )) {
+          if (!await runSearchStage(async () =>
+            await revalidateBoundCodexSearchProvider(
+              api,
+              finalSearchConfig,
+              boundCodexProvider,
+              controller.signal,
+            ))) {
             throw new BridgeRequestError(
               503,
               'OPENCLAW_SEARCH_NOT_READY',
@@ -3065,12 +3573,21 @@ export async function startWebChessBridge(
               OPENAI_ACCOUNT_AUTH_ERROR,
             )
           }
+          if (expireElapsedDeadline()) {
+            throw new BridgeRequestError(504, 'OPENCLAW_TIMEOUT', 'Codex Hosted Search timed out.')
+          }
+          if (clientDisconnected || controller.signal.aborted) {
+            throw new BridgeRequestError(408, 'OPENCLAW_ABORTED', 'Codex Hosted Search was cancelled.')
+          }
           if (!isValidCodexSearchResult(rawSearchResult, input.query)) {
             throw new BridgeRequestError(
               503,
               'OPENCLAW_SEARCH_NOT_READY',
               CODEX_SEARCH_PROVIDER_ERROR,
             )
+          }
+          if (expireElapsedDeadline()) {
+            throw new BridgeRequestError(504, 'OPENCLAW_TIMEOUT', 'Codex Hosted Search timed out.')
           }
           sendJson(response, 200, {
             ok: true,
@@ -3086,6 +3603,19 @@ export async function startWebChessBridge(
         }
         throw new BridgeRequestError(404, 'NOT_FOUND', 'Unknown bridge endpoint.')
       } finally {
+        if (modelTurn) {
+          const currentModelTurn = modelTurn
+          const drainingExecution = modelProviderExecution.current
+          if (drainingExecution) {
+            currentModelTurn.state = 'draining'
+            void drainingExecution.then(
+              () => completeModelTurn(currentModelTurn),
+              () => completeModelTurn(currentModelTurn),
+            )
+          } else {
+            completeModelTurn(currentModelTurn)
+          }
+        }
         clearTimeout(timeout)
         request.off('aborted', onAborted)
         response.off('close', onClosed)
@@ -3122,6 +3652,14 @@ export async function startWebChessBridge(
       }
       try {
         await Promise.allSettled([...activeRuns])
+        // Every detached status dependency has already received its bounded
+        // drain while its active run settled. Retire remaining tombstones only
+        // during final bridge shutdown; while the bridge is open they continue
+        // consuming finite concurrency slots until the dependency really ends.
+        for (const controller of drainingStatusExecutions.keys()) {
+          drainingStatusExecutions.delete(controller)
+          activeControllers.delete(controller)
+        }
         await closeServer(server)
       } finally {
         runtimeConfigGuard.restore()

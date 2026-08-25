@@ -3,13 +3,24 @@
 import { createHash } from 'node:crypto'
 
 import { APIConnectionTimeoutError } from 'openai'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { getLegalMoves } from '../../lib/game'
 import { CURRENT_GAME_VERSIONS } from '../../lib/game-contract'
-import { composeProblemParts } from '../../lib/division'
+import type { ReplayState } from '../../lib/game-contract'
+import { acceptMoveCommand, createReplayState } from '../../lib/game-replay'
+import {
+  composeProblemParts,
+  DIVISION_CAST_BINDING_VERSION,
+} from '../../lib/division'
 import {
   CURRENT_LIFECYCLE_VERSIONS,
+  CURRENT_METHOD_VERSION_TUPLE,
+  deriveSurvivorCandidates,
+  deriveTrajectoryDirectionalRecord,
   evaluateGate,
+  LEGACY_GATE_ALGORITHM_VERSION,
+  LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
   PORTIA_ATTACK_TYPES,
   terminalFingerprint,
 } from '../../lib/lifecycle'
@@ -21,7 +32,11 @@ import type {
   SurvivorCandidate,
   WebMemoryEvidence,
 } from '../../lib/lifecycle'
-import { makeProblemFacets } from '../../test/fixtures'
+import {
+  makeProblemFacets,
+  makeTrajectoryDirectionalFixture,
+} from '../../test/fixtures'
+import type { TrajectoryDirectionalFixture } from '../../test/fixtures'
 import type { CaptureRecord, GeneratedAnswer } from '../../types'
 import { hashCanonicalJson } from '../db'
 import type { CanonicalJson, SqlAdapter, SqlResult, SqlRow } from '../db'
@@ -35,16 +50,26 @@ import {
   LifecycleRepositoryError,
   type LifecycleRepositoryPort,
 } from '../lifecycle'
+import { ANSWER_OPERATION_TIMEOUT_MS } from '../model-operation-timeouts'
 import { OpenClawAnswerContractError } from '../openclaw/errors'
 import {
   buildBoardAnswerPromptPackage,
+  buildPlayerVisibleAnswerPrompt,
+  CAST_DIRECTED_DIVISION_PROMPT_VERSION,
   DIVISION_PROMPT_VERSION,
+  LEGACY_DIVISION_PROMPT_VERSION,
   ModelContractError,
+  ModelInputError,
   ModelResponseError,
   normalizeDivisionRepairContext,
+  orderPortiaCandidates,
   OPENAI_MODEL,
 } from '../openai'
-import type { PortiaInput, PortiaRequestContext } from '../openai'
+import type {
+  CharlotteInput,
+  PortiaInput,
+  PortiaRequestContext,
+} from '../openai'
 import {
   hashUserRateKey,
   type ModelResultPayload,
@@ -67,11 +92,100 @@ const LEASE_TOKEN = '44444444-4444-4444-8444-444444444444'
 const PROBLEM = 'How should I make this durable decision?'
 const HMAC_SECRET = 'adapter-test-secret-'.repeat(3)
 const FACETS = makeProblemFacets('Adapter facet')
+const CAST_BOUND_FACETS = FACETS.map((facet) => ({
+  ...facet,
+  castApplication:
+    `The fixed directional cast shapes adapter facet ${facet.id} into a concrete inquiry.`,
+}))
 const SEED = REQUEST_ID
 const PARTS = composeProblemParts(FACETS, SEED)
 const PROMPT = 'Canonical server-side division prompt.'
 const NOW = new Date('2026-07-26T20:00:00.000Z')
 const WEB_MEMORY_OBSERVATION_ID = 'a1000000-0000-4000-8000-000000000001'
+const LEGACY_LIFECYCLE_VERSION = 'webchess-lifecycle-v2.4' as const
+const LEGACY_PORTIA_PROMPT_VERSION = 'webchess-portia-v4' as const
+
+let alternateDirectionalFixture: TrajectoryDirectionalFixture | undefined
+
+function makeAlternateTrajectoryDirectionalFixture(): TrajectoryDirectionalFixture {
+  if (alternateDirectionalFixture) return alternateDirectionalFixture
+  const base = makeTrajectoryDirectionalFixture()
+  let state: ReplayState = createReplayState()
+  while (!state.outcome) {
+    const choice = state.pieces
+      .filter((piece) => piece.side === state.turn)
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .flatMap((piece) =>
+        getLegalMoves(piece, state.pieces)
+          .sort((left, right) =>
+            left.ring - right.ring || left.sector - right.sector)
+          .map((to) => ({ pieceId: piece.id, to })))
+      .at(-1)
+    if (!choice) throw new Error('The alternate directional game has no legal move.')
+    state = acceptMoveCommand(state, {
+      expectedPly: state.completedPlies + 1,
+      pieceId: choice.pieceId,
+      to: choice.to,
+    }, base.parts).state
+    if (state.completedPlies > 256) {
+      throw new Error('The alternate directional game exceeded its test bound.')
+    }
+  }
+  const record = deriveTrajectoryDirectionalRecord({
+    divisionDigest: base.divisionDigest,
+    divisionSeed: base.divisionSeed,
+    castSeed: base.castSeed,
+    trajectorySeed: base.trajectorySeed,
+    versions: state.versions,
+    parts: base.parts,
+    events: state.events,
+  })
+  const survivors = deriveSurvivorCandidates(state, base.parts, {
+    gameId: '00000000-0000-4000-8000-000000000203',
+    attemptId: '00000000-0000-4000-8000-000000000204',
+    divisionDigest: base.divisionDigest,
+    rulesVersion: state.versions.rules,
+    engineVersion: state.versions.engine,
+    castVersion: state.versions.cast,
+    eventVersion: state.versions.event,
+  })
+  alternateDirectionalFixture = {
+    ...base,
+    state,
+    record,
+    survivors,
+    terminalFingerprint: terminalFingerprint(survivors),
+    evidence: {
+      problem: base.evidence.problem,
+      turnCount: state.completedPlies,
+      outcome: {
+        winner: state.outcome.winner,
+        reason: state.outcome.reason,
+        completedTurn: state.outcome.completedTurn,
+      },
+      captures: state.captures.map((item) => ({
+        turn: item.turn,
+        resonance: item.resonance,
+        cell: { ...item.cell },
+        attacker: { side: item.attacker.side, kind: item.attacker.kind },
+        captured: { side: item.captured.side, kind: item.captured.kind },
+        part: {
+          id: item.part.id,
+          title: item.part.title,
+          focus: item.part.focus,
+          hexagram: item.part.hexagram,
+          hexagramName: item.part.hexagramName,
+          theme: item.part.theme,
+          dimension: item.part.dimension,
+          movement: item.part.movement,
+          prompt: item.part.prompt,
+          keyword: item.part.keyword,
+        },
+      })),
+    },
+  }
+  return alternateDirectionalFixture
+}
 
 function webMemoryEvidence(attachedAt: string | null): WebMemoryEvidence {
   return {
@@ -221,6 +335,42 @@ function terminalSnapshot(
   }) as TerminalGameSnapshot
 }
 
+function directionalTerminalSnapshot(
+  fixture: TrajectoryDirectionalFixture,
+  status: TerminalGameSnapshot['status'] = 'completed',
+): TerminalGameSnapshot {
+  if (!fixture.state.outcome) {
+    throw new Error('The directional service fixture must be terminal.')
+  }
+  return mappedSnapshot({
+    revision: status === 'answering' ? 3 : 2,
+    status,
+    problem: fixture.evidence.problem,
+    division: {
+      seed: fixture.divisionSeed,
+      facets: fixture.parts
+        .map((part) => ({
+          id: part.id,
+          title: part.title,
+          focus: part.focus,
+          question: part.prompt,
+          keyword: part.keyword,
+          castApplication: part.castApplication,
+        }))
+        .sort((left, right) => left.id - right.id),
+      parts: [...fixture.parts],
+      model: OPENAI_MODEL,
+      promptVersion: CAST_DIRECTED_DIVISION_PROMPT_VERSION,
+      promptSha256: 'a'.repeat(64),
+      digest: fixture.divisionDigest,
+    },
+    game: fixture.state,
+    answer: status === 'answered' ? STORED_ANSWER : null,
+    completedAt: NOW,
+    answeredAt: status === 'answered' ? NOW : null,
+  }) as TerminalGameSnapshot
+}
+
 function divisionResultPayload() {
   return {
     format: 'webchess-division-result/1' as const,
@@ -231,11 +381,37 @@ function divisionResultPayload() {
   }
 }
 
-function answerResultPayload() {
+function castBoundDivisionResultPayload(seed = SEED) {
   return {
-    format: 'webchess-answer-result/1' as const,
-    answer: STORED_ANSWER,
+    format: 'webchess-division-result/2' as const,
+    promptVersion: CAST_DIRECTED_DIVISION_PROMPT_VERSION,
+    castBindingVersion: DIVISION_CAST_BINDING_VERSION,
+    seed,
+    facets: CAST_BOUND_FACETS,
+    model: OPENAI_MODEL,
+    prompt: PROMPT,
   }
+}
+
+function currentMappedDivisionSnapshot(
+  payload = castBoundDivisionResultPayload(),
+  overrides: Partial<DurableGameSnapshot> = {},
+): DurableGameSnapshot {
+  return mappedSnapshot({
+    id: REQUEST_ID,
+    division: {
+      seed: payload.seed,
+      facets: payload.facets,
+      parts: composeProblemParts(payload.facets, payload.seed),
+      model: payload.model,
+      promptVersion: payload.promptVersion,
+      promptSha256: createHash('sha256')
+        .update(payload.prompt)
+        .digest('hex'),
+      digest: 'd'.repeat(64),
+    },
+    ...overrides,
+  })
 }
 
 function approvedAnswerResultPayload(lifecycle: LifecycleAggregate) {
@@ -249,6 +425,14 @@ function approvedAnswerResultPayload(lifecycle: LifecycleAggregate) {
       lifecycleRunId: lifecycle.id,
       reviewedPromptDigest: lifecycle.answerPromptDigest,
       gateInputDigest: lifecycle.gate.inputDigest,
+      ...(lifecycle.trajectoryDirectionalRecord
+        ? {
+            trajectoryDirectionalRecordVersion:
+              lifecycle.trajectoryDirectionalRecord.version,
+            trajectoryDirectionalRecordDigest:
+              lifecycle.trajectoryDirectionalRecord.digest,
+          }
+        : {}),
     },
   }
 }
@@ -258,6 +442,8 @@ type CharlotteSourceOverrides = Partial<{
   boardAnswerDigest: string
   reviewedPromptDigest: string
   gateInputDigest: string
+  trajectoryDirectionalRecordVersion: string
+  trajectoryDirectionalRecordDigest: string
 }>
 
 function approvedCharlotteResultPayload(
@@ -279,6 +465,14 @@ function approvedCharlotteResultPayload(
       ),
       reviewedPromptDigest: lifecycle.answerPromptDigest,
       gateInputDigest: lifecycle.gate.inputDigest,
+      ...(lifecycle.trajectoryDirectionalRecord
+        ? {
+            trajectoryDirectionalRecordVersion:
+              lifecycle.trajectoryDirectionalRecord.version,
+            trajectoryDirectionalRecordDigest:
+              lifecycle.trajectoryDirectionalRecord.digest,
+          }
+        : {}),
       ...sourceOverrides,
     },
   }
@@ -404,8 +598,26 @@ function createRepository() {
       game: snapshot({ id: REQUEST_ID }),
       created: true,
     })),
-    finishDivision: vi.fn(async () =>
-      mappedSnapshot({ id: REQUEST_ID }),
+    finishDivision: vi.fn(async (
+      input: Parameters<
+        ApiServiceAdapterDependencies['repository']['finishDivision']
+      >[0],
+    ) =>
+      mappedSnapshot({
+        id: input.gameId,
+        revision: input.expectedRevision + 1,
+        division: {
+          seed: String(input.analysis.seed),
+          facets: input.analysis.facets,
+          parts: input.parts,
+          model: input.analysis.model,
+          promptVersion: input.promptVersion,
+          promptSha256: createHash('sha256')
+            .update(input.analysis.prompt)
+            .digest('hex'),
+          digest: 'd'.repeat(64),
+        },
+      }),
     ),
     failDivision: vi.fn(async (input: { gameId: string }) =>
       snapshot({
@@ -452,7 +664,7 @@ function createDependencies(): ApiServiceAdapterDependencies {
       providerId: 'resp_division',
       model: OPENAI_MODEL,
       prompt: PROMPT,
-      result: { facets: FACETS },
+      result: { facets: CAST_BOUND_FACETS },
       usage: {
         reported: true,
         inputTokens: 100,
@@ -463,31 +675,37 @@ function createDependencies(): ApiServiceAdapterDependencies {
         reasoningOutputTokens: 20,
       },
     })),
-    answerGenerator: vi.fn(async () => ({
-      providerId: 'resp_answer',
-      model: OPENAI_MODEL,
-      prompt: STORED_ANSWER.prompt,
-      result: {
-        answer: STORED_ANSWER.answer,
-        sections: {
-          answer: 'Direct answer.',
-          what_the_conflicts_emphasized: 'Conflicts.',
-          the_tension_to_hold: 'Tension.',
-          three_next_moves: ['One', 'Two', 'Three'],
-          what_could_change_the_answer: 'Evidence.',
+    answerGenerator: vi.fn(async (_input, context) => {
+      await context.onProviderTurnStart?.({
+        index: 1,
+        idempotencyKey: context.idempotencyKey,
+      })
+      return {
+        providerId: 'resp_answer',
+        model: OPENAI_MODEL,
+        prompt: STORED_ANSWER.prompt,
+        result: {
+          answer: STORED_ANSWER.answer,
+          sections: {
+            answer: 'Direct answer.',
+            what_the_conflicts_emphasized: 'Conflicts.',
+            the_tension_to_hold: 'Tension.',
+            three_next_moves: ['One', 'Two', 'Three'],
+            what_could_change_the_answer: 'Evidence.',
+          },
+          wordCount: 500,
         },
-        wordCount: 500,
-      },
-      usage: {
-        reported: true,
-        inputTokens: 200,
-        outputTokens: 80,
-        totalTokens: 310,
-        cachedInputTokens: 30,
-        cacheWriteInputTokens: 10,
-        reasoningOutputTokens: 30,
-      },
-    })),
+        usage: {
+          reported: true,
+          inputTokens: 200,
+          outputTokens: 80,
+          totalTokens: 310,
+          cachedInputTokens: 30,
+          cacheWriteInputTokens: 10,
+          reasoningOutputTokens: 30,
+        },
+      }
+    }),
   }
 }
 
@@ -580,7 +798,7 @@ function lifecycleReview(
 ): PortiaReview {
   const assessments = LIFECYCLE_SURVIVORS.map(lifecycleAssessment)
   return {
-    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    contractVersion: LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
     reviewedAnswerPromptDigest: answerPromptDigest,
     promptDecision: 'permit',
     promptDecisionRationale:
@@ -602,8 +820,141 @@ function lifecycleReview(
   }
 }
 
-function exhaustedLifecycleReview(): PortiaReview {
-  const portia = lifecycleReview()
+function directionalLifecycleReview(
+  fixture: TrajectoryDirectionalFixture,
+  answerPromptDigest: string,
+): PortiaReview {
+  const coverage = [
+    'protected_outcome',
+    'evidence_or_reality',
+    'risk_or_countercase',
+    'agency_or_action',
+  ] as const
+  const assessments = fixture.survivors.map((candidate, index) => ({
+    candidateId: candidate.candidateId,
+    disposition: index === 1 ? 'wounded' as const : 'preserved' as const,
+    survivingInterpretation:
+      'A bounded interpretation remains useful after adversarial testing.',
+    requiredQualification: index === 1
+      ? 'Use this interpretation only after the local evidence check succeeds.'
+      : null,
+    redundancyClusterId: null,
+    coverageTags: [coverage[index % coverage.length]!],
+    missingEvidence: ['A direct observation remains necessary before scaling.'],
+    countercase: 'A contradictory observation would reverse the interpretation.',
+    reversalCondition: 'Stop when the protected outcome or evidence threshold fails.',
+    attackFindings: PORTIA_ATTACK_TYPES.map((attackType) => ({
+      attackType,
+      outcome: index === 1 ? 'qualified' as const : 'passed' as const,
+      severity: index === 1 ? 'moderate' as const : 'low' as const,
+      finding: `The ${attackType} attack identifies a bounded uncertainty.`,
+      consequence: 'Preserve uncertainty and a credible stopping rule.',
+      requiredRevision: null,
+    })),
+    directionalRecordDigest: fixture.record.digest,
+    directionalSignalKeys: [
+      fixture.record.survivingDirectionKeys[
+        index % fixture.record.survivingDirectionKeys.length
+      ]!,
+    ],
+    directionalInterpretation:
+      'The exact trajectory direction changes which bounded concern receives priority.',
+    directionalAmendment:
+      'Retain this trajectory-derived direction while keeping factual claims evidence-bound.',
+  }))
+  return {
+    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    reviewedAnswerPromptDigest: answerPromptDigest,
+    directionalRecordVersion: fixture.record.version,
+    directionalRecordDigest: fixture.record.digest,
+    directionalSummary:
+      'The complete legal trajectory materially ranks the surviving directional lenses used in scrutiny.',
+    promptDecision: 'permit',
+    promptDecisionRationale:
+      'The exact board-derived prompt is reasonable under the retained directional qualifications.',
+    runSummary:
+      'Portia tested every survivor and retained the exact trajectory-derived directional amendments.',
+    assessments,
+    crossCandidateContradictions: [],
+    redundancyClusters: [],
+    missingCoverage: [],
+    unresolvedQuestions: ['Which direct observation would reduce uncertainty fastest?'],
+    recommendedGateInputs: {
+      tensionCandidatePairs: [[
+        assessments[0]!.candidateId,
+        assessments[1]!.candidateId,
+      ]],
+      fatalContradictionIds: [],
+      fieldRepairReasons: [],
+    },
+  }
+}
+
+function directionalAnswerPlan(
+  fixture: TrajectoryDirectionalFixture,
+) {
+  return buildBoardAnswerPromptPackage(
+    fixture.evidence,
+    fixture.survivors,
+    fixture.terminalFingerprint,
+    [],
+    [],
+    fixture.record,
+  )
+}
+
+function directionalAnswerPromptDigest(
+  fixture: TrajectoryDirectionalFixture,
+): string {
+  return hashCanonicalJson(
+    directionalAnswerPlan(fixture) as unknown as CanonicalJson,
+  )
+}
+
+function currentReviewedDirectionalLifecycle(
+  fixture: TrajectoryDirectionalFixture,
+  portia: PortiaReview,
+  retryContext = {
+    sameFieldRetryCount: 0,
+    fieldRegenerationCount: 0,
+  },
+  overrides: Partial<LifecycleAggregate> = {},
+): LifecycleAggregate {
+  const answerPromptDigest = directionalAnswerPromptDigest(fixture)
+  if (portia.reviewedAnswerPromptDigest !== answerPromptDigest) {
+    throw new Error('The current Portia fixture must review the exact prompt.')
+  }
+  const gate = evaluateGate(portia, retryContext, fixture.record)
+  const answerUserPrompt = gate.passed
+    ? buildPlayerVisibleAnswerPrompt({
+        plan: directionalAnswerPlan(fixture),
+        reviewedPromptDigest: answerPromptDigest,
+        portia,
+        gate,
+      })
+    : null
+  return currentDirectionalLifecycle(fixture, {
+    state: gate.passed ? 'gate_passed' : 'gate_failed',
+    sameFieldRetryCount: retryContext.sameFieldRetryCount,
+    fieldRegenerationCount: retryContext.fieldRegenerationCount,
+    answerPromptDigest,
+    answerUserPrompt,
+    answerUserPromptSha256: answerUserPrompt
+      ? createHash('sha256').update(answerUserPrompt, 'utf8').digest('hex')
+      : null,
+    portia,
+    gate,
+    ...overrides,
+  })
+}
+
+function exhaustedDirectionalLifecycleReview(
+  fixture: TrajectoryDirectionalFixture,
+): PortiaReview {
+  const portia = directionalLifecycleReview(
+    fixture,
+    directionalAnswerPromptDigest(fixture),
+  )
   return {
     ...portia,
     assessments: portia.assessments.map((assessment) => ({
@@ -623,7 +974,14 @@ function exhaustedLifecycleReview(): PortiaReview {
 }
 
 function lifecycleCharlotte(portia = lifecycleReview()): CharlotteResult {
-  const wounded = portia.assessments[1]
+  const wounded = portia.assessments.find(
+    (assessment) =>
+      assessment.disposition === 'wounded' &&
+      assessment.requiredQualification !== null,
+  )
+  if (!wounded) {
+    throw new Error('The Charlotte fixture requires a wounded qualification.')
+  }
   return {
     contractVersion: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
     protectedOutcome: 'Protect the declared outcome while generating useful direct evidence.',
@@ -673,6 +1031,8 @@ function lifecycleAggregate(
     trajectorySeed: 'adapter-trajectory-seed',
     retryReason: null,
     terminalFingerprint: terminalFingerprint(LIFECYCLE_SURVIVORS),
+    trajectoryDirectionalRecord: null,
+    trajectoryDirectionalRecordStatus: 'legacy_pre_directional_generation',
     answerPromptDigest: null,
     answerUserPrompt: null,
     answerUserPromptSha256: null,
@@ -696,14 +1056,15 @@ function lifecycleAggregate(
     wilburObservations: [],
     versions: {
       software: CURRENT_LIFECYCLE_VERSIONS.software,
-      lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
-      portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
-      portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
-      gateAlgorithm: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      lifecycle: LEGACY_LIFECYCLE_VERSION,
+      portiaPrompt: LEGACY_PORTIA_PROMPT_VERSION,
+      portiaContract: LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+      gateAlgorithm: LEGACY_GATE_ALGORITHM_VERSION,
       retryPolicy: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
       charlottePrompt: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
       charlotteContract: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
       wilburRecord: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      trajectoryDirectionalRecord: null,
       rules: CURRENT_GAME_VERSIONS.rules,
       engine: CURRENT_GAME_VERSIONS.engine,
       cast: CURRENT_GAME_VERSIONS.cast,
@@ -718,13 +1079,112 @@ function lifecycleAggregate(
   }
 }
 
+function currentDirectionalLifecycle(
+  fixture: TrajectoryDirectionalFixture,
+  overrides: Partial<LifecycleAggregate> = {},
+): LifecycleAggregate {
+  return lifecycleAggregate({
+    terminalFingerprint: fixture.terminalFingerprint,
+    trajectoryDirectionalRecord: fixture.record,
+    trajectoryDirectionalRecordStatus: 'bound',
+    survivors: fixture.survivors,
+    divisionSeed: fixture.divisionSeed,
+    castSeed: fixture.castSeed,
+    trajectorySeed: fixture.trajectorySeed,
+    versions: {
+      software: CURRENT_LIFECYCLE_VERSIONS.software,
+      lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+      portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+      portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      gateAlgorithm: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      retryPolicy: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+      charlottePrompt: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+      charlotteContract: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+      wilburRecord: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+      trajectoryDirectionalRecord:
+        CURRENT_LIFECYCLE_VERSIONS.trajectoryDirectionalRecord,
+      rules: fixture.state.versions.rules,
+      engine: fixture.state.versions.engine,
+      cast: fixture.state.versions.cast,
+      event: fixture.state.versions.event,
+    },
+    ...overrides,
+  })
+}
+
+function currentPreBindLifecycle(
+  fixture: TrajectoryDirectionalFixture,
+  overrides: Partial<LifecycleAggregate> = {},
+): LifecycleAggregate {
+  const current = currentDirectionalLifecycle(fixture)
+  return currentDirectionalLifecycle(fixture, {
+    state: 'chess_playing',
+    terminalFingerprint: null,
+    trajectoryDirectionalRecord: null,
+    trajectoryDirectionalRecordStatus: 'not_terminal',
+    survivors: [],
+    portiaProgress: {
+      currentCandidateId: null,
+      completedCandidateIds: [],
+      completedAssessments: [],
+    },
+    versions: {
+      ...current.versions,
+      trajectoryDirectionalRecord: null,
+    },
+    ...overrides,
+  })
+}
+
 function createLifecycleRepository(
   initial = lifecycleAggregate(),
 ): LifecycleRepositoryPort {
   let current = initial
   const repository: LifecycleRepositoryPort = {
-    ensureForGame: vi.fn(async () => current),
-    getForGame: vi.fn(async () => current),
+    ensureForGame: vi.fn(async (input) => {
+      if (current.gameId === input.game.id) return current
+      if (!input.game.division || !input.game.game) {
+        throw new Error('The lifecycle fixture requires a mapped game.')
+      }
+      const runId = '99999999-9999-4999-8999-999999999999'
+      current = lifecycleAggregate({
+        id: runId,
+        rootRunId: runId,
+        parentRunId: null,
+        gameId: input.game.id,
+        state: 'chess_ready',
+        divisionSeed: input.game.division.seed,
+        castSeed: hashCanonicalJson({
+          purpose: 'webchess-cast-seed/v2',
+          divisionDigest: input.game.division.digest,
+          gameId: input.game.id,
+        } as unknown as CanonicalJson),
+        trajectorySeed: input.trajectorySeed,
+        terminalFingerprint: null,
+        trajectoryDirectionalRecord: null,
+        trajectoryDirectionalRecordStatus: 'not_terminal',
+        survivors: [],
+        versions: {
+          software: CURRENT_LIFECYCLE_VERSIONS.software,
+          lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+          portiaPrompt: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+          portiaContract: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+          gateAlgorithm: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+          retryPolicy: CURRENT_LIFECYCLE_VERSIONS.retryPolicy,
+          charlottePrompt: CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
+          charlotteContract: CURRENT_LIFECYCLE_VERSIONS.charlotteContract,
+          wilburRecord: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+          trajectoryDirectionalRecord: null,
+          rules: input.game.game.versions.rules,
+          engine: input.game.game.versions.engine,
+          cast: input.game.game.versions.cast,
+          event: input.game.game.versions.event,
+        },
+      })
+      return current
+    }),
+    getForGame: vi.fn(async (_ownerId, gameId) =>
+      current.gameId === gameId ? current : null),
     transition: vi.fn(async (input) => {
       current = {
         ...current,
@@ -733,6 +1193,19 @@ function createLifecycleRepository(
         terminalFingerprint:
           input.terminalFingerprint ?? current.terminalFingerprint,
         survivors: input.survivors ?? current.survivors,
+        trajectoryDirectionalRecord:
+          input.trajectoryDirectionalRecord ??
+          current.trajectoryDirectionalRecord,
+        trajectoryDirectionalRecordStatus: input.trajectoryDirectionalRecord
+          ? 'bound'
+          : current.trajectoryDirectionalRecordStatus,
+        versions: input.trajectoryDirectionalRecord
+          ? {
+              ...current.versions,
+              trajectoryDirectionalRecord:
+                CURRENT_LIFECYCLE_VERSIONS.trajectoryDirectionalRecord,
+            }
+          : current.versions,
       }
       return current
     }),
@@ -782,6 +1255,7 @@ function createLifecycleRepository(
       return current
     }),
     storePortia: vi.fn(async (input) => {
+      const orderedSurvivors = orderPortiaCandidates(current.survivors)
       current = {
         ...current,
         revision: current.revision + 1,
@@ -791,7 +1265,7 @@ function createLifecycleRepository(
         answerPromptDigest: input.review.reviewedAnswerPromptDigest,
         portiaProgress: {
           currentCandidateId: null,
-          completedCandidateIds: current.survivors.map(
+          completedCandidateIds: orderedSurvivors.map(
             (candidate) => candidate.candidateId,
           ),
           completedAssessments: input.review.assessments,
@@ -956,10 +1430,18 @@ function lifecycleDependencies(
     input: PortiaInput,
     context: PortiaRequestContext,
   ) => {
-    const result = lifecycleReview(input.answerPromptDigest)
+    const generated = lifecycleReview(input.answerPromptDigest)
+    const ordered = orderPortiaCandidates(input.survivors)
+    const result = {
+      ...generated,
+      assessments: ordered.map((survivor) =>
+        generated.assessments.find(
+          (assessment) => assessment.candidateId === survivor.candidateId,
+        )!),
+    }
     await context.onProgress?.({
       currentCandidateId: null,
-      completedCandidateIds: input.survivors.map(
+      completedCandidateIds: ordered.map(
         (candidate) => candidate.candidateId,
       ),
       completedAssessments: result.assessments,
@@ -1008,11 +1490,294 @@ function lifecycleDependencies(
   }
 }
 
+function currentDirectionalDependencies(
+  fixture: TrajectoryDirectionalFixture,
+  initial = currentDirectionalLifecycle(fixture),
+): ApiServiceAdapterDependencies {
+  const dependencies = lifecycleDependencies(initial)
+  vi.mocked(dependencies.repository.getTerminalReplay).mockImplementation(
+    async () => directionalTerminalSnapshot(fixture),
+  )
+  vi.mocked(dependencies.repository.beginAnswer).mockImplementation(
+    async () => directionalTerminalSnapshot(fixture, 'answering'),
+  )
+  vi.mocked(dependencies.repository.storeAnswer).mockImplementation(
+    async () => directionalTerminalSnapshot(fixture, 'answered'),
+  )
+  vi.mocked(dependencies.repository.failAnswer).mockImplementation(
+    async () => directionalTerminalSnapshot(fixture, 'answer_failed'),
+  )
+  const portiaGenerator = vi.fn(async (
+    input: PortiaInput,
+    context: PortiaRequestContext,
+  ) => {
+    const generated = directionalLifecycleReview(
+      fixture,
+      input.answerPromptDigest,
+    )
+    const ordered = orderPortiaCandidates(input.survivors)
+    const result = {
+      ...generated,
+      assessments: ordered.map((survivor) =>
+        generated.assessments.find(
+          (assessment) => assessment.candidateId === survivor.candidateId,
+        )!),
+    }
+    await context.onProgress?.({
+      currentCandidateId: null,
+      completedCandidateIds: ordered.map(
+        (candidate) => candidate.candidateId,
+      ),
+      completedAssessments: result.assessments,
+      totalCandidateCount: input.survivors.length,
+    })
+    return {
+      providerId: 'resp_portia_directional',
+      model: OPENAI_MODEL,
+      prompt: 'Canonical directional Portia prompt.',
+      result,
+      usage: {
+        reported: true,
+        inputTokens: 300,
+        outputTokens: 120,
+        totalTokens: 450,
+        cachedInputTokens: 20,
+        cacheWriteInputTokens: 0,
+        reasoningOutputTokens: 30,
+      },
+    }
+  })
+  const charlotteGenerator = vi.fn(async (input: CharlotteInput) => ({
+    providerId: 'resp_charlotte_directional',
+    model: OPENAI_MODEL,
+    prompt: 'Canonical directional Charlotte prompt.',
+    result: {
+      structured: lifecycleCharlotte(input.portia),
+      renderedAnswer:
+        'Charlotte preserves the qualified directional evidence boundary. '.repeat(12),
+      wordCount: 500,
+    },
+    usage: {
+      reported: true,
+      inputTokens: 240,
+      outputTokens: 110,
+      totalTokens: 380,
+      cachedInputTokens: 20,
+      cacheWriteInputTokens: 0,
+      reasoningOutputTokens: 30,
+    },
+  }))
+  return {
+    ...dependencies,
+    portiaGenerator,
+    charlotteGenerator,
+  }
+}
+
+function currentRetryFieldDependencies(): {
+  readonly fixture: TrajectoryDirectionalFixture
+  readonly dependencies: ApiServiceAdapterDependencies
+} {
+  const fixture = makeTrajectoryDirectionalFixture()
+  const portia = directionalLifecycleReview(
+    fixture,
+    directionalAnswerPromptDigest(fixture),
+  )
+  const failedPortia: PortiaReview = {
+    ...portia,
+    promptDecision: 'retry_field',
+    promptDecisionRationale:
+      'The current field requires one bounded repair before a new game.',
+    recommendedGateInputs: {
+      ...portia.recommendedGateInputs,
+      fieldRepairReasons: [
+        'Add a distinct agency path grounded in an observable action.',
+      ],
+    },
+  }
+  return {
+    fixture,
+    dependencies: currentDirectionalDependencies(
+      fixture,
+      currentReviewedDirectionalLifecycle(fixture, failedPortia),
+    ),
+  }
+}
+
+function approvedCurrentDirectionalLifecycle(
+  fixture: TrajectoryDirectionalFixture,
+  overrides: Partial<LifecycleAggregate> = {},
+): LifecycleAggregate {
+  const plan = directionalAnswerPlan(fixture)
+  const answerPromptDigest = directionalAnswerPromptDigest(fixture)
+  const portia = directionalLifecycleReview(fixture, answerPromptDigest)
+  const gate = evaluateGate(portia, {
+    sameFieldRetryCount: 0,
+    fieldRegenerationCount: 0,
+  }, fixture.record)
+  const answerUserPrompt = buildPlayerVisibleAnswerPrompt({
+    plan,
+    reviewedPromptDigest: answerPromptDigest,
+    portia,
+    gate,
+  })
+  return currentDirectionalLifecycle(fixture, {
+    state: 'gate_passed',
+    answerPromptDigest,
+    answerUserPrompt,
+    answerUserPromptSha256: createHash('sha256')
+      .update(answerUserPrompt, 'utf8')
+      .digest('hex'),
+    portia,
+    gate,
+    ...overrides,
+  })
+}
+
+function approvedCurrentDirectionalDependencies(): ApiServiceAdapterDependencies {
+  const fixture = makeTrajectoryDirectionalFixture()
+  return currentDirectionalDependencies(
+    fixture,
+    approvedCurrentDirectionalLifecycle(fixture),
+  )
+}
+
+function currentWilburFixture(
+  overrides: Partial<LifecycleAggregate> = {},
+) {
+  const fixture = makeTrajectoryDirectionalFixture()
+  const portia = directionalLifecycleReview(
+    fixture,
+    directionalAnswerPromptDigest(fixture),
+  )
+  const charlotte = lifecycleCharlotte(portia)
+  const charlotteRenderedAnswer =
+    'Charlotte preserves the qualified evidence boundary. '.repeat(12)
+  const lifecycle = approvedCurrentDirectionalLifecycle(fixture, {
+    state: 'charlotte_complete',
+    charlotte,
+    charlotteRenderedAnswer,
+    ...overrides,
+  })
+  const dependencies = currentDirectionalDependencies(fixture, lifecycle)
+  vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+    directionalTerminalSnapshot(fixture, 'answered'),
+  )
+  vi.mocked(
+    dependencies.usage.getSucceededModelResultForGame,
+  ).mockImplementation(async (input) => ({
+    found: true,
+    requestId: input.operation === 'answer'
+      ? '77777777-7777-4777-8777-777777777777'
+      : '88888888-8888-4888-8888-888888888888',
+    gameId: GAME_ID,
+    operation: input.operation,
+    status: 'succeeded',
+    resultPayload: (input.operation === 'answer'
+      ? approvedAnswerResultPayload(lifecycle)
+      : approvedCharlotteResultPayload(lifecycle)
+    ) as ModelResultPayload,
+  }))
+  return { fixture, portia, charlotte, lifecycle, dependencies }
+}
+
+function currentWilburAction(
+  lifecycle: LifecycleAggregate,
+  index = 0,
+  overrides: Partial<LifecycleAggregate['wilburActions'][number]> = {},
+) {
+  const suggestion = lifecycle.charlotte?.exactlyThreeNextActions[index]
+  if (!suggestion) throw new Error('The current Wilbur fixture needs Charlotte.')
+  return {
+    id: REQUEST_ID,
+    lifecycleRunId: lifecycle.id,
+    charlotteActionIndex: index,
+    charlotteBindingVersion:
+      'webchess-charlotte-action-binding-v1' as const,
+    actor: suggestion.actor,
+    action: suggestion.smallestAction,
+    testedAssumption: suggestion.assumptionBeingTested,
+    expectedObservation: suggestion.expectedObservation,
+    decisionThreshold: suggestion.decisionThreshold,
+    reviewHorizon: suggestion.reviewHorizon,
+    followUpAt: null,
+    status: 'planned' as const,
+    revision: 0,
+    version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
+    createdAt: NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
+    ...overrides,
+  }
+}
+
 function operationInput() {
   return {
     ownerId: OWNER_ID,
     problem: PROBLEM,
     researchConsent: RESEARCH_CONSENT_CHOICE,
+    ipAddress: '203.0.113.17',
+    idempotencyKey: IDEMPOTENCY_KEY,
+    requestId: REQUEST_ID,
+    signal: new AbortController().signal,
+  }
+}
+
+function currentDivisionRequestSha256(
+  seed = REQUEST_ID,
+  problem = PROBLEM,
+): string {
+  return hashCanonicalJson({
+    operation: 'division/v4-web-memory-research-consent',
+    problem,
+    memoryObservationIds: [],
+    researchConsent: RESEARCH_CONSENT_CHOICE,
+    divisionSeed: seed,
+    model: OPENAI_MODEL,
+    promptVersion: DIVISION_PROMPT_VERSION,
+    softwareVersion: 'webchess-test',
+  } as unknown as CanonicalJson)
+}
+
+function currentFieldRetryRequestSha256(
+  lifecycle: LifecycleAggregate,
+  requestId = REQUEST_ID,
+  memoryObservationIds: readonly string[] = [],
+  problem = PROBLEM,
+): string {
+  if (!lifecycle.gate) {
+    throw new Error('The field-Retry request fixture needs a failed Gate.')
+  }
+  const repairContext = normalizeDivisionRepairContext({
+    priorFieldGeneration: lifecycle.fieldGeneration,
+    gateMissingRequirements: lifecycle.gate.missingRequirements,
+    missingCoverage: [
+      ...(lifecycle.portia?.missingCoverage ?? []),
+      ...lifecycle.gate.coverageResults
+        .filter((coverage) => !coverage.satisfied)
+        .map((coverage) => coverage.tag),
+    ],
+    fieldRepairReasons:
+      lifecycle.portia?.recommendedGateInputs.fieldRepairReasons ?? [],
+  })
+  return hashCanonicalJson({
+    operation: 'division/v2-field-retry',
+    problem,
+    repairContext,
+    memoryObservationIds,
+    sourceGameId: GAME_ID,
+    fieldGeneration: lifecycle.fieldGeneration + 1,
+    divisionSeed: requestId,
+    model: OPENAI_MODEL,
+    promptVersion: DIVISION_PROMPT_VERSION,
+    softwareVersion: 'webchess-test',
+  } as unknown as CanonicalJson)
+}
+
+function answerOperationInput() {
+  return {
+    ownerId: OWNER_ID,
+    gameId: GAME_ID,
+    expectedRevision: 2,
     ipAddress: '203.0.113.17',
     idempotencyKey: IDEMPOTENCY_KEY,
     requestId: REQUEST_ID,
@@ -1067,6 +1832,10 @@ describe('durable HTTP service adapter', () => {
 
   beforeEach(() => {
     dependencies = createDependencies()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('bounds the configured synchronous account export size at 100 MB', () => {
@@ -1124,7 +1893,7 @@ describe('durable HTTP service adapter', () => {
         providerId: 'resp_division',
         model: OPENAI_MODEL,
         prompt: PROMPT,
-        result: { facets: FACETS },
+        result: { facets: CAST_BOUND_FACETS },
         usage: {
           reported: true,
           inputTokens: 100,
@@ -1140,9 +1909,23 @@ describe('durable HTTP service adapter', () => {
       order.push('settle')
       return { ok: true, status: 'succeeded', alreadySettled: false }
     })
-    vi.mocked(repository.finishDivision).mockImplementation(async () => {
+    vi.mocked(repository.finishDivision).mockImplementation(async (input) => {
       order.push('finish')
-      return mappedSnapshot({ id: REQUEST_ID })
+      return mappedSnapshot({
+        id: input.gameId,
+        revision: input.expectedRevision + 1,
+        division: {
+          seed: String(input.analysis.seed),
+          facets: input.analysis.facets,
+          parts: input.parts,
+          model: input.analysis.model,
+          promptVersion: input.promptVersion,
+          promptSha256: createHash('sha256')
+            .update(input.analysis.prompt)
+            .digest('hex'),
+          digest: 'd'.repeat(64),
+        },
+      })
     })
 
     const game = await createApiServicesWithDependencies(
@@ -1168,8 +1951,11 @@ describe('durable HTTP service adapter', () => {
       expect.objectContaining({
         outcome: 'succeeded',
         resultPayload: expect.objectContaining({
-          format: 'webchess-division-result/1',
+          format: 'webchess-division-result/2',
+          promptVersion: CAST_DIRECTED_DIVISION_PROMPT_VERSION,
+          castBindingVersion: DIVISION_CAST_BINDING_VERSION,
           seed: REQUEST_ID,
+          facets: CAST_BOUND_FACETS,
         }),
         usage: {
           reported: true,
@@ -1230,6 +2016,7 @@ describe('durable HTTP service adapter', () => {
           problem: PROBLEM,
           memoryObservationIds: [WEB_MEMORY_OBSERVATION_ID],
           researchConsent: RESEARCH_CONSENT_CHOICE,
+          divisionSeed: REQUEST_ID,
           model: OPENAI_MODEL,
           promptVersion: DIVISION_PROMPT_VERSION,
           softwareVersion: 'webchess-test',
@@ -1237,7 +2024,11 @@ describe('durable HTTP service adapter', () => {
       }),
     )
     expect(dependencies.divisionGenerator).toHaveBeenCalledWith(
-      { problem: PROBLEM, webMemoryEvidence: [evidence] },
+      {
+        problem: PROBLEM,
+        divisionSeed: REQUEST_ID,
+        webMemoryEvidence: [evidence],
+      },
       expect.objectContaining({ userId: OWNER_ID }),
     )
   })
@@ -1332,14 +2123,35 @@ describe('durable HTTP service adapter', () => {
     })
     vi.mocked(
       dependencies.usage.getLatestModelRequestForGame,
-    ).mockResolvedValue({
+    ).mockImplementation(async () => {
+      const reserved = vi.mocked(dependencies.usage.reserveModelRequest)
+        .mock.calls[0]?.[0]
+      if (!reserved) throw new Error('The Division reservation is missing.')
+      return {
+        found: true,
+        requestId: REQUEST_ID,
+        gameId: REQUEST_ID,
+        operation: 'division',
+        requestSha256: reserved.requestSha256,
+        promptVersion: DIVISION_PROMPT_VERSION,
+        status: 'succeeded',
+        resultPayload:
+          castBoundDivisionResultPayload() as unknown as ModelResultPayload,
+      }
+    })
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockImplementation(async (input) => ({
       found: true,
       requestId: REQUEST_ID,
       gameId: REQUEST_ID,
       operation: 'division',
+      requestSha256: input.requestSha256,
+      promptVersion: input.promptVersion,
       status: 'succeeded',
-      resultPayload: divisionResultPayload() as unknown as ModelResultPayload,
-    })
+      resultPayload:
+        castBoundDivisionResultPayload() as unknown as ModelResultPayload,
+    }))
 
     const game = await createApiServicesWithDependencies(
       dependencies,
@@ -1348,7 +2160,109 @@ describe('durable HTTP service adapter', () => {
     expect(game.status).toBe('mapped')
     expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
     expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
-    expect(dependencies.repository.finishDivision).toHaveBeenCalledTimes(1)
+    expect(dependencies.repository.finishDivision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        promptVersion: CAST_DIRECTED_DIVISION_PROMPT_VERSION,
+        analysis: expect.objectContaining({ facets: CAST_BOUND_FACETS }),
+      }),
+    )
+  })
+
+  it('recovers only a current cast-bound Division result during GET', async () => {
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      snapshot({ id: GAME_ID }),
+    )
+    vi.mocked(
+      dependencies.usage.getLatestModelRequestForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: GAME_ID,
+      gameId: GAME_ID,
+      operation: 'division',
+      requestSha256: currentDivisionRequestSha256(GAME_ID),
+      promptVersion: DIVISION_PROMPT_VERSION,
+      status: 'succeeded',
+      resultPayload:
+        castBoundDivisionResultPayload(GAME_ID) as unknown as ModelResultPayload,
+    })
+
+    const game = await createApiServicesWithDependencies(
+      dependencies,
+    ).getGame({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })
+
+    expect(game.status).toBe('mapped')
+    expect(dependencies.usage.reconcileExpiredLeases).toHaveBeenCalledOnce()
+    expect(dependencies.repository.finishDivision).toHaveBeenCalledOnce()
+    expect(dependencies.repository.failDivision).not.toHaveBeenCalled()
+    expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
+  })
+
+  it('keeps a cross-boundary current-shaped Division result read-only during GET', async () => {
+    const pending = snapshot({ id: GAME_ID })
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(pending)
+    vi.mocked(
+      dependencies.usage.getLatestModelRequestForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: GAME_ID,
+      operation: 'division',
+      requestSha256: currentDivisionRequestSha256(),
+      promptVersion: DIVISION_PROMPT_VERSION,
+      status: 'succeeded',
+      resultPayload:
+        castBoundDivisionResultPayload() as unknown as ModelResultPayload,
+    })
+
+    const game = await createApiServicesWithDependencies(
+      dependencies,
+    ).getGame({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })
+
+    expect(game.status).toBe('dividing')
+    expect(dependencies.repository.finishDivision).not.toHaveBeenCalled()
+    expect(dependencies.repository.failDivision).not.toHaveBeenCalled()
+  })
+
+  it('keeps a legacy Division result inspectable without GET-side mutation', async () => {
+    const pending = snapshot({ id: GAME_ID })
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(pending)
+    vi.mocked(
+      dependencies.usage.getLatestModelRequestForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: GAME_ID,
+      operation: 'division',
+      promptVersion: LEGACY_DIVISION_PROMPT_VERSION,
+      status: 'succeeded',
+      resultPayload: divisionResultPayload() as unknown as ModelResultPayload,
+    })
+
+    const game = await createApiServicesWithDependencies(
+      dependencies,
+    ).getGame({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })
+
+    expect(game).toMatchObject({ id: GAME_ID, status: 'dividing' })
+    expect(dependencies.usage.reconcileExpiredLeases).not.toHaveBeenCalled()
+    expect(dependencies.usage.attachModelRequestGame).not.toHaveBeenCalled()
+    expect(dependencies.repository.finishDivision).not.toHaveBeenCalled()
+    expect(dependencies.repository.failDivision).not.toHaveBeenCalled()
+    expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
   })
 
   it('finalizes the committed winner when a concurrent division success rejects this settlement', async () => {
@@ -1359,14 +2273,17 @@ describe('durable HTTP service adapter', () => {
     })
     vi.mocked(
       dependencies.usage.getSucceededModelResultForGame,
-    ).mockResolvedValue({
+    ).mockImplementation(async (input) => ({
       found: true,
-      requestId: '55555555-5555-4555-8555-555555555555',
+      requestId: REQUEST_ID,
       gameId: REQUEST_ID,
       operation: 'division',
+      requestSha256: input.requestSha256,
+      promptVersion: input.promptVersion,
       status: 'succeeded',
-      resultPayload: divisionResultPayload() as unknown as ModelResultPayload,
-    })
+      resultPayload:
+        castBoundDivisionResultPayload() as unknown as ModelResultPayload,
+    }))
 
     const game = await createApiServicesWithDependencies(
       dependencies,
@@ -1379,10 +2296,63 @@ describe('durable HTTP service adapter', () => {
       userId: OWNER_ID,
       gameId: REQUEST_ID,
       operation: 'division',
+      requestSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      promptVersion: DIVISION_PROMPT_VERSION,
     })
-    expect(dependencies.repository.finishDivision).toHaveBeenCalledTimes(1)
+    expect(dependencies.repository.finishDivision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        promptVersion: CAST_DIRECTED_DIVISION_PROMPT_VERSION,
+        analysis: expect.objectContaining({ facets: CAST_BOUND_FACETS }),
+        parts: expect.arrayContaining([
+          expect.objectContaining({
+            castApplication: CAST_BOUND_FACETS[0]!.castApplication,
+          }),
+        ]),
+      }),
+    )
     expect(dependencies.repository.failDivision).not.toHaveBeenCalled()
     expect(dependencies.usage.releaseReservation).not.toHaveBeenCalled()
+  })
+
+  it('rejects a legacy Division winner in a fresh settlement race before field or lifecycle mutation', async () => {
+    dependencies = {
+      ...dependencies,
+      lifecycleRepository: createLifecycleRepository(),
+    }
+    vi.mocked(dependencies.usage.settleModelRequest).mockResolvedValue({
+      ok: false,
+      code: 'OPERATION_ALREADY_SUCCEEDED',
+      httpStatus: 409,
+    })
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: '55555555-5555-4555-8555-555555555555',
+      gameId: REQUEST_ID,
+      operation: 'division',
+      promptVersion: LEGACY_DIVISION_PROMPT_VERSION,
+      status: 'succeeded',
+      resultPayload:
+        divisionResultPayload() as unknown as ModelResultPayload,
+    })
+
+    await expect(
+      createApiServicesWithDependencies(dependencies).divide(operationInput()),
+    ).rejects.toMatchObject({ code: 'INTERNAL_ERROR', status: 500 })
+
+    expect(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).toHaveBeenCalledWith({
+      userId: OWNER_ID,
+      gameId: REQUEST_ID,
+      operation: 'division',
+      requestSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      promptVersion: DIVISION_PROMPT_VERSION,
+    })
+    expect(dependencies.repository.finishDivision).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.ensureForGame)
+      .not.toHaveBeenCalled()
   })
 
   it.each(['reserved', 'in_progress'] satisfies ModelRequestStatus[])(
@@ -1404,6 +2374,7 @@ describe('durable HTTP service adapter', () => {
         requestId: REQUEST_ID,
         gameId: REQUEST_ID,
         operation: 'division',
+        promptVersion: DIVISION_PROMPT_VERSION,
         status,
         resultPayload: null,
       })
@@ -1421,9 +2392,8 @@ describe('durable HTTP service adapter', () => {
   it.each([
     'failed',
     'indeterminate',
-    'rejected',
   ] satisfies ModelRequestStatus[])(
-    'transitions a pending division to failed for terminal ledger state %s',
+    'transitions a current pending division to failed for terminal ledger state %s',
     async (status) => {
       vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
         snapshot(),
@@ -1432,9 +2402,11 @@ describe('durable HTTP service adapter', () => {
         dependencies.usage.getLatestModelRequestForGame,
       ).mockResolvedValue({
         found: true,
-        requestId: REQUEST_ID,
+        requestId: GAME_ID,
         gameId: GAME_ID,
         operation: 'division',
+        requestSha256: currentDivisionRequestSha256(GAME_ID),
+        promptVersion: DIVISION_PROMPT_VERSION,
         status,
         resultPayload: null,
       })
@@ -1454,6 +2426,40 @@ describe('durable HTTP service adapter', () => {
     },
   )
 
+  it('keeps a rejected Division read-only when no current succeeded winner exists', async () => {
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      snapshot(),
+    )
+    vi.mocked(
+      dependencies.usage.getLatestModelRequestForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: GAME_ID,
+      gameId: GAME_ID,
+      operation: 'division',
+      requestSha256: currentDivisionRequestSha256(GAME_ID),
+      promptVersion: DIVISION_PROMPT_VERSION,
+      status: 'rejected',
+      resultPayload: null,
+    })
+
+    const game = await createApiServicesWithDependencies(
+      dependencies,
+    ).getGame({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })
+
+    expect(game.status).toBe('dividing')
+    expect(dependencies.usage.getSucceededModelResultForGame)
+      .toHaveBeenCalledOnce()
+    expect(dependencies.repository.failDivision).not.toHaveBeenCalled()
+    expect(dependencies.repository.finishDivision).not.toHaveBeenCalled()
+    expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
+  })
+
   it('repairs the crash window between division shell creation and ledger attachment', async () => {
     vi.mocked(dependencies.repository.getCurrentGame).mockResolvedValue(
       snapshot(),
@@ -1466,6 +2472,8 @@ describe('durable HTTP service adapter', () => {
       requestId: GAME_ID,
       gameId: null,
       operation: 'division',
+      requestSha256: currentDivisionRequestSha256(GAME_ID),
+      promptVersion: DIVISION_PROMPT_VERSION,
       status: 'reserved',
       resultPayload: null,
     })
@@ -1564,21 +2572,23 @@ describe('durable HTTP service adapter', () => {
     ).mockResolvedValue({
       found: true,
       requestId: REQUEST_ID,
-      gameId: GAME_ID,
+      gameId: REQUEST_ID,
       operation: 'division',
       status: 'in_progress',
       resultPayload: null,
     })
     vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
-      snapshot({ id: GAME_ID }),
+      snapshot({ id: REQUEST_ID }),
     )
     vi.mocked(
       dependencies.usage.getLatestModelRequestForGame,
     ).mockResolvedValue({
       found: true,
       requestId: REQUEST_ID,
-      gameId: GAME_ID,
+      gameId: REQUEST_ID,
       operation: 'division',
+      requestSha256: currentDivisionRequestSha256(),
+      promptVersion: DIVISION_PROMPT_VERSION,
       status: 'failed',
       resultPayload: null,
     })
@@ -1744,14 +2754,12 @@ describe('durable HTTP service adapter', () => {
     expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
   })
 
+  describe('current Answer execution', () => {
+    beforeEach(() => {
+      dependencies = approvedCurrentDirectionalDependencies()
+    })
+
   it('derives answer evidence only from the authoritative terminal replay', async () => {
-    vi.mocked(dependencies.repository.storeAnswer).mockImplementation(
-      async (input) => ({
-        ...terminalSnapshot('answered'),
-        revision: 4,
-        answer: input.answer,
-      }),
-    )
 
     const result = await createApiServicesWithDependencies(
       dependencies,
@@ -1766,31 +2774,554 @@ describe('durable HTTP service adapter', () => {
     })
 
     expect(result.answer).toEqual(STORED_ANSWER)
-    const evidence = vi.mocked(dependencies.answerGenerator).mock.calls[0]?.[0]
-    expect(evidence).toEqual({
-      problem: PROBLEM,
-      turnCount: 1,
-      outcome: {
-        winner: null,
-        reason: 'no-moves',
-        completedTurn: 1,
+    const answerInput = vi.mocked(dependencies.answerGenerator).mock.calls[0]?.[0]
+    const fixture = makeTrajectoryDirectionalFixture()
+    expect(answerInput).toMatchObject({
+      plan: {
+        promptVersion: 'webchess-answer-v4',
+        evidence: fixture.evidence,
+        trajectoryDirectionalRecord: fixture.record,
       },
-      captures: [
-        {
-          turn: 1,
-          resonance: 73,
-          cell: { ring: 4, sector: 0 },
-          attacker: { side: 'white', kind: 'rook' },
-          captured: { side: 'black', kind: 'pawn' },
-          part: PARTS[0],
-        },
-      ],
+      portia: {
+        contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+      },
+      gate: {
+        algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+        passed: true,
+      },
     })
-    expect(JSON.stringify(evidence)).not.toContain('capture-private-id')
-    expect(JSON.stringify(evidence)).not.toContain('Private narration')
+    expect(JSON.stringify(answerInput)).not.toContain('capture-private-id')
+    expect(JSON.stringify(answerInput)).not.toContain('Private narration')
     expect(dependencies.usage.settleModelRequest).toHaveBeenCalledBefore(
       vi.mocked(dependencies.repository.storeAnswer),
     )
+  })
+
+  it('releases the Answer reservation when local prompt validation fails before provider start', async () => {
+    vi.mocked(dependencies.answerGenerator).mockRejectedValue(
+      new ModelInputError('The complete Answer prompt is too large.'),
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .answer(answerOperationInput())).rejects.toMatchObject({
+      code: 'BAD_REQUEST',
+      status: 400,
+    })
+
+    expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+    expect(dependencies.usage.settleModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.usage.releaseReservation).toHaveBeenCalledWith({
+      userId: OWNER_ID,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      reason: 'provider_not_started',
+    })
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+  })
+
+  it('renews the same durable Answer fence before both provider turns', async () => {
+    const generate = vi.mocked(dependencies.answerGenerator)
+      .getMockImplementation()
+    if (!generate) throw new Error('The Answer generator fixture is missing.')
+    let providerTurnCount = 0
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (answerInput, context) => {
+        await context.onProviderTurnStart?.({
+          index: 1,
+          idempotencyKey: 'initial-provider-turn',
+        })
+        providerTurnCount += 1
+        await context.onProviderTurnStart?.({
+          index: 2,
+          idempotencyKey: 'corrective-provider-turn',
+        })
+        providerTurnCount += 1
+        return generate(answerInput, {
+          ...context,
+          onProviderTurnStart: undefined,
+        })
+      },
+    )
+
+    const result = await createApiServicesWithDependencies(
+      dependencies,
+    ).answer(answerOperationInput())
+
+    expect(result.answer).toEqual(STORED_ANSWER)
+    expect(providerTurnCount).toBe(2)
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.beginProviderCall).toHaveBeenCalledTimes(2)
+    for (const [renewal] of vi.mocked(
+      dependencies.usage.beginProviderCall,
+    ).mock.calls) {
+      expect(renewal).toEqual({
+        userId: OWNER_ID,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      })
+    }
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).toHaveBeenCalledOnce()
+  })
+
+  it('starts the absolute Answer deadline before setup and never reserves or calls a provider after it', async () => {
+    let now = NOW.getTime()
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const getTerminalReplay = vi.mocked(
+      dependencies.repository.getTerminalReplay,
+    ).getMockImplementation()
+    if (!getTerminalReplay) throw new Error('The terminal replay fixture is missing.')
+    vi.mocked(dependencies.repository.getTerminalReplay).mockImplementationOnce(
+      async (...args) => {
+        const terminal = await getTerminalReplay(...args)
+        now += ANSWER_OPERATION_TIMEOUT_MS
+        return terminal
+      },
+    )
+
+    try {
+      await expect(createApiServicesWithDependencies(dependencies)
+        .answer(answerOperationInput())).rejects.toMatchObject({
+          code: 'UPSTREAM_TIMEOUT',
+          status: 504,
+        })
+    } finally {
+      nowSpy.mockRestore()
+    }
+
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+    expect(dependencies.answerGenerator).not.toHaveBeenCalled()
+    expect(dependencies.repository.beginAnswer).not.toHaveBeenCalled()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+  })
+
+  it('does not start a deferred first provider turn at the absolute Answer deadline', async () => {
+    let now = NOW.getTime()
+    const startedAt = now
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let startedProviderTurns = 0
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (_answerInput, context) => {
+        now = startedAt + ANSWER_OPERATION_TIMEOUT_MS
+        await context.onProviderTurnStart?.({
+          index: 1,
+          idempotencyKey: 'deferred-first-turn',
+        })
+        startedProviderTurns += 1
+        throw new Error('The first provider turn must not start after expiry.')
+      },
+    )
+
+    try {
+      await expect(createApiServicesWithDependencies(dependencies)
+        .answer(answerOperationInput())).rejects.toMatchObject({
+          code: 'UPSTREAM_TIMEOUT',
+          status: 504,
+        })
+    } finally {
+      nowSpy.mockRestore()
+    }
+
+    expect(startedProviderTurns).toBe(0)
+    expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+    expect(dependencies.usage.releaseReservation).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+  })
+
+  it('rolls back the durable Answer fence when the deadline crosses during renewal before dispatch', async () => {
+    let now = NOW.getTime()
+    const startedAt = now
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let dispatchedProviderTurns = 0
+    vi.mocked(dependencies.usage.beginProviderCall).mockImplementationOnce(
+      async () => {
+        now = startedAt + ANSWER_OPERATION_TIMEOUT_MS
+        return {
+          ok: true,
+          status: 'in_progress',
+          alreadyStarted: false,
+        }
+      },
+    )
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (_answerInput, context) => {
+        await context.onProviderTurnStart?.({
+          index: 1,
+          idempotencyKey: context.idempotencyKey,
+        })
+        dispatchedProviderTurns += 1
+        throw new Error('The provider must not dispatch after expiry.')
+      },
+    )
+
+    try {
+      await expect(createApiServicesWithDependencies(dependencies)
+        .answer(answerOperationInput())).rejects.toMatchObject({
+          code: 'UPSTREAM_TIMEOUT',
+          status: 504,
+        })
+    } finally {
+      nowSpy.mockRestore()
+    }
+
+    expect(dispatchedProviderTurns).toBe(0)
+    expect(dependencies.usage.beginProviderCall).toHaveBeenCalledOnce()
+    expect(dependencies.usage.releaseReservation).toHaveBeenCalledOnce()
+    expect(dependencies.usage.releaseReservation).toHaveBeenCalledWith({
+      userId: OWNER_ID,
+      requestId: REQUEST_ID,
+      leaseToken: LEASE_TOKEN,
+      reason: 'provider_not_started',
+    })
+    expect(dependencies.usage.settleModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+  })
+
+  it('accepts a two-turn Answer that completes after three minutes but before five', async () => {
+    const generate = vi.mocked(dependencies.answerGenerator)
+      .getMockImplementation()
+    if (!generate) throw new Error('The Answer generator fixture is missing.')
+    let now = NOW.getTime()
+    const startedAt = now
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (answerInput, context) => {
+        now = startedAt + 180_001
+        await context.onProviderTurnStart?.({
+          index: 1,
+          idempotencyKey: 'delayed-initial-provider-turn',
+        })
+        now = startedAt + 240_000
+        await context.onProviderTurnStart?.({
+          index: 2,
+          idempotencyKey: 'delayed-corrective-provider-turn',
+        })
+        return generate(answerInput, {
+          ...context,
+          onProviderTurnStart: async () => undefined,
+        })
+      },
+    )
+
+    try {
+      await expect(createApiServicesWithDependencies(dependencies)
+        .answer(answerOperationInput())).resolves.toMatchObject({
+          answer: STORED_ANSWER,
+          game: { status: 'answered' },
+        })
+    } finally {
+      nowSpy.mockRestore()
+    }
+
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.beginProviderCall).toHaveBeenCalledTimes(2)
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'succeeded' }),
+    )
+    expect(dependencies.repository.failAnswer).not.toHaveBeenCalled()
+    expect(dependencies.repository.storeAnswer).toHaveBeenCalledOnce()
+  })
+
+  it('allows two Answer turns before five minutes but never starts a deferred corrective turn at expiry', async () => {
+    const generate = vi.mocked(dependencies.answerGenerator)
+      .getMockImplementation()
+    if (!generate) throw new Error('The Answer generator fixture is missing.')
+    let now = NOW.getTime()
+    const startedAt = now
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let startedProviderTurns = 0
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (answerInput, context) => {
+        now = startedAt + 180_001
+        await context.onProviderTurnStart?.({
+          index: 1,
+          idempotencyKey: 'initial-provider-turn',
+        })
+        startedProviderTurns += 1
+        now = startedAt + ANSWER_OPERATION_TIMEOUT_MS
+        await context.onProviderTurnStart?.({
+          index: 2,
+          idempotencyKey: 'deferred-corrective-turn',
+        })
+        startedProviderTurns += 1
+        return generate(answerInput, {
+          ...context,
+          onProviderTurnStart: async () => undefined,
+        })
+      },
+    )
+
+    try {
+      await expect(createApiServicesWithDependencies(dependencies)
+        .answer(answerOperationInput())).rejects.toMatchObject({
+          code: 'UPSTREAM_TIMEOUT',
+          status: 504,
+        })
+    } finally {
+      nowSpy.mockRestore()
+    }
+
+    expect(startedProviderTurns).toBe(1)
+    expect(dependencies.usage.beginProviderCall).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'indeterminate',
+        failureCode: 'answer_operation_timeout',
+      }),
+    )
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+  })
+
+  it('never refunds the first Answer turn when the deadline crosses during corrective renewal', async () => {
+    let now = NOW.getTime()
+    const startedAt = now
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let renewals = 0
+    let dispatchedProviderTurns = 0
+    vi.mocked(dependencies.usage.beginProviderCall).mockImplementation(
+      async () => {
+        renewals += 1
+        if (renewals === 2) {
+          now = startedAt + ANSWER_OPERATION_TIMEOUT_MS
+        }
+        return {
+          ok: true,
+          status: 'in_progress',
+          alreadyStarted: renewals > 1,
+        }
+      },
+    )
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (_answerInput, context) => {
+        now = startedAt + 180_001
+        await context.onProviderTurnStart?.({
+          index: 1,
+          idempotencyKey: 'initial-provider-turn',
+        })
+        dispatchedProviderTurns += 1
+        now = startedAt + ANSWER_OPERATION_TIMEOUT_MS - 1
+        await context.onProviderTurnStart?.({
+          index: 2,
+          idempotencyKey: 'corrective-provider-turn',
+        })
+        dispatchedProviderTurns += 1
+        throw new Error('The corrective provider turn must not dispatch.')
+      },
+    )
+
+    try {
+      await expect(createApiServicesWithDependencies(dependencies)
+        .answer(answerOperationInput())).rejects.toMatchObject({
+          code: 'UPSTREAM_TIMEOUT',
+          status: 504,
+        })
+    } finally {
+      nowSpy.mockRestore()
+    }
+
+    expect(dispatchedProviderTurns).toBe(1)
+    expect(dependencies.usage.beginProviderCall).toHaveBeenCalledTimes(2)
+    expect(dependencies.usage.releaseReservation).not.toHaveBeenCalled()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'indeterminate',
+        failureCode: 'answer_operation_timeout',
+      }),
+    )
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+  })
+
+  it('rejects a provider result that resumes after the absolute deadline before success settlement', async () => {
+    const generate = vi.mocked(dependencies.answerGenerator)
+      .getMockImplementation()
+    if (!generate) throw new Error('The Answer generator fixture is missing.')
+    let now = NOW.getTime()
+    const startedAt = now
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (answerInput, context) => {
+        await context.onProviderTurnStart?.({
+          index: 1,
+          idempotencyKey: 'late-result-provider-turn',
+        })
+        const generated = await generate(answerInput, {
+          ...context,
+          onProviderTurnStart: async () => undefined,
+        })
+        now = startedAt + ANSWER_OPERATION_TIMEOUT_MS
+        return generated
+      },
+    )
+
+    try {
+      await expect(createApiServicesWithDependencies(dependencies)
+        .answer(answerOperationInput())).rejects.toMatchObject({
+          code: 'UPSTREAM_TIMEOUT',
+          status: 504,
+        })
+    } finally {
+      nowSpy.mockRestore()
+    }
+
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.beginProviderCall).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'indeterminate',
+        failureCode: 'answer_operation_timeout',
+      }),
+    )
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+  })
+
+  it('settles the aggregate five-minute Answer deadline when the provider ignores its abort signal', async () => {
+    vi.useFakeTimers({ now: NOW })
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (_answerInput, context) => {
+        await context.onProviderTurnStart?.({
+          index: 1,
+          idempotencyKey: context.idempotencyKey,
+        })
+        return new Promise<never>(() => {})
+      },
+    )
+
+    const answer = createApiServicesWithDependencies(dependencies)
+      .answer(answerOperationInput())
+    const answerOutcome = answer.then(
+      () => null,
+      (error: unknown) => error,
+    )
+    for (let index = 0; index < 12; index += 1) await Promise.resolve()
+
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(299_999)
+    expect(dependencies.usage.settleModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.repository.failAnswer).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(answerOutcome).resolves.toMatchObject({
+      code: 'UPSTREAM_TIMEOUT',
+      status: 504,
+    })
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: OWNER_ID,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+        outcome: 'indeterminate',
+        failureCode: 'answer_operation_timeout',
+      }),
+    )
+    expect(dependencies.usage.reconcileExpiredLeases).not.toHaveBeenCalled()
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+  })
+
+  it('reconciles an expired ambiguous Answer settlement without another provider call', async () => {
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (_answerInput, context) => {
+        await context.onProviderTurnStart?.({
+          index: 1,
+          idempotencyKey: context.idempotencyKey,
+        })
+        throw new APIConnectionTimeoutError()
+      },
+    )
+    vi.mocked(dependencies.usage.settleModelRequest).mockResolvedValue({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+    vi.mocked(dependencies.usage.getModelRequestResult).mockResolvedValue({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: GAME_ID,
+      operation: 'answer',
+      status: 'indeterminate',
+      resultPayload: null,
+    })
+
+    const services = createApiServicesWithDependencies(dependencies)
+    await expect(services.answer(answerOperationInput())).rejects.toMatchObject({
+      code: 'UPSTREAM_TIMEOUT',
+      status: 504,
+    })
+
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'indeterminate',
+        failureCode: 'provider_timeout',
+      }),
+    )
+    expect(dependencies.usage.reconcileExpiredLeases).toHaveBeenCalledOnce()
+    expect(dependencies.usage.getModelRequestResult).toHaveBeenCalledWith({
+      userId: OWNER_ID,
+      requestId: REQUEST_ID,
+    })
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
+
+    const fixture = makeTrajectoryDirectionalFixture()
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      directionalTerminalSnapshot(fixture, 'answer_failed'),
+    )
+    await expect(services.getGame({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({ status: 'answer_failed' })
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a late Answer response after lease expiry without duplicating provider work', async () => {
+    vi.mocked(dependencies.usage.settleModelRequest).mockResolvedValue({
+      ok: false,
+      code: 'LEASE_EXPIRED',
+      httpStatus: 410,
+    })
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockResolvedValue({ found: false })
+    vi.mocked(dependencies.usage.getModelRequestResult).mockResolvedValue({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: GAME_ID,
+      operation: 'answer',
+      status: 'indeterminate',
+      resultPayload: null,
+    })
+
+    await expect(
+      createApiServicesWithDependencies(dependencies)
+        .answer(answerOperationInput()),
+    ).rejects.toMatchObject({
+      code: 'UPSTREAM_TIMEOUT',
+      status: 504,
+    })
+
+    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.reconcileExpiredLeases).toHaveBeenCalledOnce()
+    expect(dependencies.repository.failAnswer).toHaveBeenCalledOnce()
+    expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
   })
 
   it('settles a terminal corrective Answer failure and exposes only its safe prompt', async () => {
@@ -1799,8 +3330,14 @@ describe('durable HTTP service adapter', () => {
       'CORRECTION REQUIRED',
       'Verified board evidence only.',
     ].join('\n\n')
-    vi.mocked(dependencies.answerGenerator).mockRejectedValue(
-      new OpenClawAnswerContractError(publicPrompt),
+    vi.mocked(dependencies.answerGenerator).mockImplementation(
+      async (_answerInput, context) => {
+        await context.onProviderTurnStart?.({
+          index: 1,
+          idempotencyKey: context.idempotencyKey,
+        })
+        throw new OpenClawAnswerContractError(publicPrompt)
+      },
     )
 
     await expect(createApiServicesWithDependencies(dependencies).answer({
@@ -1830,8 +3367,9 @@ describe('durable HTTP service adapter', () => {
   it.each(['failed', 'indeterminate', 'rejected'] satisfies ModelRequestStatus[])(
     'transitions a pending answer to answer_failed for terminal ledger state %s',
     async (status) => {
+      const fixture = makeTrajectoryDirectionalFixture()
       vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
-        terminalSnapshot('answering'),
+        directionalTerminalSnapshot(fixture, 'answering'),
       )
       vi.mocked(
         dependencies.usage.getLatestModelRequestForGame,
@@ -1860,14 +3398,14 @@ describe('durable HTTP service adapter', () => {
   )
 
   it('recovers a succeeded answer payload during GET without another provider call', async () => {
-    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
-      terminalSnapshot('answering'),
+    const fixture = makeTrajectoryDirectionalFixture()
+    const lifecycle = await dependencies.lifecycleRepository?.getForGame(
+      OWNER_ID,
+      GAME_ID,
     )
-    vi.mocked(dependencies.repository.storeAnswer).mockImplementation(
-      async (input) => ({
-        ...terminalSnapshot('answered'),
-        answer: input.answer,
-      }),
+    if (!lifecycle) throw new Error('The current Answer lifecycle is missing.')
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      directionalTerminalSnapshot(fixture, 'answering'),
     )
     vi.mocked(
       dependencies.usage.getLatestModelRequestForGame,
@@ -1877,7 +3415,8 @@ describe('durable HTTP service adapter', () => {
       gameId: GAME_ID,
       operation: 'answer',
       status: 'succeeded',
-      resultPayload: answerResultPayload() as unknown as ModelResultPayload,
+      resultPayload:
+        approvedAnswerResultPayload(lifecycle) as unknown as ModelResultPayload,
     })
 
     const game = await createApiServicesWithDependencies(
@@ -1895,6 +3434,11 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('uses the succeeded answer winner when an idempotent duplicate was rejected', async () => {
+    const lifecycle = await dependencies.lifecycleRepository?.getForGame(
+      OWNER_ID,
+      GAME_ID,
+    )
+    if (!lifecycle) throw new Error('The current Answer lifecycle is missing.')
     vi.mocked(dependencies.usage.reserveModelRequest).mockResolvedValue({
       ok: true,
       kind: 'existing',
@@ -1920,15 +3464,9 @@ describe('durable HTTP service adapter', () => {
       gameId: GAME_ID,
       operation: 'answer',
       status: 'succeeded',
-      resultPayload: answerResultPayload() as unknown as ModelResultPayload,
+      resultPayload:
+        approvedAnswerResultPayload(lifecycle) as unknown as ModelResultPayload,
     })
-    vi.mocked(dependencies.repository.storeAnswer).mockImplementation(
-      async (input) => ({
-        ...terminalSnapshot('answered'),
-        answer: input.answer,
-      }),
-    )
-
     const result = await createApiServicesWithDependencies(
       dependencies,
     ).answer({
@@ -1956,9 +3494,6 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('does not recreate an answer after forced deletion wins during its provider call', async () => {
-    vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
-      terminalSnapshot(),
-    )
     vi.mocked(dependencies.usage.settleModelRequest).mockResolvedValue({
       ok: false,
       code: 'REQUEST_NOT_FOUND',
@@ -1985,6 +3520,8 @@ describe('durable HTTP service adapter', () => {
 
     expect(dependencies.repository.storeAnswer).not.toHaveBeenCalled()
     expect(dependencies.repository.failAnswer).not.toHaveBeenCalled()
+  })
+
   })
 
   it('does not call the game repository when durable move throttling denies a move', async () => {
@@ -2016,6 +3553,8 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('hydrates the child created by the atomic replay accounting mutation', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    dependencies = currentDirectionalDependencies(fixture)
     const order: string[] = []
     vi.mocked(
       dependencies.usage.consumeReplayGameStart,
@@ -2067,7 +3606,52 @@ describe('durable HTTP service adapter', () => {
     )
   })
 
+  it.each(['missing', 'legacy', 'mixed-division'] as const)(
+    'rejects %s replay provenance before quota or child mutation',
+    async (kind) => {
+      const fixture = makeTrajectoryDirectionalFixture()
+      dependencies = currentDirectionalDependencies(fixture)
+      if (kind === 'missing') {
+        vi.mocked(dependencies.lifecycleRepository!.getForGame)
+          .mockResolvedValue(null)
+      } else if (kind === 'legacy') {
+        vi.mocked(dependencies.lifecycleRepository!.getForGame)
+          .mockResolvedValue(lifecycleAggregate())
+      } else {
+        const terminal = directionalTerminalSnapshot(fixture)
+        vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue({
+          ...terminal,
+          division: {
+            ...terminal.division,
+            promptVersion: LEGACY_DIVISION_PROMPT_VERSION,
+          },
+        })
+      }
+
+      await expect(
+        createApiServicesWithDependencies(dependencies).replay({
+          ownerId: OWNER_ID,
+          gameId: GAME_ID,
+          expectedRevision: 2,
+          ipAddress: '203.0.113.17',
+          idempotencyKey: IDEMPOTENCY_KEY,
+          requestId: REQUEST_ID,
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+      expect(dependencies.usage.consumeReplayGameStart).not.toHaveBeenCalled()
+      expect(dependencies.repository.getOwnedGame).not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.transition)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.createRetryRun)
+        .not.toHaveBeenCalled()
+    },
+  )
+
   it('does not hydrate a replay child when the atomic mutation rejects stale source state', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    dependencies = currentDirectionalDependencies(fixture)
     vi.mocked(
       dependencies.usage.consumeReplayGameStart,
     ).mockResolvedValue({
@@ -2081,7 +3665,7 @@ describe('durable HTTP service adapter', () => {
       createApiServicesWithDependencies(dependencies).replay({
         ownerId: OWNER_ID,
         gameId: GAME_ID,
-        expectedRevision: 1,
+        expectedRevision: 2,
         ipAddress: '203.0.113.17',
         idempotencyKey: IDEMPOTENCY_KEY,
         requestId: REQUEST_ID,
@@ -2519,96 +4103,677 @@ describe('durable HTTP service adapter', () => {
     })
   })
 
-  it('runs Portia, commits the deterministic Gate, and authorizes board answer generation', async () => {
+  it('keeps a legacy Portia lifecycle read-only with zero usage or provider work', async () => {
     dependencies = lifecycleDependencies()
     const services = createApiServicesWithDependencies(dependencies)
 
-    const lifecycle = await services.runPortia({
+    await expect(services.runPortia({
       ...operationInput(),
       gameId: GAME_ID,
       expectedRevision: 2,
+    })).rejects.toMatchObject({
+      code: 'CONFLICT',
+      status: 409,
+      message: expect.stringContaining('read-only'),
     })
 
-    expect(lifecycle).toMatchObject({
-      state: 'gate_passed',
-      portia: { contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract },
-      gate: { passed: true, recommendedNextTransition: 'answer' },
-      answerPromptDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
-      answerUserPrompt: expect.stringContaining('"reviewed_prompt"'),
-      answerUserPromptSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
-      portiaProgress: {
-        currentCandidateId: null,
-        completedCandidateIds: LIFECYCLE_SURVIVORS.map(
-          (candidate) => candidate.candidateId,
-        ),
-      },
-    })
-    expect(dependencies.portiaGenerator).toHaveBeenCalledWith(
-      expect.objectContaining({
-        problem: PROBLEM,
-        survivors: LIFECYCLE_SURVIVORS,
-        answerPromptPackage: expect.objectContaining({
-          promptVersion: 'webchess-answer-v3',
-          evidence: expect.objectContaining({ problem: PROBLEM }),
-        }),
-        answerPromptDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
-      }),
-      expect.objectContaining({
-        userId: OWNER_ID,
-        idempotencyKey: expect.stringMatching(/^[0-9a-f]{64}$/u),
-        onProgress: expect.any(Function),
-      }),
-    )
-    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
-      expect.objectContaining({
-        outcome: 'succeeded',
-        resultPayload: expect.objectContaining({
-          format: 'webchess-portia-result/1',
-        }),
-      }),
-    )
-    expect(dependencies.lifecycleRepository?.storePortia).toHaveBeenCalledOnce()
-    expect(dependencies.lifecycleRepository?.storeGate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        answerUserPrompt: lifecycle.answerUserPrompt,
-      }),
-    )
-    expect(lifecycle.answerUserPrompt).toContain(PROBLEM)
-    expect(lifecycle.answerUserPrompt).toContain('"portia_authorization"')
-    expect(lifecycle.answerUserPrompt).toContain('"gate"')
-    expect(lifecycle.answerUserPrompt).not.toContain('PORTIA AUTHORIZATION BOUNDARY')
-    expect(lifecycle.answerUserPrompt).not.toContain('OUTPUT CONTRACT')
-    expect(vi.mocked(dependencies.portiaGenerator!).mock.calls[0]?.[1])
-      .not.toHaveProperty('apiKey')
+    expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.usage.reconcileExpiredLeases).not.toHaveBeenCalled()
+    expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.transition).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.beginPortiaAttempt)
+      .not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.storePortia).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.storeGate).not.toHaveBeenCalled()
   })
 
-  it('safely backfills the exact player-visible prompt for an unfinished historical Gate pass', async () => {
-    const primingDependencies = lifecycleDependencies()
-    const approved = await createApiServicesWithDependencies(
-      primingDependencies,
-    ).runPortia({
+  it('repairs an interrupted current terminal bind exactly once during lifecycle reads', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const initial = currentPreBindLifecycle(fixture)
+    dependencies = currentDirectionalDependencies(fixture, initial)
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      directionalTerminalSnapshot(fixture),
+    )
+    const services = createApiServicesWithDependencies(dependencies)
+    const input = {
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    }
+
+    const first = await services.getLifecycle(input)
+    const second = await services.getLifecycle(input)
+
+    expect(first).toMatchObject({
+      state: 'chess_terminal',
+      trajectoryDirectionalRecordStatus: 'bound',
+      trajectoryDirectionalRecord: {
+        version: CURRENT_LIFECYCLE_VERSIONS.trajectoryDirectionalRecord,
+        digest: fixture.record.digest,
+      },
+    })
+    expect(second).toEqual(first)
+    const terminalTransitions = vi.mocked(
+      dependencies.lifecycleRepository!.transition,
+    ).mock.calls.filter(
+      ([input]) => input.activityType === 'terminal_ecology_derived',
+    )
+    expect(terminalTransitions).toHaveLength(1)
+    expect(dependencies.usage.reconcileExpiredLeases).not.toHaveBeenCalled()
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+  })
+
+  it('rejects persisted Portia progress before an interrupted terminal bind can mutate lifecycle state', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const validAssessment = directionalLifecycleReview(
+      fixture,
+      directionalAnswerPromptDigest(fixture),
+    ).assessments[0]!
+    const withoutDirectionalDigest = Object.fromEntries(
+      Object.entries(validAssessment).filter(
+        ([key]) => key !== 'directionalRecordDigest',
+      ),
+    ) as typeof validAssessment
+    const initial = currentPreBindLifecycle(fixture, {
+      portiaProgress: {
+        currentCandidateId: null,
+        completedCandidateIds: [validAssessment.candidateId],
+        completedAssessments: [withoutDirectionalDigest],
+      },
+    })
+    dependencies = currentDirectionalDependencies(fixture, initial)
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      directionalTerminalSnapshot(fixture),
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .getLifecycle({
+        ownerId: OWNER_ID,
+        gameId: GAME_ID,
+        requestId: REQUEST_ID,
+        signal: new AbortController().signal,
+      })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+    expect(dependencies.lifecycleRepository?.transition).not.toHaveBeenCalled()
+    expect(dependencies.usage.reconcileExpiredLeases).not.toHaveBeenCalled()
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+  })
+
+  it('repairs an interrupted current terminal bind before one Portia execution', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    dependencies = currentDirectionalDependencies(
+      fixture,
+      currentPreBindLifecycle(fixture),
+    )
+    const services = createApiServicesWithDependencies(dependencies)
+    vi.mocked(dependencies.usage.reserveModelRequest).mockResolvedValue({
+      ok: true,
+      kind: 'existing',
+      requestId: REQUEST_ID,
+      gameId: GAME_ID,
+      status: 'in_progress',
+      leaseToken: LEASE_TOKEN,
+      leaseExpiresAt: '2026-07-26T20:03:00.000Z',
+    })
+    vi.mocked(dependencies.usage.getModelRequestResult).mockResolvedValue({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: GAME_ID,
+      operation: 'portia',
+      status: 'in_progress',
+      resultPayload: null,
+    })
+    const input = {
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    }
+
+    await expect(services.runPortia(input)).rejects.toMatchObject({
+      code: 'CONFLICT',
+      status: 409,
+    })
+    await expect(services.runPortia(input)).rejects.toMatchObject({
+      code: 'CONFLICT',
+      status: 409,
+    })
+    const terminalTransitions = vi.mocked(
+      dependencies.lifecycleRepository!.transition,
+    ).mock.calls.filter(
+      ([transition]) =>
+        transition.activityType === 'terminal_ecology_derived',
+    )
+    expect(terminalTransitions).toHaveLength(1)
+    expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+    expect(dependencies.usage.reserveModelRequest).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['missing', 'mismatched'] as const)(
+    'rejects %s directional provenance in persisted Portia progress before side effects',
+    async (kind) => {
+      const fixture = makeTrajectoryDirectionalFixture()
+      const validAssessment = directionalLifecycleReview(
+        fixture,
+        directionalAnswerPromptDigest(fixture),
+      ).assessments[0]!
+      const withoutDigest = Object.fromEntries(
+        Object.entries(validAssessment).filter(
+          ([key]) => key !== 'directionalRecordDigest',
+        ),
+      ) as typeof validAssessment
+      const invalidAssessment = kind === 'missing'
+        ? withoutDigest as typeof validAssessment
+        : {
+            ...validAssessment,
+            directionalRecordDigest: 'f'.repeat(64),
+          }
+      const lifecycle = currentDirectionalLifecycle(fixture, {
+        state: 'portia_pending',
+        portiaProgress: {
+          currentCandidateId: null,
+          completedCandidateIds: [validAssessment.candidateId],
+          completedAssessments: [invalidAssessment],
+        },
+      })
+      dependencies = currentDirectionalDependencies(fixture, lifecycle)
+
+      await expect(
+        createApiServicesWithDependencies(dependencies).runPortia({
+          ...operationInput(),
+          gameId: GAME_ID,
+          expectedRevision: 2,
+        }),
+      ).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+      expect(dependencies.usage.reconcileExpiredLeases).not.toHaveBeenCalled()
+      expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+      expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+      expect(dependencies.usage.settleModelRequest).not.toHaveBeenCalled()
+      expect(dependencies.usage.releaseReservation).not.toHaveBeenCalled()
+      expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.transition)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.beginPortiaAttempt)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.updatePortiaProgress)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.storePortia)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.failPortiaAttempt)
+        .not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([
+    'self-selected non-prefix survivor',
+    'unordered completed IDs',
+    'preassigned redundancy cluster',
+    'wrong current-candidate pointer',
+    'duplicate survivor identity',
+  ] as const)(
+    'rejects %s in persisted Portia progress before every side effect',
+    async (kind) => {
+      const fixture = makeTrajectoryDirectionalFixture()
+      const ordered = orderPortiaCandidates(fixture.survivors)
+      const first = ordered[0]
+      const second = ordered[1]
+      if (!first || !second) {
+        throw new Error('The Portia traversal fixture requires two survivors.')
+      }
+      const review = directionalLifecycleReview(
+        fixture,
+        directionalAnswerPromptDigest(fixture),
+      )
+      const assessment = (candidateId: string) => {
+        const found = review.assessments.find(
+          (candidate) => candidate.candidateId === candidateId,
+        )
+        if (!found) throw new Error('The Portia fixture assessment is missing.')
+        return found
+      }
+      const firstAssessment = assessment(first.candidateId)
+      const secondAssessment = assessment(second.candidateId)
+      const portiaProgress: LifecycleAggregate['portiaProgress'] =
+        kind === 'duplicate survivor identity'
+          ? {
+              currentCandidateId: null,
+              completedCandidateIds: [],
+              completedAssessments: [],
+            }
+          : kind === 'self-selected non-prefix survivor'
+          ? {
+              currentCandidateId: null,
+              completedCandidateIds: [second.candidateId],
+              completedAssessments: [secondAssessment],
+            }
+          : kind === 'unordered completed IDs'
+            ? {
+                currentCandidateId: null,
+                completedCandidateIds: [second.candidateId, first.candidateId],
+                completedAssessments: [secondAssessment, firstAssessment],
+              }
+            : kind === 'preassigned redundancy cluster'
+              ? {
+                  currentCandidateId: second.candidateId,
+                  completedCandidateIds: [first.candidateId],
+                  completedAssessments: [{
+                    ...firstAssessment,
+                    redundancyClusterId: 'premature-cluster',
+                  }],
+                }
+              : {
+                  currentCandidateId: first.candidateId,
+                  completedCandidateIds: [first.candidateId],
+                  completedAssessments: [firstAssessment],
+                }
+      dependencies = currentDirectionalDependencies(
+        fixture,
+        currentDirectionalLifecycle(fixture, {
+          state: 'portia_pending',
+          portiaProgress,
+          ...(kind === 'duplicate survivor identity'
+            ? { survivors: [first, first] }
+            : {}),
+        }),
+      )
+
+      await expect(createApiServicesWithDependencies(dependencies)
+        .runPortia({
+          ...operationInput(),
+          gameId: GAME_ID,
+          expectedRevision: 2,
+        })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+      expect(dependencies.usage.reconcileExpiredLeases).not.toHaveBeenCalled()
+      expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+      expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+      expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.transition)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.beginPortiaAttempt)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.updatePortiaProgress)
+        .not.toHaveBeenCalled()
+    },
+  )
+
+  it('binds each legal terminal trajectory into current Portia, Gate, and request identity', async () => {
+    const fixtures = [
+      makeTrajectoryDirectionalFixture(),
+      makeAlternateTrajectoryDirectionalFixture(),
+    ]
+    const requestDigests: string[] = []
+
+    for (const fixture of fixtures) {
+      dependencies = currentDirectionalDependencies(fixture)
+      const lifecycle = await createApiServicesWithDependencies(
+        dependencies,
+      ).runPortia({
+        ...operationInput(),
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })
+      const generatedInput = vi.mocked(dependencies.portiaGenerator!).mock
+        .calls[0]![0]
+      const reservation = vi.mocked(dependencies.usage.reserveModelRequest).mock
+        .calls[0]![0]
+
+      expect(generatedInput.answerPromptPackage.trajectoryDirectionalRecord)
+        .toEqual(fixture.record)
+      expect(generatedInput.answerPromptDigest).toBe(
+        hashCanonicalJson(
+          generatedInput.answerPromptPackage as unknown as CanonicalJson,
+        ),
+      )
+      expect(lifecycle).toMatchObject({
+        trajectoryDirectionalRecordStatus: 'bound',
+        portia: {
+          contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+          directionalRecordVersion: fixture.record.version,
+          directionalRecordDigest: fixture.record.digest,
+        },
+        gate: {
+          algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+          passed: true,
+          directionalRecordVersion: fixture.record.version,
+          directionalRecordDigest: fixture.record.digest,
+          survivingDirectionKeys: fixture.record.survivingDirectionKeys,
+          directionalBindingsSatisfied: true,
+        },
+      })
+      expect(reservation).toMatchObject({
+        promptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
+        requestSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      })
+      requestDigests.push(reservation.requestSha256)
+    }
+
+    expect(fixtures[0]!.record.trajectory.eventStreamDigest).not.toBe(
+      fixtures[1]!.record.trajectory.eventStreamDigest,
+    )
+    expect(fixtures[0]!.record.digest).not.toBe(fixtures[1]!.record.digest)
+    expect(requestDigests[0]).not.toBe(requestDigests[1])
+  })
+
+  it('fails current Portia closed when the record is missing or belongs to a different legal trajectory', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const invalidRuns = [
+      currentDirectionalLifecycle(fixture, {
+        trajectoryDirectionalRecord: null,
+        trajectoryDirectionalRecordStatus: 'legacy_pre_directional_generation',
+      }),
+      currentDirectionalLifecycle(fixture, {
+        trajectoryDirectionalRecord:
+          makeAlternateTrajectoryDirectionalFixture().record,
+      }),
+    ]
+
+    for (const initial of invalidRuns) {
+      dependencies = currentDirectionalDependencies(fixture, initial)
+      await expect(
+        createApiServicesWithDependencies(dependencies).runPortia({
+          ...operationInput(),
+          gameId: GAME_ID,
+          expectedRevision: 2,
+        }),
+      ).rejects.toMatchObject({ code: 'INTERNAL_ERROR', status: 500 })
+      expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+      expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    }
+  })
+
+  it('rejects a v2.5 lifecycle bound to a legacy Division before Portia admission', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const terminal = directionalTerminalSnapshot(fixture)
+    const initial = currentDirectionalLifecycle(fixture)
+    const legacyDivisionGame = {
+      ...terminal,
+      division: {
+        ...terminal.division,
+        promptVersion: LEGACY_DIVISION_PROMPT_VERSION,
+      },
+    }
+    dependencies = currentDirectionalDependencies(fixture, initial)
+    vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+      legacyDivisionGame,
+    )
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      legacyDivisionGame,
+    )
+    const services = createApiServicesWithDependencies(dependencies)
+
+    await expect(services.getLifecycle({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })).resolves.toEqual(initial)
+    expect(dependencies.lifecycleRepository?.transition).not.toHaveBeenCalled()
+
+    await expect(services.runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+    expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.beginPortiaAttempt)
+      .not.toHaveBeenCalled()
+  })
+
+  it.each(['missing', 'mixed'] as const)(
+    'rejects a %s lifecycle before every provider-backed lifecycle mutation',
+    async (fixtureKind) => {
+      const fixture = makeTrajectoryDirectionalFixture()
+      const operations = ['portia', 'answer', 'charlotte', 'retry'] as const
+
+      for (const operation of operations) {
+        const mixedLifecycle = currentDirectionalLifecycle(fixture, {
+          versions: {
+            ...currentDirectionalLifecycle(fixture).versions,
+            charlottePrompt: 'webchess-charlotte-v4',
+          },
+        })
+        dependencies = currentDirectionalDependencies(
+          fixture,
+          mixedLifecycle,
+        )
+        if (fixtureKind === 'missing') {
+          vi.mocked(dependencies.lifecycleRepository!.getForGame)
+            .mockResolvedValue(null)
+        }
+        const services = createApiServicesWithDependencies(dependencies)
+        const request = operation === 'portia'
+          ? services.runPortia({
+              ...operationInput(),
+              gameId: GAME_ID,
+              expectedRevision: 2,
+            })
+          : operation === 'answer'
+            ? services.answer(answerOperationInput())
+            : operation === 'charlotte'
+              ? services.runCharlotte({
+                  ...operationInput(),
+                  gameId: GAME_ID,
+                  expectedRevision: 2,
+                })
+              : services.retryLifecycle({
+                  ...operationInput(),
+                  gameId: GAME_ID,
+                  expectedRevision: 2,
+                })
+
+        await expect(request).rejects.toMatchObject({
+          code: 'CONFLICT',
+          status: 409,
+        })
+        expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+        expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+        expect(dependencies.repository.beginAnswer).not.toHaveBeenCalled()
+        expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+        expect(dependencies.answerGenerator).not.toHaveBeenCalled()
+        expect(dependencies.charlotteGenerator).not.toHaveBeenCalled()
+        expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
+        expect(dependencies.lifecycleRepository?.transition)
+          .not.toHaveBeenCalled()
+        expect(dependencies.lifecycleRepository?.beginPortiaAttempt)
+          .not.toHaveBeenCalled()
+        expect(dependencies.lifecycleRepository?.beginCharlotteAttempt)
+          .not.toHaveBeenCalled()
+        expect(dependencies.lifecycleRepository?.createRetryRun)
+          .not.toHaveBeenCalled()
+      }
+    },
+  )
+
+  it('rejects a current lifecycle carrying a non-v4 Answer prompt before admission', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const legacyPlan = {
+      ...directionalAnswerPlan(fixture),
+      promptVersion: 'webchess-answer-v3',
+    }
+    expect(legacyPlan.promptVersion).not.toBe(
+      CURRENT_METHOD_VERSION_TUPLE.answerPrompt,
+    )
+    const legacyDigest = hashCanonicalJson(
+      legacyPlan as unknown as CanonicalJson,
+    )
+    const portia = directionalLifecycleReview(fixture, legacyDigest)
+    const gate = evaluateGate(portia, undefined, fixture.record)
+    dependencies = currentDirectionalDependencies(
+      fixture,
+      currentDirectionalLifecycle(fixture, {
+        state: 'gate_passed',
+        answerPromptDigest: legacyDigest,
+        answerUserPrompt: null,
+        answerUserPromptSha256: null,
+        portia,
+        gate,
+      }),
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies).answer(
+      answerOperationInput(),
+    )).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+    expect(dependencies.repository.beginAnswer).not.toHaveBeenCalled()
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+    expect(dependencies.answerGenerator).not.toHaveBeenCalled()
+  })
+
+  it('binds current Answer and Charlotte inputs and recovered result envelopes to the exact record', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    dependencies = currentDirectionalDependencies(fixture)
+    const services = createApiServicesWithDependencies(dependencies)
+    const approved = await services.runPortia({
       ...operationInput(),
       gameId: GAME_ID,
       expectedRevision: 2,
     })
-    if (!approved.portia || !approved.gate || !approved.answerPromptDigest) {
-      throw new Error('The primed lifecycle is missing its approval provenance.')
+    if (!approved.answerPromptDigest || !approved.gate) {
+      throw new Error('The directional lifecycle did not reach its Gate.')
     }
-    const historicalRevision = approved.revision
-    dependencies = lifecycleDependencies(lifecycleAggregate({
-      ...approved,
+
+    const answered = await services.answer(answerOperationInput())
+    expect(answered.answer).toEqual(STORED_ANSWER)
+    expect(dependencies.answerGenerator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plan: expect.objectContaining({
+          trajectoryDirectionalRecord: fixture.record,
+        }),
+        reviewedPromptDigest: approved.answerPromptDigest,
+        gate: expect.objectContaining({
+          directionalRecordDigest: fixture.record.digest,
+        }),
+      }),
+      expect.any(Object),
+    )
+    const answerSettlement = vi.mocked(dependencies.usage.settleModelRequest)
+      .mock.calls
+      .map(([input]) => input)
+      .find((input) =>
+        input.outcome === 'succeeded' &&
+        input.resultPayload.format === 'webchess-answer-result/2')
+    if (!answerSettlement || answerSettlement.outcome !== 'succeeded') {
+      throw new Error('The directional Answer result was not settled.')
+    }
+    expect(answerSettlement.resultPayload).toMatchObject({
+      approval: {
+        trajectoryDirectionalRecordVersion: fixture.record.version,
+        trajectoryDirectionalRecordDigest: fixture.record.digest,
+      },
+    })
+
+    const exactAnswerPayload = approvedAnswerResultPayload(approved)
+    vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+      directionalTerminalSnapshot(fixture, 'answered'),
+    )
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: '77777777-7777-4777-8777-777777777777',
+      gameId: GAME_ID,
+      operation: 'answer',
+      status: 'succeeded',
+      resultPayload: {
+        ...exactAnswerPayload,
+        approval: {
+          ...exactAnswerPayload.approval,
+          trajectoryDirectionalRecordDigest: 'f'.repeat(64),
+        },
+      } as unknown as ModelResultPayload,
+    })
+    await expect(services.answer(answerOperationInput())).rejects.toMatchObject({
+      code: 'CONFLICT',
+      status: 409,
+    })
+
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: '77777777-7777-4777-8777-777777777777',
+      gameId: GAME_ID,
+      operation: 'answer',
+      status: 'succeeded',
+      resultPayload: exactAnswerPayload as unknown as ModelResultPayload,
+    })
+    const qualified = await services.runCharlotte({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+    expect(dependencies.charlotteGenerator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        trajectoryDirectionalRecord: fixture.record,
+        reviewedPromptDigest: approved.answerPromptDigest,
+        gate: expect.objectContaining({
+          directionalRecordDigest: fixture.record.digest,
+        }),
+      }),
+      expect.any(Object),
+    )
+    const charlotteSettlement = vi.mocked(dependencies.usage.settleModelRequest)
+      .mock.calls
+      .map(([input]) => input)
+      .find((input) =>
+        input.outcome === 'succeeded' &&
+        input.resultPayload.format === 'webchess-charlotte-result/3')
+    if (!charlotteSettlement || charlotteSettlement.outcome !== 'succeeded') {
+      throw new Error('The directional Charlotte result was not settled.')
+    }
+    expect(charlotteSettlement.resultPayload).toMatchObject({
+      source: {
+        trajectoryDirectionalRecordVersion: fixture.record.version,
+        trajectoryDirectionalRecordDigest: fixture.record.digest,
+      },
+    })
+
+    const wrongCharlotte = approvedCharlotteResultPayload(qualified, {
+      trajectoryDirectionalRecordDigest: 'e'.repeat(64),
+    })
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockImplementation(async (input) => ({
+      found: true,
+      requestId: input.operation === 'answer'
+        ? '77777777-7777-4777-8777-777777777777'
+        : '88888888-8888-4888-8888-888888888888',
+      gameId: GAME_ID,
+      operation: input.operation,
+      status: 'succeeded',
+      resultPayload: (input.operation === 'answer'
+        ? exactAnswerPayload
+        : wrongCharlotte) as unknown as ModelResultPayload,
+    }))
+    await expect(services.runCharlotte({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+  })
+
+  it('does not backfill or execute an unfinished historical Gate pass', async () => {
+    const portia = lifecycleReview()
+    const historical = lifecycleAggregate({
+      state: 'gate_passed',
+      answerPromptDigest: portia.reviewedAnswerPromptDigest,
+      portia,
+      gate: evaluateGate(portia),
       answerUserPrompt: null,
       answerUserPromptSha256: null,
-    }))
-    vi.mocked(dependencies.repository.storeAnswer).mockImplementation(
-      async (input) => ({
-        ...terminalSnapshot('answered'),
-        revision: 4,
-        answer: input.answer,
-      }),
-    )
+    })
+    dependencies = lifecycleDependencies(historical)
 
-    const result = await createApiServicesWithDependencies(dependencies).answer({
+    await expect(createApiServicesWithDependencies(dependencies).answer({
       ownerId: OWNER_ID,
       gameId: GAME_ID,
       expectedRevision: 2,
@@ -2616,48 +4781,26 @@ describe('durable HTTP service adapter', () => {
       idempotencyKey: IDEMPOTENCY_KEY,
       requestId: REQUEST_ID,
       signal: new AbortController().signal,
-    })
+    })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
 
-    expect(result.answer).toEqual(STORED_ANSWER)
-    expect(dependencies.lifecycleRepository?.storeGate).toHaveBeenCalledOnce()
-    expect(dependencies.lifecycleRepository?.storeGate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        expectedRevision: historicalRevision,
-        result: approved.gate,
-        answerUserPrompt: expect.stringContaining(PROBLEM),
-      }),
-    )
-    const backfilled = await dependencies.lifecycleRepository?.getForGame(
-      OWNER_ID,
-      GAME_ID,
-    )
-    expect(backfilled).toMatchObject({
-      revision: historicalRevision,
-      state: 'gate_passed',
-      answerUserPrompt: expect.stringContaining('"reviewed_prompt"'),
-      answerUserPromptSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
-    })
-    expect(dependencies.answerGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.lifecycleRepository?.storeGate).not.toHaveBeenCalled()
+    expect(dependencies.repository.beginAnswer).not.toHaveBeenCalled()
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.answerGenerator).not.toHaveBeenCalled()
   })
 
   it('rejects an already-answered current run when its persisted player-visible prompt was changed', async () => {
-    const primingDependencies = lifecycleDependencies()
-    const approved = await createApiServicesWithDependencies(
-      primingDependencies,
-    ).runPortia({
-      ...operationInput(),
-      gameId: GAME_ID,
-      expectedRevision: 2,
-    })
-    dependencies = lifecycleDependencies(lifecycleAggregate({
+    const fixture = makeTrajectoryDirectionalFixture()
+    const approved = approvedCurrentDirectionalLifecycle(fixture)
+    dependencies = currentDirectionalDependencies(fixture, {
       ...approved,
       answerUserPrompt: '{"tampered":true}',
       answerUserPromptSha256: createHash('sha256')
         .update('{"tampered":true}', 'utf8')
         .digest('hex'),
-    }))
+    })
     vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
-      terminalSnapshot('answered'),
+      directionalTerminalSnapshot(fixture, 'answered'),
     )
 
     await expect(createApiServicesWithDependencies(dependencies).answer({
@@ -2675,6 +4818,8 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('binds visible Codex research into the exact prompt before Portia adjudicates it', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const directionalProblem = fixture.evidence.problem
     const acceptedPageText =
       'The current official guidance recommends a bounded, reversible test.'
     const researchRecord = {
@@ -2687,7 +4832,7 @@ describe('durable HTTP service adapter', () => {
       policyVersion: 'webchess-visible-research-v4',
       materiality: 'required' as const,
       reason: 'Portia needs current external evidence before reviewing this exact board-derived prompt.',
-      query: `${PROBLEM} current authoritative evidence`,
+      query: `${directionalProblem} current authoritative evidence`,
       status: 'completed' as const,
       provider: 'codex' as const,
       transport: 'local' as const,
@@ -2700,7 +4845,7 @@ describe('durable HTTP service adapter', () => {
         synthesisCharacterLimit: 12_000,
       },
       attemptCount: 1,
-      executedQueries: [`${PROBLEM} current authoritative evidence`],
+      executedQueries: [`${directionalProblem} current authoritative evidence`],
       searchSynthesis:
         'Codex Search found current source links. This remains model-generated synthesis for Portia to assess.',
       directPageTextFetched: true,
@@ -2750,7 +4895,7 @@ describe('durable HTTP service adapter', () => {
       createdAt: NOW.toISOString(),
       updatedAt: NOW.toISOString(),
     }
-    dependencies = lifecycleDependencies(lifecycleAggregate({
+    dependencies = currentDirectionalDependencies(fixture, currentDirectionalLifecycle(fixture, {
       research: [researchRecord],
     }))
     dependencies = {
@@ -2775,7 +4920,7 @@ describe('durable HTTP service adapter', () => {
       lifecycleRunId: researchRecord.lifecycleRunId,
       lifecycleState: 'portia_pending',
       stage: 'portia',
-      problem: PROBLEM,
+      problem: directionalProblem,
       researchConsent: RESEARCH_CONSENT,
     })
     expect(dependencies.portiaGenerator).toHaveBeenCalledWith(
@@ -2805,13 +4950,15 @@ describe('durable HTTP service adapter', () => {
       }),
       expect.any(Object),
     )
-    expect(completed.survivors).toEqual(LIFECYCLE_SURVIVORS)
+    expect(completed.survivors).toEqual(fixture.survivors)
     expect(completed.research).toEqual([researchRecord])
     expect(completed.answerPromptDigest).toMatch(/^[0-9a-f]{64}$/u)
   })
 
   it('keeps a fenced Portia provider attempt alive after the originating request is aborted', async () => {
-    dependencies = lifecycleDependencies()
+    dependencies = currentDirectionalDependencies(
+      makeTrajectoryDirectionalFixture(),
+    )
     const requestController = new AbortController()
     const defaultGenerator = vi.mocked(
       dependencies.portiaGenerator!,
@@ -2867,7 +5014,7 @@ describe('durable HTTP service adapter', () => {
       .not.toHaveBeenCalled()
   })
 
-  it('reconciles a migrated pre-v2 Portia run with a legacy terminal fingerprint before building the v3 prompt', async () => {
+  it('keeps a migrated pre-v2 Portia run read-only without recovery or provider work', async () => {
     const currentFingerprint = terminalFingerprint(LIFECYCLE_SURVIVORS)
     const legacyFingerprint = 'f'.repeat(64)
     expect(legacyFingerprint).not.toBe(currentFingerprint)
@@ -2887,71 +5034,35 @@ describe('durable HTTP service adapter', () => {
     dependencies = lifecycleDependencies(migratedLifecycle)
     const services = createApiServicesWithDependencies(dependencies)
 
-    const reconciled = await services.getLifecycle({
+    const inspected = await services.getLifecycle({
       ownerId: OWNER_ID,
       gameId: GAME_ID,
       requestId: REQUEST_ID,
       signal: new AbortController().signal,
     })
 
-    expect(reconciled).toMatchObject({
-      state: 'portia_pending',
-      portiaActiveModelRequestId: null,
-      portia: null,
-    })
-    expect(dependencies.lifecycleRepository?.transition).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: 'portia_pending',
-        activityType: 'legacy_review_recovered_for_retry',
-      }),
-    )
+    expect(inspected).toEqual(migratedLifecycle)
+    expect(dependencies.lifecycleRepository?.transition).not.toHaveBeenCalled()
     expect(dependencies.lifecycleRepository?.failPortiaAttempt)
       .not.toHaveBeenCalled()
     expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
 
-    const completed = await services.runPortia({
+    await expect(services.runPortia({
       ...operationInput(),
       gameId: GAME_ID,
       expectedRevision: 2,
-    })
+    })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
 
-    expect(completed.state).toBe('gate_passed')
-    expect(dependencies.portiaGenerator).toHaveBeenCalledOnce()
-    const generatedInput = vi.mocked(dependencies.portiaGenerator!).mock
-      .calls[0]![0]
-    expect(generatedInput.answerPromptPackage).toMatchObject({
-      terminalFingerprint: currentFingerprint,
-      survivors: LIFECYCLE_SURVIVORS,
-    })
-    expect(generatedInput.answerPromptPackage.terminalFingerprint)
-      .not.toBe(legacyFingerprint)
-    const reservation = vi.mocked(
-      dependencies.usage.reserveModelRequest,
-    ).mock.calls[0]![0]
-    expect(reservation.requestSha256).toBe(hashCanonicalJson({
-      operation: 'portia/v3',
-      gameId: GAME_ID,
-      terminalFingerprint: currentFingerprint,
-      input: {
-        problem: generatedInput.problem,
-        survivors: generatedInput.survivors,
-        answerPromptPackage: generatedInput.answerPromptPackage,
-        answerPromptDigest: generatedInput.answerPromptDigest,
-      },
-      model: OPENAI_MODEL,
-      promptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
-      contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
-    } as unknown as CanonicalJson))
-    expect(dependencies.usage.getLatestModelRequestForGame)
-      .toHaveBeenCalledWith(expect.objectContaining({
-        operation: 'portia',
-        requestSha256: reservation.requestSha256,
-        promptVersion: CURRENT_LIFECYCLE_VERSIONS.portiaPrompt,
-      }))
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
+    expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.beginPortiaAttempt)
+      .not.toHaveBeenCalled()
   })
 
   it('ends in portia_unavailable after three definitive provider failures without losing completed assessments or invoking Answer', async () => {
-    dependencies = lifecycleDependencies()
+    const fixture = makeTrajectoryDirectionalFixture()
+    dependencies = currentDirectionalDependencies(fixture)
     vi.mocked(dependencies.usage.reserveModelRequest).mockImplementation(
       async (input) => ({
         ok: true,
@@ -2963,22 +5074,22 @@ describe('durable HTTP service adapter', () => {
         leaseExpiresAt: '2026-07-26T20:03:00.000Z',
       }),
     )
-    const completedAssessment = lifecycleAssessment(
-      LIFECYCLE_SURVIVORS[0],
-      0,
-    )
+    const ordered = orderPortiaCandidates(fixture.survivors)
+    const completedAssessment = directionalLifecycleReview(
+      fixture,
+      'a'.repeat(64),
+    ).assessments.find(
+      (assessment) => assessment.candidateId === ordered[0]!.candidateId,
+    )!
     let providerAttempt = 0
     vi.mocked(dependencies.portiaGenerator!).mockImplementation(
       async (input, context) => {
-        expect(input.completedAssessments).toEqual(
-          providerAttempt === 0 ? [] : [completedAssessment],
-        )
         providerAttempt += 1
         await context.onProgress?.({
-          currentCandidateId: LIFECYCLE_SURVIVORS[1].candidateId,
-          completedCandidateIds: [LIFECYCLE_SURVIVORS[0].candidateId],
+          currentCandidateId: ordered[1]!.candidateId,
+          completedCandidateIds: [ordered[0]!.candidateId],
           completedAssessments: [completedAssessment],
-          totalCandidateCount: LIFECYCLE_SURVIVORS.length,
+          totalCandidateCount: fixture.survivors.length,
         })
         throw new ModelContractError(
           'Portia provider returned an invalid candidate assessment.',
@@ -3022,11 +5133,6 @@ describe('durable HTTP service adapter', () => {
           portiaActiveModelRequestId: null,
           portiaFailedAttemptCount: index + 1,
           portiaFailureLimit: 3,
-          portiaProgress: {
-            currentCandidateId: null,
-            completedCandidateIds: [LIFECYCLE_SURVIVORS[0].candidateId],
-            completedAssessments: [completedAssessment],
-          },
         })
       } else {
         await expect(promise).resolves.toMatchObject({
@@ -3034,11 +5140,6 @@ describe('durable HTTP service adapter', () => {
           portiaActiveModelRequestId: null,
           portiaFailedAttemptCount: 3,
           portiaFailureLimit: 3,
-          portiaProgress: {
-            currentCandidateId: LIFECYCLE_SURVIVORS[1].candidateId,
-            completedCandidateIds: [LIFECYCLE_SURVIVORS[0].candidateId],
-            completedAssessments: [completedAssessment],
-          },
         })
       }
     }
@@ -3071,12 +5172,20 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('ends immediately when the Gate commits an exhausted retry recommendation', async () => {
-    const exhaustedPortia = exhaustedLifecycleReview()
-    dependencies = lifecycleDependencies(lifecycleAggregate({
-      state: 'portia_complete',
-      portia: exhaustedPortia,
-      fieldRegenerationCount: 1,
-    }))
+    const fixture = makeTrajectoryDirectionalFixture()
+    const exhaustedPortia = exhaustedDirectionalLifecycleReview(fixture)
+    dependencies = currentDirectionalDependencies(
+      fixture,
+      currentReviewedDirectionalLifecycle(
+        fixture,
+        exhaustedPortia,
+        { sameFieldRetryCount: 0, fieldRegenerationCount: 1 },
+        { state: 'portia_complete' },
+      ),
+    )
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      directionalTerminalSnapshot(fixture),
+    )
 
     const lifecycle = await createApiServicesWithDependencies(
       dependencies,
@@ -3104,19 +5213,22 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('recovers a persisted terminal Gate decision after an interrupted transition', async () => {
-    const portia = exhaustedLifecycleReview()
-    const gate = evaluateGate(portia, {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const portia = exhaustedDirectionalLifecycleReview(fixture)
+    const retryContext = {
       sameFieldRetryCount: 1,
       fieldRegenerationCount: 1,
-    })
+    }
+    const gate = evaluateGate(portia, retryContext, fixture.record)
     expect(gate.recommendedNextTransition).toBe('insufficient_basis')
-    dependencies = lifecycleDependencies(lifecycleAggregate({
-      state: 'gate_failed',
-      portia,
-      gate,
-      sameFieldRetryCount: 1,
-      fieldRegenerationCount: 1,
-    }))
+    dependencies = currentDirectionalDependencies(
+      fixture,
+      currentReviewedDirectionalLifecycle(
+        fixture,
+        portia,
+        retryContext,
+      ),
+    )
 
     const lifecycle = await createApiServicesWithDependencies(
       dependencies,
@@ -3140,18 +5252,23 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('normalizes an interrupted terminal Gate decision during lifecycle restore', async () => {
-    const portia = exhaustedLifecycleReview()
-    const gate = evaluateGate(portia, {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const portia = exhaustedDirectionalLifecycleReview(fixture)
+    const retryContext = {
       sameFieldRetryCount: 1,
       fieldRegenerationCount: 1,
-    })
-    dependencies = lifecycleDependencies(lifecycleAggregate({
-      state: 'gate_failed',
-      portia,
-      gate,
-      sameFieldRetryCount: 1,
-      fieldRegenerationCount: 1,
-    }))
+    }
+    dependencies = currentDirectionalDependencies(
+      fixture,
+      currentReviewedDirectionalLifecycle(
+        fixture,
+        portia,
+        retryContext,
+      ),
+    )
+    vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
+      directionalTerminalSnapshot(fixture),
+    )
 
     const lifecycle = await createApiServicesWithDependencies(
       dependencies,
@@ -3174,17 +5291,13 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('runs Charlotte only from a persisted passed Gate and stores its qualified answer', async () => {
-    const portia = lifecycleReview()
-    const gate = evaluateGate(portia)
-    const initialLifecycle = lifecycleAggregate({
-      state: 'gate_passed',
-      answerPromptDigest: portia.reviewedAnswerPromptDigest,
-      portia,
-      gate,
-    })
-    dependencies = lifecycleDependencies(initialLifecycle)
+    const fixture = makeTrajectoryDirectionalFixture()
+    const initialLifecycle = approvedCurrentDirectionalLifecycle(fixture)
+    const portia = initialLifecycle.portia as PortiaReview
+    const gate = initialLifecycle.gate!
+    dependencies = currentDirectionalDependencies(fixture, initialLifecycle)
     vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
-      terminalSnapshot('answered'),
+      directionalTerminalSnapshot(fixture, 'answered'),
     )
     vi.mocked(
       dependencies.usage.getSucceededModelResultForGame,
@@ -3215,15 +5328,10 @@ describe('durable HTTP service adapter', () => {
       },
     })
     expect(lifecycle.charlotte?.exactlyThreeNextActions).toHaveLength(3)
-    expect(dependencies.lifecycleRepository?.storeGate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        result: gate,
-        answerUserPrompt: expect.stringContaining(PROBLEM),
-      }),
-    )
+    expect(dependencies.lifecycleRepository?.storeGate).not.toHaveBeenCalled()
     expect(dependencies.charlotteGenerator).toHaveBeenCalledWith(
-      {
-        problem: PROBLEM,
+      expect.objectContaining({
+        problem: fixture.evidence.problem,
         boardAnswer: STORED_ANSWER,
         boardAnswerDigest: hashCanonicalJson(
           STORED_ANSWER as unknown as CanonicalJson,
@@ -3231,7 +5339,7 @@ describe('durable HTTP service adapter', () => {
         reviewedPromptDigest: portia.reviewedAnswerPromptDigest,
         portia,
         gate,
-      },
+      }),
       expect.objectContaining({
         userId: OWNER_ID,
       }),
@@ -3241,38 +5349,34 @@ describe('durable HTTP service adapter', () => {
     expect(dependencies.lifecycleRepository?.storeCharlotte)
       .toHaveBeenCalledWith(expect.objectContaining({
         modelRequestId: REQUEST_ID,
-        renderedAnswer: expect.stringContaining('qualified evidence boundary'),
+        renderedAnswer: expect.stringContaining(
+          'qualified directional evidence boundary',
+        ),
       }))
     expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: 'succeeded',
         resultPayload: expect.objectContaining({
           format: 'webchess-charlotte-result/3',
-          source: {
+          source: expect.objectContaining({
             lifecycleRunId: initialLifecycle.id,
             boardAnswerDigest: hashCanonicalJson(
               STORED_ANSWER as unknown as CanonicalJson,
             ),
             reviewedPromptDigest: portia.reviewedAnswerPromptDigest,
             gateInputDigest: gate.inputDigest,
-          },
+          }),
         }),
       }),
     )
   })
 
   it('ends in charlotte_unavailable after three definitive provider failures and never starts a fourth', async () => {
-    const portia = lifecycleReview()
-    const gate = evaluateGate(portia)
-    const initialLifecycle = lifecycleAggregate({
-      state: 'gate_passed',
-      answerPromptDigest: portia.reviewedAnswerPromptDigest,
-      portia,
-      gate,
-    })
-    dependencies = lifecycleDependencies(initialLifecycle)
+    const fixture = makeTrajectoryDirectionalFixture()
+    const initialLifecycle = approvedCurrentDirectionalLifecycle(fixture)
+    dependencies = currentDirectionalDependencies(fixture, initialLifecycle)
     vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
-      terminalSnapshot('answered'),
+      directionalTerminalSnapshot(fixture, 'answered'),
     )
     vi.mocked(
       dependencies.usage.getSucceededModelResultForGame,
@@ -3370,18 +5474,18 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('recovers a current Charlotte winner only when its /3 source matches the exact answer lifecycle and Gate', async () => {
-    const portia = lifecycleReview()
-    const initialLifecycle = lifecycleAggregate({
+    const fixture = makeTrajectoryDirectionalFixture()
+    const initialLifecycle = approvedCurrentDirectionalLifecycle(fixture, {
       state: 'charlotte_pending',
-      answerPromptDigest: portia.reviewedAnswerPromptDigest,
-      portia,
-      gate: evaluateGate(portia),
     })
-    dependencies = lifecycleDependencies(initialLifecycle)
+    dependencies = currentDirectionalDependencies(fixture, initialLifecycle)
     arrangeRecoveredCharlotteWinner(
       dependencies,
       initialLifecycle,
       approvedCharlotteResultPayload(initialLifecycle),
+    )
+    vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+      directionalTerminalSnapshot(fixture, 'answered'),
     )
 
     const recovered = await createApiServicesWithDependencies(
@@ -3408,18 +5512,18 @@ describe('durable HTTP service adapter', () => {
     ]
 
     for (const [sourceName, sourceOverrides] of cases) {
-      const portia = lifecycleReview()
-      const initialLifecycle = lifecycleAggregate({
+      const fixture = makeTrajectoryDirectionalFixture()
+      const initialLifecycle = approvedCurrentDirectionalLifecycle(fixture, {
         state: 'charlotte_pending',
-        answerPromptDigest: portia.reviewedAnswerPromptDigest,
-        portia,
-        gate: evaluateGate(portia),
       })
-      dependencies = lifecycleDependencies(initialLifecycle)
+      dependencies = currentDirectionalDependencies(fixture, initialLifecycle)
       arrangeRecoveredCharlotteWinner(
         dependencies,
         initialLifecycle,
         approvedCharlotteResultPayload(initialLifecycle, sourceOverrides),
+      )
+      vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+        directionalTerminalSnapshot(fixture, 'answered'),
       )
 
       await expect(
@@ -3436,18 +5540,19 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('does not accept a legacy /1 payload as the winner for a current Charlotte run', async () => {
-    const portia = lifecycleReview()
-    const initialLifecycle = lifecycleAggregate({
+    const fixture = makeTrajectoryDirectionalFixture()
+    const initialLifecycle = approvedCurrentDirectionalLifecycle(fixture, {
       state: 'charlotte_pending',
-      answerPromptDigest: portia.reviewedAnswerPromptDigest,
-      portia,
-      gate: evaluateGate(portia),
     })
-    dependencies = lifecycleDependencies(initialLifecycle)
+    const portia = initialLifecycle.portia as PortiaReview
+    dependencies = currentDirectionalDependencies(fixture, initialLifecycle)
     arrangeRecoveredCharlotteWinner(
       dependencies,
       initialLifecycle,
       legacyCharlotteResultPayload(portia),
+    )
+    vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
+      directionalTerminalSnapshot(fixture, 'answered'),
     )
 
     await expect(
@@ -3462,7 +5567,8 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('recovers persisted Portia output and verifies completed current Charlotte provenance idempotently', async () => {
-    const primingDependencies = lifecycleDependencies()
+    const fixture = makeTrajectoryDirectionalFixture()
+    const primingDependencies = currentDirectionalDependencies(fixture)
     const primed = await createApiServicesWithDependencies(
       primingDependencies,
     ).runPortia({
@@ -3472,13 +5578,12 @@ describe('durable HTTP service adapter', () => {
     })
     if (!primed.portia) throw new Error('The primed Portia review is missing.')
     const portia = primed.portia as PortiaReview
-    dependencies = lifecycleDependencies(lifecycleAggregate({
+    dependencies = currentDirectionalDependencies(fixture, {
+      ...primed,
       state: 'portia_complete',
-      answerPromptDigest: portia.reviewedAnswerPromptDigest,
       answerUserPrompt: null,
       answerUserPromptSha256: null,
-      portia,
-    }))
+    })
     const recovered = await createApiServicesWithDependencies(
       dependencies,
     ).runPortia({
@@ -3491,19 +5596,26 @@ describe('durable HTTP service adapter', () => {
     expect(dependencies.portiaGenerator).not.toHaveBeenCalled()
     expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
 
-    const gate = evaluateGate(portia)
+    const gate = evaluateGate(portia, undefined, fixture.record)
     const charlotte = lifecycleCharlotte(portia)
-    const completedLifecycle = lifecycleAggregate({
-      state: 'charlotte_complete',
-      answerPromptDigest: portia.reviewedAnswerPromptDigest,
+    const completedLifecycle = currentReviewedDirectionalLifecycle(
+      fixture,
       portia,
-      gate,
-      charlotte,
-      charlotteRenderedAnswer: 'The persisted Charlotte answer is already complete.',
-    })
-    dependencies = lifecycleDependencies(completedLifecycle)
+      {
+        sameFieldRetryCount: 0,
+        fieldRegenerationCount: 0,
+      },
+      {
+        state: 'charlotte_complete',
+        charlotte,
+        charlotteRenderedAnswer:
+          'The persisted Charlotte answer is already complete.',
+      },
+    )
+    expect(completedLifecycle.gate).toEqual(gate)
+    dependencies = currentDirectionalDependencies(fixture, completedLifecycle)
     vi.mocked(dependencies.repository.getTerminalReplay).mockResolvedValue(
-      terminalSnapshot('answered'),
+      directionalTerminalSnapshot(fixture, 'answered'),
     )
     vi.mocked(
       dependencies.usage.getSucceededModelResultForGame,
@@ -3532,7 +5644,7 @@ describe('durable HTTP service adapter', () => {
     expect(dependencies.charlotteGenerator).not.toHaveBeenCalled()
   })
 
-  it('keeps completed Charlotte histories from the prior prompt contract readable', async () => {
+  it('keeps completed Charlotte histories inspectable but disables provider execution', async () => {
     const portia = lifecycleReview()
     const gate = evaluateGate(portia)
     const charlotte = lifecycleCharlotte(portia)
@@ -3550,18 +5662,30 @@ describe('durable HTTP service adapter', () => {
     })
     dependencies = lifecycleDependencies(legacyLifecycle)
 
-    const completed = await createApiServicesWithDependencies(
-      dependencies,
-    ).runCharlotte({
+    const services = createApiServicesWithDependencies(dependencies)
+    const inspected = await services.getLifecycle({
+      ownerId: OWNER_ID,
+      gameId: GAME_ID,
+      requestId: REQUEST_ID,
+      signal: new AbortController().signal,
+    })
+    expect(inspected).toEqual(legacyLifecycle)
+
+    await expect(services.runCharlotte({
       ...operationInput(),
       gameId: GAME_ID,
       expectedRevision: 2,
-    })
+    })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
 
-    expect(completed).toEqual(legacyLifecycle)
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.usage.beginProviderCall).not.toHaveBeenCalled()
     expect(dependencies.usage.getSucceededModelResultForGame)
       .not.toHaveBeenCalled()
     expect(dependencies.charlotteGenerator).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.beginCharlotteAttempt)
+      .not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.storeCharlotte)
+      .not.toHaveBeenCalled()
   })
 
   it('enforces lifecycle authority and the bounded Retry outcomes', async () => {
@@ -3575,30 +5699,43 @@ describe('durable HTTP service adapter', () => {
       }),
     ).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', status: 503 })
 
-    const failedPortia = {
-      ...lifecycleReview(),
-      assessments: [lifecycleReview().assessments[0]],
+    const fixture = makeTrajectoryDirectionalFixture()
+    const basePortia = directionalLifecycleReview(
+      fixture,
+      directionalAnswerPromptDigest(fixture),
+    )
+    const failedPortia: PortiaReview = {
+      ...basePortia,
+      assessments: basePortia.assessments.map((assessment, index) => index < 2
+        ? assessment
+        : {
+            ...assessment,
+            disposition: 'consumed' as const,
+            survivingInterpretation: null,
+            requiredQualification: null,
+          }),
       recommendedGateInputs: {
         tensionCandidatePairs: [],
         fatalContradictionIds: [],
         fieldRepairReasons: [],
       },
     }
-    const failedGate = evaluateGate(failedPortia)
-    dependencies = lifecycleDependencies(lifecycleAggregate({
-      state: 'gate_failed',
-      portia: failedPortia,
-      gate: failedGate,
-    }))
+    const failedGate = evaluateGate(failedPortia, undefined, fixture.record)
+    expect(failedGate.recommendedNextTransition).toBe('retry_game')
+    dependencies = currentDirectionalDependencies(
+      fixture,
+      currentReviewedDirectionalLifecycle(fixture, failedPortia),
+    )
     const inheritedEvidence = webMemoryEvidence(NOW.toISOString())
     vi.mocked(
       dependencies.lifecycleRepository!.getWebMemoryEvidenceForGame,
     ).mockResolvedValue([inheritedEvidence])
     vi.mocked(dependencies.repository.getOwnedGame).mockResolvedValue(
-      snapshot({
+      mappedSnapshot({
         id: IDEMPOTENCY_KEY,
         sourceGameId: GAME_ID,
-        status: 'mapped',
+        problem: fixture.evidence.problem,
+        division: directionalTerminalSnapshot(fixture).division,
       }),
     )
     const replayed = await createApiServicesWithDependencies(
@@ -3634,13 +5771,14 @@ describe('durable HTTP service adapter', () => {
       ).mock.invocationCallOrder[0]!,
     )
 
-    dependencies = lifecycleDependencies(lifecycleAggregate({
-      state: 'gate_failed',
-      portia: failedPortia,
-      gate: failedGate,
-      sameFieldRetryCount: 2,
-      fieldRegenerationCount: 1,
-    }))
+    dependencies = currentDirectionalDependencies(
+      fixture,
+      currentReviewedDirectionalLifecycle(
+        fixture,
+        failedPortia,
+        { sameFieldRetryCount: 2, fieldRegenerationCount: 1 },
+      ),
+    )
     const exhausted = await createApiServicesWithDependencies(
       dependencies,
     ).retryLifecycle({
@@ -3654,11 +5792,16 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('regenerates a deficient field with bounded Gate feedback and durable provenance', async () => {
-    const portia = lifecycleReview()
+    const fixture = makeTrajectoryDirectionalFixture()
+    const portia = directionalLifecycleReview(
+      fixture,
+      directionalAnswerPromptDigest(fixture),
+    )
     const failedPortia: PortiaReview = {
       ...portia,
-      assessments: portia.assessments.slice(0, 3),
-      missingCoverage: ['agency_or_action'],
+      promptDecision: 'retry_field',
+      promptDecisionRationale:
+        'The current field requires one bounded repair before a new game.',
       recommendedGateInputs: {
         ...portia.recommendedGateInputs,
         fieldRepairReasons: [
@@ -3666,13 +5809,12 @@ describe('durable HTTP service adapter', () => {
         ],
       },
     }
-    const failedGate = evaluateGate(failedPortia)
+    const failedGate = evaluateGate(failedPortia, undefined, fixture.record)
     expect(failedGate.recommendedNextTransition).toBe('retry_field')
-    dependencies = lifecycleDependencies(lifecycleAggregate({
-      state: 'gate_failed',
-      portia: failedPortia,
-      gate: failedGate,
-    }))
+    dependencies = currentDirectionalDependencies(
+      fixture,
+      currentReviewedDirectionalLifecycle(fixture, failedPortia),
+    )
     const inheritedEvidence = webMemoryEvidence(NOW.toISOString())
     vi.mocked(
       dependencies.lifecycleRepository!.getWebMemoryEvidenceForGame,
@@ -3709,7 +5851,8 @@ describe('durable HTTP service adapter', () => {
     })
     expect(dependencies.divisionGenerator).toHaveBeenCalledWith(
       {
-        problem: PROBLEM,
+        problem: fixture.evidence.problem,
+        divisionSeed: REQUEST_ID,
         repairContext,
         webMemoryEvidence: [inheritedEvidence],
       },
@@ -3717,7 +5860,7 @@ describe('durable HTTP service adapter', () => {
     )
     expect(dependencies.repository.getOrCreateDivision).toHaveBeenCalledWith(
       expect.objectContaining({
-        problem: PROBLEM,
+        problem: fixture.evidence.problem,
         sourceGameId: GAME_ID,
       }),
     )
@@ -3725,11 +5868,12 @@ describe('durable HTTP service adapter', () => {
       expect.objectContaining({
         requestSha256: hashCanonicalJson({
           operation: 'division/v2-field-retry',
-          problem: PROBLEM,
+          problem: fixture.evidence.problem,
           repairContext,
           memoryObservationIds: [WEB_MEMORY_OBSERVATION_ID],
           sourceGameId: GAME_ID,
           fieldGeneration: 2,
+          divisionSeed: REQUEST_ID,
           model: OPENAI_MODEL,
           promptVersion: DIVISION_PROMPT_VERSION,
           softwareVersion: 'webchess-test',
@@ -3754,14 +5898,433 @@ describe('durable HTTP service adapter', () => {
       vi.mocked(
         dependencies.lifecycleRepository!.attachWebMemoryEvidence,
       ).mock.invocationCallOrder[0],
-    ).toBeLessThan(
+    ).toBeGreaterThan(
       vi.mocked(dependencies.divisionGenerator).mock.invocationCallOrder[0]!,
     )
   })
 
-  it('reopens a premature saved stop and uses its unspent field repair', async () => {
+  it.each(['provider contract', 'assembled payload'] as const)(
+    'settles a definitive Retry %s failure and fails its child without lineage',
+    async (failure) => {
+      dependencies = currentRetryFieldDependencies().dependencies
+      if (failure === 'provider contract') {
+        vi.mocked(dependencies.divisionGenerator).mockRejectedValue(
+          new ModelContractError('invalid regenerated field'),
+        )
+      } else {
+        vi.mocked(dependencies.divisionGenerator).mockResolvedValue({
+          providerId: 'resp_invalid_retry_division',
+          model: OPENAI_MODEL,
+          prompt: PROMPT,
+          result: { facets: [] },
+          usage: {
+            reported: true,
+            inputTokens: 1,
+            outputTokens: 1,
+            totalTokens: 2,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            reasoningOutputTokens: 0,
+          },
+        })
+      }
+
+      await expect(createApiServicesWithDependencies(dependencies)
+        .retryLifecycle({
+          ...operationInput(),
+          gameId: GAME_ID,
+          expectedRevision: 2,
+        })).rejects.toBeInstanceOf(Error)
+
+      expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+        expect.objectContaining({ outcome: 'failed' }),
+      )
+      expect(dependencies.repository.failDivision).toHaveBeenCalledOnce()
+      expect(dependencies.usage.releaseReservation).not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.createRetryRun)
+        .not.toHaveBeenCalled()
+      expect(dependencies.divisionGenerator).toHaveBeenCalledOnce()
+    },
+  )
+
+  it('leaves an ambiguous Retry provider timeout for bounded lease reconciliation', async () => {
+    dependencies = currentRetryFieldDependencies().dependencies
+    vi.mocked(dependencies.divisionGenerator).mockRejectedValue(
+      new APIConnectionTimeoutError(),
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .retryLifecycle({
+        ...operationInput(),
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })).rejects.toMatchObject({ code: 'UPSTREAM_TIMEOUT', status: 504 })
+
+    expect(dependencies.usage.settleModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.repository.failDivision).not.toHaveBeenCalled()
+    expect(dependencies.usage.releaseReservation).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.createRetryRun)
+      .not.toHaveBeenCalled()
+    expect(dependencies.divisionGenerator).toHaveBeenCalledOnce()
+  })
+
+  it('releases a Retry reservation and fails its child when linking fails before provider dispatch', async () => {
+    dependencies = currentRetryFieldDependencies().dependencies
+    vi.mocked(dependencies.usage.attachModelRequestGame).mockResolvedValue({
+      ok: false,
+      code: 'GAME_LINK_CONFLICT',
+      httpStatus: 409,
+    })
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .retryLifecycle({
+        ...operationInput(),
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+    expect(dependencies.usage.releaseReservation).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'provider_not_started' }),
+    )
+    expect(dependencies.repository.failDivision).toHaveBeenCalledOnce()
+    expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.createRetryRun)
+      .not.toHaveBeenCalled()
+  })
+
+  it('accepts an existing mapped Retry child only through its exact current Division binding', async () => {
+    dependencies = currentRetryFieldDependencies().dependencies
+    const payload = castBoundDivisionResultPayload()
+    vi.mocked(dependencies.usage.reserveModelRequest).mockResolvedValue({
+      ok: true,
+      kind: 'existing',
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+      status: 'succeeded',
+      leaseToken: LEASE_TOKEN,
+      leaseExpiresAt: '2026-07-26T20:03:00.000Z',
+    })
+    vi.mocked(dependencies.repository.getOrCreateDivision).mockResolvedValue({
+      game: currentMappedDivisionSnapshot(payload),
+      created: false,
+    })
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockImplementation(async (input) => ({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+      operation: 'division',
+      requestSha256: input.requestSha256,
+      promptVersion: input.promptVersion,
+      status: 'succeeded',
+      resultPayload: payload as unknown as ModelResultPayload,
+    }))
+
+    const retried = await createApiServicesWithDependencies(dependencies)
+      .retryLifecycle({
+        ...operationInput(),
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })
+
+    expect(retried.game).toMatchObject({
+      id: REQUEST_ID,
+      status: 'mapped',
+    })
+    expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
+    expect(dependencies.usage.getSucceededModelResultForGame)
+      .toHaveBeenCalledWith({
+        userId: OWNER_ID,
+        gameId: REQUEST_ID,
+        operation: 'division',
+        requestSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        promptVersion: DIVISION_PROMPT_VERSION,
+      })
+    expect(dependencies.lifecycleRepository?.createRetryRun)
+      .toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    'legacy result',
+    'wrong request hash',
+    'wrong seed',
+    'persisted mismatch',
+  ] as const)(
+    'rejects an existing mapped Retry child with %s before lifecycle mutation',
+    async (kind) => {
+      dependencies = currentRetryFieldDependencies().dependencies
+      const currentPayload = castBoundDivisionResultPayload()
+      const resultPayload = kind === 'legacy result'
+        ? divisionResultPayload()
+        : kind === 'wrong seed'
+          ? { ...currentPayload, seed: GAME_ID }
+          : currentPayload
+      vi.mocked(dependencies.usage.reserveModelRequest).mockResolvedValue({
+        ok: true,
+        kind: 'existing',
+        requestId: REQUEST_ID,
+        gameId: REQUEST_ID,
+        status: 'succeeded',
+        leaseToken: LEASE_TOKEN,
+        leaseExpiresAt: '2026-07-26T20:03:00.000Z',
+      })
+      vi.mocked(dependencies.repository.getOrCreateDivision).mockResolvedValue({
+        game: currentMappedDivisionSnapshot(currentPayload, kind === 'persisted mismatch'
+          ? {
+              division: {
+                ...currentMappedDivisionSnapshot(currentPayload).division!,
+                model: 'wrong-model',
+              },
+            }
+          : {}),
+        created: false,
+      })
+      vi.mocked(
+        dependencies.usage.getSucceededModelResultForGame,
+      ).mockImplementation(async (input) => ({
+        found: true,
+        requestId: REQUEST_ID,
+        gameId: REQUEST_ID,
+        operation: 'division',
+        requestSha256: kind === 'wrong request hash'
+          ? 'f'.repeat(64)
+          : input.requestSha256,
+        promptVersion: input.promptVersion,
+        status: 'succeeded',
+        resultPayload: resultPayload as unknown as ModelResultPayload,
+      }))
+
+      await expect(createApiServicesWithDependencies(dependencies)
+        .retryLifecycle({
+          ...operationInput(),
+          gameId: GAME_ID,
+          expectedRevision: 2,
+        })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+      expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
+      expect(dependencies.repository.finishDivision).not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.createRetryRun)
+        .not.toHaveBeenCalled()
+    },
+  )
+
+  it('rejects arbitrary preexisting child lifecycle state after a current Retry Division commits', async () => {
+    const setup = currentRetryFieldDependencies()
+    dependencies = setup.dependencies
+    const lifecycleRepository = dependencies.lifecycleRepository!
+    const parentLifecycle = await lifecycleRepository.getForGame(
+      OWNER_ID,
+      GAME_ID,
+    )
+    if (!parentLifecycle) throw new Error('The parent lifecycle fixture is missing.')
+    const unrelated = currentPreBindLifecycle(setup.fixture, {
+      gameId: REQUEST_ID,
+    })
+    vi.mocked(lifecycleRepository.getForGame).mockImplementation(
+      async (_ownerId, gameId) => gameId === GAME_ID
+        ? parentLifecycle
+        : unrelated,
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .retryLifecycle({
+        ...operationInput(),
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'succeeded' }),
+    )
+    expect(dependencies.repository.failDivision).not.toHaveBeenCalled()
+    expect(lifecycleRepository.createRetryRun).not.toHaveBeenCalled()
+  })
+
+  it('returns an exact existing current Retry child without a second provider call or lineage write', async () => {
+    const setup = currentRetryFieldDependencies()
+    dependencies = setup.dependencies
+    const lifecycleRepository = dependencies.lifecycleRepository!
+    const parent = await lifecycleRepository.getForGame(OWNER_ID, GAME_ID)
+    if (!parent) throw new Error('The parent lifecycle fixture is missing.')
+    const retryingParent: LifecycleAggregate = {
+      ...parent,
+      revision: parent.revision + 1,
+      state: 'retry_running',
+    }
+    const payload = castBoundDivisionResultPayload()
+    const child = currentMappedDivisionSnapshot(payload, {
+      sourceGameId: GAME_ID,
+    })
+    const reason =
+      'The Gate identified a field-level deficiency or the same-field replay allowance is exhausted.'
+    const exactChildLifecycle = currentPreBindLifecycle(setup.fixture, {
+      id: '66666666-6666-4666-8666-666666666666',
+      rootRunId: retryingParent.rootRunId,
+      parentRunId: retryingParent.id,
+      gameId: child.id,
+      state: 'chess_ready',
+      fieldGeneration: retryingParent.fieldGeneration + 1,
+      gameAttempt: 1,
+      sameFieldRetryCount: retryingParent.sameFieldRetryCount,
+      fieldRegenerationCount: retryingParent.fieldRegenerationCount + 1,
+      divisionSeed: payload.seed,
+      castSeed: hashCanonicalJson({
+        purpose: 'webchess-cast-seed/v2',
+        divisionDigest: child.division!.digest,
+        gameId: child.id,
+      } as unknown as CanonicalJson),
+      trajectorySeed: child.id,
+      retryReason: reason,
+    })
+    vi.mocked(lifecycleRepository.getForGame).mockImplementation(
+      async (_ownerId, gameId) => gameId === GAME_ID
+        ? retryingParent
+        : exactChildLifecycle,
+    )
+    vi.mocked(
+      dependencies.usage.getModelRequestByIdempotencyKey,
+    ).mockResolvedValue({
+      found: true,
+      requestId: REQUEST_ID,
+      gameId: REQUEST_ID,
+      operation: 'division',
+      requestSha256: currentFieldRetryRequestSha256(
+        retryingParent,
+        REQUEST_ID,
+        [],
+        setup.fixture.evidence.problem,
+      ),
+      promptVersion: DIVISION_PROMPT_VERSION,
+      status: 'succeeded',
+      resultPayload: payload as unknown as ModelResultPayload,
+    })
+    vi.mocked(
+      dependencies.repository.getOwnedGame,
+    ).mockResolvedValue(child)
+    const responseLossRequestId =
+      '22222222-2222-4222-8222-222222222229'
+
+    const retried = await createApiServicesWithDependencies(dependencies)
+      .retryLifecycle({
+        ...operationInput(),
+        requestId: responseLossRequestId,
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })
+
+    expect(retried.game).toMatchObject({ id: REQUEST_ID, status: 'mapped' })
+    expect(retried.lifecycle).toEqual(exactChildLifecycle)
+    expect(
+      dependencies.usage.getModelRequestByIdempotencyKey,
+    ).toHaveBeenCalledWith({
+      userId: OWNER_ID,
+      operation: 'division',
+      idempotencyKey: IDEMPOTENCY_KEY,
+    })
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.repository.getOrCreateDivision).not.toHaveBeenCalled()
+    expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
+    expect(lifecycleRepository.createRetryRun).not.toHaveBeenCalled()
+    expect(lifecycleRepository.attachWebMemoryEvidence).not.toHaveBeenCalled()
+  })
+
+  it('rejects a different Retry key after the parent entered retry_running without quota, provider, or lineage mutation', async () => {
+    const setup = currentRetryFieldDependencies()
+    dependencies = setup.dependencies
+    const lifecycleRepository = dependencies.lifecycleRepository!
+    const parent = await lifecycleRepository.getForGame(OWNER_ID, GAME_ID)
+    if (!parent) throw new Error('The parent lifecycle fixture is missing.')
+    const retryingParent: LifecycleAggregate = {
+      ...parent,
+      revision: parent.revision + 1,
+      state: 'retry_running',
+    }
+    vi.mocked(lifecycleRepository.getForGame).mockResolvedValue(retryingParent)
+    vi.mocked(
+      dependencies.usage.getModelRequestByIdempotencyKey,
+    ).mockResolvedValue({ found: false })
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .retryLifecycle({
+        ...operationInput(),
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
+
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.usage.consumeReplayGameStart).not.toHaveBeenCalled()
+    expect(dependencies.repository.getOrCreateDivision).not.toHaveBeenCalled()
+    expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
+    expect(lifecycleRepository.attachWebMemoryEvidence).not.toHaveBeenCalled()
+    expect(lifecycleRepository.createRetryRun).not.toHaveBeenCalled()
+  })
+
+  it('rejects a legacy Division winner in a Retry settlement race before current lineage mutation', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
+    const portia = directionalLifecycleReview(
+      fixture,
+      directionalAnswerPromptDigest(fixture),
+    )
+    const failedPortia: PortiaReview = {
+      ...portia,
+      promptDecision: 'retry_field',
+      promptDecisionRationale:
+        'The current field requires one bounded repair before a new game.',
+      recommendedGateInputs: {
+        ...portia.recommendedGateInputs,
+        fieldRepairReasons: [
+          'Add a distinct agency path grounded in an observable action.',
+        ],
+      },
+    }
+    dependencies = currentDirectionalDependencies(
+      fixture,
+      currentReviewedDirectionalLifecycle(fixture, failedPortia),
+    )
+    vi.mocked(dependencies.usage.settleModelRequest).mockResolvedValue({
+      ok: false,
+      code: 'OPERATION_ALREADY_SUCCEEDED',
+      httpStatus: 409,
+    })
+    vi.mocked(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).mockResolvedValue({
+      found: true,
+      requestId: '55555555-5555-4555-8555-555555555555',
+      gameId: REQUEST_ID,
+      operation: 'division',
+      promptVersion: LEGACY_DIVISION_PROMPT_VERSION,
+      status: 'succeeded',
+      resultPayload:
+        divisionResultPayload() as unknown as ModelResultPayload,
+    })
+
+    await expect(createApiServicesWithDependencies(dependencies)
+      .retryLifecycle({
+        ...operationInput(),
+        gameId: GAME_ID,
+        expectedRevision: 2,
+      })).rejects.toMatchObject({ code: 'INTERNAL_ERROR', status: 500 })
+
+    expect(
+      dependencies.usage.getSucceededModelResultForGame,
+    ).toHaveBeenCalledWith({
+      userId: OWNER_ID,
+      gameId: REQUEST_ID,
+      operation: 'division',
+      requestSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      promptVersion: DIVISION_PROMPT_VERSION,
+    })
+    expect(dependencies.repository.finishDivision).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.createRetryRun)
+      .not.toHaveBeenCalled()
+  })
+
+  it('rejects a stale terminal Gate instead of mutating a current lifecycle', async () => {
+    const fixture = makeTrajectoryDirectionalFixture()
     const portia: PortiaReview = {
-      ...exhaustedLifecycleReview(),
+      ...exhaustedDirectionalLifecycleReview(fixture),
       promptDecision: 'deny',
       promptDecisionRationale:
         'The current evidence and conflict scope require one bounded repair.',
@@ -3769,36 +6332,106 @@ describe('durable HTTP service adapter', () => {
     const persistedTerminalGate = evaluateGate(portia, {
       sameFieldRetryCount: 0,
       fieldRegenerationCount: 1,
-    })
+    }, fixture.record)
     expect(persistedTerminalGate.recommendedNextTransition)
       .toBe('insufficient_basis')
-    dependencies = lifecycleDependencies(lifecycleAggregate({
+    dependencies = currentDirectionalDependencies(fixture, currentDirectionalLifecycle(fixture, {
       state: 'insufficient_basis',
+      answerPromptDigest: directionalAnswerPromptDigest(fixture),
       portia,
       gate: persistedTerminalGate,
       fieldRegenerationCount: 0,
     }))
 
-    const retried = await createApiServicesWithDependencies(
+    await expect(createApiServicesWithDependencies(
       dependencies,
     ).retryLifecycle({
       ...operationInput(),
       gameId: GAME_ID,
       expectedRevision: 2,
-    })
+    })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 })
 
-    expect(retried.game).not.toBeNull()
-    expect(retried.lifecycle).toMatchObject({
-      state: 'field_ready',
-      fieldRegenerationCount: 1,
-    })
-    expect(dependencies.divisionGenerator).toHaveBeenCalledOnce()
+    expect(dependencies.usage.reserveModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.usage.consumeReplayGameStart).not.toHaveBeenCalled()
+    expect(dependencies.divisionGenerator).not.toHaveBeenCalled()
     expect(dependencies.lifecycleRepository?.createRetryRun)
-      .toHaveBeenCalledWith(expect.objectContaining({
-        parentGameId: GAME_ID,
-        mode: 'regenerate_field',
-      }))
+      .not.toHaveBeenCalled()
   })
+
+  it.each(['create', 'update', 'observe'] as const)(
+    'keeps legacy Wilbur %s read-only before claim, rate, or artifact mutation',
+    async (operation) => {
+      const portia = lifecycleReview()
+      const charlotte = lifecycleCharlotte(portia)
+      const legacy = lifecycleAggregate({
+        state: 'charlotte_complete',
+        portia,
+        gate: evaluateGate(portia),
+        charlotte,
+        charlotteRenderedAnswer:
+          'The historical Charlotte result remains inspectable.',
+      })
+      const existingAction = currentWilburAction(legacy)
+      dependencies = lifecycleDependencies({
+        ...legacy,
+        wilburActions: [existingAction],
+      })
+      const suggestion = charlotte.exactlyThreeNextActions[0]!
+      const services = createApiServicesWithDependencies(dependencies)
+      const request = operation === 'create'
+        ? services.createWilburAction({
+            ...operationInput(),
+            gameId: GAME_ID,
+            charlotteActionIndex: 0,
+            actor: suggestion.actor,
+            action: suggestion.smallestAction,
+            testedAssumption: suggestion.assumptionBeingTested,
+            expectedObservation: suggestion.expectedObservation,
+            decisionThreshold: suggestion.decisionThreshold,
+            reviewHorizon: suggestion.reviewHorizon,
+          })
+        : operation === 'update'
+          ? services.updateWilburAction({
+              ...operationInput(),
+              gameId: GAME_ID,
+              actionId: REQUEST_ID,
+              expectedRevision: 0,
+              status: 'in_progress',
+            })
+          : services.appendWilburObservation({
+              ...operationInput(),
+              gameId: GAME_ID,
+              actionId: REQUEST_ID,
+              observedAt: NOW.toISOString(),
+              observation: 'A bounded historical observation.',
+              evidenceClassification: 'Direct observation.',
+              expectedEffect: 'No current mutation occurs.',
+              unexpectedEffect: 'None.',
+              stakeholderResponse: 'The stop path remains available.',
+              assumptionResult: 'unresolved',
+              nextDecision: 'Start a new current game.',
+            })
+
+      await expect(request).rejects.toMatchObject({
+        code: 'CONFLICT',
+        status: 409,
+      })
+      expect(dependencies.usage.getSucceededModelResultForGame)
+        .not.toHaveBeenCalled()
+      expect(dependencies.usage.consumeWilburMutationRate)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.claimWilburMutation)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.settleWilburMutationConflict)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.createWilburAction)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.updateWilburAction)
+        .not.toHaveBeenCalled()
+      expect(dependencies.lifecycleRepository?.appendWilburObservation)
+        .not.toHaveBeenCalled()
+    },
+  )
 
   it.each([
     'actor',
@@ -3810,8 +6443,8 @@ describe('durable HTTP service adapter', () => {
   ] as const)(
     'refuses a Wilbur action whose %s does not exactly match Charlotte',
     async (field) => {
-      const portia = lifecycleReview()
-      const charlotte = lifecycleCharlotte(portia)
+      const setup = currentWilburFixture()
+      const { charlotte } = setup
       const suggestion = charlotte.exactlyThreeNextActions[0]!
       const canonicalCommand = {
         actor: suggestion.actor,
@@ -3821,12 +6454,7 @@ describe('durable HTTP service adapter', () => {
         decisionThreshold: suggestion.decisionThreshold,
         reviewHorizon: suggestion.reviewHorizon,
       }
-      dependencies = lifecycleDependencies(lifecycleAggregate({
-        state: 'charlotte_complete',
-        portia,
-        gate: evaluateGate(portia),
-        charlotte,
-      }))
+      dependencies = setup.dependencies
 
       await expect(
         createApiServicesWithDependencies(dependencies).createWilburAction({
@@ -3849,35 +6477,14 @@ describe('durable HTTP service adapter', () => {
   )
 
   it('rejects an already current-bound Charlotte action before rate admission', async () => {
-    const portia = lifecycleReview()
-    const charlotte = lifecycleCharlotte(portia)
-    const suggestion = charlotte.exactlyThreeNextActions[0]!
-    const existingAction = {
-      id: REQUEST_ID,
-      lifecycleRunId: GAME_ID,
-      charlotteActionIndex: 0,
-      charlotteBindingVersion:
-        'webchess-charlotte-action-binding-v1' as const,
-      actor: suggestion.actor,
-      action: suggestion.smallestAction,
-      testedAssumption: suggestion.assumptionBeingTested,
-      expectedObservation: suggestion.expectedObservation,
-      decisionThreshold: suggestion.decisionThreshold,
-      reviewHorizon: suggestion.reviewHorizon,
-      followUpAt: null,
-      status: 'planned' as const,
-      revision: 0,
-      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
-      createdAt: NOW.toISOString(),
-      updatedAt: NOW.toISOString(),
-    }
-    dependencies = lifecycleDependencies(lifecycleAggregate({
+    const base = currentWilburFixture()
+    const existingAction = currentWilburAction(base.lifecycle)
+    const setup = currentWilburFixture({
       state: 'wilbur_planning',
-      portia,
-      gate: evaluateGate(portia),
-      charlotte,
       wilburActions: [existingAction],
-    }))
+    })
+    const suggestion = setup.charlotte.exactlyThreeNextActions[0]!
+    dependencies = setup.dependencies
 
     await expect(createApiServicesWithDependencies(dependencies)
       .createWilburAction({
@@ -3900,15 +6507,10 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('terminally settles an admitted create conflict and releases its reservation', async () => {
-    const portia = lifecycleReview()
-    const charlotte = lifecycleCharlotte(portia)
+    const setup = currentWilburFixture()
+    const { charlotte } = setup
     const suggestion = charlotte.exactlyThreeNextActions[0]!
-    dependencies = lifecycleDependencies(lifecycleAggregate({
-      state: 'charlotte_complete',
-      portia,
-      gate: evaluateGate(portia),
-      charlotte,
-    }))
+    dependencies = setup.dependencies
     vi.mocked(dependencies.lifecycleRepository!.createWilburAction)
       .mockRejectedValueOnce(new LifecycleRepositoryError(
         'conflict',
@@ -3934,33 +6536,16 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('settles a stale status intent without consuming shared rate capacity', async () => {
-    const portia = lifecycleReview()
-    const charlotte = lifecycleCharlotte(portia)
-    const suggestion = charlotte.exactlyThreeNextActions[0]!
-    dependencies = lifecycleDependencies(lifecycleAggregate({
+    const base = currentWilburFixture()
+    const existingAction = currentWilburAction(base.lifecycle, 0, {
+      status: 'in_progress',
+      revision: 1,
+    })
+    const setup = currentWilburFixture({
       state: 'wilbur_planning',
-      portia,
-      gate: evaluateGate(portia),
-      charlotte,
-      wilburActions: [{
-        id: REQUEST_ID,
-        lifecycleRunId: GAME_ID,
-        charlotteActionIndex: 0,
-        charlotteBindingVersion: 'webchess-charlotte-action-binding-v1',
-        actor: suggestion.actor,
-        action: suggestion.smallestAction,
-        testedAssumption: suggestion.assumptionBeingTested,
-        expectedObservation: suggestion.expectedObservation,
-        decisionThreshold: suggestion.decisionThreshold,
-        reviewHorizon: suggestion.reviewHorizon,
-        followUpAt: null,
-        status: 'in_progress',
-        revision: 1,
-        version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
-        createdAt: NOW.toISOString(),
-        updatedAt: NOW.toISOString(),
-      }],
-    }))
+      wilburActions: [existingAction],
+    })
+    dependencies = setup.dependencies
 
     await expect(createApiServicesWithDependencies(dependencies)
       .updateWilburAction({
@@ -3979,33 +6564,14 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('denies every valid Wilbur mutation before an artifact write', async () => {
-    const portia = lifecycleReview()
-    const charlotte = lifecycleCharlotte(portia)
-    const suggestion = charlotte.exactlyThreeNextActions[0]!
-    dependencies = lifecycleDependencies(lifecycleAggregate({
+    const base = currentWilburFixture()
+    const existingAction = currentWilburAction(base.lifecycle, 2)
+    const setup = currentWilburFixture({
       state: 'wilbur_planning',
-      portia,
-      gate: evaluateGate(portia),
-      charlotte,
-      wilburActions: [{
-        id: REQUEST_ID,
-        lifecycleRunId: GAME_ID,
-        charlotteActionIndex: 2,
-        charlotteBindingVersion: 'webchess-charlotte-action-binding-v1',
-        actor: suggestion.actor,
-        action: suggestion.smallestAction,
-        testedAssumption: suggestion.assumptionBeingTested,
-        expectedObservation: suggestion.expectedObservation,
-        decisionThreshold: suggestion.decisionThreshold,
-        reviewHorizon: suggestion.reviewHorizon,
-        followUpAt: null,
-        status: 'planned',
-        revision: 0,
-        version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
-        createdAt: NOW.toISOString(),
-        updatedAt: NOW.toISOString(),
-      }],
-    }))
+      wilburActions: [existingAction],
+    })
+    const suggestion = setup.charlotte.exactlyThreeNextActions[0]!
+    dependencies = setup.dependencies
     vi.mocked(dependencies.usage.consumeWilburMutationRate)
       .mockResolvedValueOnce({
         ok: false,
@@ -4081,14 +6647,7 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('delegates owner-scoped Wilbur actions, statuses, observations, and provenance', async () => {
-    const portia = lifecycleReview()
-    const charlotte = lifecycleCharlotte(portia)
-    const suggestion = charlotte.exactlyThreeNextActions[0]!
-    dependencies = lifecycleDependencies(lifecycleAggregate({
-      state: 'charlotte_complete',
-      portia,
-      gate: evaluateGate(portia),
-      charlotte,
+    const setup = currentWilburFixture({
       activities: [{
         id: 'activity-1',
         sequence: 1,
@@ -4104,7 +6663,10 @@ describe('durable HTTP service adapter', () => {
         eventVersion: 1,
         createdAt: NOW.toISOString(),
       }],
-    }))
+    })
+    const { charlotte } = setup
+    const suggestion = charlotte.exactlyThreeNextActions[0]!
+    dependencies = setup.dependencies
     const services = createApiServicesWithDependencies(dependencies)
     const context = {
       ...operationInput(),
@@ -4228,35 +6790,13 @@ describe('durable HTTP service adapter', () => {
   })
 
   it('replays the saved PATCH result after an ambiguous lost response', async () => {
-    const portia = lifecycleReview()
-    const charlotte = lifecycleCharlotte(portia)
-    const suggestion = charlotte.exactlyThreeNextActions[0]!
-    const action = {
-      id: REQUEST_ID,
-      lifecycleRunId: GAME_ID,
-      charlotteActionIndex: 0,
-      charlotteBindingVersion:
-        'webchess-charlotte-action-binding-v1' as const,
-      actor: suggestion.actor,
-      action: suggestion.smallestAction,
-      testedAssumption: suggestion.assumptionBeingTested,
-      expectedObservation: suggestion.expectedObservation,
-      decisionThreshold: suggestion.decisionThreshold,
-      reviewHorizon: suggestion.reviewHorizon,
-      followUpAt: null,
-      status: 'planned' as const,
-      revision: 0,
-      version: CURRENT_LIFECYCLE_VERSIONS.wilburRecord,
-      createdAt: NOW.toISOString(),
-      updatedAt: NOW.toISOString(),
-    }
-    dependencies = lifecycleDependencies(lifecycleAggregate({
+    const base = currentWilburFixture()
+    const action = currentWilburAction(base.lifecycle)
+    const setup = currentWilburFixture({
       state: 'wilbur_planning',
-      portia,
-      gate: evaluateGate(portia),
-      charlotte,
       wilburActions: [action],
-    }))
+    })
+    dependencies = setup.dependencies
     const services = createApiServicesWithDependencies(dependencies)
     const command = {
       ...operationInput(),

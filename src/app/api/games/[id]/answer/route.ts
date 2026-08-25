@@ -2,7 +2,8 @@ import type { NextRequest } from 'next/server'
 import { handleAnswerRequest } from '@/server/http'
 
 export const dynamic = 'force-dynamic'
-export const maxDuration = 150
+// Provider work is capped at 300s; the extra 30s is settlement-only grace.
+export const maxDuration = 330
 export const runtime = 'nodejs'
 
 interface RouteContext {

@@ -296,7 +296,7 @@ class FakeResearchRepository implements ResearchRepositoryPort {
           executedQueries: [],
           searchSynthesis: null,
           contentDigest: null,
-          startedAt: CREATED_AT,
+          startedAt: new Date(Date.now()).toISOString(),
           completedAt: null,
         })),
       }
@@ -352,6 +352,7 @@ const searchExecutor = vi.mocked(runOpenClawWebSearch)
 
 beforeEach(() => {
   vi.stubEnv('WEBCHESS_OPENCLAW_BIN', 'openclaw-research-test')
+  vi.stubEnv('WEBCHESS_OPENCLAW_SEARCH_TIMEOUT_MS', '300000')
   vi.stubEnv('WEBCHESS_OPENCLAW_TIMEOUT_MS', '150000')
   vi.stubEnv('WEBCHESS_OPENCLAW_TRANSPORT', 'local')
   searchExecutor.mockReset()
@@ -506,19 +507,24 @@ describe('durable research broker', () => {
     expect(searchExecutor).toHaveBeenCalledTimes(1)
     expect(searchExecutor).toHaveBeenCalledWith(
       query,
-      {
+      expect.objectContaining({
         binary: 'openclaw-research-test',
         bridgeToken: null,
         bridgeUrl: null,
         maxOutputBytes: 512 * 1024,
-        timeoutMs: RESEARCH_BOUNDS.timeoutMs,
+        timeoutMs: 150_000,
         transport: 'local',
-      },
+      }),
       {
         limit: RESEARCH_BOUNDS.resultLimit,
         maxContentChars: RESEARCH_BOUNDS.synthesisCharacterLimit + 512,
         maxSearchActivities: 24,
       },
+    )
+    const invokedConfig = searchExecutor.mock.calls[0]?.[1]
+    expect(invokedConfig?.searchTimeoutMs).toBeGreaterThan(0)
+    expect(invokedConfig?.searchTimeoutMs).toBeLessThanOrEqual(
+      RESEARCH_BOUNDS.timeoutMs,
     )
     expect(repository.start).toHaveBeenCalledTimes(1)
     expect(repository.start).toHaveBeenCalledWith(expect.objectContaining({
@@ -571,7 +577,7 @@ describe('durable research broker', () => {
   })
 
   it('persists and displays the effective configured timeout below the policy ceiling', async () => {
-    vi.stubEnv('WEBCHESS_OPENCLAW_TIMEOUT_MS', '90000')
+    vi.stubEnv('WEBCHESS_OPENCLAW_SEARCH_TIMEOUT_MS', '180000')
     const repository = new FakeResearchRepository()
     const broker = createBroker(repository)
     searchExecutor.mockResolvedValue(searchResult(
@@ -581,14 +587,98 @@ describe('durable research broker', () => {
     const result = await broker.ensureForStage(requestContext)
 
     expect(repository.start).toHaveBeenCalledWith(expect.objectContaining({
-      timeoutMs: 90_000,
+      timeoutMs: 180_000,
     }))
     expect(searchExecutor).toHaveBeenCalledWith(
       expect.any(String),
-      expect.objectContaining({ timeoutMs: 90_000 }),
+      expect.objectContaining({ transport: 'local' }),
       expect.any(Object),
     )
-    expect(result.bounds.timeoutMs).toBe(90_000)
+    const invokedConfig = searchExecutor.mock.calls[0]?.[1]
+    expect(invokedConfig?.searchTimeoutMs).toBeGreaterThan(0)
+    expect(invokedConfig?.searchTimeoutMs).toBeLessThanOrEqual(180_000)
+    expect(result.bounds.timeoutMs).toBe(180_000)
+  })
+
+  it('passes only durable claim headroom to Hosted Search', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    vi.setSystemTime('2026-08-25T05:00:00.000Z')
+    const repository = new FakeResearchRepository()
+    const originalStart = repository.start.getMockImplementation()
+    if (!originalStart) throw new Error('test_start_implementation_missing')
+    repository.start.mockImplementationOnce(async (input) => {
+      const claimed = await originalStart(input)
+      await new Promise<void>((resolve) => setTimeout(resolve, 120_000))
+      return claimed
+    })
+    const broker = createBroker(repository)
+    searchExecutor.mockResolvedValue(searchResult(
+      'Grounded synthesis with [one source](https://example.edu/research).',
+    ))
+
+    const pending = broker.ensureForStage(requestContext)
+    await vi.advanceTimersByTimeAsync(120_000)
+    const result = await pending
+
+    expect(searchExecutor).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ searchTimeoutMs: 180_000 }),
+      expect.any(Object),
+    )
+    expect(result.status).toBe('completed')
+  })
+
+  it('settles an exhausted durable claim deadline without starting Hosted Search', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    vi.setSystemTime('2026-08-25T05:00:00.000Z')
+    const repository = new FakeResearchRepository()
+    const originalStart = repository.start.getMockImplementation()
+    if (!originalStart) throw new Error('test_start_implementation_missing')
+    repository.start.mockImplementationOnce(async (input) => {
+      const claimed = await originalStart(input)
+      await new Promise<void>((resolve) => setTimeout(resolve, 300_001))
+      return claimed
+    })
+    const broker = createBroker(repository)
+
+    const pending = broker.ensureForStage(requestContext)
+    await vi.advanceTimersByTimeAsync(300_001)
+    const result = await pending
+
+    expect(searchExecutor).not.toHaveBeenCalled()
+    expect(repository.complete).not.toHaveBeenCalled()
+    expect(repository.fail).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({
+      status: 'timed_out',
+      failureCode: 'durable_research_deadline_expired',
+    })
+  })
+
+  it('discards a late Hosted Search result and settles the durable deadline once', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'clearTimeout', 'setTimeout'] })
+    vi.setSystemTime('2026-08-25T05:00:00.000Z')
+    const repository = new FakeResearchRepository()
+    const broker = createBroker(repository)
+    searchExecutor.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 300_001))
+      return searchResult(
+        'Late synthesis with [one source](https://example.edu/research).',
+      )
+    })
+
+    const pending = broker.ensureForStage(requestContext)
+    await vi.advanceTimersByTimeAsync(300_001)
+    const first = await pending
+    const second = await broker.ensureForStage(requestContext)
+
+    expect(searchExecutor).toHaveBeenCalledTimes(1)
+    expect(repository.complete).not.toHaveBeenCalled()
+    expect(repository.fail).toHaveBeenCalledTimes(1)
+    expect(first).toMatchObject({
+      status: 'timed_out',
+      failureCode: 'durable_research_deadline_expired',
+    })
+    expect(second).toBe(first)
   })
 
   it('lets only the durable insert winner invoke Codex Search under concurrency', async () => {
@@ -718,20 +808,52 @@ describe('durable research broker', () => {
     })
   })
 
-  it('terminally recovers a stale searching record without searching again', async () => {
-    const stale = record({
+  it('keeps a durable search unresolved immediately before its five-minute boundary', async () => {
+    const now = Date.parse('2026-08-25T05:04:59.999Z')
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    const searching = record({
       status: 'searching',
       model: null,
+      bounds: {
+        ...RESEARCH_BOUNDS,
+        timeoutMs: 300_000,
+      },
       executedQueries: [],
       searchSynthesis: null,
       contentDigest: null,
-      startedAt: '2020-01-01T00:00:00.000Z',
+      startedAt: '2026-08-25T05:00:00.000Z',
+      completedAt: null,
+    })
+    const repository = new FakeResearchRepository([searching])
+    const broker = createBroker(repository)
+
+    await expect(broker.ensureForStage(requestContext)).resolves.toBe(searching)
+    expect(repository.fail).not.toHaveBeenCalled()
+    expect(repository.start).not.toHaveBeenCalled()
+    expect(searchExecutor).not.toHaveBeenCalled()
+  })
+
+  it('terminally settles a search at the exact five-minute boundary without searching again', async () => {
+    const now = Date.parse('2026-08-25T05:05:00.000Z')
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    const stale = record({
+      status: 'searching',
+      model: null,
+      bounds: {
+        ...RESEARCH_BOUNDS,
+        timeoutMs: 300_000,
+      },
+      executedQueries: [],
+      searchSynthesis: null,
+      contentDigest: null,
+      startedAt: '2026-08-25T05:00:00.000Z',
       completedAt: null,
     })
     const repository = new FakeResearchRepository([stale])
     const broker = createBroker(repository)
 
-    const result = await broker.ensureForStage(requestContext)
+    const first = await broker.ensureForStage(requestContext)
+    const second = await broker.ensureForStage(requestContext)
 
     expect(searchExecutor).not.toHaveBeenCalled()
     expect(repository.start).not.toHaveBeenCalled()
@@ -741,10 +863,11 @@ describe('durable research broker', () => {
       status: 'timed_out',
       failureCode: 'durable_research_deadline_expired',
     }))
-    expect(result).toMatchObject({
+    expect(first).toMatchObject({
       status: 'timed_out',
       failureCode: 'durable_research_deadline_expired',
     })
+    expect(second).toBe(first)
   })
 
   it('records a not-needed decision without starting the executor', async () => {

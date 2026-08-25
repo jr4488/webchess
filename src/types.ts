@@ -51,6 +51,8 @@ export interface ProblemPart {
   movement: string
   prompt: string
   keyword: string
+  /** Provider explanation for a v4 cast-directed facet; absent on legacy games. */
+  castApplication?: string
 }
 
 export interface ProblemFacet {
@@ -59,6 +61,8 @@ export interface ProblemFacet {
   focus: string
   question: string
   keyword: string
+  /** Provider explanation for a v4 cast-directed facet; absent on legacy games. */
+  castApplication?: string
 }
 
 export interface DivisionAnalysis {

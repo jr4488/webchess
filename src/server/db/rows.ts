@@ -450,50 +450,76 @@ export const modelConcurrencySlotRowSchema = z
     },
   )
 
-export const lifecycleRunRowSchema = z.object({
-  id: uuidSchema,
-  clerk_user_id: z.string().min(3).max(255),
-  game_id: uuidSchema,
-  root_run_id: uuidSchema,
-  parent_run_id: uuidSchema.nullable(),
-  state: z.enum(LIFECYCLE_STATES),
-  revision: nonnegativeBigintSchema,
-  field_generation: z.number().int().positive(),
-  game_attempt: z.number().int().positive(),
-  same_field_retry_count: z.number().int().min(0).max(2),
-  field_regeneration_count: z.number().int().min(0).max(1),
-  division_seed: z.string().min(1).max(512),
-  cast_seed: z.string().min(1).max(512),
-  trajectory_seed: z.string().min(1).max(512),
-  retry_reason: z.string().min(8).max(2_000).nullable(),
-  terminal_fingerprint: sha256Schema.nullable(),
-  answer_prompt_digest: sha256Schema.nullable(),
-  survivor_set: z.array(z.unknown()).nullable(),
-  portia_current_candidate_id: z.string().min(3).max(220).nullable(),
-  portia_active_model_request_id: uuidSchema.nullable(),
-  portia_failed_attempt_count: z.number().int().min(0).max(10),
-  portia_failure_limit: z.number().int().min(1).max(10),
-  portia_completed_candidate_ids: z.array(z.string().min(3).max(220)),
-  portia_assessment_drafts: z.array(z.unknown()),
-  charlotte_active_model_request_id: uuidSchema.nullable(),
-  charlotte_failed_attempt_count: z.number().int().min(0).max(10),
-  charlotte_failure_limit: z.number().int().min(1).max(10),
-  software_version: z.string().min(1).max(120),
-  lifecycle_version: z.string().min(1).max(80),
-  rules_version: z.string().min(1).max(80),
-  engine_version: z.string().min(1).max(80),
-  cast_version: z.string().min(1).max(80),
-  event_version: z.number().int().positive(),
-  portia_prompt_version: z.string().min(1).max(80),
-  portia_contract_version: z.string().min(1).max(80),
-  gate_algorithm_version: z.string().min(1).max(80),
-  retry_policy_version: z.string().min(1).max(80),
-  charlotte_prompt_version: z.string().min(1).max(80),
-  charlotte_contract_version: z.string().min(1).max(80),
-  wilbur_record_version: z.string().min(1).max(80),
-  created_at: timestampSchema,
-  updated_at: timestampSchema,
-})
+export const lifecycleRunRowSchema = z
+  .object({
+    id: uuidSchema,
+    clerk_user_id: z.string().min(3).max(255),
+    game_id: uuidSchema,
+    root_run_id: uuidSchema,
+    parent_run_id: uuidSchema.nullable(),
+    state: z.enum(LIFECYCLE_STATES),
+    revision: nonnegativeBigintSchema,
+    field_generation: z.number().int().positive(),
+    game_attempt: z.number().int().positive(),
+    same_field_retry_count: z.number().int().min(0).max(2),
+    field_regeneration_count: z.number().int().min(0).max(1),
+    division_seed: z.string().min(1).max(512),
+    cast_seed: z.string().min(1).max(512),
+    trajectory_seed: z.string().min(1).max(512),
+    retry_reason: z.string().min(8).max(2_000).nullable(),
+    terminal_fingerprint: sha256Schema.nullable(),
+    trajectory_directional_record_version: z
+      .string()
+      .min(1)
+      .max(80)
+      .nullable()
+      .default(null),
+    trajectory_directional_record_digest: sha256Schema
+      .nullable()
+      .default(null),
+    trajectory_directional_record: jsonObjectSchema.nullable().default(null),
+    answer_prompt_digest: sha256Schema.nullable(),
+    survivor_set: z.array(z.unknown()).nullable(),
+    portia_current_candidate_id: z.string().min(3).max(220).nullable(),
+    portia_active_model_request_id: uuidSchema.nullable(),
+    portia_failed_attempt_count: z.number().int().min(0).max(10),
+    portia_failure_limit: z.number().int().min(1).max(10),
+    portia_completed_candidate_ids: z.array(z.string().min(3).max(220)),
+    portia_assessment_drafts: z.array(z.unknown()),
+    charlotte_active_model_request_id: uuidSchema.nullable(),
+    charlotte_failed_attempt_count: z.number().int().min(0).max(10),
+    charlotte_failure_limit: z.number().int().min(1).max(10),
+    software_version: z.string().min(1).max(120),
+    lifecycle_version: z.string().min(1).max(80),
+    rules_version: z.string().min(1).max(80),
+    engine_version: z.string().min(1).max(80),
+    cast_version: z.string().min(1).max(80),
+    event_version: z.number().int().positive(),
+    portia_prompt_version: z.string().min(1).max(80),
+    portia_contract_version: z.string().min(1).max(80),
+    gate_algorithm_version: z.string().min(1).max(80),
+    retry_policy_version: z.string().min(1).max(80),
+    charlotte_prompt_version: z.string().min(1).max(80),
+    charlotte_contract_version: z.string().min(1).max(80),
+    wilbur_record_version: z.string().min(1).max(80),
+    created_at: timestampSchema,
+    updated_at: timestampSchema,
+  })
+  .superRefine((row, context) => {
+    const fields = [
+      row.trajectory_directional_record_version,
+      row.trajectory_directional_record_digest,
+      row.trajectory_directional_record,
+    ]
+    const present = fields.filter((value) => value !== null).length
+    if (present !== 0 && present !== fields.length) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A trajectory directional record must be wholly empty or populated.',
+        path: ['trajectory_directional_record'],
+      })
+    }
+  })
 
 export const portiaReviewRowSchema = z.object({
   id: uuidSchema,

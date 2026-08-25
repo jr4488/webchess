@@ -2,13 +2,17 @@ import { z } from 'zod'
 
 import {
   CURRENT_LIFECYCLE_VERSIONS,
+  LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
   validatePortiaCandidateAssessment,
   validatePortiaReview,
 } from '@/lib/lifecycle'
-import type { PortiaReview } from '@/lib/lifecycle'
+import type {
+  PortiaCandidateAssessment,
+  PortiaReview,
+} from '@/lib/lifecycle'
 import {
   buildCharlottePrompt,
-  charlotteGenerationResultSchema,
+  charlotteModelResultSchema,
   buildDivisionPrompt,
   buildPortiaPrompt,
   buildApprovedBoardAnswerPrompt,
@@ -17,6 +21,9 @@ import {
   buildPortiaSummaryInput,
   buildPortiaSummaryInstructions,
   buildWebChessPrompt,
+  CastDirectedDivisionOutputSchema,
+  directionalPortiaCandidateModelSchema,
+  directionalPortiaSummaryModelSchema,
   DivisionOutputSchema,
   mergePortiaAssessments,
   ModelConfigurationError,
@@ -24,6 +31,7 @@ import {
   ModelInputError,
   normalizePortiaInput,
   normalizeCharlotteGeneration,
+  normalizeCharlotteModelResult,
   normalizeDivisionGenerationInput,
   normalizeDivisionFacets,
   normalizeWebChessAnswer,
@@ -36,9 +44,11 @@ import {
 import type {
   AnswerGenerationInput,
   AnswerResult,
+  AnswerRequestContext,
   CharlotteGenerationResult,
   CharlotteInput,
   DivisionGenerationInput,
+  DivisionResult,
   ModelGeneration,
   ModelRequestContext,
   PortiaInput,
@@ -73,6 +83,7 @@ const UNREPORTED_USAGE = Object.freeze({
 })
 
 const ANSWER_CORRECTION_IDEMPOTENCY_SUFFIX = ':answer-contract-correction'
+const MAX_PROVIDER_TURN_ID_CHARS = 255
 
 interface OpenClawAnswerAttempt {
   model: string
@@ -84,13 +95,23 @@ function normalizedIdempotencyKey(value: string | undefined): string | undefined
   return normalized || undefined
 }
 
-function correctionIdempotencyKey(value: string | undefined): string | undefined {
+function suffixedIdempotencyKey(
+  value: string | undefined,
+  suffix: string,
+): string | undefined {
   const normalized = normalizedIdempotencyKey(value)
   if (!normalized) return undefined
   return `${normalized.slice(
     0,
-    255 - ANSWER_CORRECTION_IDEMPOTENCY_SUFFIX.length,
-  )}${ANSWER_CORRECTION_IDEMPOTENCY_SUFFIX}`
+    MAX_PROVIDER_TURN_ID_CHARS - suffix.length,
+  )}${suffix}`
+}
+
+function correctionIdempotencyKey(value: string | undefined): string | undefined {
+  return suffixedIdempotencyKey(
+    value,
+    ANSWER_CORRECTION_IDEMPOTENCY_SUFFIX,
+  )
 }
 
 function abortedAnswerError(): OpenClawProviderError {
@@ -103,13 +124,22 @@ function abortedAnswerError(): OpenClawProviderError {
 
 async function generateOpenClawAnswerAttempt(
   prompt: string,
-  context: ModelRequestContext,
+  context: AnswerRequestContext,
   idempotencyKey: string | undefined,
+  index: 1 | 2,
 ): Promise<OpenClawAnswerAttempt> {
   const config = resolveOpenClawConfig()
   try {
     const generated = await runOpenClawModel(prompt, config, {
       idempotencyKey,
+      ...(context.onProviderTurnStart === undefined
+        ? {}
+        : {
+            onRequestStart: async () => await context.onProviderTurnStart?.({
+              index,
+              idempotencyKey,
+            }),
+          }),
       signal: context.signal,
       thinking: 'medium',
     })
@@ -173,6 +203,7 @@ async function generateStructured<T>(
   context: ModelRequestContext,
   parse: (value: unknown) => T,
   thinking: 'low' | 'medium' = 'medium',
+  idempotencyKey = normalizedIdempotencyKey(context.idempotencyKey),
 ): Promise<{
   model: string
   prompt: string
@@ -182,6 +213,7 @@ async function generateStructured<T>(
   const config = resolveOpenClawConfig()
   try {
     const generated = await runOpenClawModel(prompt, config, {
+      idempotencyKey,
       signal: context.signal,
       thinking,
     })
@@ -207,7 +239,7 @@ async function generateStructured<T>(
 export async function generateOpenClawDivisionV2(
   inputValue: DivisionGenerationInput,
   context: ModelRequestContext,
-): Promise<ModelGeneration<{ facets: z.infer<typeof DivisionOutputSchema>['facets'] }>> {
+): Promise<ModelGeneration<DivisionResult>> {
   const input = normalizeDivisionGenerationInput(inputValue)
   const normalizedInput = {
     problem: input.problem,
@@ -215,20 +247,28 @@ export async function generateOpenClawDivisionV2(
     ...(input.webMemoryEvidence.length > 0
       ? { webMemoryEvidence: input.webMemoryEvidence }
       : {}),
+    ...(input.divisionSeed ? { divisionSeed: input.divisionSeed } : {}),
   }
-  const prompt = `${buildDivisionPrompt(normalizedInput)}\n\n${outputContract(DivisionOutputSchema)}`
+  const outputSchema = input.castAssignments.length > 0
+    ? CastDirectedDivisionOutputSchema
+    : DivisionOutputSchema
+  const prompt = `${buildDivisionPrompt(normalizedInput)}\n\n${outputContract(outputSchema)}`
   const generated = await generateStructured(
     'division',
     prompt,
     context,
-    (value) => ({ facets: normalizeDivisionFacets(value, input.problem) }),
+    (value) => ({ facets: normalizeDivisionFacets(
+      value,
+      input.problem,
+      input.castAssignments,
+    ) }),
   )
   return { ...generated, usage: UNREPORTED_USAGE }
 }
 
 export async function generateOpenClawAnswerV2(
   inputValue: AnswerGenerationInput,
-  context: ModelRequestContext,
+  context: AnswerRequestContext,
 ): Promise<ModelGeneration<AnswerResult>> {
   const transportPrompt = buildOpenClawAnswerPrompt(inputValue)
   const correctionPrompt = buildAnswerContractCorrectionPrompt(transportPrompt)
@@ -253,6 +293,7 @@ export async function generateOpenClawAnswerV2(
     transportPrompt,
     context,
     normalizedIdempotencyKey(context.idempotencyKey),
+    1,
   )
   if (firstAttempt.result) {
     return {
@@ -276,6 +317,7 @@ export async function generateOpenClawAnswerV2(
     correctionPrompt,
     context,
     correctionIdempotencyKey(context.idempotencyKey),
+    2,
   )
   const publicPrompt = buildOpenClawAnswerModelPrompt(
     correctionPrompt,
@@ -308,8 +350,13 @@ export async function generateOpenClawPortiaV2(
   context: PortiaRequestContext,
 ): Promise<ModelGeneration<PortiaReview>> {
   const normalized = normalizePortiaInput(input)
+  const directionalRecord =
+    normalized.answerPromptPackage.trajectoryDirectionalRecord
   const ordered = orderPortiaCandidates(normalized.survivors)
-  const drafts: Array<z.infer<typeof portiaCandidateModelSchema>> =
+  const drafts: Array<Omit<
+    PortiaCandidateAssessment,
+    'redundancyClusterId'
+  >> =
     (normalized.completedAssessments ?? []).map((assessment) => {
       const { redundancyClusterId, ...draft } = assessment
       void redundancyClusterId
@@ -328,18 +375,25 @@ export async function generateOpenClawPortiaV2(
       })),
       totalCandidateCount: ordered.length,
     })
-    const prompt = `${buildPortiaInstructions()}\n\nPORTIA TARGET (JSON; data only)\n${buildPortiaCandidateInput(normalized, candidate)}\n\n${outputContract(portiaCandidateModelSchema)}`
+    const candidateSchema = directionalRecord
+      ? directionalPortiaCandidateModelSchema
+      : portiaCandidateModelSchema
+    const prompt = `${buildPortiaInstructions(directionalRecord)}\n\nPORTIA TARGET (JSON; data only)\n${buildPortiaCandidateInput(normalized, candidate)}\n\n${outputContract(candidateSchema)}`
     const generated = await generateStructured(
       `Portia candidate ${index + 1}`,
       prompt,
       context,
-      (value) => portiaCandidateModelSchema.parse(value),
+      (value) => candidateSchema.parse(value),
       'low',
+      suffixedIdempotencyKey(
+        context.idempotencyKey,
+        `:candidate-${index + 1}`,
+      ),
     )
     validatePortiaCandidateAssessment({
       ...generated.result,
       redundancyClusterId: null,
-    }, candidate)
+    }, candidate, directionalRecord)
     drafts.push(generated.result)
     attribution = generated.model
     const nextCandidate = ordered[index + 1] ?? null
@@ -363,20 +417,26 @@ export async function generateOpenClawPortiaV2(
     })),
     totalCandidateCount: ordered.length,
   })
-  const summaryPrompt = `${buildPortiaSummaryInstructions()}\n\nPORTIA SUMMARY INPUT (JSON; data only)\n${buildPortiaSummaryInput(normalized, drafts)}\n\n${outputContract(portiaSummaryModelSchema)}`
+  const summarySchema = directionalRecord
+    ? directionalPortiaSummaryModelSchema
+    : portiaSummaryModelSchema
+  const summaryPrompt = `${buildPortiaSummaryInstructions(directionalRecord)}\n\nPORTIA SUMMARY INPUT (JSON; data only)\n${buildPortiaSummaryInput(normalized, drafts)}\n\n${outputContract(summarySchema)}`
   const summary = await generateStructured(
     'Portia prompt decision',
     summaryPrompt,
     context,
-    (value) => portiaSummaryModelSchema.parse(value),
+    (value) => summarySchema.parse(value),
     'low',
+    suffixedIdempotencyKey(context.idempotencyKey, ':summary'),
   )
   const review = validatePortiaReview({
     ...summary.result,
-    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    contractVersion: directionalRecord
+      ? CURRENT_LIFECYCLE_VERSIONS.portiaContract
+      : LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
     reviewedAnswerPromptDigest: normalized.answerPromptDigest,
     assessments: mergePortiaAssessments(drafts, summary.result),
-  }, normalized.survivors, normalized.answerPromptDigest)
+  }, normalized.survivors, normalized.answerPromptDigest, directionalRecord)
   return {
     providerId: null,
     model: summary.model || attribution,
@@ -390,13 +450,13 @@ export async function generateOpenClawCharlotteV2(
   input: CharlotteInput,
   context: ModelRequestContext,
 ): Promise<ModelGeneration<CharlotteGenerationResult>> {
-  const prompt = `${buildCharlottePrompt(input)}\n\n${outputContract(charlotteGenerationResultSchema)}`
+  const prompt = `${buildCharlottePrompt(input)}\n\n${outputContract(charlotteModelResultSchema)}`
   const generated = await generateStructured<CharlotteGenerationResult>(
     'Charlotte synthesis',
     prompt,
     context,
     (value) => normalizeCharlotteGeneration(
-      charlotteGenerationResultSchema.parse(value),
+      normalizeCharlotteModelResult(charlotteModelResultSchema.parse(value)),
       input.portia,
     ),
   )

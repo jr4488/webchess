@@ -8,10 +8,14 @@ import {
 } from 'openai'
 import { z } from 'zod'
 
-import { composeProblemParts } from '../../lib/division'
+import {
+  composeProblemParts,
+  DIVISION_CAST_BINDING_VERSION,
+} from '../../lib/division'
 import { GameRuleError } from '../../lib/game-replay'
 import {
   CURRENT_LIFECYCLE_VERSIONS,
+  CURRENT_METHOD_VERSION_TUPLE,
   CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION,
   WEBCHESS_SOFTWARE_VERSION,
   canReopenInsufficientBasis,
@@ -19,12 +23,17 @@ import {
   decideRetry,
   deriveSurvivorCandidates,
   evaluateGate,
-  isPromptBoundPortiaReview,
+  hasCurrentLifecycleBaseVersions,
+  hasCurrentLifecycleExecutionVersions,
   portiaReviewSchema,
   terminalFingerprint,
   type GateResult,
+  type PortiaReview,
+  validatePortiaCandidateAssessment,
   validatePortiaReview,
 } from '../../lib/lifecycle'
+import { deriveTrajectoryDirectionalRecord } from '../../lib/lifecycle/trajectory-direction'
+import type { TrajectoryDirectionalRecord } from '../../lib/lifecycle/trajectory-direction'
 import type { DurableGame } from '../../lib/webchess-api'
 import { MAX_PERSISTED_MODEL_PROMPT_CHARS } from '../../types'
 import type { WebChessCaseProfile } from '../../lib/case-bundle-contract'
@@ -50,8 +59,9 @@ import {
   ANSWER_PROMPT_VERSION,
   buildBoardAnswerPromptPackage,
   buildPlayerVisibleAnswerPrompt,
+  CastBoundDivisionFacetSchema,
+  CAST_DIRECTED_DIVISION_PROMPT_VERSION,
   DIVISION_PROMPT_VERSION,
-  DivisionFacetSchema,
   generateAnswer,
   generateCharlotteSynthesis,
   generateDivision,
@@ -60,7 +70,9 @@ import {
   ModelContractError,
   ModelInputError,
   ModelResponseError,
+  LEGACY_DIVISION_PROMPT_VERSION,
   normalizeDivisionRepairContext,
+  orderPortiaCandidates,
   OPENAI_MODEL,
   OPENAI_PROVIDER,
   parseServerDerivedEvidence,
@@ -70,6 +82,7 @@ import type {
   BoardAnswerPromptPackage,
   CharlotteGenerationResult,
   CharlotteInput,
+  DivisionFacet,
   DivisionRepairContext,
   ModelGeneration,
   PortiaInput,
@@ -95,6 +108,7 @@ import {
   OpenClawAnswerContractError,
   OpenClawProviderError,
 } from '../openclaw/errors'
+import { ANSWER_OPERATION_TIMEOUT_MS } from '../model-operation-timeouts'
 import {
   caseBundleRows,
   caseBundleStatements,
@@ -132,11 +146,12 @@ export type {
 } from './data-control-service-core'
 
 const FALLBACK_SOFTWARE_VERSION = `webchess@${WEBCHESS_SOFTWARE_VERSION}`
-
-const DivisionResultPayloadSchema = z.strictObject({
-  format: z.literal('webchess-division-result/1'),
+const CastDirectedDivisionResultPayloadSchema = z.strictObject({
+  format: z.literal('webchess-division-result/2'),
+  promptVersion: z.literal(CAST_DIRECTED_DIVISION_PROMPT_VERSION),
+  castBindingVersion: z.literal(DIVISION_CAST_BINDING_VERSION),
   seed: z.string().trim().min(1).max(512),
-  facets: z.array(DivisionFacetSchema).length(64),
+  facets: z.array(CastBoundDivisionFacetSchema).length(64),
   model: z.string().trim().min(1).max(120),
   prompt: z.string().trim().min(1).max(200_000),
 })
@@ -159,6 +174,8 @@ const ApprovedAnswerResultPayloadSchema = z.strictObject({
     lifecycleRunId: z.string().uuid(),
     reviewedPromptDigest: z.string().regex(/^[0-9a-f]{64}$/u),
     gateInputDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    trajectoryDirectionalRecordVersion: z.string().trim().min(3).max(80).optional(),
+    trajectoryDirectionalRecordDigest: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   }),
 })
 
@@ -202,6 +219,10 @@ const ApprovedCharlotteResultPayloadSchema = z.strictObject({
     boardAnswerDigest: z.string().regex(/^[0-9a-f]{64}$/u),
     reviewedPromptDigest: z.string().regex(/^[0-9a-f]{64}$/u),
     gateInputDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    trajectoryDirectionalRecordVersion:
+      z.string().trim().min(3).max(80).optional(),
+    trajectoryDirectionalRecordDigest:
+      z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   }),
 })
 
@@ -211,7 +232,19 @@ const CharlotteResultPayloadSchema = z.discriminatedUnion('format', [
   ApprovedCharlotteResultPayloadSchema,
 ])
 
-type DivisionResultPayload = z.infer<typeof DivisionResultPayloadSchema>
+type LegacyDivisionResultPayload = {
+  readonly format: 'webchess-division-result/1'
+  readonly seed: string
+  readonly facets: DivisionFacet[]
+  readonly model: string
+  readonly prompt: string
+}
+type DivisionResultPayload =
+  | LegacyDivisionResultPayload
+  | z.infer<typeof CastDirectedDivisionResultPayloadSchema>
+type CastDirectedDivisionResultPayload = z.infer<
+  typeof CastDirectedDivisionResultPayloadSchema
+>
 type AnswerResultPayload = z.infer<typeof AnswerResultPayloadSchema>
 type ApprovedAnswerResultPayload = z.infer<typeof ApprovedAnswerResultPayloadSchema>
 type PortiaResultPayload = z.infer<typeof PortiaResultPayloadSchema>
@@ -268,6 +301,315 @@ interface ProviderFailure {
 
 function canonicalHash(value: unknown): string {
   return hashCanonicalJson(value as CanonicalJson)
+}
+
+function exactTrajectoryDirectionalRecord(
+  snapshot: DurableGameSnapshot,
+  lifecycle: LifecycleAggregate,
+): TrajectoryDirectionalRecord {
+  const division = snapshot.division
+  const game = snapshot.game
+  const record = lifecycle.trajectoryDirectionalRecord
+  if (
+    !record ||
+    lifecycle.trajectoryDirectionalRecordStatus !== 'bound' ||
+    lifecycle.versions.trajectoryDirectionalRecord !== record.version ||
+    !division ||
+    !game?.outcome
+  ) {
+    throw new ApiError(
+      'INTERNAL_ERROR',
+      500,
+      'The current terminal lifecycle is missing its exact trajectory directional record.',
+    )
+  }
+
+  let expected: TrajectoryDirectionalRecord
+  try {
+    expected = deriveTrajectoryDirectionalRecord({
+      divisionDigest: division.digest,
+      divisionSeed: lifecycle.divisionSeed,
+      castSeed: lifecycle.castSeed,
+      trajectorySeed: lifecycle.trajectorySeed,
+      versions: game.versions,
+      parts: division.parts,
+      events: game.events,
+    })
+  } catch (error) {
+    throw new ApiError(
+      'INTERNAL_ERROR',
+      500,
+      'The terminal game could not reproduce its trajectory directional record.',
+      { cause: error },
+    )
+  }
+  if (
+    expected.digest !== record.digest ||
+    canonicalHash(expected) !== canonicalHash(record)
+  ) {
+    throw new ApiError(
+      'INTERNAL_ERROR',
+      500,
+      'The saved trajectory directional record does not match this exact game replay.',
+    )
+  }
+  return record
+}
+
+function requireCurrentLifecycleExecution(
+  snapshot: DurableGameSnapshot,
+  lifecycle: LifecycleAggregate | null | undefined,
+): {
+  readonly lifecycle: LifecycleAggregate
+  readonly trajectoryDirectionalRecord: TrajectoryDirectionalRecord
+} {
+  if (
+    !lifecycle ||
+    !hasCurrentLifecycleExecutionVersions(lifecycle.versions) ||
+    snapshot.division?.promptVersion !==
+      CURRENT_METHOD_VERSION_TUPLE.divisionPrompt
+  ) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'This preserved historical lifecycle is read-only. Start a new game to run the current Arachne lifecycle.',
+    )
+  }
+  return {
+    lifecycle,
+    trajectoryDirectionalRecord: exactTrajectoryDirectionalRecord(
+      snapshot,
+      lifecycle,
+    ),
+  }
+}
+
+function requireCurrentLifecycleBase(
+  snapshot: DurableGameSnapshot,
+  lifecycle: LifecycleAggregate | null | undefined,
+): LifecycleAggregate {
+  const legitimatePreBind = Boolean(
+    lifecycle &&
+    lifecycle.versions.trajectoryDirectionalRecord === null &&
+    lifecycle.trajectoryDirectionalRecord === null &&
+    lifecycle.trajectoryDirectionalRecordStatus === 'not_terminal' &&
+    lifecycle.terminalFingerprint === null &&
+    (lifecycle.state === 'chess_ready' || lifecycle.state === 'chess_playing'),
+  )
+  if (
+    !lifecycle ||
+    !hasCurrentLifecycleBaseVersions(lifecycle.versions) ||
+    snapshot.division?.promptVersion !==
+      CURRENT_METHOD_VERSION_TUPLE.divisionPrompt ||
+    (
+      lifecycle.versions.trajectoryDirectionalRecord !==
+        CURRENT_LIFECYCLE_VERSIONS.trajectoryDirectionalRecord &&
+      !legitimatePreBind
+    )
+  ) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'This preserved historical lifecycle is read-only. Start a new game to run the current Arachne lifecycle.',
+    )
+  }
+  return lifecycle
+}
+
+function requireCurrentPortiaProgress(
+  lifecycle: LifecycleAggregate,
+  directionalRecord?: TrajectoryDirectionalRecord,
+): void {
+  const progress = lifecycle.portiaProgress
+  try {
+    if (!directionalRecord) {
+      if (
+        progress.currentCandidateId !== null ||
+        progress.completedCandidateIds.length > 0 ||
+        progress.completedAssessments.length > 0
+      ) {
+        throw new Error(
+          'Portia progress cannot predate the bound trajectory directional record.',
+        )
+      }
+      return
+    }
+
+    const ordered = orderPortiaCandidates(lifecycle.survivors)
+    if (
+      new Set(ordered.map((survivor) => survivor.candidateId)).size !==
+        ordered.length
+    ) {
+      throw new Error('Portia survivor candidate IDs must be unique.')
+    }
+    if (
+      new Set(progress.completedCandidateIds).size !==
+        progress.completedCandidateIds.length ||
+      progress.completedAssessments.length !==
+        progress.completedCandidateIds.length ||
+      progress.completedAssessments.length > ordered.length
+    ) {
+      throw new Error(
+        'Portia completed progress must be a unique bounded traversal prefix.',
+      )
+    }
+    for (const [index, assessment] of
+      progress.completedAssessments.entries()) {
+      const survivor = ordered[index]
+      if (
+        !survivor ||
+        progress.completedCandidateIds[index] !== survivor.candidateId ||
+        assessment.candidateId !== survivor.candidateId
+      ) {
+        throw new Error(
+          'Portia completed progress must match the canonical survivor traversal prefix.',
+        )
+      }
+      if (assessment.redundancyClusterId !== null) {
+        throw new Error(
+          'Portia draft progress cannot pre-assign a redundancy cluster.',
+        )
+      }
+      validatePortiaCandidateAssessment(
+        assessment,
+        survivor,
+        directionalRecord,
+      )
+    }
+    const nextCandidateId =
+      ordered[progress.completedAssessments.length]?.candidateId ?? null
+    if (
+      progress.currentCandidateId !== null &&
+      progress.currentCandidateId !== nextCandidateId
+    ) {
+      throw new Error(
+        'Portia current progress must identify the next canonical survivor.',
+      )
+    }
+  } catch (error) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'This lifecycle contains invalid current Portia progress and is read-only.',
+      { cause: error },
+    )
+  }
+}
+
+function requireCurrentReviewedGate(
+  snapshot: TerminalGameSnapshot,
+  lifecycle: LifecycleAggregate | null | undefined,
+): {
+  readonly lifecycle: LifecycleAggregate
+  readonly trajectoryDirectionalRecord: TrajectoryDirectionalRecord
+  readonly answerPrompt: ReturnType<typeof boardAnswerPromptPlan>
+  readonly portia: PortiaReview
+  readonly gate: GateResult
+} {
+  const current = requireCurrentLifecycleExecution(snapshot, lifecycle)
+  const portia = current.lifecycle.portia
+  const gate = current.lifecycle.gate
+  const answerPrompt = boardAnswerPromptPlan(snapshot, current.lifecycle)
+  if (
+    !portia ||
+    portia.contractVersion !== CURRENT_LIFECYCLE_VERSIONS.portiaContract ||
+    !gate ||
+    gate.algorithmVersion !== CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm ||
+    answerPrompt.plan.promptVersion !== ANSWER_PROMPT_VERSION ||
+    current.lifecycle.answerPromptDigest !== answerPrompt.digest ||
+    portia.reviewedAnswerPromptDigest !== answerPrompt.digest
+  ) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'This lifecycle does not contain the exact current Portia review, Answer prompt, and Gate decision.',
+    )
+  }
+
+  let validatedPortia: PortiaReview
+  try {
+    validatedPortia = validatePortiaReview(
+      portia,
+      current.lifecycle.survivors,
+      answerPrompt.digest,
+      current.trajectoryDirectionalRecord,
+    )
+  } catch (error) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'This lifecycle does not contain a valid current Portia review.',
+      { cause: error },
+    )
+  }
+  const expectedGate = evaluateGate(validatedPortia, {
+    sameFieldRetryCount: current.lifecycle.sameFieldRetryCount,
+    fieldRegenerationCount: current.lifecycle.fieldRegenerationCount,
+  }, current.trajectoryDirectionalRecord)
+  if (canonicalHash(expectedGate) !== canonicalHash(gate)) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'This lifecycle does not contain the exact current deterministic Gate decision.',
+    )
+  }
+
+  if (gate.passed) {
+    const expectedUserPrompt = buildPlayerVisibleAnswerPrompt({
+      plan: answerPrompt.plan,
+      reviewedPromptDigest: answerPrompt.digest,
+      portia: validatedPortia,
+      gate,
+    })
+    if (
+      current.lifecycle.answerUserPrompt !== expectedUserPrompt ||
+      current.lifecycle.answerUserPromptSha256 !== sha256Hex(expectedUserPrompt)
+    ) {
+      throw new ApiError(
+        'CONFLICT',
+        409,
+        'This lifecycle does not contain the exact approved current Answer prompt.',
+      )
+    }
+  }
+
+  return {
+    ...current,
+    answerPrompt,
+    portia: validatedPortia,
+    gate,
+  }
+}
+
+function directionalResultSource(
+  record: TrajectoryDirectionalRecord | undefined,
+): {
+  readonly trajectoryDirectionalRecordVersion: string
+  readonly trajectoryDirectionalRecordDigest: string
+} | Record<string, never> {
+  return record
+    ? {
+        trajectoryDirectionalRecordVersion: record.version,
+        trajectoryDirectionalRecordDigest: record.digest,
+      }
+    : {}
+}
+
+function directionalResultSourceMatches(
+  source: {
+    readonly trajectoryDirectionalRecordVersion?: string
+    readonly trajectoryDirectionalRecordDigest?: string
+  },
+  lifecycle: LifecycleAggregate,
+): boolean {
+  const record = lifecycle.trajectoryDirectionalRecord
+  return Boolean(
+    hasCurrentLifecycleExecutionVersions(lifecycle.versions) &&
+    record &&
+    lifecycle.trajectoryDirectionalRecordStatus === 'bound' &&
+    source.trajectoryDirectionalRecordVersion === record.version &&
+    source.trajectoryDirectionalRecordDigest === record.digest
+  )
 }
 
 function utf8Bytes(values: readonly string[]): number {
@@ -556,6 +898,15 @@ function classifyProviderFailure(
   error: unknown,
   signal: AbortSignal,
 ): ProviderFailure {
+  if (
+    signal.aborted &&
+    signal.reason instanceof AnswerOperationDeadlineError
+  ) {
+    return {
+      ambiguous: true,
+      failureCode: 'answer_operation_timeout',
+    }
+  }
   if (error instanceof OpenClawProviderError) {
     return {
       ambiguous: error.ambiguous,
@@ -643,6 +994,63 @@ function durableProviderSignal(): AbortSignal {
   return new AbortController().signal
 }
 
+class AnswerOperationDeadlineError extends OpenClawProviderError {
+  override name = 'AnswerOperationDeadlineError'
+
+  constructor() {
+    super(
+      'provider_timeout',
+      true,
+      'The Answer stage exceeded its five-minute limit and was saved as a retryable failure.',
+    )
+  }
+}
+
+function durableAnswerOperationDeadline(): {
+  readonly assertBeforeDeadline: () => void
+  readonly deadlineAt: number
+  readonly dispose: () => void
+  readonly expired: Promise<never>
+  readonly signal: AbortSignal
+} {
+  const controller = new AbortController()
+  const deadlineAt = Date.now() + ANSWER_OPERATION_TIMEOUT_MS
+  let timer!: ReturnType<typeof setTimeout>
+  let rejectExpired!: (error: AnswerOperationDeadlineError) => void
+  let deadlineError: AnswerOperationDeadlineError | null = null
+  const expire = (): AnswerOperationDeadlineError => {
+    const error = deadlineError ?? new AnswerOperationDeadlineError()
+    deadlineError = error
+    if (!controller.signal.aborted) controller.abort(error)
+    rejectExpired(error)
+    return error
+  }
+  const expired = new Promise<never>((_resolve, reject) => {
+    rejectExpired = reject
+    timer = setTimeout(() => {
+      expire()
+    }, ANSWER_OPERATION_TIMEOUT_MS)
+  })
+  // The timer starts at Answer entry, before provider work begins. Keep its
+  // rejection observed even when setup returns early or reaches the deadline
+  // before the provider race is installed.
+  void expired.catch(() => undefined)
+  timer.unref?.()
+  return {
+    assertBeforeDeadline: () => {
+      if (!controller.signal.aborted && Date.now() < deadlineAt) return
+      const reason = controller.signal.reason
+      throw reason instanceof AnswerOperationDeadlineError
+        ? reason
+        : expire()
+    },
+    deadlineAt,
+    dispose: () => clearTimeout(timer),
+    expired,
+    signal: controller.signal,
+  }
+}
+
 function modelOperationLabel(operation: ModelOperation): string {
   return {
     division: 'division',
@@ -676,18 +1084,6 @@ function beginProviderCallError(
   )
 }
 
-function divisionPayload(value: unknown): DivisionResultPayload {
-  const parsed = DivisionResultPayloadSchema.safeParse(value)
-  if (!parsed.success) {
-    throw new ApiError(
-      'INTERNAL_ERROR',
-      500,
-      'The saved division result could not be verified.',
-    )
-  }
-  return parsed.data
-}
-
 function answerPayload(value: unknown): AnswerResultPayload {
   const parsed = AnswerResultPayloadSchema.safeParse(value)
   if (!parsed.success) {
@@ -710,7 +1106,8 @@ function approvedAnswerMatchesLifecycle(
     lifecycle.gate &&
     payload.approval.lifecycleRunId === lifecycle.id &&
     payload.approval.reviewedPromptDigest === lifecycle.answerPromptDigest &&
-    payload.approval.gateInputDigest === lifecycle.gate.inputDigest,
+    payload.approval.gateInputDigest === lifecycle.gate.inputDigest &&
+    directionalResultSourceMatches(payload.approval, lifecycle),
   )
 }
 
@@ -785,7 +1182,8 @@ function approvedCharlotteMatchesSource(
     payload.source.lifecycleRunId === lifecycle.id &&
     payload.source.boardAnswerDigest === canonicalHash(game.answer) &&
     payload.source.reviewedPromptDigest === lifecycle.answerPromptDigest &&
-    payload.source.gateInputDigest === lifecycle.gate.inputDigest,
+    payload.source.gateInputDigest === lifecycle.gate.inputDigest &&
+    directionalResultSourceMatches(payload.source, lifecycle),
   )
 }
 
@@ -929,6 +1327,10 @@ function boardAnswerPromptPlan(
   // survivor ecology, so derive that prompt-local value from the persisted
   // survivors instead of rewriting historical lifecycle provenance.
   const answerPromptFingerprint = terminalFingerprint(lifecycle.survivors)
+  const trajectoryDirectionalRecord = exactTrajectoryDirectionalRecord(
+    snapshot,
+    lifecycle,
+  )
   const plan = buildBoardAnswerPromptPackage(
     serverEvidence(snapshot),
     lifecycle.survivors,
@@ -938,6 +1340,7 @@ function boardAnswerPromptPlan(
       return evidence ? [evidence] : []
     }),
     lifecycle.webMemoryEvidence,
+    trajectoryDirectionalRecord,
   )
   return {
     plan,
@@ -951,87 +1354,6 @@ function lifecycleConfigurationDigest(snapshot: DurableGameSnapshot): string {
     game: snapshot.game?.versions ?? null,
     divisionDigest: snapshot.division?.digest ?? null,
   })
-}
-
-async function ensurePlayerVisibleAnswerPrompt(
-  dependencies: ApiServiceAdapterDependencies,
-  ownerId: string,
-  snapshot: TerminalGameSnapshot,
-  lifecycle: LifecycleAggregate,
-): Promise<{
-  readonly lifecycle: LifecycleAggregate
-  readonly answerInput: AnswerGenerationInput
-  readonly exactPromptAvailable: boolean
-}> {
-  const reviewed = boardAnswerPromptPlan(snapshot, lifecycle)
-  const portia = lifecycle.portia
-  const gate = lifecycle.gate
-  if (
-    !portia ||
-    !isPromptBoundPortiaReview(portia) ||
-    portia.promptDecision !== 'permit' ||
-    !gate?.passed ||
-    gate.recommendedNextTransition !== 'answer' ||
-    lifecycle.answerPromptDigest !== reviewed.digest ||
-    portia.reviewedAnswerPromptDigest !== reviewed.digest
-  ) {
-    throw new ApiError(
-      'CONFLICT',
-      409,
-      'The exact board-derived answer prompt must be permitted by Portia and the Gate before generation.',
-    )
-  }
-
-  const answerInput: AnswerGenerationInput = {
-    plan: reviewed.plan,
-    reviewedPromptDigest: reviewed.digest,
-    portia,
-    gate,
-  }
-  const playerVisiblePrompt = buildPlayerVisibleAnswerPrompt(answerInput)
-  let ensured = lifecycle
-  if (
-    ensured.state === 'gate_passed' &&
-    ensured.answerUserPrompt === null &&
-    ensured.answerUserPromptSha256 === null
-  ) {
-    ensured = await requireLifecycleRepository(dependencies).storeGate({
-      ownerId,
-      gameId: snapshot.id,
-      expectedRevision: ensured.revision,
-      result: gate,
-      answerUserPrompt: playerVisiblePrompt,
-      configurationDigest: lifecycleConfigurationDigest(snapshot),
-    })
-  }
-
-  if (
-    ensured.answerUserPrompt === null &&
-    ensured.answerUserPromptSha256 === null
-  ) {
-    // Completed histories created before prompt disclosure remain readable,
-    // but are not retroactively assigned provenance they never persisted.
-    return {
-      lifecycle: ensured,
-      answerInput,
-      exactPromptAvailable: false,
-    }
-  }
-  if (
-    ensured.answerUserPrompt !== playerVisiblePrompt ||
-    ensured.answerUserPromptSha256 !== sha256Hex(playerVisiblePrompt)
-  ) {
-    throw new ApiError(
-      'CONFLICT',
-      409,
-      'The persisted player-visible Answer prompt does not match this Portia-approved generation.',
-    )
-  }
-  return {
-    lifecycle: ensured,
-    answerInput,
-    exactPromptAvailable: true,
-  }
 }
 
 function fieldRepairContext(
@@ -1095,16 +1417,205 @@ function canonicalCharlotteActionForWilbur(
   return suggestion
 }
 
+const WILBUR_EXECUTABLE_STATES = new Set<LifecycleAggregate['state']>([
+  'charlotte_complete',
+  'wilbur_planning',
+  'wilbur_in_progress',
+  'wilbur_observed',
+])
+
+async function requireCurrentWilburExecution(
+  dependencies: ApiServiceAdapterDependencies,
+  ownerId: string,
+  gameId: string,
+  lifecycle: LifecycleAggregate | null | undefined,
+): Promise<LifecycleAggregate> {
+  const terminal = await dependencies.repository.getTerminalReplay(
+    ownerId,
+    gameId,
+  )
+  const reviewed = requireCurrentReviewedGate(terminal, lifecycle)
+  if (!WILBUR_EXECUTABLE_STATES.has(reviewed.lifecycle.state)) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'Wilbur requires the exact completed current Charlotte lifecycle.',
+    )
+  }
+  await requireApprovedAnswerPayload(
+    dependencies,
+    ownerId,
+    terminal,
+    reviewed.lifecycle,
+  )
+  const approvedCharlotte = await requireApprovedCharlottePayload(
+    dependencies,
+    ownerId,
+    terminal,
+    reviewed.lifecycle,
+  )
+  if (
+    !reviewed.lifecycle.charlotte ||
+    canonicalHash(reviewed.lifecycle.charlotte) !==
+      canonicalHash(approvedCharlotte.structured) ||
+    reviewed.lifecycle.charlotteRenderedAnswer !==
+      approvedCharlotte.renderedAnswer
+  ) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'Wilbur requires the exact persisted current Charlotte result.',
+    )
+  }
+  return reviewed.lifecycle
+}
+
+function requireCurrentWilburAction(
+  lifecycle: LifecycleAggregate,
+  actionId: string,
+) {
+  const action = lifecycle.wilburActions.find(
+    (candidate) => candidate.id === actionId,
+  )
+  const suggestion = action?.charlotteActionIndex === null ||
+      action?.charlotteActionIndex === undefined
+    ? null
+    : lifecycle.charlotte?.exactlyThreeNextActions[action.charlotteActionIndex]
+  if (
+    !action ||
+    action.lifecycleRunId !== lifecycle.id ||
+    action.version !== CURRENT_LIFECYCLE_VERSIONS.wilburRecord ||
+    action.charlotteBindingVersion !==
+      CURRENT_WILBUR_CHARLOTTE_BINDING_VERSION ||
+    !suggestion ||
+    action.actor !== suggestion.actor ||
+    action.action !== suggestion.smallestAction ||
+    action.testedAssumption !== suggestion.assumptionBeingTested ||
+    action.expectedObservation !== suggestion.expectedObservation ||
+    action.decisionThreshold !== suggestion.decisionThreshold ||
+    action.reviewHorizon !== suggestion.reviewHorizon
+  ) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'This preserved Wilbur action is not bound to the exact current Charlotte result.',
+    )
+  }
+  return action
+}
+
 async function ensureLifecycleForNewGame(
   dependencies: ApiServiceAdapterDependencies,
   ownerId: string,
   snapshot: DurableGameSnapshot,
 ): Promise<LifecycleAggregate> {
-  return requireLifecycleRepository(dependencies).ensureForGame({
+  const repository = requireLifecycleRepository(dependencies)
+  const validate = (candidate: LifecycleAggregate) => {
+    const current = requireCurrentLifecycleBase(snapshot, candidate)
+    const expectedCastSeed = canonicalHash({
+      purpose: 'webchess-cast-seed/v2',
+      divisionDigest: snapshot.division?.digest,
+      gameId: snapshot.id,
+    })
+    if (
+      current.gameId !== snapshot.id ||
+      current.rootRunId !== current.id ||
+      current.parentRunId !== null ||
+      current.divisionSeed !== snapshot.division?.seed ||
+      current.castSeed !== expectedCastSeed ||
+      current.trajectorySeed !== snapshot.id
+    ) {
+      throw new ApiError(
+        'CONFLICT',
+        409,
+        'The saved game has an unrelated lifecycle and is read-only.',
+      )
+    }
+    return current
+  }
+  const existing = await repository.getForGame(ownerId, snapshot.id)
+  if (existing) {
+    return validate(existing)
+  }
+  return validate(await repository.ensureForGame({
     ownerId,
     game: snapshot,
     trajectorySeed: snapshot.id,
+  }))
+}
+
+function requireExactRetryChildLifecycle(
+  parent: LifecycleAggregate,
+  child: DurableGameSnapshot,
+  existing: LifecycleAggregate,
+  mode: 'replay_game' | 'regenerate_field',
+  reason: string,
+): LifecycleAggregate {
+  const current = requireCurrentLifecycleBase(child, existing)
+  const division = child.division
+  if (!division) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'The Retry child has no exact current Division binding.',
+    )
+  }
+  const sameField = mode === 'replay_game'
+  const expectedCastSeed = canonicalHash({
+    purpose: 'webchess-cast-seed/v2',
+    divisionDigest: division.digest,
+    gameId: child.id,
   })
+  if (
+    current.id === parent.id ||
+    current.gameId !== child.id ||
+    current.rootRunId !== parent.rootRunId ||
+    current.parentRunId !== parent.id ||
+    current.fieldGeneration !==
+      (sameField ? parent.fieldGeneration : parent.fieldGeneration + 1) ||
+    current.gameAttempt !== (sameField ? parent.gameAttempt + 1 : 1) ||
+    current.sameFieldRetryCount !==
+      (sameField
+        ? parent.sameFieldRetryCount + 1
+        : parent.sameFieldRetryCount) ||
+    current.fieldRegenerationCount !==
+      (sameField
+        ? parent.fieldRegenerationCount
+        : parent.fieldRegenerationCount + 1) ||
+    current.divisionSeed !== division.seed ||
+    current.castSeed !== expectedCastSeed ||
+    current.trajectorySeed !== child.id ||
+    current.retryReason !== reason
+  ) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'The Retry child already has unrelated lifecycle state.',
+    )
+  }
+  return current
+}
+
+function requireExactSameFieldReplay(
+  source: TerminalGameSnapshot,
+  child: DurableGameSnapshot,
+): void {
+  if (
+    child.sourceGameId !== source.id ||
+    child.problem !== source.problem ||
+    child.status !== 'mapped' ||
+    !child.division ||
+    !child.game ||
+    child.game.completedPlies !== 0 ||
+    child.game.outcome !== null ||
+    canonicalHash(child.division) !== canonicalHash(source.division)
+  ) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'The replay target is not an exact current same-field child.',
+    )
+  }
 }
 
 async function synchronizeLifecycleWithGame(
@@ -1163,6 +1674,18 @@ async function synchronizeLifecycleWithGame(
       },
     )
     const fingerprint = terminalFingerprint(survivors)
+    const trajectoryDirectionalRecord =
+      lifecycle.versions.lifecycle === CURRENT_LIFECYCLE_VERSIONS.lifecycle
+        ? deriveTrajectoryDirectionalRecord({
+            divisionDigest: snapshot.division.digest,
+            divisionSeed: lifecycle.divisionSeed,
+            castSeed: lifecycle.castSeed,
+            trajectorySeed: lifecycle.trajectorySeed,
+            versions: snapshot.game.versions,
+            parts: snapshot.division.parts,
+            events: snapshot.game.events,
+          })
+        : undefined
     lifecycle = await repository.transition({
       ownerId,
       gameId: snapshot.id,
@@ -1176,7 +1699,13 @@ async function synchronizeLifecycleWithGame(
       configurationDigest: digest,
       terminalFingerprint: fingerprint,
       survivors,
+      ...(trajectoryDirectionalRecord
+        ? { trajectoryDirectionalRecord }
+        : {}),
     })
+    if (trajectoryDirectionalRecord) {
+      exactTrajectoryDirectionalRecord(snapshot, lifecycle)
+    }
   }
   return lifecycle
 }
@@ -1190,6 +1719,11 @@ async function preparePortia(
     dependencies,
     ownerId,
     snapshot,
+  )
+  const current = requireCurrentLifecycleExecution(snapshot, lifecycle)
+  requireCurrentPortiaProgress(
+    lifecycle,
+    current.trajectoryDirectionalRecord,
   )
   if (lifecycle.state === 'chess_terminal') {
     lifecycle = await requireLifecycleRepository(dependencies).transition({
@@ -1230,17 +1764,19 @@ async function releaseBeforeProvider(
   usage: UsageController,
   reservation: ModelReservation,
   ownerId: string,
-): Promise<void> {
-  if (reservation.kind !== 'reserved' || !reservation.leaseToken) return
+): Promise<boolean> {
+  if (reservation.kind !== 'reserved' || !reservation.leaseToken) return false
   try {
-    await usage.releaseReservation({
+    const released = await usage.releaseReservation({
       userId: ownerId,
       requestId: reservation.requestId,
       leaseToken: reservation.leaseToken,
       reason: 'provider_not_started',
     })
+    return released.ok
   } catch {
     // An expiring lease is reconciled durably by the next reservation or poll.
+    return false
   }
 }
 
@@ -1315,13 +1851,44 @@ async function finishDivisionForOwner(
         prompt: stored.prompt,
       },
       parts,
-      promptVersion: DIVISION_PROMPT_VERSION,
+      promptVersion: stored.format === 'webchess-division-result/1'
+        ? LEGACY_DIVISION_PROMPT_VERSION
+        : stored.promptVersion,
     })
   } catch (error) {
     if (!isGameRepositoryError(error) || error.code === 'not-found') throw error
     const current = await repository.getOwnedGame(ownerId, snapshot.id)
     if (current.status !== 'dividing') return current
     throw error
+  }
+}
+
+function requireExactCurrentMappedDivision(
+  snapshot: DurableGameSnapshot,
+  stored: CastDirectedDivisionResultPayload,
+  requestId: string,
+): void {
+  const division = snapshot.division
+  const parts = composeProblemParts(stored.facets, stored.seed)
+  const promptSha256 = sha256Hex(stored.prompt)
+  if (
+    snapshot.id !== requestId ||
+    stored.seed !== requestId ||
+    snapshot.status !== 'mapped' ||
+    !snapshot.game ||
+    !division ||
+    division.seed !== stored.seed ||
+    division.model !== stored.model ||
+    division.promptVersion !== stored.promptVersion ||
+    division.promptSha256 !== promptSha256 ||
+    canonicalHash(division.facets) !== canonicalHash(stored.facets) ||
+    canonicalHash(division.parts) !== canonicalHash(parts)
+  ) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'The saved field is not bound to this exact current Division request.',
+    )
   }
 }
 
@@ -1361,7 +1928,7 @@ async function winningResult(
   operation: ModelOperation,
   result: GetModelRequestResultResult,
   expected?: {
-    readonly requestSha256: string
+    readonly requestSha256?: string
     readonly promptVersion: string
   },
 ): Promise<GetModelRequestResultResult> {
@@ -1387,6 +1954,7 @@ async function findDivisionRequest(
   usage: UsageController,
   ownerId: string,
   gameId: string,
+  options: { readonly attachUnlinked?: boolean } = {},
 ): Promise<GetModelRequestResultResult> {
   const linked = await usage.getLatestModelRequestForGame({
     userId: ownerId,
@@ -1401,7 +1969,11 @@ async function findDivisionRequest(
   })
   if (!direct.found || direct.operation !== 'division') return { found: false }
 
-  if (direct.gameId === null && direct.status === 'reserved') {
+  if (
+    options.attachUnlinked &&
+    direct.gameId === null &&
+    direct.status === 'reserved'
+  ) {
     const attached = await usage.attachModelRequestGame({
       userId: ownerId,
       requestId: direct.requestId,
@@ -1418,10 +1990,72 @@ async function findDivisionRequest(
   return direct
 }
 
+function isCurrentDivisionRequest(
+  result: GetModelRequestResultResult,
+): result is Extract<GetModelRequestResultResult, { found: true }> {
+  return result.found &&
+    result.operation === 'division' &&
+    result.promptVersion === DIVISION_PROMPT_VERSION
+}
+
+function isExactCurrentDivisionRequest(
+  result: GetModelRequestResultResult,
+  snapshot: DurableGameSnapshot,
+  options: {
+    readonly allowUnlinkedReserved?: boolean
+    readonly requestId?: string
+    readonly requestSha256?: string
+  } = {},
+): result is Extract<GetModelRequestResultResult, { found: true }> {
+  if (!isCurrentDivisionRequest(result)) return false
+  const requestId = options.requestId ?? snapshot.id
+  const linked = result.gameId === snapshot.id
+  const permittedUnlinked = options.allowUnlinkedReserved === true &&
+    result.gameId === null &&
+    result.status === 'reserved'
+  if (
+    requestId !== snapshot.id ||
+    result.requestId !== requestId ||
+    (!linked && !permittedUnlinked) ||
+    typeof result.requestSha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(result.requestSha256) ||
+    (
+      options.requestSha256 !== undefined &&
+      result.requestSha256 !== options.requestSha256
+    )
+  ) return false
+  if (result.status !== 'succeeded') return true
+  const payload = currentDivisionPayload(result.resultPayload)
+  return payload !== null && payload.seed === requestId
+}
+
+function currentDivisionPayload(
+  value: unknown,
+): CastDirectedDivisionResultPayload | null {
+  const parsed = CastDirectedDivisionResultPayloadSchema.safeParse(value)
+  return parsed.success ? parsed.data : null
+}
+
+function requireGeneratedCurrentDivisionPayload(
+  value: unknown,
+): CastDirectedDivisionResultPayload {
+  const parsed = CastDirectedDivisionResultPayloadSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new ModelContractError(
+      'The model returned an invalid current cast-bound Division result.',
+    )
+  }
+  return parsed.data
+}
+
 async function reconcilePendingGame(
   dependencies: ApiServiceAdapterDependencies,
   ownerId: string,
   snapshot: DurableGameSnapshot,
+  options: {
+    readonly divisionRequestId?: string
+    readonly divisionRequestSha256?: string
+  } = {},
 ): Promise<DurableGameSnapshot> {
   const operation: ModelOperation | null =
     snapshot.status === 'dividing'
@@ -1431,21 +2065,98 @@ async function reconcilePendingGame(
         : null
   if (!operation) return snapshot
 
-  await dependencies.usage.reconcileExpiredLeases()
-  const found = operation === 'division'
-    ? await findDivisionRequest(dependencies.usage, ownerId, snapshot.id)
-    : await dependencies.usage.getLatestModelRequestForGame({
-        userId: ownerId,
-        gameId: snapshot.id,
-        operation,
+  let executableAnswerLifecycle: LifecycleAggregate | null = null
+  if (operation === 'answer') {
+    const lifecycle = await dependencies.lifecycleRepository?.getForGame(
+      ownerId,
+      snapshot.id,
+    )
+    if (!lifecycle || !hasCurrentLifecycleExecutionVersions(lifecycle.versions)) {
+      // Historical rows remain available for inspection. A GET must not turn
+      // an unsupported old request into a current mutation or usage recovery.
+      return snapshot
+    }
+    executableAnswerLifecycle = requireCurrentReviewedGate(
+      snapshot as TerminalGameSnapshot,
+      lifecycle,
+    ).lifecycle
+  }
+
+  let found: GetModelRequestResultResult
+  if (operation === 'division') {
+    const observed = await findDivisionRequest(
+      dependencies.usage,
+      ownerId,
+      snapshot.id,
+    )
+    if (!isExactCurrentDivisionRequest(observed, snapshot, {
+      allowUnlinkedReserved: true,
+      ...(options.divisionRequestId === undefined
+        ? {}
+        : { requestId: options.divisionRequestId }),
+      ...(options.divisionRequestSha256 === undefined
+        ? {}
+        : { requestSha256: options.divisionRequestSha256 }),
+    })) {
+      return snapshot
+    }
+    if (observed.gameId === null && observed.status === 'reserved') {
+      await findDivisionRequest(dependencies.usage, ownerId, snapshot.id, {
+        attachUnlinked: true,
       })
+    }
+    await dependencies.usage.reconcileExpiredLeases()
+    found = await findDivisionRequest(
+      dependencies.usage,
+      ownerId,
+      snapshot.id,
+    )
+    if (!isExactCurrentDivisionRequest(found, snapshot, {
+      ...(options.divisionRequestId === undefined
+        ? {}
+        : { requestId: options.divisionRequestId }),
+      ...(options.divisionRequestSha256 === undefined
+        ? {}
+        : { requestSha256: options.divisionRequestSha256 }),
+    })) return snapshot
+  } else {
+    await dependencies.usage.reconcileExpiredLeases()
+    found = await dependencies.usage.getLatestModelRequestForGame({
+      userId: ownerId,
+      gameId: snapshot.id,
+      operation,
+    })
+  }
   const result = await winningResult(
     dependencies.usage,
     ownerId,
     snapshot.id,
     operation,
     found,
+    operation === 'division'
+      ? {
+          ...(found.found && found.requestSha256
+            ? { requestSha256: found.requestSha256 }
+            : {}),
+          promptVersion: DIVISION_PROMPT_VERSION,
+        }
+      : undefined,
   )
+
+  if (operation === 'division' && !isExactCurrentDivisionRequest(
+    result,
+    snapshot,
+    {
+      ...(options.divisionRequestId === undefined
+        ? {}
+        : { requestId: options.divisionRequestId }),
+      ...(options.divisionRequestSha256 === undefined
+        ? {}
+        : { requestSha256: options.divisionRequestSha256 }),
+    },
+  )) {
+    return snapshot
+  }
 
   if (!result.found) {
     return operation === 'division'
@@ -1461,21 +2172,19 @@ async function reconcilePendingGame(
       )
     }
     if (operation === 'division') {
+      const stored = currentDivisionPayload(result.resultPayload)
+      if (!stored) return snapshot
       return finishDivisionForOwner(
         dependencies.repository,
         ownerId,
         snapshot,
-        divisionPayload(result.resultPayload),
+        stored,
       )
     }
     const storedAnswer = answerPayload(result.resultPayload)
-    const lifecycle = await dependencies.lifecycleRepository?.getForGame(
-      ownerId,
-      snapshot.id,
-    )
     if (
-      lifecycle?.versions.portiaContract === CURRENT_LIFECYCLE_VERSIONS.portiaContract &&
-      !approvedAnswerMatchesLifecycle(storedAnswer, lifecycle)
+      !executableAnswerLifecycle ||
+      !approvedAnswerMatchesLifecycle(storedAnswer, executableAnswerLifecycle)
     ) {
       return failAnswerForOwner(dependencies.repository, ownerId, snapshot)
     }
@@ -1502,16 +2211,17 @@ async function settleDefinitiveFailure(
     leaseToken: string
     error: unknown
     signal: AbortSignal
+    settleAmbiguous?: boolean
   },
 ): Promise<boolean> {
   const failure = classifyProviderFailure(input.error, input.signal)
-  if (failure.ambiguous) return false
+  if (failure.ambiguous && !input.settleAmbiguous) return false
 
   const settled = await dependencies.usage.settleModelRequest({
     userId: input.ownerId,
     requestId: input.reservation.requestId,
     leaseToken: input.leaseToken,
-    outcome: 'failed',
+    outcome: failure.ambiguous ? 'indeterminate' : 'failed',
     failureCode: failure.failureCode,
     ...(failure.providerId === undefined
       ? {}
@@ -1522,6 +2232,23 @@ async function settleDefinitiveFailure(
       : { providerHttpStatus: failure.httpStatus }),
   })
   return settled.ok
+}
+
+async function reconcileTerminalAnswerFailure(
+  dependencies: ApiServiceAdapterDependencies,
+  ownerId: string,
+  requestId: string,
+): Promise<boolean> {
+  await dependencies.usage.reconcileExpiredLeases()
+  const result = await dependencies.usage.getModelRequestResult({
+    userId: ownerId,
+    requestId,
+  })
+  return result.found && (
+    result.status === 'failed' ||
+    result.status === 'indeterminate' ||
+    result.status === 'rejected'
+  )
 }
 
 async function recoverCommittedResult(
@@ -1542,6 +2269,49 @@ async function recoverCommittedResult(
   })
 }
 
+async function requireCurrentMappedDivisionBinding(
+  dependencies: ApiServiceAdapterDependencies,
+  ownerId: string,
+  snapshot: DurableGameSnapshot,
+  requestId: string,
+  requestSha256: string,
+): Promise<CastDirectedDivisionResultPayload> {
+  const recovered = await recoverCommittedResult(
+    dependencies,
+    ownerId,
+    snapshot.id,
+    'division',
+    {
+      requestSha256,
+      promptVersion: DIVISION_PROMPT_VERSION,
+    },
+  )
+  if (
+    !recovered.found ||
+    recovered.status !== 'succeeded' ||
+    recovered.gameId !== snapshot.id ||
+    recovered.operation !== 'division' ||
+    recovered.requestSha256 !== requestSha256 ||
+    recovered.promptVersion !== DIVISION_PROMPT_VERSION
+  ) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'The saved field has no exact current Division result binding.',
+    )
+  }
+  const stored = currentDivisionPayload(recovered.resultPayload)
+  if (!stored || recovered.requestId !== requestId) {
+    throw new ApiError(
+      'CONFLICT',
+      409,
+      'The saved field has no exact current Division result binding.',
+    )
+  }
+  requireExactCurrentMappedDivision(snapshot, stored, requestId)
+  return stored
+}
+
 async function commitPortiaAndGate(
   dependencies: ApiServiceAdapterDependencies,
   ownerId: string,
@@ -1552,10 +2322,15 @@ async function commitPortiaAndGate(
   reviewValue: unknown,
 ): Promise<LifecycleAggregate> {
   const repository = requireLifecycleRepository(dependencies)
+  const trajectoryDirectionalRecord = exactTrajectoryDirectionalRecord(
+    game,
+    lifecycle,
+  )
   const review = validatePortiaReview(
     reviewValue,
     lifecycle.survivors,
     lifecycle.answerPromptDigest ?? undefined,
+    trajectoryDirectionalRecord,
   )
   let current = lifecycle
   if (current.state === 'portia_pending') {
@@ -1589,7 +2364,7 @@ async function commitPortiaAndGate(
     const gate = evaluateGate(review, {
       sameFieldRetryCount: current.sameFieldRetryCount,
       fieldRegenerationCount: current.fieldRegenerationCount,
-    })
+    }, trajectoryDirectionalRecord)
     let answerUserPrompt: string | null = null
     if (gate.passed) {
       const reviewed = boardAnswerPromptPlan(game, current)
@@ -1640,6 +2415,8 @@ async function concludeInsufficientBasisGate(
   ) {
     return lifecycle
   }
+
+  requireCurrentReviewedGate(game as TerminalGameSnapshot, lifecycle)
 
   return requireLifecycleRepository(dependencies).transition({
     ownerId,
@@ -1710,6 +2487,7 @@ async function commitCharlotte(
   inputDigest: string,
   payload: CharlotteResultPayload,
 ): Promise<LifecycleAggregate> {
+  exactTrajectoryDirectionalRecord(game, lifecycle)
   if (!approvedCharlotteMatchesSource(payload, lifecycle, game)) {
     throw new ApiError(
       'CONFLICT',
@@ -1757,6 +2535,16 @@ async function reconcileRunningLifecycleModel(
       : null
   if (!operation) return lifecycle
 
+  if (operation === 'portia') {
+    const current = requireCurrentLifecycleExecution(game, lifecycle)
+    requireCurrentPortiaProgress(
+      lifecycle,
+      current.trajectoryDirectionalRecord,
+    )
+  } else {
+    requireCurrentReviewedGate(game, lifecycle)
+  }
+
   const answerPrompt = operation === 'portia'
     ? boardAnswerPromptPlan(game, lifecycle)
     : null
@@ -1774,7 +2562,8 @@ async function reconcileRunningLifecycleModel(
     if (
       !game.answer ||
       !lifecycle.portia ||
-      !isPromptBoundPortiaReview(lifecycle.portia) ||
+      lifecycle.portia.contractVersion !==
+        CURRENT_LIFECYCLE_VERSIONS.portiaContract ||
       !lifecycle.gate ||
       !lifecycle.answerPromptDigest
     ) {
@@ -1784,8 +2573,8 @@ async function reconcileRunningLifecycleModel(
         'The saved Charlotte result is missing its board-answer inputs.',
       )
     }
-    const researchEvidence = boardAnswerPromptPlan(game, lifecycle)
-      .plan.researchEvidence
+    const charlottePromptPlan = boardAnswerPromptPlan(game, lifecycle).plan
+    const researchEvidence = charlottePromptPlan.researchEvidence
     charlotteInput = {
       problem: game.problem,
       boardAnswer: game.answer,
@@ -1794,6 +2583,12 @@ async function reconcileRunningLifecycleModel(
       portia: lifecycle.portia,
       gate: lifecycle.gate,
       ...(researchEvidence?.length ? { researchEvidence } : {}),
+      ...(charlottePromptPlan.trajectoryDirectionalRecord
+        ? {
+            trajectoryDirectionalRecord:
+              charlottePromptPlan.trajectoryDirectionalRecord,
+          }
+        : {}),
     }
     await requireApprovedAnswerPayload(
       dependencies,
@@ -1804,7 +2599,7 @@ async function reconcileRunningLifecycleModel(
   }
   const requestSha256 = canonicalHash(operation === 'portia'
     ? {
-        operation: 'portia/v3',
+        operation: 'portia/v4-directional',
         gameId: game.id,
         terminalFingerprint: answerPrompt!.plan.terminalFingerprint,
         input: {
@@ -1818,7 +2613,7 @@ async function reconcileRunningLifecycleModel(
         contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
       }
     : {
-        operation: 'charlotte/v3',
+        operation: 'charlotte/v4-directional',
         gameId: game.id,
         input: charlotteInput,
         model: modelName(dependencies),
@@ -1990,12 +2785,14 @@ export function createApiServicesWithDependencies(
     problem: string,
     memoryObservationIds: readonly string[],
     researchConsent: Omit<ResearchConsent, 'recordedAt'>,
+    divisionSeed: string,
   ) =>
     canonicalHash({
       operation: 'division/v4-web-memory-research-consent',
       problem,
       memoryObservationIds,
       researchConsent,
+      divisionSeed,
       model: modelName(dependencies),
       promptVersion: DIVISION_PROMPT_VERSION,
       softwareVersion: dependencies.softwareVersion,
@@ -2007,6 +2804,12 @@ export function createApiServicesWithDependencies(
       return apiOperation(async () => {
         const problem = normalizeProblem(input.problem)
         const memoryObservationIds = [...new Set(input.memoryObservationIds ?? [])]
+        const requestSha256 = divisionRequestHash(
+          problem,
+          memoryObservationIds,
+          input.researchConsent,
+          input.requestId,
+        )
         const lifecycleRepository = memoryObservationIds.length > 0
           ? requireLifecycleRepository(dependencies)
           : null
@@ -2022,11 +2825,7 @@ export function createApiServicesWithDependencies(
           userId: input.ownerId,
           operation: 'division',
           idempotencyKey: input.idempotencyKey,
-          requestSha256: divisionRequestHash(
-            problem,
-            memoryObservationIds,
-            input.researchConsent,
-          ),
+          requestSha256,
           provider: modelProvider(dependencies),
           model: modelName(dependencies),
           promptVersion: DIVISION_PROMPT_VERSION,
@@ -2076,9 +2875,22 @@ export function createApiServicesWithDependencies(
               dependencies,
               input.ownerId,
               shell,
+              {
+                divisionRequestId: reservation.requestId,
+                divisionRequestSha256: requestSha256,
+              },
             )
             if (recovered.status === 'division_failed') {
               throw terminalModelFailure('division')
+            }
+            if (recovered.status === 'mapped') {
+              await requireCurrentMappedDivisionBinding(
+                dependencies,
+                input.ownerId,
+                recovered,
+                reservation.requestId,
+                requestSha256,
+              )
             }
             if (
               recovered.status !== 'dividing' &&
@@ -2105,12 +2917,16 @@ export function createApiServicesWithDependencies(
           providerStarted = true
           const providerSignal = durableProviderSignal()
 
-          let generated: Awaited<ReturnType<typeof generateDivision>>
+          let winning: CastDirectedDivisionResultPayload
           try {
-            generated = await dependencies.divisionGenerator(
-              webMemoryEvidence.length > 0
-                ? { problem, webMemoryEvidence }
-                : problem,
+            const generated = await dependencies.divisionGenerator(
+              {
+                problem,
+                divisionSeed: reservation.requestId,
+                ...(webMemoryEvidence.length > 0
+                  ? { webMemoryEvidence }
+                  : {}),
+              },
               {
               userId: input.ownerId,
               safetyHmacSecret: dependencies.hmacSecret,
@@ -2123,6 +2939,69 @@ export function createApiServicesWithDependencies(
               ),
               },
             )
+            const stored = requireGeneratedCurrentDivisionPayload({
+              format: 'webchess-division-result/2',
+              promptVersion: CAST_DIRECTED_DIVISION_PROMPT_VERSION,
+              castBindingVersion: DIVISION_CAST_BINDING_VERSION,
+              seed: reservation.requestId,
+              facets: generated.result.facets,
+              model: generated.model,
+              prompt: generated.prompt,
+            })
+            const payload = modelResultPayload(stored)
+            const settled = await dependencies.usage.settleModelRequest({
+              userId: input.ownerId,
+              requestId: reservation.requestId,
+              leaseToken,
+              outcome: 'succeeded',
+              usage: providerUsage(generated),
+              ...(generated.providerId === null
+                ? {}
+                : { providerResponseId: generated.providerId }),
+              responseSha256: canonicalHash(payload),
+              resultPayload: payload,
+            })
+
+            winning = stored
+            if (!settled.ok) {
+              const recovered = await recoverCommittedResult(
+                dependencies,
+                input.ownerId,
+                shell.id,
+                'division',
+                {
+                  requestSha256,
+                  promptVersion: DIVISION_PROMPT_VERSION,
+                },
+              )
+              if (!recovered.found || recovered.status !== 'succeeded') {
+                throw new ApiError(
+                  'INTERNAL_ERROR',
+                  500,
+                  'The division result could not be committed safely.',
+                )
+              }
+              const currentWinner = currentDivisionPayload(
+                recovered.resultPayload,
+              )
+              if (
+                !currentWinner ||
+                currentWinner.seed !== reservation.requestId ||
+                recovered.requestId !== reservation.requestId ||
+                recovered.gameId !== shell.id ||
+                recovered.operation !== 'division' ||
+                recovered.requestSha256 !== requestSha256 ||
+                recovered.promptVersion !== DIVISION_PROMPT_VERSION
+              ) {
+                throw new ApiError(
+                  'INTERNAL_ERROR',
+                  500,
+                  'The division result could not be committed safely.',
+                )
+              }
+              winning = currentWinner
+            }
+            successCommitted = true
           } catch (error) {
             const settled = await settleDefinitiveFailure(dependencies, {
               ownerId: input.ownerId,
@@ -2140,51 +3019,16 @@ export function createApiServicesWithDependencies(
             }
             throw error
           }
-
-          const stored = DivisionResultPayloadSchema.parse({
-            format: 'webchess-division-result/1',
-            seed: reservation.requestId,
-            facets: generated.result.facets,
-            model: generated.model,
-            prompt: generated.prompt,
-          })
-          const payload = modelResultPayload(stored)
-          const settled = await dependencies.usage.settleModelRequest({
-            userId: input.ownerId,
-            requestId: reservation.requestId,
-            leaseToken,
-            outcome: 'succeeded',
-            usage: providerUsage(generated),
-            ...(generated.providerId === null
-              ? {}
-              : { providerResponseId: generated.providerId }),
-            responseSha256: canonicalHash(payload),
-            resultPayload: payload,
-          })
-
-          let winning = stored
-          if (!settled.ok) {
-            const recovered = await recoverCommittedResult(
-              dependencies,
-              input.ownerId,
-              shell.id,
-              'division',
-            )
-            if (!recovered.found || recovered.status !== 'succeeded') {
-              throw new ApiError(
-                'INTERNAL_ERROR',
-                500,
-                'The division result could not be committed safely.',
-              )
-            }
-            winning = divisionPayload(recovered.resultPayload)
-          }
-          successCommitted = true
           shell = await finishDivisionForOwner(
             dependencies.repository,
             input.ownerId,
             shell,
             winning,
+          )
+          requireExactCurrentMappedDivision(
+            shell,
+            winning,
+            reservation.requestId,
           )
           if (dependencies.lifecycleRepository) {
             await ensureLifecycleForNewGame(
@@ -2326,37 +3170,28 @@ export function createApiServicesWithDependencies(
     },
 
     answer(input) {
+      const providerDeadline = durableAnswerOperationDeadline()
       return apiOperation(async () => {
+        providerDeadline.assertBeforeDeadline()
         let terminal = await dependencies.repository.getTerminalReplay(
           input.ownerId,
           input.gameId,
         )
+        providerDeadline.assertBeforeDeadline()
         let lifecycle = await dependencies.lifecycleRepository?.getForGame(
           input.ownerId,
           input.gameId,
         )
+        providerDeadline.assertBeforeDeadline()
+        let approvedLifecycle = requireCurrentReviewedGate(terminal, lifecycle)
+        lifecycle = approvedLifecycle.lifecycle
         if (terminal.status === 'answered' && terminal.answer) {
-          if (lifecycle?.versions.portiaContract === CURRENT_LIFECYCLE_VERSIONS.portiaContract) {
-            if (!lifecycle.portia || !isPromptBoundPortiaReview(lifecycle.portia)) {
-              throw new ApiError(
-                'CONFLICT',
-                409,
-                'This answer predates the required prompt-bound Portia review.',
-              )
-            }
-            lifecycle = (await ensurePlayerVisibleAnswerPrompt(
-              dependencies,
-              input.ownerId,
-              terminal,
-              lifecycle,
-            )).lifecycle
-            await requireApprovedAnswerPayload(
-              dependencies,
-              input.ownerId,
-              terminal,
-              lifecycle,
-            )
-          }
+          await requireApprovedAnswerPayload(
+            dependencies,
+            input.ownerId,
+            terminal,
+            lifecycle,
+          )
           return {
             game: publicGame(terminal),
             answer: terminal.answer,
@@ -2369,22 +3204,19 @@ export function createApiServicesWithDependencies(
             terminal,
           )
           if (reconciled.status === 'answered' && reconciled.answer) {
-            if (lifecycle?.versions.portiaContract === CURRENT_LIFECYCLE_VERSIONS.portiaContract) {
-              const reconciledTerminal = await dependencies.repository
-                .getTerminalReplay(input.ownerId, input.gameId)
-              lifecycle = (await ensurePlayerVisibleAnswerPrompt(
-                dependencies,
-                input.ownerId,
-                reconciledTerminal,
-                lifecycle,
-              )).lifecycle
-              await requireApprovedAnswerPayload(
-                dependencies,
-                input.ownerId,
-                reconciledTerminal,
-                lifecycle,
-              )
-            }
+            const reconciledTerminal = await dependencies.repository
+              .getTerminalReplay(input.ownerId, input.gameId)
+            approvedLifecycle = requireCurrentReviewedGate(
+              reconciledTerminal,
+              lifecycle,
+            )
+            lifecycle = approvedLifecycle.lifecycle
+            await requireApprovedAnswerPayload(
+              dependencies,
+              input.ownerId,
+              reconciledTerminal,
+              lifecycle,
+            )
             return {
               game: publicGame(reconciled),
               answer: reconciled.answer,
@@ -2397,36 +3229,27 @@ export function createApiServicesWithDependencies(
             input.ownerId,
             input.gameId,
           )
+          approvedLifecycle = requireCurrentReviewedGate(terminal, lifecycle)
+          lifecycle = approvedLifecycle.lifecycle
         }
 
-        const evidence = serverEvidence(terminal)
-        let answerInput: AnswerGenerationInput = evidence
-        if (lifecycle) {
-          if (lifecycle.state !== 'gate_passed') {
-            throw new ApiError(
-              'CONFLICT',
-              409,
-              'The exact board-derived answer prompt must be permitted by Portia and the Gate before generation.',
-            )
-          }
-          const ensured = await ensurePlayerVisibleAnswerPrompt(
-            dependencies,
-            input.ownerId,
-            terminal,
-            lifecycle,
+        if (lifecycle.state !== 'gate_passed' || !approvedLifecycle.gate.passed) {
+          throw new ApiError(
+            'CONFLICT',
+            409,
+            'The exact current board-derived Answer prompt must be permitted by Portia and the Gate before generation.',
           )
-          if (!ensured.exactPromptAvailable) {
-            throw new ApiError(
-              'CONFLICT',
-              409,
-              'The exact player-visible Answer prompt was not persisted before generation.',
-            )
-          }
-          lifecycle = ensured.lifecycle
-          answerInput = ensured.answerInput
         }
+        const answerInput: AnswerGenerationInput = {
+          plan: approvedLifecycle.answerPrompt.plan,
+          reviewedPromptDigest: approvedLifecycle.answerPrompt.digest,
+          portia: approvedLifecycle.portia,
+          gate: approvedLifecycle.gate,
+        }
+        const trajectoryDirectionalRecord =
+          approvedLifecycle.trajectoryDirectionalRecord
         const requestSha256 = canonicalHash({
-          operation: lifecycle ? 'answer/v3-approved' : 'answer/v1',
+          operation: 'answer/v4-directional-approved',
           gameId: input.gameId,
           expectedRevision: input.expectedRevision,
           input: answerInput,
@@ -2434,6 +3257,7 @@ export function createApiServicesWithDependencies(
           promptVersion: ANSWER_PROMPT_VERSION,
           softwareVersion: dependencies.softwareVersion,
         })
+        providerDeadline.assertBeforeDeadline()
         const reservation = await dependencies.usage.reserveModelRequest({
           requestId: input.requestId,
           gameId: input.gameId,
@@ -2448,6 +3272,18 @@ export function createApiServicesWithDependencies(
           countsAsGameStart: false,
           ipAddress: input.ipAddress,
         })
+        try {
+          providerDeadline.assertBeforeDeadline()
+        } catch (error) {
+          if (reservation.ok && reservation.kind === 'reserved') {
+            await releaseBeforeProvider(
+              dependencies.usage,
+              reservation,
+              input.ownerId,
+            )
+          }
+          throw error
+        }
         if (!reservation.ok) throw usageError(reservation)
         if (reservation.kind === 'existing') {
           const direct = await dependencies.usage.getModelRequestResult({
@@ -2514,6 +3350,7 @@ export function createApiServicesWithDependencies(
         }
 
         let pending: DurableGameSnapshot | null = null
+        let providerReleasedBeforeDispatch = false
         let providerStarted = false
         let successCommitted = false
         try {
@@ -2535,73 +3372,127 @@ export function createApiServicesWithDependencies(
           }
 
           const leaseToken = requireLease(reservation)
-          const began = await dependencies.usage.beginProviderCall({
-            userId: input.ownerId,
-            requestId: reservation.requestId,
-            leaseToken,
-          })
-          if (!began.ok) {
-            throw beginProviderCallError(began, 'answer')
-          }
-          providerStarted = true
-          const providerSignal = durableProviderSignal()
-
-          let generated: Awaited<ReturnType<typeof generateAnswer>>
-          try {
-            generated = await dependencies.answerGenerator(answerInput, {
-              userId: input.ownerId,
-              safetyHmacSecret: dependencies.hmacSecret,
-              signal: providerSignal,
-              idempotencyKey: providerIdempotencyKey(
-                dependencies.hmacSecret,
-                input.ownerId,
-                'answer',
-                input.idempotencyKey,
-              ),
-            })
-          } catch (error) {
+          const providerSignal = providerDeadline.signal
+          const failProviderAttempt = async (error: unknown): Promise<never> => {
+            if (!providerStarted) {
+              if (providerSignal.aborted) {
+                throw new OpenClawProviderError(
+                  'provider_timeout',
+                  false,
+                  'The Answer stage exceeded its five-minute limit before provider execution began.',
+                  { cause: error },
+                )
+              }
+              throw error
+            }
             const settled = await settleDefinitiveFailure(dependencies, {
               ownerId: input.ownerId,
               reservation,
               leaseToken,
               error,
               signal: providerSignal,
+              settleAmbiguous: true,
             })
-            if (settled && pending) {
+            const terminalFailure = settled ||
+              await reconcileTerminalAnswerFailure(
+                dependencies,
+                input.ownerId,
+                reservation.requestId,
+              )
+            if (terminalFailure && pending) {
               pending = await failAnswerForOwner(
                 dependencies.repository,
                 input.ownerId,
                 pending,
               )
             }
+            if (providerSignal.aborted) {
+              throw new OpenClawProviderError(
+                'provider_timeout',
+                false,
+                'The Answer stage exceeded its five-minute limit and was saved as a retryable failure.',
+                { cause: error },
+              )
+            }
             throw error
           }
 
-          const stored = AnswerResultPayloadSchema.parse(
-            lifecycle && lifecycle.answerPromptDigest && lifecycle.gate
-              ? {
-                  format: 'webchess-answer-result/2',
-                  answer: {
-                    answer: generated.result.answer,
-                    model: generated.model,
-                    prompt: generated.prompt,
+          const generated = await (async () => {
+            try {
+              providerDeadline.assertBeforeDeadline()
+              const result = await Promise.race([
+                dependencies.answerGenerator(answerInput, {
+                  userId: input.ownerId,
+                  safetyHmacSecret: dependencies.hmacSecret,
+                  signal: providerSignal,
+                  idempotencyKey: providerIdempotencyKey(
+                    dependencies.hmacSecret,
+                    input.ownerId,
+                    'answer',
+                    input.idempotencyKey,
+                  ),
+                  onProviderTurnStart: async () => {
+                    providerDeadline.assertBeforeDeadline()
+                    const priorProviderTurnStarted = providerStarted
+                    const began = await dependencies.usage.beginProviderCall({
+                      userId: input.ownerId,
+                      requestId: reservation.requestId,
+                      leaseToken,
+                    })
+                    if (!began.ok) {
+                      throw beginProviderCallError(began, 'answer')
+                    }
+                    const providerWasAlreadyStarted =
+                      priorProviderTurnStarted || began.alreadyStarted
+                    try {
+                      providerDeadline.assertBeforeDeadline()
+                    } catch (error) {
+                      const rolledBack = providerWasAlreadyStarted
+                        ? false
+                        : await releaseBeforeProvider(
+                            dependencies.usage,
+                            reservation,
+                            input.ownerId,
+                          )
+                      providerReleasedBeforeDispatch = rolledBack
+                      // If the fenced rollback could not prove that dispatch
+                      // remained unstarted, use the conservative settlement
+                      // path so no in-progress lease can be orphaned.
+                      providerStarted = !rolledBack
+                      throw error
+                    }
+                    providerStarted = true
                   },
-                  approval: {
-                    lifecycleRunId: lifecycle.id,
-                    reviewedPromptDigest: lifecycle.answerPromptDigest,
-                    gateInputDigest: lifecycle.gate.inputDigest,
-                  },
-                }
-              : {
-                  format: 'webchess-answer-result/1',
-                  answer: {
-                    answer: generated.result.answer,
-                    model: generated.model,
-                    prompt: generated.prompt,
-                  },
-                },
-          )
+                }),
+                providerDeadline.expired,
+              ])
+              providerDeadline.assertBeforeDeadline()
+              return result
+            } catch (error) {
+              return failProviderAttempt(error)
+            }
+          })()
+
+          const stored = ApprovedAnswerResultPayloadSchema.parse({
+            format: 'webchess-answer-result/2',
+            answer: {
+              answer: generated.result.answer,
+              model: generated.model,
+              prompt: generated.prompt,
+            },
+            approval: {
+              lifecycleRunId: lifecycle.id,
+              reviewedPromptDigest: approvedLifecycle.answerPrompt.digest,
+              gateInputDigest: approvedLifecycle.gate.inputDigest,
+              ...directionalResultSource(trajectoryDirectionalRecord),
+            },
+          })
           const payload = modelResultPayload(stored)
+          try {
+            providerDeadline.assertBeforeDeadline()
+          } catch (error) {
+            await failProviderAttempt(error)
+          }
           const settled = await dependencies.usage.settleModelRequest({
             userId: input.ownerId,
             requestId: reservation.requestId,
@@ -2617,7 +3508,7 @@ export function createApiServicesWithDependencies(
 
           let winning = stored
           if (!settled.ok) {
-            const recovered = await recoverCommittedResult(
+            let recovered = await recoverCommittedResult(
               dependencies,
               input.ownerId,
               input.gameId,
@@ -2628,15 +3519,50 @@ export function createApiServicesWithDependencies(
               },
             )
             if (!recovered.found || recovered.status !== 'succeeded') {
+              const terminalFailure =
+                await reconcileTerminalAnswerFailure(
+                  dependencies,
+                  input.ownerId,
+                  reservation.requestId,
+                )
+              recovered = await recoverCommittedResult(
+                dependencies,
+                input.ownerId,
+                input.gameId,
+                'answer',
+                {
+                  requestSha256,
+                  promptVersion: ANSWER_PROMPT_VERSION,
+                },
+              )
+              if (
+                terminalFailure &&
+                (!recovered.found || recovered.status !== 'succeeded')
+              ) {
+                pending = await failAnswerForOwner(
+                  dependencies.repository,
+                  input.ownerId,
+                  pending,
+                )
+                throw new ApiError(
+                  'UPSTREAM_TIMEOUT',
+                  504,
+                  'The Answer result arrived after its durable deadline and was saved as a retryable failure.',
+                )
+              }
+            }
+            if (!recovered.found || recovered.status !== 'succeeded') {
               throw new ApiError(
                 'INTERNAL_ERROR',
                 500,
                 'The answer result could not be committed safely.',
               )
             }
-            winning = answerPayload(recovered.resultPayload)
+            winning = ApprovedAnswerResultPayloadSchema.parse(
+              recovered.resultPayload,
+            )
           }
-          if (lifecycle && !approvedAnswerMatchesLifecycle(winning, lifecycle)) {
+          if (!approvedAnswerMatchesLifecycle(winning, lifecycle)) {
             throw new ApiError(
               'INTERNAL_ERROR',
               500,
@@ -2663,11 +3589,13 @@ export function createApiServicesWithDependencies(
           }
         } catch (error) {
           if (!providerStarted) {
-            await releaseBeforeProvider(
-              dependencies.usage,
-              reservation,
-              input.ownerId,
-            )
+            if (!providerReleasedBeforeDispatch) {
+              await releaseBeforeProvider(
+                dependencies.usage,
+                reservation,
+                input.ownerId,
+              )
+            }
             if (pending) {
               await failBeforeProviderWithoutMaskingDeletion(() =>
                 failAnswerForOwner(
@@ -2682,20 +3610,64 @@ export function createApiServicesWithDependencies(
           }
           throw error
         }
-      })
+      }).finally(providerDeadline.dispose)
     },
 
     getLifecycle(input) {
       return apiOperation(async () => {
+        const repository = requireLifecycleRepository(dependencies)
         const game = await dependencies.repository.getOwnedGame(
           input.ownerId,
           input.gameId,
         )
+        const storedLifecycle = await repository.getForGame(
+          input.ownerId,
+          input.gameId,
+        )
+        if (!storedLifecycle) {
+          throw new ApiError(
+            'LIFECYCLE_NOT_FOUND',
+            404,
+            'This game has no lifecycle provenance.',
+          )
+        }
+        let baseLifecycle: LifecycleAggregate
+        try {
+          baseLifecycle = requireCurrentLifecycleBase(game, storedLifecycle)
+        } catch (error) {
+          if (!isApiError(error) || error.code !== 'CONFLICT') throw error
+          // Preserve historical rows as read-only evidence. Polling them must
+          // never reconcile a lease or advance a modern lifecycle state.
+          return storedLifecycle
+        }
+        if (game.game?.outcome) {
+          const existingDirectionalRecord =
+            baseLifecycle.versions.trajectoryDirectionalRecord ===
+              CURRENT_LIFECYCLE_VERSIONS.trajectoryDirectionalRecord
+              ? requireCurrentLifecycleExecution(
+                  game,
+                  baseLifecycle,
+                ).trajectoryDirectionalRecord
+              : undefined
+          // Validate persisted Portia state before the terminal synchronization
+          // CAS so corrupt or mixed progress can never trigger lifecycle writes.
+          requireCurrentPortiaProgress(
+            baseLifecycle,
+            existingDirectionalRecord,
+          )
+        }
         let lifecycle = await synchronizeLifecycleWithGame(
           dependencies,
           input.ownerId,
           game,
         )
+        if (game.game?.outcome) {
+          const current = requireCurrentLifecycleExecution(game, lifecycle)
+          requireCurrentPortiaProgress(
+            lifecycle,
+            current.trajectoryDirectionalRecord,
+          )
+        }
         if (
           lifecycle.state === 'portia_running' ||
           lifecycle.state === 'charlotte_running'
@@ -2704,6 +3676,17 @@ export function createApiServicesWithDependencies(
             input.ownerId,
             input.gameId,
           )
+          if (lifecycle.state === 'portia_running') {
+            requireCurrentLifecycleExecution(terminal, lifecycle)
+          } else {
+            requireCurrentReviewedGate(terminal, lifecycle)
+            await requireApprovedAnswerPayload(
+              dependencies,
+              input.ownerId,
+              terminal,
+              lifecycle,
+            )
+          }
           lifecycle = await reconcileRunningLifecycleModel(
             dependencies,
             input.ownerId,
@@ -2733,6 +3716,24 @@ export function createApiServicesWithDependencies(
             'The game revision changed before Portia began.',
           )
         }
+        const storedLifecycle = await requireLifecycleRepository(dependencies)
+          .getForGame(input.ownerId, terminal.id)
+        const baseLifecycle = requireCurrentLifecycleBase(
+          terminal,
+          storedLifecycle,
+        )
+        const existingDirectionalRecord =
+          baseLifecycle.versions.trajectoryDirectionalRecord ===
+            CURRENT_LIFECYCLE_VERSIONS.trajectoryDirectionalRecord
+            ? requireCurrentLifecycleExecution(
+                terminal,
+                baseLifecycle,
+              ).trajectoryDirectionalRecord
+            : undefined
+        requireCurrentPortiaProgress(
+          baseLifecycle,
+          existingDirectionalRecord,
+        )
         let lifecycle = await preparePortia(
           dependencies,
           input.ownerId,
@@ -2763,9 +3764,13 @@ export function createApiServicesWithDependencies(
             lifecycle,
             lifecycle.id,
             canonicalHash({
-              operation: 'portia/v3-recovery',
+              operation: 'portia/v4-directional-recovery',
               gameId: terminal.id,
               terminalFingerprint: lifecycle.terminalFingerprint,
+              trajectoryDirectionalRecordVersion:
+                lifecycle.trajectoryDirectionalRecord!.version,
+              trajectoryDirectionalRecordDigest:
+                lifecycle.trajectoryDirectionalRecord!.digest,
             }),
             lifecycle.portia,
           )
@@ -2817,6 +3822,11 @@ export function createApiServicesWithDependencies(
           throw serviceUnavailable('The Portia model stage is not configured.')
         }
 
+        const current = requireCurrentLifecycleExecution(terminal, lifecycle)
+        requireCurrentPortiaProgress(
+          lifecycle,
+          current.trajectoryDirectionalRecord,
+        )
         await dependencies.usage.reconcileExpiredLeases()
         const answerPrompt = boardAnswerPromptPlan(terminal, lifecycle)
         const portiaInput: PortiaInput = {
@@ -2827,7 +3837,7 @@ export function createApiServicesWithDependencies(
           completedAssessments: lifecycle.portiaProgress.completedAssessments,
         }
         const requestSha256 = canonicalHash({
-          operation: 'portia/v3',
+          operation: 'portia/v4-directional',
           gameId: terminal.id,
           terminalFingerprint: answerPrompt.plan.terminalFingerprint,
           input: {
@@ -2951,6 +3961,32 @@ export function createApiServicesWithDependencies(
                   'Portia reported progress for an unknown board signal.',
                 )
               }
+              try {
+                requireCurrentPortiaProgress(
+                  {
+                    ...lifecycle,
+                    portiaProgress: {
+                      currentCandidateId: progress.currentCandidateId,
+                      completedCandidateIds: progress.completedCandidateIds,
+                      completedAssessments: progress.completedAssessments,
+                    },
+                  },
+                  current.trajectoryDirectionalRecord,
+                )
+                const expectedCurrentCandidateId = orderPortiaCandidates(
+                  lifecycle.survivors,
+                )[progress.completedAssessments.length]?.candidateId ?? null
+                if (progress.currentCandidateId !== expectedCurrentCandidateId) {
+                  throw new Error(
+                    'Portia progress did not identify the next canonical survivor.',
+                  )
+                }
+              } catch (error) {
+                throw new ModelContractError(
+                  'Portia reported invalid current directional progress.',
+                  { cause: error },
+                )
+              }
               lifecycle = await requireLifecycleRepository(dependencies)
                 .updatePortiaProgress({
                   ownerId: input.ownerId,
@@ -3049,10 +4085,18 @@ export function createApiServicesWithDependencies(
             'The game revision changed before Charlotte began.',
           )
         }
-        let lifecycle = await synchronizeLifecycleWithGame(
+        const storedLifecycle = await requireLifecycleRepository(dependencies)
+          .getForGame(input.ownerId, terminal.id)
+        const approvedLifecycle = requireCurrentReviewedGate(
+          terminal,
+          storedLifecycle,
+        )
+        let lifecycle = approvedLifecycle.lifecycle
+        await requireApprovedAnswerPayload(
           dependencies,
           input.ownerId,
           terminal,
+          lifecycle,
         )
         if (lifecycle.state === 'charlotte_unavailable') return lifecycle
         if (
@@ -3060,36 +4104,19 @@ export function createApiServicesWithDependencies(
           lifecycle.state !== 'charlotte_pending' &&
           lifecycle.state !== 'charlotte_running'
         ) {
-          if (
-            lifecycle.versions.charlottePrompt ===
-              CURRENT_LIFECYCLE_VERSIONS.charlottePrompt
-          ) {
-            lifecycle = (await ensurePlayerVisibleAnswerPrompt(
-              dependencies,
-              input.ownerId,
-              terminal,
-              lifecycle,
-            )).lifecycle
-            await requireApprovedAnswerPayload(
-              dependencies,
-              input.ownerId,
-              terminal,
-              lifecycle,
-            )
-            await requireApprovedCharlottePayload(
-              dependencies,
-              input.ownerId,
-              terminal,
-              lifecycle,
-            )
-          }
+          await requireApprovedCharlottePayload(
+            dependencies,
+            input.ownerId,
+            terminal,
+            lifecycle,
+          )
           return lifecycle
         }
-        const portia = lifecycle.portia
-        const gate = lifecycle.gate
+        const portia = approvedLifecycle.portia
+        const gate = approvedLifecycle.gate
         if (
           !portia ||
-          !isPromptBoundPortiaReview(portia) ||
+          portia.contractVersion !== CURRENT_LIFECYCLE_VERSIONS.portiaContract ||
           !gate?.passed ||
           !terminal.answer
         ) {
@@ -3110,18 +4137,6 @@ export function createApiServicesWithDependencies(
             'Charlotte cannot qualify an answer whose reviewed prompt provenance changed.',
           )
         }
-        lifecycle = (await ensurePlayerVisibleAnswerPrompt(
-          dependencies,
-          input.ownerId,
-          terminal,
-          lifecycle,
-        )).lifecycle
-        await requireApprovedAnswerPayload(
-          dependencies,
-          input.ownerId,
-          terminal,
-          lifecycle,
-        )
         if (lifecycle.state === 'gate_passed') {
           lifecycle = await requireLifecycleRepository(dependencies).transition({
             ownerId: input.ownerId,
@@ -3152,9 +4167,11 @@ export function createApiServicesWithDependencies(
         }
 
         await dependencies.usage.reconcileExpiredLeases()
-        const researchEvidence = boardAnswerPromptPlan(terminal, lifecycle)
-          .plan.researchEvidence
-        const modelInput = {
+        const answerPromptPlan = approvedLifecycle.answerPrompt.plan
+        const researchEvidence = answerPromptPlan.researchEvidence
+        const trajectoryDirectionalRecord =
+          approvedLifecycle.trajectoryDirectionalRecord
+        const modelInput: CharlotteInput = {
           problem: terminal.problem,
           boardAnswer: terminal.answer,
           boardAnswerDigest: canonicalHash(terminal.answer),
@@ -3162,9 +4179,12 @@ export function createApiServicesWithDependencies(
           portia,
           gate,
           ...(researchEvidence?.length ? { researchEvidence } : {}),
+          ...(trajectoryDirectionalRecord
+            ? { trajectoryDirectionalRecord }
+            : {}),
         }
         const requestSha256 = canonicalHash({
-          operation: 'charlotte/v3',
+          operation: 'charlotte/v4-directional',
           gameId: terminal.id,
           input: modelInput,
           model: modelName(dependencies),
@@ -3308,6 +4328,7 @@ export function createApiServicesWithDependencies(
             boardAnswerDigest: modelInput.boardAnswerDigest,
             reviewedPromptDigest,
             gateInputDigest: gate.inputDigest,
+            ...directionalResultSource(trajectoryDirectionalRecord),
           },
         })
         const payload = modelResultPayload(stored)
@@ -3365,6 +4386,14 @@ export function createApiServicesWithDependencies(
           input.ownerId,
           input.gameId,
         )
+        const storedLifecycle = await repository.getForGame(
+          input.ownerId,
+          terminal.id,
+        )
+        const reviewedLifecycle = requireCurrentReviewedGate(
+          terminal,
+          storedLifecycle,
+        )
         const inheritedWebMemory = await repository.getWebMemoryEvidenceForGame(
           input.ownerId,
           terminal.id,
@@ -3375,19 +4404,17 @@ export function createApiServicesWithDependencies(
         if (terminal.revision !== input.expectedRevision) {
           throw new ApiError('CONFLICT', 409, 'The game revision changed before Retry began.')
         }
-        let lifecycle = await synchronizeLifecycleWithGame(
-          dependencies,
-          input.ownerId,
-          terminal,
-        )
-        const promptBoundPortia = lifecycle.portia
-          && isPromptBoundPortiaReview(lifecycle.portia)
-          ? lifecycle.portia
-          : null
+        let lifecycle = reviewedLifecycle.lifecycle
+        const trajectoryDirectionalRecord =
+          reviewedLifecycle.trajectoryDirectionalRecord
+        const promptBoundPortia = reviewedLifecycle.portia
+        const retryAlreadyRunning = lifecycle.state === 'retry_running'
         const reopeningTerminal = canReopenInsufficientBasis(lifecycle)
           && promptBoundPortia !== null
         if (
-          (lifecycle.state !== 'gate_failed' && !reopeningTerminal)
+          (!retryAlreadyRunning &&
+            lifecycle.state !== 'gate_failed' &&
+            !reopeningTerminal)
           || !lifecycle.gate
         ) {
           throw new ApiError('CONFLICT', 409, 'Retry requires a failed deterministic Gate.')
@@ -3396,7 +4423,7 @@ export function createApiServicesWithDependencies(
           ? evaluateGate(promptBoundPortia, {
               sameFieldRetryCount: lifecycle.sameFieldRetryCount,
               fieldRegenerationCount: lifecycle.fieldRegenerationCount,
-            })
+            }, trajectoryDirectionalRecord)
           : lifecycle.gate
         const duplicateTerminalFingerprint = lifecycle.terminalFingerprint
           ? await repository.hasPriorTerminalFingerprint(
@@ -3412,6 +4439,122 @@ export function createApiServicesWithDependencies(
           fieldRegenerationCount: lifecycle.fieldRegenerationCount,
           duplicateTerminalFingerprint,
         })
+        const repairContext = decision.mode === 'regenerate_field'
+          ? fieldRepairContext(lifecycle, failedGate)
+          : null
+        const regeneratedFieldRequestSha256 = repairContext
+          ? canonicalHash({
+              operation: 'division/v2-field-retry',
+              problem: terminal.problem,
+              repairContext,
+              memoryObservationIds: inheritedObservationIds,
+              sourceGameId: terminal.id,
+              fieldGeneration: lifecycle.fieldGeneration + 1,
+              divisionSeed: input.requestId,
+              model: modelName(dependencies),
+              promptVersion: DIVISION_PROMPT_VERSION,
+              softwareVersion: dependencies.softwareVersion,
+            })
+          : null
+
+        if (retryAlreadyRunning) {
+          const retryMode = decision.mode
+          if (retryMode === 'insufficient_basis') {
+            throw new ApiError(
+              'CONFLICT',
+              409,
+              'Retry is already running under a different idempotency target.',
+            )
+          }
+          let child: DurableGameSnapshot | null = null
+          if (
+            retryMode === 'regenerate_field' &&
+            repairContext
+          ) {
+            const existingRequest = await dependencies.usage
+              .getModelRequestByIdempotencyKey({
+                userId: input.ownerId,
+                operation: 'division',
+                idempotencyKey: input.idempotencyKey,
+              })
+            if (!existingRequest.found) {
+              throw new ApiError(
+                'CONFLICT',
+                409,
+                'Retry is already running under a different idempotency target.',
+              )
+            }
+            const existingRequestSha256 = canonicalHash({
+              operation: 'division/v2-field-retry',
+              problem: terminal.problem,
+              repairContext,
+              memoryObservationIds: inheritedObservationIds,
+              sourceGameId: terminal.id,
+              fieldGeneration: lifecycle.fieldGeneration + 1,
+              divisionSeed: existingRequest.requestId,
+              model: modelName(dependencies),
+              promptVersion: DIVISION_PROMPT_VERSION,
+              softwareVersion: dependencies.softwareVersion,
+            })
+            const payload = currentDivisionPayload(existingRequest.resultPayload)
+            if (
+              existingRequest.gameId !== existingRequest.requestId ||
+              existingRequest.operation !== 'division' ||
+              existingRequest.requestSha256 !== existingRequestSha256 ||
+              existingRequest.promptVersion !== DIVISION_PROMPT_VERSION ||
+              existingRequest.status !== 'succeeded' ||
+              !payload ||
+              payload.seed !== existingRequest.requestId
+            ) {
+              throw new ApiError(
+                'CONFLICT',
+                409,
+                'Retry is already running under a different idempotency target.',
+              )
+            }
+            child = await dependencies.repository.getOwnedGame(
+              input.ownerId,
+              existingRequest.gameId,
+            )
+            requireExactCurrentMappedDivision(
+              child,
+              payload,
+              existingRequest.requestId,
+            )
+          } else if (retryMode === 'replay_game') {
+            try {
+              child = await dependencies.repository.getOwnedGame(
+                input.ownerId,
+                input.idempotencyKey,
+              )
+            } catch (error) {
+              if (!isGameRepositoryError(error) || error.code !== 'not-found') {
+                throw error
+              }
+            }
+            if (child) requireExactSameFieldReplay(terminal, child)
+          }
+          const existingChildLifecycle = child
+            ? await repository.getForGame(input.ownerId, child.id)
+            : null
+          if (!child || !existingChildLifecycle) {
+            throw new ApiError(
+              'CONFLICT',
+              409,
+              'Retry is already running under a different idempotency target.',
+            )
+          }
+          return {
+            game: publicGame(child),
+            lifecycle: requireExactRetryChildLifecycle(
+              lifecycle,
+              child,
+              existingChildLifecycle,
+              retryMode,
+              decision.reason,
+            ),
+          }
+        }
         if (decision.mode === 'insufficient_basis') {
           lifecycle = await repository.transition({
             ownerId: input.ownerId,
@@ -3443,18 +4586,14 @@ export function createApiServicesWithDependencies(
             allowed.gameId,
           )
         } else {
-          const repairContext = fieldRepairContext(lifecycle, failedGate)
-          const requestSha256 = canonicalHash({
-            operation: 'division/v2-field-retry',
-            problem: terminal.problem,
-            repairContext,
-            memoryObservationIds: inheritedObservationIds,
-            sourceGameId: terminal.id,
-            fieldGeneration: lifecycle.fieldGeneration + 1,
-            model: modelName(dependencies),
-            promptVersion: DIVISION_PROMPT_VERSION,
-            softwareVersion: dependencies.softwareVersion,
-          })
+          if (!repairContext || !regeneratedFieldRequestSha256) {
+            throw new ApiError(
+              'INTERNAL_ERROR',
+              500,
+              'The regenerated field request could not be derived safely.',
+            )
+          }
+          const requestSha256 = regeneratedFieldRequestSha256
           const reservation = await dependencies.usage.reserveModelRequest({
             requestId: input.requestId,
             gameId: null,
@@ -3470,110 +4609,211 @@ export function createApiServicesWithDependencies(
             ipAddress: input.ipAddress,
           })
           if (!reservation.ok) throw usageError(reservation)
-          const shellResult = await dependencies.repository.getOrCreateDivision({
-            ownerId: input.ownerId,
-            problem: terminal.problem,
-            softwareVersion: dependencies.softwareVersion,
-            gameId: reservation.requestId,
-            sourceGameId: terminal.id,
-          })
-          child = shellResult.game
-          if (inheritedObservationIds.length > 0) {
-            await repository.attachWebMemoryEvidence(
-              input.ownerId,
-              child.id,
-              inheritedObservationIds,
-            )
-          }
-          const attached = await dependencies.usage.attachModelRequestGame({
-            userId: input.ownerId,
-            requestId: reservation.requestId,
-            gameId: child.id,
-          })
-          if (!attached.ok) {
-            throw new ApiError('CONFLICT', 409, 'The regenerated field could not be linked safely.')
-          }
-          if (reservation.kind === 'existing') {
-            child = await reconcilePendingGame(
-              dependencies,
-              input.ownerId,
-              child,
-            )
-            if (child.status !== 'mapped') throw terminalModelFailure('division')
-          } else {
-            const leaseToken = requireLease(reservation)
-            const began = await dependencies.usage.beginProviderCall({
-              userId: input.ownerId,
-              requestId: reservation.requestId,
-              leaseToken,
-            })
-            if (!began.ok) throw beginProviderCallError(began, 'division')
-            const providerSignal = durableProviderSignal()
-            const generated = await dependencies.divisionGenerator(
-              {
+          let shell: DurableGameSnapshot | null = null
+          let providerStarted = false
+          let successCommitted = false
+          try {
+            const shellResult = await dependencies.repository
+              .getOrCreateDivision({
+                ownerId: input.ownerId,
                 problem: terminal.problem,
-                repairContext,
-                ...(inheritedWebMemory.length > 0
-                  ? { webMemoryEvidence: inheritedWebMemory }
-                  : {}),
-              },
-              {
-                userId: input.ownerId,
-                safetyHmacSecret: dependencies.hmacSecret,
-                signal: providerSignal,
-                idempotencyKey: providerIdempotencyKey(
-                  dependencies.hmacSecret,
-                  input.ownerId,
-                  'division',
-                  input.idempotencyKey,
-                ),
-              },
-            )
-            const stored = DivisionResultPayloadSchema.parse({
-              format: 'webchess-division-result/1',
-              seed: reservation.requestId,
-              facets: generated.result.facets,
-              model: generated.model,
-              prompt: generated.prompt,
+                softwareVersion: dependencies.softwareVersion,
+                gameId: reservation.requestId,
+                sourceGameId: terminal.id,
             })
-            const payload = modelResultPayload(stored)
-            const settled = await dependencies.usage.settleModelRequest({
+            shell = shellResult.game
+            child = shell
+            const attached = await dependencies.usage.attachModelRequestGame({
               userId: input.ownerId,
               requestId: reservation.requestId,
-              leaseToken,
-              outcome: 'succeeded',
-              usage: providerUsage(generated),
-              ...(generated.providerId === null
-                ? {}
-                : { providerResponseId: generated.providerId }),
-              responseSha256: canonicalHash(payload),
-              resultPayload: payload,
+              gameId: child.id,
             })
-            let winning = stored
-            if (!settled.ok) {
-              const recovered = await recoverCommittedResult(
+            if (!attached.ok) {
+              throw new ApiError('CONFLICT', 409, 'The regenerated field could not be linked safely.')
+            }
+            if (reservation.kind === 'existing') {
+              child = await reconcilePendingGame(
                 dependencies,
                 input.ownerId,
-                child.id,
-                'division',
+                child,
+                {
+                  divisionRequestId: reservation.requestId,
+                  divisionRequestSha256: requestSha256,
+                },
               )
-              if (!recovered.found || recovered.status !== 'succeeded') {
-                throw new ApiError('INTERNAL_ERROR', 500, 'The regenerated field could not be committed safely.')
+              if (child.status !== 'mapped') {
+                if (child.status === 'dividing') throw pendingConflict('division')
+                throw terminalModelFailure('division')
               }
-              winning = divisionPayload(recovered.resultPayload)
+              await requireCurrentMappedDivisionBinding(
+                dependencies,
+                input.ownerId,
+                child,
+                reservation.requestId,
+                requestSha256,
+              )
+            } else {
+              const leaseToken = requireLease(reservation)
+              const began = await dependencies.usage.beginProviderCall({
+                userId: input.ownerId,
+                requestId: reservation.requestId,
+                leaseToken,
+              })
+              if (!began.ok) throw beginProviderCallError(began, 'division')
+              providerStarted = true
+              const providerSignal = durableProviderSignal()
+              let winning: CastDirectedDivisionResultPayload
+              try {
+                const generated = await dependencies.divisionGenerator(
+                  {
+                    problem: terminal.problem,
+                    divisionSeed: reservation.requestId,
+                    repairContext,
+                    ...(inheritedWebMemory.length > 0
+                      ? { webMemoryEvidence: inheritedWebMemory }
+                      : {}),
+                  },
+                  {
+                    userId: input.ownerId,
+                    safetyHmacSecret: dependencies.hmacSecret,
+                    signal: providerSignal,
+                    idempotencyKey: providerIdempotencyKey(
+                      dependencies.hmacSecret,
+                      input.ownerId,
+                      'division',
+                      input.idempotencyKey,
+                    ),
+                  },
+                )
+                const stored = requireGeneratedCurrentDivisionPayload({
+                  format: 'webchess-division-result/2',
+                  promptVersion: CAST_DIRECTED_DIVISION_PROMPT_VERSION,
+                  castBindingVersion: DIVISION_CAST_BINDING_VERSION,
+                  seed: reservation.requestId,
+                  facets: generated.result.facets,
+                  model: generated.model,
+                  prompt: generated.prompt,
+                })
+                const payload = modelResultPayload(stored)
+                const settled = await dependencies.usage.settleModelRequest({
+                  userId: input.ownerId,
+                  requestId: reservation.requestId,
+                  leaseToken,
+                  outcome: 'succeeded',
+                  usage: providerUsage(generated),
+                  ...(generated.providerId === null
+                    ? {}
+                    : { providerResponseId: generated.providerId }),
+                  responseSha256: canonicalHash(payload),
+                  resultPayload: payload,
+                })
+                winning = stored
+                if (!settled.ok) {
+                  const recovered = await recoverCommittedResult(
+                    dependencies,
+                    input.ownerId,
+                    child.id,
+                    'division',
+                    {
+                      requestSha256,
+                      promptVersion: DIVISION_PROMPT_VERSION,
+                    },
+                  )
+                  if (
+                    !recovered.found ||
+                    recovered.status !== 'succeeded' ||
+                    recovered.requestId !== reservation.requestId ||
+                    recovered.gameId !== child.id ||
+                    recovered.operation !== 'division' ||
+                    recovered.requestSha256 !== requestSha256 ||
+                    recovered.promptVersion !== DIVISION_PROMPT_VERSION
+                  ) {
+                    throw new ApiError('INTERNAL_ERROR', 500, 'The regenerated field could not be committed safely.')
+                  }
+                  const currentWinner = currentDivisionPayload(
+                    recovered.resultPayload,
+                  )
+                  if (
+                    !currentWinner ||
+                    currentWinner.seed !== reservation.requestId
+                  ) {
+                    throw new ApiError('INTERNAL_ERROR', 500, 'The regenerated field could not be committed safely.')
+                  }
+                  winning = currentWinner
+                }
+                successCommitted = true
+              } catch (error) {
+                const settled = await settleDefinitiveFailure(dependencies, {
+                  ownerId: input.ownerId,
+                  reservation,
+                  leaseToken,
+                  error,
+                  signal: providerSignal,
+                })
+                if (settled && shell) {
+                  shell = await failDivisionForOwner(
+                    dependencies.repository,
+                    input.ownerId,
+                    shell,
+                  )
+                }
+                throw error
+              }
+              child = await finishDivisionForOwner(
+                dependencies.repository,
+                input.ownerId,
+                child,
+                winning,
+              )
+              requireExactCurrentMappedDivision(
+                child,
+                winning,
+                reservation.requestId,
+              )
             }
-            child = await finishDivisionForOwner(
-              dependencies.repository,
-              input.ownerId,
-              child,
-              winning,
-            )
+          } catch (error) {
+            if (reservation.kind === 'reserved' && !providerStarted) {
+              await releaseBeforeProvider(
+                dependencies.usage,
+                reservation,
+                input.ownerId,
+              )
+              if (shell) {
+                await failBeforeProviderWithoutMaskingDeletion(() =>
+                  failDivisionForOwner(
+                    dependencies.repository,
+                    input.ownerId,
+                    shell!,
+                  ),
+                )
+              }
+            } else if (successCommitted) {
+              // Exact current Division evidence remains authoritative; never
+              // rewrite the child as failed after its provider result commits.
+            }
+            throw error
           }
         }
-        if (
-          decision.mode === 'replay_game'
-          && inheritedObservationIds.length > 0
-        ) {
+        if (decision.mode === 'replay_game') {
+          requireExactSameFieldReplay(terminal, child)
+        }
+        const existingChildLifecycle = await repository.getForGame(
+          input.ownerId,
+          child.id,
+        )
+        if (existingChildLifecycle) {
+          return {
+            game: publicGame(child),
+            lifecycle: requireExactRetryChildLifecycle(
+              lifecycle,
+              child,
+              existingChildLifecycle,
+              decision.mode,
+              decision.reason,
+            ),
+          }
+        }
+        if (inheritedObservationIds.length > 0) {
           await repository.attachWebMemoryEvidence(
             input.ownerId,
             child.id,
@@ -3607,17 +4847,23 @@ export function createApiServicesWithDependencies(
     createWilburAction(input) {
       return apiOperation(async () => {
         const repository = requireLifecycleRepository(dependencies)
-        const lifecycle = await repository.getForGame(
+        const storedLifecycle = await repository.getForGame(
           input.ownerId,
           input.gameId,
         )
-        if (!lifecycle) {
+        if (!storedLifecycle) {
           throw new ApiError(
             'LIFECYCLE_NOT_FOUND',
             404,
             'Lifecycle provenance not found.',
           )
         }
+        const lifecycle = await requireCurrentWilburExecution(
+          dependencies,
+          input.ownerId,
+          input.gameId,
+          storedLifecycle,
+        )
         const suggestion = canonicalCharlotteActionForWilbur(lifecycle, input)
         const requestDigest = canonicalHash({
           operation: 'wilbur-action/v3',
@@ -3720,13 +4966,23 @@ export function createApiServicesWithDependencies(
     updateWilburAction(input) {
       return apiOperation(async () => {
         const repository = requireLifecycleRepository(dependencies)
-        const lifecycle = await repository.getForGame(input.ownerId, input.gameId)
-        const currentAction = lifecycle?.wilburActions.find(
-          (action) => action.id === input.actionId,
+        const storedLifecycle = await repository.getForGame(
+          input.ownerId,
+          input.gameId,
         )
-        if (!currentAction) {
+        if (!storedLifecycle) {
           throw new ApiError('LIFECYCLE_NOT_FOUND', 404, 'Wilbur action not found.')
         }
+        const lifecycle = await requireCurrentWilburExecution(
+          dependencies,
+          input.ownerId,
+          input.gameId,
+          storedLifecycle,
+        )
+        const currentAction = requireCurrentWilburAction(
+          lifecycle,
+          input.actionId,
+        )
         const requestDigest = canonicalHash({
           operation: 'wilbur-action-status/v2',
           gameId: input.gameId,
@@ -3807,10 +5063,20 @@ export function createApiServicesWithDependencies(
     appendWilburObservation(input) {
       return apiOperation(async () => {
         const repository = requireLifecycleRepository(dependencies)
-        const lifecycle = await repository.getForGame(input.ownerId, input.gameId)
-        if (!lifecycle?.wilburActions.some((action) => action.id === input.actionId)) {
+        const storedLifecycle = await repository.getForGame(
+          input.ownerId,
+          input.gameId,
+        )
+        if (!storedLifecycle) {
           throw new ApiError('LIFECYCLE_NOT_FOUND', 404, 'Wilbur action not found.')
         }
+        const lifecycle = await requireCurrentWilburExecution(
+          dependencies,
+          input.ownerId,
+          input.gameId,
+          storedLifecycle,
+        )
+        requireCurrentWilburAction(lifecycle, input.actionId)
         const requestDigest = canonicalHash({
           operation: 'wilbur-observation/v2',
           gameId: input.gameId,
@@ -3901,6 +5167,21 @@ export function createApiServicesWithDependencies(
 
     replay(input) {
       return apiOperation(async () => {
+        const terminal = await dependencies.repository.getTerminalReplay(
+          input.ownerId,
+          input.gameId,
+        )
+        if (terminal.revision !== input.expectedRevision) {
+          throw new ApiError(
+            'CONFLICT',
+            409,
+            'The game revision changed before replay began.',
+          )
+        }
+        const lifecycle = await requireLifecycleRepository(dependencies)
+          .getForGame(input.ownerId, terminal.id)
+        requireCurrentLifecycleExecution(terminal, lifecycle)
+
         const allowed = await dependencies.usage.consumeReplayGameStart({
           userId: input.ownerId,
           sourceGameId: input.gameId,

@@ -33,11 +33,15 @@ export {
   buildDivisionInput,
   buildDivisionInstructions,
   buildDivisionPrompt,
+  CastBoundDivisionFacetSchema,
+  CastDirectedDivisionFacetSchema,
+  CastDirectedDivisionOutputSchema,
   DIVISION_DIMENSIONS,
   DIVISION_MAX_OUTPUT_TOKENS,
   DIVISION_MOVEMENTS,
   DivisionFacetSchema,
   DivisionOutputSchema,
+  DurableDivisionFacetSchema,
   FACET_COUNT,
   generateDivision,
   normalizeDivisionGenerationInput,
@@ -59,7 +63,9 @@ export {
   normalizePortiaInput,
   orderPortiaCandidates,
   portiaCandidateModelSchema,
+  directionalPortiaCandidateModelSchema,
   portiaSummaryModelSchema,
+  directionalPortiaSummaryModelSchema,
   PORTIA_MAX_OUTPUT_TOKENS,
 } from './portia'
 export type { PortiaInput, PortiaProgress, PortiaRequestContext } from './portia'
@@ -69,12 +75,14 @@ export {
   buildCharlotteInstructions,
   buildCharlottePrompt,
   charlotteGenerationResultSchema,
+  charlotteModelResultSchema,
   CHARLOTTE_MAX_RENDERED_CHARACTERS,
   CHARLOTTE_MAX_OUTPUT_TOKENS,
   CHARLOTTE_MAX_SUPPORTING_CANDIDATES,
   countCharlotteWords,
   generateCharlotteSynthesis,
   normalizeCharlotteGeneration,
+  normalizeCharlotteModelResult,
   renderCharlotteResult,
 } from './charlotte'
 export type {
@@ -93,8 +101,10 @@ export type {
 } from './response'
 export {
   ANSWER_PROMPT_VERSION,
+  CAST_DIRECTED_DIVISION_PROMPT_VERSION,
   DEFAULT_OPENAI_TIMEOUT_MS,
   DIVISION_PROMPT_VERSION,
+  LEGACY_DIVISION_PROMPT_VERSION,
   MAX_OPENAI_TIMEOUT_MS,
   ModelConfigurationError,
   ModelContractError,
@@ -104,6 +114,8 @@ export {
   OPENAI_REASONING_EFFORT,
 } from './types'
 export type {
+  AnswerProviderTurn,
+  AnswerRequestContext,
   DivisionGenerationInput,
   DivisionRepairContext,
   DivisionRepairRequest,

@@ -6,9 +6,12 @@ import { CURRENT_GAME_VERSIONS } from '../../src/lib/game-contract'
 import { createReplayState, toGameView } from '../../src/lib/game-replay'
 import {
   CURRENT_LIFECYCLE_VERSIONS,
+  LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+  deriveSurvivorCandidates,
   evaluateGate,
   terminalFingerprint,
 } from '../../src/lib/lifecycle'
+import { deriveTrajectoryDirectionalRecord } from '../../src/lib/lifecycle/trajectory-direction'
 import { PORTIA_ATTACK_TYPES } from '../../src/lib/lifecycle/contracts'
 import type {
   CharlotteResult,
@@ -16,7 +19,11 @@ import type {
   SurvivorCandidate,
 } from '../../src/lib/lifecycle/contracts'
 import { RESEARCH_CONSENT_VERSION } from '../../src/lib/research'
-import { makeProblemFacets, makeProblemParts } from '../../src/test/fixtures'
+import {
+  makeProblemFacets,
+  makeProblemParts,
+  makeTrajectoryDirectionalFixture,
+} from '../../src/test/fixtures'
 import type { DurableGameSnapshot } from '../../src/server/games'
 import { DurableLifecycleRepository } from '../../src/server/lifecycle'
 import {
@@ -27,7 +34,9 @@ import type { PostgresTestDatabase } from './postgres-test-database'
 const OWNER = 'user_lifecycle_repository_integration'
 const RETRY_OWNER = 'user_lifecycle_retry_lineage_integration'
 const CHARLOTTE_OWNER = 'user_lifecycle_charlotte_fence_integration'
+const DIRECTIONAL_OWNER = 'user_lifecycle_directional_record_integration'
 const GAME_ID = '62000000-0000-4000-8000-0000000000a1'
+const DIRECTIONAL_GAME_ID = '62000000-0000-4000-8000-0000000000d1'
 const PROBLEM = 'How should this lifecycle preserve evidence while moving toward action?'
 
 function utf8Bytes(values: readonly string[]): number {
@@ -173,7 +182,202 @@ function survivor(index: number): SurvivorCandidate {
   }
 }
 
-function portiaReview(survivors: readonly SurvivorCandidate[]): PortiaReview {
+async function markLifecycleLegacy(
+  ownerId: string,
+  gameId: string,
+) {
+  await database.adapter.query({
+    text: `
+      UPDATE lifecycle_runs
+      SET lifecycle_version = 'webchess-lifecycle-v2.4'
+      WHERE clerk_user_id = $1::text AND game_id = $2::uuid
+    `,
+    values: [ownerId, gameId],
+  })
+  const lifecycle = await repository.getForGame(ownerId, gameId)
+  if (!lifecycle) throw new Error('The legacy lifecycle fixture is missing.')
+  return lifecycle
+}
+
+async function createDirectionalTerminalFixture() {
+  const fixture = makeTrajectoryDirectionalFixture()
+  const now = new Date('2026-08-01T20:30:00.000Z')
+  const facets = fixture.parts.map((part) => ({
+    id: part.id,
+    title: part.title,
+    focus: part.focus,
+    question: part.prompt,
+    keyword: part.keyword,
+    castApplication: part.castApplication,
+  }))
+  await database.adapter.query({
+    text: `INSERT INTO user_controls (clerk_user_id) VALUES ($1::text)`,
+    values: [DIRECTIONAL_OWNER],
+  })
+  await database.adapter.query({
+    text: `
+      INSERT INTO games (
+        id, clerk_user_id, is_current, revision, status, problem,
+        problem_sha256, research_consent_version,
+        research_consent_decision, research_consent_recorded_at,
+        division_seed, division_facets, problem_parts,
+        division_model, division_prompt_version, division_prompt_sha256,
+        division_digest, event_version, rules_version, engine_version,
+        cast_version, software_version, created_at, updated_at
+      )
+      VALUES (
+        $1::uuid, $2::text, false, 1, 'playing', $3::text,
+        repeat('a', 64), 'webchess-research-consent-v1',
+        'no_external_research', $11::timestamptz,
+        $4::text, $5::jsonb, $6::jsonb,
+        'gpt-5.6-sol', 'webchess-division-v4', repeat('b', 64),
+        $7::char(64), $8::smallint, $9::text, $10::text,
+        $12::text, '2.2.0-rc.1', $11::timestamptz, $11::timestamptz
+      )
+    `,
+    values: [
+      DIRECTIONAL_GAME_ID,
+      DIRECTIONAL_OWNER,
+      PROBLEM,
+      fixture.divisionSeed,
+      JSON.stringify(facets),
+      JSON.stringify(fixture.parts),
+      fixture.divisionDigest,
+      CURRENT_GAME_VERSIONS.event,
+      CURRENT_GAME_VERSIONS.rules,
+      CURRENT_GAME_VERSIONS.engine,
+      now.toISOString(),
+      CURRENT_GAME_VERSIONS.cast,
+    ],
+  })
+  const snapshot: DurableGameSnapshot = {
+    id: DIRECTIONAL_GAME_ID,
+    sourceGameId: null,
+    isCurrent: false,
+    revision: 1,
+    status: 'playing',
+    problem: PROBLEM,
+    researchConsent: {
+      version: RESEARCH_CONSENT_VERSION,
+      decision: 'no_external_research',
+      recordedAt: now.toISOString(),
+    },
+    division: {
+      seed: fixture.divisionSeed,
+      facets,
+      parts: fixture.parts,
+      model: 'gpt-5.6-sol',
+      promptVersion: 'webchess-division-v4',
+      promptSha256: 'b'.repeat(64),
+      digest: fixture.divisionDigest,
+    },
+    game: toGameView(createReplayState()),
+    answer: null,
+    createdAt: now,
+    updatedAt: now,
+    completedAt: null,
+    answeredAt: null,
+  }
+  const lifecycle = await repository.ensureForGame({
+    ownerId: DIRECTIONAL_OWNER,
+    game: snapshot,
+    trajectorySeed: fixture.trajectorySeed,
+  })
+  const eventRows = fixture.state.events.map((event) => ({
+    ply: event.ply,
+    kind: event.type === 'move' ? 'move' : 'pass',
+    source: event.type === 'move' ? 'client' : 'server',
+    side: event.side,
+    piece_id: event.type === 'move' ? event.pieceId : null,
+    captured_piece_id:
+      event.type === 'move' ? event.capturedPieceId ?? null : null,
+    promoted_to: event.type === 'move' ? event.promotedTo ?? null : null,
+    from_ring: event.type === 'move' ? event.from.ring : null,
+    from_sector: event.type === 'move' ? event.from.sector : null,
+    to_ring: event.type === 'move' ? event.to.ring : null,
+    to_sector: event.type === 'move' ? event.to.sector : null,
+    idempotency_key:
+      event.type === 'move'
+        ? `62000000-0000-4001-8000-${String(event.ply).padStart(12, '0')}`
+        : null,
+    request_sha256: event.type === 'move' ? 'e'.repeat(64) : null,
+    game_revision: event.ply,
+  }))
+  await database.adapter.transaction([
+    {
+      text: `
+        UPDATE games
+        SET status = 'completed', revision = $3::bigint,
+            outcome = $4::jsonb, completed_at = $5::timestamptz,
+            updated_at = $5::timestamptz
+        WHERE id = $1::uuid AND clerk_user_id = $2::text
+      `,
+      values: [
+        DIRECTIONAL_GAME_ID,
+        DIRECTIONAL_OWNER,
+        fixture.state.completedPlies,
+        JSON.stringify(fixture.state.outcome),
+        now.toISOString(),
+      ],
+    },
+    {
+      text: `
+        INSERT INTO game_events (
+          game_id, ply, kind, source, side, piece_id,
+          captured_piece_id, promoted_to, from_ring, from_sector,
+          to_ring, to_sector, idempotency_key, request_sha256, game_revision
+        )
+        SELECT $1::uuid, event.ply, event.kind, event.source, event.side,
+          event.piece_id, event.captured_piece_id, event.promoted_to,
+          event.from_ring, event.from_sector, event.to_ring, event.to_sector,
+          event.idempotency_key, event.request_sha256, event.game_revision
+        FROM jsonb_to_recordset($2::jsonb) AS event(
+          ply smallint, kind text, source text, side text, piece_id text,
+          captured_piece_id text, promoted_to text, from_ring smallint,
+          from_sector smallint, to_ring smallint, to_sector smallint,
+          idempotency_key uuid, request_sha256 char(64), game_revision bigint
+        )
+      `,
+      values: [DIRECTIONAL_GAME_ID, JSON.stringify(eventRows)],
+    },
+  ])
+  const survivors = deriveSurvivorCandidates(
+    fixture.state,
+    fixture.parts,
+    {
+      gameId: DIRECTIONAL_GAME_ID,
+      attemptId: lifecycle.id,
+      divisionDigest: fixture.divisionDigest,
+      rulesVersion: fixture.state.versions.rules,
+      engineVersion: fixture.state.versions.engine,
+      castVersion: fixture.state.versions.cast,
+      eventVersion: fixture.state.versions.event,
+    },
+  )
+  const record = deriveTrajectoryDirectionalRecord({
+    divisionDigest: fixture.divisionDigest,
+    divisionSeed: lifecycle.divisionSeed,
+    castSeed: lifecycle.castSeed,
+    trajectorySeed: lifecycle.trajectorySeed,
+    versions: fixture.state.versions,
+    parts: fixture.parts,
+    events: fixture.state.events,
+  })
+  return {
+    lifecycle,
+    record,
+    survivors,
+    terminalFingerprint: terminalFingerprint(survivors),
+  }
+}
+
+function portiaReview(
+  survivors: readonly SurvivorCandidate[],
+  contractVersion:
+    | typeof CURRENT_LIFECYCLE_VERSIONS.portiaContract
+    | typeof LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION =
+      CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+): PortiaReview {
   const coverage = [
     'protected_outcome',
     'evidence_or_reality',
@@ -181,7 +385,7 @@ function portiaReview(survivors: readonly SurvivorCandidate[]): PortiaReview {
     'agency_or_action',
   ] as const
   return {
-    contractVersion: CURRENT_LIFECYCLE_VERSIONS.portiaContract,
+    contractVersion,
     reviewedAnswerPromptDigest: 'a'.repeat(64),
     promptDecision: 'permit',
     promptDecisionRationale:
@@ -336,6 +540,9 @@ async function advanceToGateFailure(
 ) {
   let lifecycle = await repository.getForGame(RETRY_OWNER, gameId)
   if (!lifecycle) throw new Error('The retry lineage fixture has no lifecycle run.')
+  if (lifecycle.versions.lifecycle === CURRENT_LIFECYCLE_VERSIONS.lifecycle) {
+    lifecycle = await markLifecycleLegacy(RETRY_OWNER, gameId)
+  }
 
   const transitions = [
     ['chess_playing', 'chess', 'game_started'],
@@ -508,6 +715,281 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
     })).rejects.toMatchObject({ code: 'conflict' })
   })
 
+  it('atomically binds, verifies, and preserves current trajectory direction evidence', async () => {
+    const fixture = await createDirectionalTerminalFixture()
+    const transitionInput = {
+      ownerId: DIRECTIONAL_OWNER,
+      gameId: DIRECTIONAL_GAME_ID,
+      expectedRevision: fixture.lifecycle.revision,
+      to: 'chess_terminal' as const,
+      stage: 'chess' as const,
+      activityType: 'terminal_directional_record_bound',
+      terminalFingerprint: fixture.terminalFingerprint,
+      survivors: fixture.survivors,
+      trajectoryDirectionalRecord: fixture.record,
+      configurationDigest: '9'.repeat(64),
+    }
+
+    await expect(repository.transition({
+      ...transitionInput,
+      trajectoryDirectionalRecord: undefined,
+    })).rejects.toMatchObject({ code: 'invalid-input' })
+
+    const mismatchedParts = fixture.record.field.parts.map((entry) => ({
+      ...entry.part,
+      castApplication:
+        `${entry.part.castApplication} This trusted-source mismatch must fail.`,
+    }))
+    const sourceMismatchedRecord = deriveTrajectoryDirectionalRecord({
+      divisionDigest: fixture.record.division.digest,
+      divisionSeed: fixture.record.division.seed,
+      castSeed: fixture.record.cast.lifecycleSeed,
+      trajectorySeed: fixture.record.trajectory.seed,
+      versions: makeTrajectoryDirectionalFixture().state.versions,
+      parts: mismatchedParts,
+      events: fixture.record.trajectory.events.map((entry) => entry.event),
+    })
+    await expect(repository.transition({
+      ...transitionInput,
+      trajectoryDirectionalRecord: sourceMismatchedRecord,
+    })).rejects.toMatchObject({ code: 'invalid-input' })
+
+    const survivorMutations: readonly {
+      readonly label: string
+      readonly survivors: readonly SurvivorCandidate[]
+    }[] = [
+      {
+        label: 'final facet',
+        survivors: fixture.survivors.map((candidate, index) =>
+          index === 0
+            ? {
+                ...candidate,
+                facet: {
+                  ...candidate.facet,
+                  title: `${candidate.facet.title} changed`,
+                },
+              }
+            : candidate),
+      },
+      {
+        label: 'candidate identity and role',
+        survivors: fixture.survivors.map((candidate, index) =>
+          index === 0
+            ? {
+                ...candidate,
+                candidateId: `${candidate.candidateId}-changed`,
+                pieceRole: `${candidate.pieceRole} changed`,
+              }
+            : candidate),
+      },
+      {
+        label: 'capture lineage',
+        survivors: fixture.survivors.map((candidate, index) =>
+          index === 0
+            ? {
+                ...candidate,
+                capturesMade: [
+                  ...candidate.capturesMade,
+                  'tampered-capture-id',
+                ],
+              }
+            : candidate),
+      },
+      {
+        label: 'attacked plies',
+        survivors: fixture.survivors.map((candidate, index) =>
+          index === 0
+            ? {
+                ...candidate,
+                attackedPlies: [...candidate.attackedPlies, 256],
+              }
+            : candidate),
+      },
+      {
+        label: 'source digest',
+        survivors: fixture.survivors.map((candidate, index) =>
+          index === 0
+            ? { ...candidate, sourceDigest: '0'.repeat(64) }
+            : candidate),
+      },
+    ]
+    for (const mutation of survivorMutations) {
+      await expect(
+        repository.transition({
+          ...transitionInput,
+          survivors: mutation.survivors,
+          terminalFingerprint: terminalFingerprint(mutation.survivors),
+        }),
+        mutation.label,
+      ).rejects.toMatchObject({ code: 'invalid-input' })
+    }
+
+    await database.adapter.query({
+      text: `
+        CREATE FUNCTION reject_directional_activity_for_test()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $function$
+        BEGIN
+          RAISE EXCEPTION 'injected directional activity failure';
+        END
+        $function$
+      `,
+    })
+    await database.adapter.query({
+      text: `
+        CREATE TRIGGER reject_directional_activity_for_test
+        BEFORE INSERT ON lifecycle_events
+        FOR EACH ROW
+        WHEN (NEW.activity_type = 'terminal_directional_record_bound')
+        EXECUTE FUNCTION reject_directional_activity_for_test()
+      `,
+    })
+    await expect(repository.transition(transitionInput)).rejects.toThrow(
+      'injected directional activity failure',
+    )
+    await database.adapter.query({
+      text: 'DROP TRIGGER reject_directional_activity_for_test ON lifecycle_events',
+    })
+    await database.adapter.query({
+      text: 'DROP FUNCTION reject_directional_activity_for_test()',
+    })
+
+    const afterRollback = await repository.getForGame(
+      DIRECTIONAL_OWNER,
+      DIRECTIONAL_GAME_ID,
+    )
+    expect(afterRollback).toMatchObject({
+      state: 'chess_playing',
+      revision: fixture.lifecycle.revision,
+      terminalFingerprint: null,
+      trajectoryDirectionalRecord: null,
+      trajectoryDirectionalRecordStatus: 'not_terminal',
+    })
+
+    const terminal = await repository.transition(transitionInput)
+    expect(terminal).toMatchObject({
+      state: 'chess_terminal',
+      revision: fixture.lifecycle.revision + 1,
+      terminalFingerprint: fixture.terminalFingerprint,
+      trajectoryDirectionalRecordStatus: 'bound',
+      versions: {
+        lifecycle: 'webchess-lifecycle-v2.5',
+        trajectoryDirectionalRecord: fixture.record.version,
+      },
+    })
+    expect(terminal.trajectoryDirectionalRecord).toEqual(fixture.record)
+    expect(terminal.survivors).toEqual(fixture.survivors)
+
+    const exactRetry = await repository.transition(transitionInput)
+    expect(exactRetry.revision).toBe(terminal.revision)
+    expect(exactRetry.activities).toHaveLength(terminal.activities.length)
+
+    const tampered = structuredClone(fixture.record) as unknown as {
+      explanation: string[]
+    } & typeof fixture.record
+    tampered.explanation[0] = `${tampered.explanation[0]} changed`
+    await expect(repository.transition({
+      ...transitionInput,
+      trajectoryDirectionalRecord: tampered,
+    })).rejects.toMatchObject({ code: 'invalid-input' })
+
+    await expect(database.adapter.query({
+      text: `
+        UPDATE lifecycle_runs
+        SET trajectory_directional_record_digest = repeat('0', 64)
+        WHERE clerk_user_id = $1::text AND game_id = $2::uuid
+      `,
+      values: [DIRECTIONAL_OWNER, DIRECTIONAL_GAME_ID],
+    })).rejects.toMatchObject({ code: '23514' })
+
+    const persisted = await database.adapter.query<{
+      terminal_fingerprint: string
+      trajectory_directional_record_version: string
+      trajectory_directional_record_digest: string
+      trajectory_directional_record: Record<string, unknown>
+      survivor_set: readonly unknown[]
+    }>({
+      text: `
+        SELECT terminal_fingerprint,
+          trajectory_directional_record_version,
+          trajectory_directional_record_digest,
+          trajectory_directional_record,
+          survivor_set
+        FROM lifecycle_runs
+        WHERE clerk_user_id = $1::text AND game_id = $2::uuid
+      `,
+      values: [DIRECTIONAL_OWNER, DIRECTIONAL_GAME_ID],
+    })
+    expect(persisted.rows).toEqual([{
+      terminal_fingerprint: fixture.terminalFingerprint,
+      trajectory_directional_record_version: fixture.record.version,
+      trajectory_directional_record_digest: fixture.record.digest,
+      trajectory_directional_record: fixture.record,
+      survivor_set: fixture.survivors,
+    }])
+
+    const storedTamper = fixture.survivors.map((candidate, index) =>
+      index === 0
+        ? { ...candidate, sourceDigest: '0'.repeat(64) }
+        : candidate)
+    await database.adapter.query({
+      text: `
+        ALTER TABLE lifecycle_runs
+        DISABLE TRIGGER lifecycle_runs_trajectory_directional_record_guard
+      `,
+    })
+    try {
+      await database.adapter.query({
+        text: `
+          UPDATE lifecycle_runs
+          SET survivor_set = $3::jsonb
+          WHERE clerk_user_id = $1::text AND game_id = $2::uuid
+        `,
+        values: [
+          DIRECTIONAL_OWNER,
+          DIRECTIONAL_GAME_ID,
+          JSON.stringify(storedTamper),
+        ],
+      })
+      await database.adapter.query({
+        text: `
+          ALTER TABLE lifecycle_runs
+          ENABLE TRIGGER lifecycle_runs_trajectory_directional_record_guard
+        `,
+      })
+      await expect(repository.getForGame(
+        DIRECTIONAL_OWNER,
+        DIRECTIONAL_GAME_ID,
+      )).rejects.toMatchObject({ code: 'invalid-state' })
+    } finally {
+      await database.adapter.query({
+        text: `
+          ALTER TABLE lifecycle_runs
+          DISABLE TRIGGER lifecycle_runs_trajectory_directional_record_guard
+        `,
+      })
+      await database.adapter.query({
+        text: `
+          UPDATE lifecycle_runs
+          SET survivor_set = $3::jsonb
+          WHERE clerk_user_id = $1::text AND game_id = $2::uuid
+        `,
+        values: [
+          DIRECTIONAL_OWNER,
+          DIRECTIONAL_GAME_ID,
+          JSON.stringify(fixture.survivors),
+        ],
+      })
+      await database.adapter.query({
+        text: `
+          ALTER TABLE lifecycle_runs
+          ENABLE TRIGGER lifecycle_runs_trajectory_directional_record_guard
+        `,
+      })
+    }
+  })
+
   it('persists immutable Portia, Gate, Charlotte, and append-only Wilbur artifacts', async () => {
     await database.adapter.query({
       text: `
@@ -530,7 +1012,7 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
         CURRENT_LIFECYCLE_VERSIONS.charlottePrompt,
       ],
     })
-    const current = await repository.getForGame(OWNER, GAME_ID)
+    const current = await markLifecycleLegacy(OWNER, GAME_ID)
     expect(current?.state).toBe('chess_playing')
     const survivors = Array.from({ length: 4 }, (_, index) => survivor(index))
     let lifecycle = await repository.transition({
@@ -544,6 +1026,14 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       survivors,
       configurationDigest: 'd'.repeat(64),
     })
+    expect(lifecycle).toMatchObject({
+      trajectoryDirectionalRecord: null,
+      trajectoryDirectionalRecordStatus: 'legacy_pre_directional_generation',
+      versions: {
+        lifecycle: 'webchess-lifecycle-v2.4',
+        trajectoryDirectionalRecord: null,
+      },
+    })
     lifecycle = await repository.transition({
       ownerId: OWNER,
       gameId: GAME_ID,
@@ -553,7 +1043,10 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       activityType: 'adversarial_review_authorized',
       configurationDigest: 'd'.repeat(64),
     })
-    const review = portiaReview(survivors)
+    const review = portiaReview(
+      survivors,
+      LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+    )
     await database.adapter.query({
       text: `
         UPDATE model_requests
@@ -652,6 +1145,24 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       answerUserPrompt: '{\n  "reviewed_prompt": "exact player-visible input"\n}',
       configurationDigest: 'd'.repeat(64),
     })
+    const preservedLegacyContracts = await database.adapter.query<{
+      contract_version: string
+      algorithm_version: string
+    }>({
+      text: `
+        SELECT review.contract_version, decision.algorithm_version
+        FROM portia_reviews AS review
+        INNER JOIN gate_decisions AS decision
+          ON decision.lifecycle_run_id = review.lifecycle_run_id
+        WHERE review.clerk_user_id = $1::text
+          AND review.lifecycle_run_id = $2::uuid
+      `,
+      values: [OWNER, lifecycle.id],
+    })
+    expect(preservedLegacyContracts.rows).toEqual([{
+      contract_version: LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+      algorithm_version: 'webchess-gate-v4',
+    }])
     expect(lifecycle.answerUserPrompt).toBe(
       '{\n  "reviewed_prompt": "exact player-visible input"\n}',
     )
@@ -1819,6 +2330,10 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       gameAttempt: 2,
       sameFieldRetryCount: 1,
       fieldRegenerationCount: 0,
+      versions: {
+        lifecycle: 'webchess-lifecycle-v2.4',
+        trajectoryDirectionalRecord: null,
+      },
     })
     const firstReplayFailure = await advanceToGateFailure(firstReplayGame.id, {
       fingerprint: terminalFingerprint(repeatedEcology),
@@ -1847,6 +2362,10 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       gameAttempt: 3,
       sameFieldRetryCount: 2,
       fieldRegenerationCount: 0,
+      versions: {
+        lifecycle: 'webchess-lifecycle-v2.4',
+        trajectoryDirectionalRecord: null,
+      },
     })
     await advanceToGateFailure(secondReplayGame.id)
 
@@ -1866,6 +2385,10 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       gameAttempt: 1,
       sameFieldRetryCount: 2,
       fieldRegenerationCount: 1,
+      versions: {
+        lifecycle: CURRENT_LIFECYCLE_VERSIONS.lifecycle,
+        trajectoryDirectionalRecord: null,
+      },
     })
 
     const boundedGame = await insertMappedRetryGame(
@@ -1873,11 +2396,12 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       null,
       'portia-bounded-failure-field',
     )
-    let bounded = await repository.ensureForGame({
+    await repository.ensureForGame({
       ownerId: RETRY_OWNER,
       game: boundedGame,
       trajectorySeed: 'portia-bounded-failure-trajectory',
     })
+    let bounded = await markLifecycleLegacy(RETRY_OWNER, boundedGame.id)
     bounded = await repository.transition({
       ownerId: RETRY_OWNER,
       gameId: boundedGame.id,
@@ -2027,11 +2551,12 @@ describe('durable WebChess 2.0 lifecycle repository', () => {
       'charlotte-bounded-failure-field',
       CHARLOTTE_OWNER,
     )
-    let bounded = await repository.ensureForGame({
+    await repository.ensureForGame({
       ownerId: CHARLOTTE_OWNER,
       game: boundedGame,
       trajectorySeed: 'charlotte-bounded-failure-trajectory',
     })
+    let bounded = await markLifecycleLegacy(CHARLOTTE_OWNER, boundedGame.id)
     for (const [to, stage, activityType] of [
       ['chess_playing', 'chess', 'game_started'],
       ['chess_terminal', 'chess', 'terminal_replay_verified'],

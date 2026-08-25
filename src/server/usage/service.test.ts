@@ -194,6 +194,11 @@ describe('usage configuration', () => {
     expect(() => loadUsageConfig({ WEBCHESS_HMAC_SECRET: 'too-short' })).toThrow(
       /at least 32 bytes/,
     )
+    expect(() => loadUsageConfig({
+      WEBCHESS_HMAC_SECRET: HMAC_SECRET,
+      WEBCHESS_DELETION_HMAC_SECRET: 'd'.repeat(48),
+      WEBCHESS_MODEL_LEASE_SECONDS: '179',
+    })).toThrow(/at least 180/u)
   })
 
   it('rejects an app concurrency value that the schema cannot enforce', () => {
@@ -824,6 +829,39 @@ describe('reservation lifecycle', () => {
     expect(statement?.text).toContain("status = 'in_progress'")
   })
 
+  it('renews an in-progress request lease without consuming provider usage twice', async () => {
+    const db = new FakeSqlAdapter()
+    db.transactionResults = [
+      sqlResult([{ held: null }]),
+      sqlResult([{ code: 'ALREADY_STARTED' }]),
+    ]
+
+    await expect(
+      controllerWith(db).beginProviderCall({
+        userId: USER_ID,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'in_progress',
+      alreadyStarted: true,
+    })
+
+    const statement = db.transactions[0]?.statements[1]
+    expect(statement?.text).toBe(beginProviderCallSql)
+    expect(statement?.values?.slice(0, 5)).toEqual([
+      REQUEST_ID,
+      USER_ID,
+      LEASE_TOKEN,
+      NOW.toISOString(),
+      '2026-07-26T19:15:34.000Z',
+    ])
+    expect(statement?.text).toContain("decision.code = 'ALLOW'")
+    expect(statement?.text).toContain("decision.code IN ('ALLOW', 'ALREADY_STARTED')")
+    expect(statement?.text).toContain('SET lease_expires_at = $5::timestamptz')
+  })
+
   it.each([
     ['ACCOUNT_DELETED', 403],
     ['ACCOUNT_SUSPENDED', 403],
@@ -983,6 +1021,48 @@ describe('reservation lifecycle', () => {
     )
   })
 
+  it('persists an indeterminate timeout idempotently and releases its durable slot', async () => {
+    const db = new FakeSqlAdapter()
+    db.transactionResults = [
+      sqlResult([{ held: null }]),
+      sqlResult([{ code: 'ALREADY_SETTLED' }]),
+    ]
+
+    await expect(
+      controllerWith(db).settleModelRequest({
+        userId: USER_ID,
+        requestId: REQUEST_ID,
+        leaseToken: LEASE_TOKEN,
+        outcome: 'indeterminate',
+        failureCode: 'answer_operation_timeout',
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      status: 'indeterminate',
+      alreadySettled: true,
+    })
+
+    const statement = db.transactions[0]?.statements[1]
+    expect(statement?.text).toBe(settleModelRequestSql)
+    expect(statement?.values?.slice(3, 9)).toEqual([
+      'indeterminate',
+      null,
+      null,
+      'answer_operation_timeout',
+      null,
+      NOW.toISOString(),
+    ])
+    expect(settleModelRequestSql).toContain(
+      "$4::text IN ('failed', 'indeterminate')",
+    )
+    expect(settleModelRequestSql).toContain(
+      "SET\n    request_id = NULL",
+    )
+    expect(settleModelRequestSql).toContain(
+      'slots.request_id = completed_request.id',
+    )
+  })
+
   it('rejects reasoning traces in a durable result payload before SQL', async () => {
     const db = new FakeSqlAdapter()
 
@@ -1068,6 +1148,16 @@ describe('reservation lifecycle', () => {
     expect(statement?.values?.[4]).toBe('released_provider_not_started')
     expect(statement?.text).toContain('refund_model_reservation')
     expect(statement?.text).toContain('refund_game_reservation')
+    expect(statement?.text).toContain(
+      "status FROM request_state) NOT IN ('reserved', 'in_progress')",
+    )
+    expect(statement?.text).toContain(
+      "$5::text <> 'released_provider_not_started'",
+    )
+    expect(statement?.text).toContain(
+      "WHEN request_state.status = 'in_progress' THEN 1",
+    )
+    expect(statement?.text).toContain('provider_started_at = CASE')
   })
 
   it('reconciles expired leases through the durable lock protocol', async () => {

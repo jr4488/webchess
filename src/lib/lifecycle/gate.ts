@@ -7,7 +7,11 @@ import type {
   PortiaReview,
 } from './contracts'
 import { COVERAGE_TAGS } from './contracts'
-import { CURRENT_LIFECYCLE_VERSIONS } from './versions'
+import {
+  CURRENT_LIFECYCLE_VERSIONS,
+  LEGACY_GATE_ALGORITHM_VERSION,
+} from './versions'
+import type { TrajectoryDirectionalRecord } from './trajectory-direction'
 
 export const GATE_THRESHOLDS = Object.freeze({
   minimumUsableCandidates: 3,
@@ -77,6 +81,7 @@ export function evaluateGate(
     sameFieldRetryCount: 0,
     fieldRegenerationCount: 0,
   },
+  directionalRecord?: TrajectoryDirectionalRecord,
 ): GateResult {
   if (
     !Number.isInteger(context.sameFieldRetryCount) ||
@@ -163,6 +168,34 @@ export function evaluateGate(
     })
 
   const missingRequirements: string[] = []
+  let directionalBindingsSatisfied: boolean | undefined
+  if (directionalRecord) {
+    const allowedKeys = new Set(directionalRecord.survivingDirectionKeys)
+    directionalBindingsSatisfied =
+      review.contractVersion === CURRENT_LIFECYCLE_VERSIONS.portiaContract &&
+      review.directionalRecordVersion === directionalRecord.version &&
+      review.directionalRecordDigest === directionalRecord.digest &&
+      typeof review.directionalSummary === 'string' &&
+      review.directionalSummary.trim().length >= 20 &&
+      review.assessments.every((assessment) => {
+        const keys = assessment.directionalSignalKeys
+        return assessment.directionalRecordDigest === directionalRecord.digest &&
+          typeof assessment.directionalInterpretation === 'string' &&
+          assessment.directionalInterpretation.trim().length >= 20 &&
+          typeof assessment.directionalAmendment === 'string' &&
+          assessment.directionalAmendment.trim().length >= 20 &&
+          Array.isArray(keys) &&
+          keys.length >= 1 &&
+          keys.length <= 8 &&
+          new Set(keys).size === keys.length &&
+          keys.every((key) => allowedKeys.has(key))
+      })
+    if (!directionalBindingsSatisfied) {
+      missingRequirements.push(
+        'The trajectory-derived directional record is missing or incompletely bound into Portia scrutiny.',
+      )
+    }
+  }
   if (review.promptDecision !== 'permit') {
     missingRequirements.push(
       `Portia did not permit the reviewed answer prompt: ${review.promptDecision}.`,
@@ -229,11 +262,41 @@ export function evaluateGate(
     ? 'answer'
     : promptRecommendation(review, context, duplicateHeavy)
   const explanation = passed
-    ? `Portia's candidate prompt is permitted: ${usable.length} usable candidates remain across ${independentClusterCount} independent clusters and all required coverage floors.`
+    ? `Portia's candidate prompt is permitted: ${usable.length} usable candidates remain across ${independentClusterCount} independent clusters and all required coverage floors${directionalRecord ? `; the exact trajectory-directional record ${directionalRecord.digest} is bound through scrutiny` : ''}.`
     : `The Gate failed ${missingRequirements.length} sufficiency requirement${missingRequirements.length === 1 ? '' : 's'}; ${recommendedNextTransition === 'retry_game' ? 'another trajectory is recommended' : recommendedNextTransition === 'retry_field' ? 'the semantic field should be regenerated' : 'the bounded retry policy is exhausted'}.`
 
-  return {
-    algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+  const reviewDirectionalBinding =
+    review.contractVersion === CURRENT_LIFECYCLE_VERSIONS.portiaContract
+      ? {
+          version: review.directionalRecordVersion ?? null,
+          digest: review.directionalRecordDigest ?? null,
+          summary: review.directionalSummary ?? null,
+        }
+      : null
+
+  const inputDigest = stableDigest({
+    contractVersion: review.contractVersion,
+    assessments,
+    contradictions: review.crossCandidateContradictions,
+    gateInputs: review.recommendedGateInputs,
+    missingCoverage: review.missingCoverage,
+    promptDecision: review.promptDecision,
+    reviewedAnswerPromptDigest: review.reviewedAnswerPromptDigest,
+    ...(directionalRecord
+      ? {
+          reviewDirectionalBinding,
+          directionalRecord: {
+            version: directionalRecord.version,
+            digest: directionalRecord.digest,
+            survivingDirectionKeys: directionalRecord.survivingDirectionKeys,
+          },
+        }
+      : {}),
+    context,
+    thresholds: GATE_THRESHOLDS,
+  })
+
+  const result = {
     passed,
     usableCandidateCount: usable.length,
     preservedCount,
@@ -250,16 +313,20 @@ export function evaluateGate(
     missingRequirements,
     recommendedNextTransition,
     explanation,
-    inputDigest: stableDigest({
-      contractVersion: review.contractVersion,
-      assessments,
-      contradictions: review.crossCandidateContradictions,
-      gateInputs: review.recommendedGateInputs,
-      missingCoverage: review.missingCoverage,
-      promptDecision: review.promptDecision,
-      reviewedAnswerPromptDigest: review.reviewedAnswerPromptDigest,
-      context,
-      thresholds: GATE_THRESHOLDS,
-    }),
+    inputDigest,
+  }
+  if (directionalRecord) {
+    return {
+      ...result,
+      algorithmVersion: CURRENT_LIFECYCLE_VERSIONS.gateAlgorithm,
+      directionalRecordVersion: directionalRecord.version,
+      directionalRecordDigest: directionalRecord.digest,
+      survivingDirectionKeys: directionalRecord.survivingDirectionKeys,
+      directionalBindingsSatisfied: directionalBindingsSatisfied === true,
+    }
+  }
+  return {
+    ...result,
+    algorithmVersion: LEGACY_GATE_ALGORITHM_VERSION,
   }
 }

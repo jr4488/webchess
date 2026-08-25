@@ -303,6 +303,9 @@ const RUNTIME_COLUMN_CONTRACT = {
     ['charlotte_active_model_request_id', 'uuid', false],
     ['charlotte_failed_attempt_count', 'smallint', true],
     ['charlotte_failure_limit', 'smallint', true],
+    ['trajectory_directional_record_version', 'text', false],
+    ['trajectory_directional_record_digest', 'character(64)', false],
+    ['trajectory_directional_record', 'jsonb', false],
   ],
   portia_reviews: [
     ['id', 'uuid', true],
@@ -709,6 +712,49 @@ const WILBUR_MUTATION_REQUEST_FUNCTION_SOURCE = normalizeFunctionSource(`
     END
   `)
 
+const TRAJECTORY_DIRECTIONAL_RECORD_FUNCTION_SOURCE = normalizeFunctionSource(`
+    BEGIN
+      IF TG_OP = 'UPDATE' THEN
+        IF OLD.trajectory_directional_record IS NOT NULL AND (
+          NEW.trajectory_directional_record_version IS DISTINCT FROM
+            OLD.trajectory_directional_record_version
+          OR NEW.trajectory_directional_record_digest IS DISTINCT FROM
+            OLD.trajectory_directional_record_digest
+          OR NEW.trajectory_directional_record IS DISTINCT FROM
+            OLD.trajectory_directional_record
+          OR NEW.terminal_fingerprint IS DISTINCT FROM OLD.terminal_fingerprint
+          OR NEW.survivor_set IS DISTINCT FROM OLD.survivor_set
+        ) THEN
+          RAISE EXCEPTION
+            'Persisted trajectory directional and terminal evidence is immutable.'
+            USING ERRCODE = '23514';
+        END IF;
+
+        IF
+          OLD.trajectory_directional_record IS NULL
+          AND NEW.trajectory_directional_record IS NOT NULL
+          AND (
+            OLD.state <> 'chess_playing'
+            OR NEW.state <> 'chess_terminal'
+            OR NEW.revision <> OLD.revision + 1
+            OR NEW.terminal_fingerprint IS NULL
+            OR NEW.survivor_set IS NULL
+          )
+        THEN
+          RAISE EXCEPTION
+            'A trajectory directional record must be bound by the terminal compare-and-swap.'
+            USING ERRCODE = '23514';
+        END IF;
+      ELSIF NEW.trajectory_directional_record IS NOT NULL THEN
+        RAISE EXCEPTION
+          'A trajectory directional record cannot be inserted before terminal replay settlement.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      RETURN NEW;
+    END
+  `)
+
 const RUNTIME_TRIGGER_CONTRACT = [
   {
     table_name: 'wilbur_actions',
@@ -754,9 +800,75 @@ const RUNTIME_TRIGGER_CONTRACT = [
     initially_deferred: false,
     parent_trigger: false,
   },
+  {
+    table_name: 'lifecycle_runs',
+    trigger_name: 'lifecycle_runs_trajectory_directional_record_guard',
+    function_name: 'webchess_guard_trajectory_directional_record',
+    function_source: TRAJECTORY_DIRECTIONAL_RECORD_FUNCTION_SOURCE,
+    function_config: 'search_path=pg_catalog, pg_temp',
+    security_definer: false,
+    leakproof: false,
+    function_owner_isolated: true,
+    volatility: 'v',
+    parallel_mode: 'u',
+    enabled_mode: 'O',
+    trigger_type: 23,
+    has_when_clause: false,
+    update_columns: '',
+    argument_count: 0,
+    argument_bytes: 0,
+    constraint_trigger: false,
+    trigger_deferrable: false,
+    initially_deferred: false,
+    parent_trigger: false,
+  },
 ]
 
 const RUNTIME_CONSTRAINT_CONTRACT = [
+  {
+    table_name: 'lifecycle_runs',
+    constraint_name:
+      'lifecycle_runs_trajectory_directional_record_binding_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (trajectory_directional_record IS NULL AND (lifecycle_version <> 'webchess-lifecycle-v2.5'::text OR terminal_fingerprint IS NULL) OR trajectory_directional_record IS NOT NULL AND lifecycle_version = 'webchess-lifecycle-v2.5'::text AND terminal_fingerprint IS NOT NULL AND survivor_set IS NOT NULL AND (state <> ALL (ARRAY['anansi_pending'::text, 'anansi_running'::text, 'field_ready'::text, 'chess_ready'::text, 'chess_playing'::text])))",
+  },
+  {
+    table_name: 'lifecycle_runs',
+    constraint_name:
+      'lifecycle_runs_trajectory_directional_record_complete',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      'CHECK (trajectory_directional_record_version IS NULL AND trajectory_directional_record_digest IS NULL AND trajectory_directional_record IS NULL OR trajectory_directional_record_version IS NOT NULL AND trajectory_directional_record_digest IS NOT NULL AND trajectory_directional_record IS NOT NULL)',
+  },
+  {
+    table_name: 'lifecycle_runs',
+    constraint_name:
+      'lifecycle_runs_trajectory_directional_record_provenance_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (trajectory_directional_record_version IS NULL AND trajectory_directional_record_digest IS NULL OR trajectory_directional_record_version = 'webchess-directional-record-v1'::text AND trajectory_directional_record_digest ~ '^[0-9a-f]{64}$'::text)",
+  },
+  {
+    table_name: 'lifecycle_runs',
+    constraint_name:
+      'lifecycle_runs_trajectory_directional_record_shape_valid',
+    constraint_type: 'c',
+    validated: true,
+    deferrable: false,
+    initially_deferred: false,
+    definition:
+      "CHECK (trajectory_directional_record IS NULL OR jsonb_typeof(trajectory_directional_record) = 'object'::text AND octet_length(trajectory_directional_record::text) <= 4000000 AND trajectory_directional_record ? 'version'::text AND jsonb_typeof(trajectory_directional_record -> 'version'::text) = 'string'::text AND ((trajectory_directional_record ->> 'version'::text) = trajectory_directional_record_version) IS TRUE AND trajectory_directional_record ? 'digest'::text AND jsonb_typeof(trajectory_directional_record -> 'digest'::text) = 'string'::text AND ((trajectory_directional_record ->> 'digest'::text) = trajectory_directional_record_digest::text) IS TRUE)",
+  },
   {
     table_name: 'games',
     constraint_name: 'games_research_consent_decision_valid',
@@ -1489,6 +1601,10 @@ const RUNTIME_COMPATIBILITY_SQL = `
         'games_research_consent_decision_valid',
         'games_research_consent_shape',
         'games_research_consent_version_valid',
+        'lifecycle_runs_trajectory_directional_record_binding_valid',
+        'lifecycle_runs_trajectory_directional_record_complete',
+        'lifecycle_runs_trajectory_directional_record_provenance_valid',
+        'lifecycle_runs_trajectory_directional_record_shape_valid',
         'research_requests_consent_shape',
         'research_requests_json_shapes',
         'research_requests_opt_out_shape',

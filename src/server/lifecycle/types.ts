@@ -15,6 +15,7 @@ import type {
 } from '../../lib/lifecycle'
 import type { AssumptionResult } from '../../lib/lifecycle/contracts'
 import type { DurableGameSnapshot } from '../games'
+import type { TrajectoryDirectionalRecord } from '../../lib/lifecycle/trajectory-direction'
 
 export interface EnsureLifecycleInput {
   readonly ownerId: string
@@ -36,6 +37,7 @@ export interface TransitionLifecycleInput {
   readonly configurationDigest: string
   readonly terminalFingerprint?: string
   readonly survivors?: readonly SurvivorCandidate[]
+  readonly trajectoryDirectionalRecord?: TrajectoryDirectionalRecord
 }
 
 export interface StorePortiaInput {

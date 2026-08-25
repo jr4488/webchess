@@ -218,6 +218,7 @@ describe('OpenClaw WebChess launcher', () => {
       WEBCHESS_OPENCLAW_BRIDGE_TOKEN: BRIDGE.token,
       WEBCHESS_OPENCLAW_BRIDGE_URL: BRIDGE.url,
       WEBCHESS_OPENCLAW_OWNER_ID: 'openclaw_test_installation',
+      WEBCHESS_OPENCLAW_SEARCH_TIMEOUT_MS: '300000',
       WEBCHESS_OPENCLAW_TIMEOUT_MS: '150000',
       WEBCHESS_OPENCLAW_TRANSPORT: 'local',
       WEBCHESS_RELEASE_SHA: 'a'.repeat(40),
