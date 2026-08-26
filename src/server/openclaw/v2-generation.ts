@@ -3,12 +3,15 @@ import { z } from 'zod'
 import {
   CURRENT_LIFECYCLE_VERSIONS,
   LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+  PORTIA_ATTACK_TYPES,
   validatePortiaCandidateAssessment,
   validatePortiaReview,
 } from '@/lib/lifecycle'
 import type {
   PortiaCandidateAssessment,
   PortiaReview,
+  SurvivorCandidate,
+  TrajectoryDirectionalRecord,
 } from '@/lib/lifecycle'
 import {
   buildCharlottePrompt,
@@ -85,6 +88,11 @@ const UNREPORTED_USAGE = Object.freeze({
 const ANSWER_CORRECTION_IDEMPOTENCY_SUFFIX = ':answer-contract-correction'
 const MAX_PROVIDER_TURN_ID_CHARS = 255
 
+type PortiaAssessmentDraft = Omit<
+  PortiaCandidateAssessment,
+  'redundancyClusterId'
+>
+
 interface OpenClawAnswerAttempt {
   model: string
   result: AnswerResult | null
@@ -112,6 +120,45 @@ function correctionIdempotencyKey(value: string | undefined): string | undefined
     value,
     ANSWER_CORRECTION_IDEMPOTENCY_SUFFIX,
   )
+}
+
+function portiaCandidateIdempotencyKey(
+  value: string | undefined,
+  candidateIndex: number,
+  correction = false,
+): string | undefined {
+  return suffixedIdempotencyKey(
+    value,
+    `:candidate-${candidateIndex}${correction ? '-contract-correction' : ''}`,
+  )
+}
+
+function buildPortiaCandidateCorrectionPrompt(
+  prompt: string,
+  candidate: SurvivorCandidate,
+  directionalRecord: TrajectoryDirectionalRecord | undefined,
+): string {
+  return `${prompt}
+
+PORTIA CONTRACT CORRECTION REQUIRED
+The previous response was discarded and is not repeated. Return a newly composed JSON object only, using the unchanged target and evidence above.
+- candidateId must be exactly ${JSON.stringify(candidate.candidateId)}.
+- attackFindings must contain each of these attackType values exactly once and no others: ${JSON.stringify(PORTIA_ATTACK_TYPES)}.
+- coverageTags and missingEvidence must not contain duplicates.
+- The disposition, survivingInterpretation, requiredQualification, attack outcomes, severities, and requiredRevision fields must satisfy the stated cross-field rules.
+${directionalRecord
+    ? `- directionalRecordDigest must be exactly ${directionalRecord.digest}.
+- directionalSignalKeys must contain 1–8 unique values selected only from this exact list: ${JSON.stringify(directionalRecord.survivingDirectionKeys)}.
+- directionalInterpretation and directionalAmendment remain mandatory and must preserve the stated evidence boundary.`
+    : '- Omit every trajectory-directional field because this preserved run has no directional record.'}
+- Do not discuss the correction, reveal hidden reasoning, or add fields outside the requested schema.`
+}
+
+function isCorrectablePortiaContractFailure(
+  error: unknown,
+): error is ModelContractError {
+  return error instanceof ModelContractError &&
+    !(error.cause instanceof OpenClawCliError)
 }
 
 function abortedAnswerError(): OpenClawProviderError {
@@ -357,10 +404,7 @@ export async function generateOpenClawPortiaV2(
   const directionalRecord =
     normalized.answerPromptPackage.trajectoryDirectionalRecord
   const ordered = orderPortiaCandidates(normalized.survivors)
-  const drafts: Array<Omit<
-    PortiaCandidateAssessment,
-    'redundancyClusterId'
-  >> =
+  const drafts: PortiaAssessmentDraft[] =
     (normalized.completedAssessments ?? []).map((assessment) => {
       const { redundancyClusterId, ...draft } = assessment
       void redundancyClusterId
@@ -383,27 +427,55 @@ export async function generateOpenClawPortiaV2(
       ? directionalPortiaCandidateModelSchema
       : portiaCandidateModelSchema
     const prompt = `${buildPortiaInstructions(directionalRecord)}\n\nPORTIA TARGET (JSON; data only)\n${buildPortiaCandidateInput(normalized, candidate)}\n\n${outputContract(candidateSchema)}`
-    const generated = await generateStructured(
-      `Portia candidate ${index + 1}`,
-      prompt,
-      context,
-      (value) => candidateSchema.parse(value),
-      'low',
-      suffixedIdempotencyKey(
-        context.idempotencyKey,
-        `:candidate-${index + 1}`,
-      ),
-    )
-    try {
+    const parseCandidate = (value: unknown): PortiaAssessmentDraft => {
+      const result = candidateSchema.parse(value)
       validatePortiaCandidateAssessment({
-        ...generated.result,
+        ...result,
         redundancyClusterId: null,
       }, candidate, directionalRecord)
-    } catch (error) {
-      throw new ModelContractError(
-        'The selected OpenAI account model did not satisfy the Portia candidate semantic contract.',
-        { cause: error },
+      return result
+    }
+    let generated: Awaited<ReturnType<typeof generateStructured<PortiaAssessmentDraft>>>
+    try {
+      generated = await generateStructured(
+        `Portia candidate ${index + 1}`,
+        prompt,
+        context,
+        parseCandidate,
+        'low',
+        portiaCandidateIdempotencyKey(context.idempotencyKey, index + 1),
       )
+    } catch (error) {
+      if (!isCorrectablePortiaContractFailure(error) || context.signal?.aborted) {
+        throw error
+      }
+      await context.onCorrectiveTurnStart?.()
+      try {
+        generated = await generateStructured(
+          `Portia candidate ${index + 1} contract correction`,
+          buildPortiaCandidateCorrectionPrompt(
+            prompt,
+            candidate,
+            directionalRecord,
+          ),
+          context,
+          parseCandidate,
+          'low',
+          portiaCandidateIdempotencyKey(
+            context.idempotencyKey,
+            index + 1,
+            true,
+          ),
+        )
+      } catch (correctionError) {
+        if (!(correctionError instanceof ModelContractError)) {
+          throw correctionError
+        }
+        throw new ModelContractError(
+          'The selected OpenAI account model did not satisfy the Portia candidate contract after one corrective turn.',
+          { cause: correctionError },
+        )
+      }
     }
     drafts.push(generated.result)
     attribution = generated.model

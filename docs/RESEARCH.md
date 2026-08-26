@@ -95,7 +95,13 @@ turn itself remains capped at 150 seconds. The per-request lease and each
 single-generation route provide 35 additional seconds—335 seconds total: up to
 5 seconds to drain the loopback response after the authenticated envelope, then
 30 seconds for durable settlement. Neither grace period permits more provider
-work; Portia's multi-generation route remains separately bounded. Answer
+work. Portia's multi-generation route remains separately bounded; each
+contract-invalid candidate may receive one corrective provider turn after the
+same durable fence is renewed, without copying or persisting the rejected
+output. A run with `S` survivors can add at most `S` corrective turns, and the
+existing three-attempt budget bounds the total at `3S`. If a correction also
+fails, the run-level attempt fails once.
+Answer
 separately has a hard 300-second logical-operation
 deadline across its initial and at most one contract-corrective turn, and no
 bridge request restarts that deadline. These operational bounds are not study

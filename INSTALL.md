@@ -48,7 +48,7 @@ The exact current method-version tuple is part of that candidate identity:
 | --- | --- |
 | Lifecycle | `webchess-lifecycle-v2.5` |
 | Division prompt | `webchess-division-v5` |
-| Portia prompt | `webchess-portia-v5` |
+| Portia prompt | `webchess-portia-v6` |
 | Portia review contract | `webchess-portia-review-v3` |
 | Gate algorithm | `webchess-gate-v5` |
 | Answer prompt | `webchess-answer-v5` |
@@ -108,7 +108,7 @@ mkdir -- "$WEBCHESS_INSTALL_WORKSPACE"
 cd -- "$WEBCHESS_INSTALL_WORKSPACE"
 export WEBCHESS_IDENTITY_URL='https://webchess.anansiportia.com/downloads/webchess-release-identity.json'
 curl --fail --location --remove-on-error --output webchess-release-identity.json "$WEBCHESS_IDENTITY_URL"
-node -e 'const m=require("./webchess-release-identity.json"),v={lifecycle:"webchess-lifecycle-v2.5",divisionPrompt:"webchess-division-v5",portiaPrompt:"webchess-portia-v5",portiaReview:"webchess-portia-review-v3",gateAlgorithm:"webchess-gate-v5",answerPrompt:"webchess-answer-v5",charlottePrompt:"webchess-charlotte-v6"}; if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved"||JSON.stringify(m.release?.methodVersions)!==JSON.stringify(v)) process.exit(1)'
+node -e 'const m=require("./webchess-release-identity.json"),v={lifecycle:"webchess-lifecycle-v2.5",divisionPrompt:"webchess-division-v5",portiaPrompt:"webchess-portia-v6",portiaReview:"webchess-portia-review-v3",gateAlgorithm:"webchess-gate-v5",answerPrompt:"webchess-answer-v5",charlottePrompt:"webchess-charlotte-v6"}; if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved"||JSON.stringify(m.release?.methodVersions)!==JSON.stringify(v)) process.exit(1)'
 export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.source.commit ?? "")')"
 test "${#WEBCHESS_RELEASE_SHA}" -eq 40
 ```
@@ -712,12 +712,17 @@ can stop at `S + 1` and an initial/fresh-field path at `S + 2`. Each game can
 also make up to one separately disclosed lifecycle-search invocation, in
 addition to the two per-launch readiness requests.
 The explicit profile-specific `models status --probe` in the preflight is a
-separate, additional provider request and allowance event. Technical retries, a
+separate, additional provider request and allowance event. Each structurally or
+semantically invalid Portia candidate may receive exactly one bounded
+corrective turn inside the same run-level attempt; the rejected output is not
+copied. A run with `S` survivors can add up to `S` corrections, and up to `3S`
+across the existing three-attempt Portia budget, in addition to repeated
+nominal candidate and summary calls. Technical retries, a
 repeated Portia summary, or the single allowed corrective Answer turn after a
-strictly contract-invalid first Answer can add calls. Provider/transport
-failure does not trigger that correction. Two Gate-authorized same-field games
-and one fresh field can further amplify model calls, context, runtime, and
-allowance use. Each Retry child inherits consent and can repeat its own bounded
+strictly contract-invalid first Answer can also add calls. Provider/transport
+failure does not trigger either kind of semantic correction. Two Gate-authorized
+same-field games and one fresh field can further amplify model calls, context,
+runtime, and allowance use. Each Retry child inherits consent and can repeat its own bounded
 search/page transmission; a fresh field also repeats Division. No duration or
 unmetered-use promise is made.
 

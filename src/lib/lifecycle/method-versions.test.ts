@@ -19,7 +19,7 @@ describe('canonical current method-version tuple', () => {
     expect(CURRENT_METHOD_VERSION_TUPLE).toEqual({
       lifecycle: 'webchess-lifecycle-v2.5',
       divisionPrompt: 'webchess-division-v5',
-      portiaPrompt: 'webchess-portia-v5',
+      portiaPrompt: 'webchess-portia-v6',
       portiaReview: 'webchess-portia-review-v3',
       gateAlgorithm: 'webchess-gate-v5',
       answerPrompt: 'webchess-answer-v5',

@@ -58,7 +58,7 @@ observed outcome. The exact current method-version tuple is:
 | --- | --- |
 | Lifecycle | `webchess-lifecycle-v2.5` |
 | Division prompt | `webchess-division-v5` |
-| Portia prompt | `webchess-portia-v5` |
+| Portia prompt | `webchess-portia-v6` |
 | Portia review contract | `webchess-portia-review-v3` |
 | Gate algorithm | `webchess-gate-v5` |
 | Answer prompt | `webchess-answer-v5` |
@@ -221,6 +221,15 @@ Answer output is strictly validated. If the first generation returns content
 that violates the Answer contract, WebChess may make exactly one corrective
 turn using the same approved evidence and bounded disclosure. Provider,
 transport, or cancellation failure does not earn that semantic correction.
+Portia applies the same bounded principle at candidate granularity: each
+structurally or semantically invalid candidate may receive exactly one
+corrective turn with a distinct idempotency identity after renewal of the same
+durable fence. The rejected response is not copied or persisted, and a second
+invalid response fails one run-level attempt under Portia's existing
+three-attempt budget. A run with `S` survivors can add at most `S` corrective
+generations; across all three attempts the bound is `3S`, in addition to any
+repeated nominal candidate and summary calls. The clean `S + 4` topology is the
+no-correction accepted path, not a maximum-call claim.
 Each lifecycle model request has a 300-second authenticated local bridge
 envelope for bounded preflight, one provider turn, and postflight. The provider
 turn itself remains capped at 150 seconds. The per-request lease and each
@@ -493,8 +502,10 @@ For `S` terminal survivors, the nominal accepted lifecycle uses `S + 4` model
 generations: Division, `S` Portia candidate calls, one Portia summary, Answer,
 and Charlotte. For the allowed 1-32 survivors this is 5-36 generations, plus at
 most one separately disclosed material research search. A contract-invalid
-first Answer can add one corrective generation. Technical attempts, a repeated
-Portia summary, Gate-authorized same-field retries, and one fresh-field retry
+first Answer can add one corrective generation. Contract-invalid Portia
+candidates can add up to `S` corrective generations per attempt and `3S` across
+the three-attempt budget. Technical attempts, a repeated Portia summary,
+Gate-authorized same-field retries, and one fresh-field retry
 can amplify model calls, context, runtime, and account allowance. WebChess
 makes no fixed-duration or unmetered-use promise.
 

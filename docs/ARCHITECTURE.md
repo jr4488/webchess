@@ -521,6 +521,11 @@ single-generation HTTP route allow 35 additional seconds—335 seconds total: up
 to 5 seconds to drain the loopback response after the authenticated envelope,
 then 30 seconds for durable settlement. Neither grace period permits more
 provider work. Portia's multi-generation route remains separately bounded.
+Each structurally or semantically invalid candidate may receive exactly one
+corrective turn using a distinct turn identity after the same durable fence is
+renewed; the rejected output is neither copied into that prompt nor persisted.
+A run with `S` survivors can therefore add at most `S` corrective turns, and
+the existing three-attempt budget bounds the total at `3S`.
 Answer also has a separate hard 300-second logical-operation deadline across
 its initial turn and, only after contract-invalid output, one corrective turn.
 The cutoff is captured at Answer HTTP route entry before authentication,

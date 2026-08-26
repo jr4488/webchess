@@ -526,29 +526,97 @@ describe('OpenClaw WebChess 2.2 model generation', () => {
     )
   })
 
-  it('classifies a schema-valid trajectory mismatch as a Portia contract failure', async () => {
+  it('repairs one contract-invalid Portia candidate without persisting the rejected draft', async () => {
+    const { input, review } = directionalPortiaCase()
+    const outputs = portiaProviderOutputs(review)
+    const validCandidate = outputs[0] as Record<string, unknown>
+    const rejectedDirectionalKey = 'not-a-surviving-direction'
+    outputs.unshift({
+      ...validCandidate,
+      directionalSignalKeys: [rejectedDirectionalKey],
+    })
+    const onProgress = vi.fn()
+    const onCorrectiveTurnStart = vi.fn()
+    harness.runOpenClawModel.mockImplementation(async () =>
+      modelResult(outputs.shift()))
+
+    const generated = await generateOpenClawPortiaV2(input, {
+      ...requestContext,
+      idempotencyKey: 'correctable-portia-candidate',
+      onProgress,
+      onCorrectiveTurnStart,
+    })
+
+    expect(generated.result).toEqual(review)
+    expect(harness.runOpenClawModel).toHaveBeenCalledTimes(
+      input.survivors.length + 2,
+    )
+    expect(harness.runOpenClawModel.mock.calls[0]?.[2]?.idempotencyKey)
+      .toBe('correctable-portia-candidate:candidate-1')
+    expect(harness.runOpenClawModel.mock.calls[1]?.[2]?.idempotencyKey)
+      .toBe('correctable-portia-candidate:candidate-1-contract-correction')
+    expect(harness.runOpenClawModel.mock.calls[1]?.[0]).toContain(
+      'PORTIA CONTRACT CORRECTION REQUIRED',
+    )
+    expect(harness.runOpenClawModel.mock.calls[1]?.[0]).not.toContain(
+      rejectedDirectionalKey,
+    )
+    expect(onCorrectiveTurnStart).toHaveBeenCalledOnce()
+    expect(onProgress.mock.calls.filter((call) =>
+      call[0].completedAssessments.length === 0)).toHaveLength(1)
+  })
+
+  it('classifies two schema-valid trajectory mismatches as one Portia contract failure', async () => {
     const { input, review } = directionalPortiaCase()
     const [candidate] = portiaProviderOutputs(review)
     const onProgress = vi.fn()
-    harness.runOpenClawModel.mockResolvedValueOnce(modelResult({
+    const onCorrectiveTurnStart = vi.fn()
+    const invalidCandidate = {
       ...(candidate as Record<string, unknown>),
       directionalSignalKeys: ['not-a-surviving-direction'],
-    }))
+    }
+    harness.runOpenClawModel
+      .mockResolvedValueOnce(modelResult(invalidCandidate))
+      .mockResolvedValueOnce(modelResult(invalidCandidate))
 
     await expect(generateOpenClawPortiaV2(input, {
       ...requestContext,
       idempotencyKey: 'semantic-portia-contract-failure',
       onProgress,
+      onCorrectiveTurnStart,
     })).rejects.toBeInstanceOf(ModelContractError)
 
-    expect(harness.runOpenClawModel).toHaveBeenCalledOnce()
+    expect(harness.runOpenClawModel).toHaveBeenCalledTimes(2)
+    expect(harness.runOpenClawModel.mock.calls.map((call) =>
+      call[2]?.idempotencyKey)).toEqual([
+      'semantic-portia-contract-failure:candidate-1',
+      'semantic-portia-contract-failure:candidate-1-contract-correction',
+    ])
     expect(onProgress).toHaveBeenCalledOnce()
+    expect(onCorrectiveTurnStart).toHaveBeenCalledOnce()
     expect(onProgress).toHaveBeenCalledWith({
       currentCandidateId: orderPortiaCandidates(input.survivors)[0]!.candidateId,
       completedCandidateIds: [],
       completedAssessments: [],
       totalCandidateCount: input.survivors.length,
     })
+  })
+
+  it('does not correct an invalid OpenClaw response envelope', async () => {
+    const { input } = directionalPortiaCase()
+    const onCorrectiveTurnStart = vi.fn()
+    harness.runOpenClawModel.mockRejectedValueOnce(
+      new OpenClawCliError('invalid-output', 'Malformed bridge envelope.'),
+    )
+
+    await expect(generateOpenClawPortiaV2(input, {
+      ...requestContext,
+      idempotencyKey: 'invalid-portia-envelope',
+      onCorrectiveTurnStart,
+    })).rejects.toBeInstanceOf(ModelContractError)
+
+    expect(harness.runOpenClawModel).toHaveBeenCalledOnce()
+    expect(onCorrectiveTurnStart).not.toHaveBeenCalled()
   })
 
   it('classifies a schema-valid Portia summary mismatch as a contract failure', async () => {

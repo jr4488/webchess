@@ -4083,6 +4083,16 @@ export function createApiServicesWithDependencies(
         const providerSignal = durableProviderSignal()
         let generated: Awaited<ReturnType<typeof generatePortiaReview>>
         try {
+          const renewPortiaProviderFence = async () => {
+            const renewed = await dependencies.usage.beginProviderCall({
+              userId: input.ownerId,
+              requestId: reservation.requestId,
+              leaseToken,
+            })
+            if (!renewed.ok) {
+              throw beginProviderCallError(renewed, 'portia')
+            }
+          }
           generated = await generator(portiaInput, {
             userId: input.ownerId,
             safetyHmacSecret: dependencies.hmacSecret,
@@ -4093,15 +4103,9 @@ export function createApiServicesWithDependencies(
               'portia',
               input.idempotencyKey,
             ),
+            onCorrectiveTurnStart: renewPortiaProviderFence,
             onProgress: async (progress) => {
-              const renewed = await dependencies.usage.beginProviderCall({
-                userId: input.ownerId,
-                requestId: reservation.requestId,
-                leaseToken,
-              })
-              if (!renewed.ok) {
-                throw beginProviderCallError(renewed, 'portia')
-              }
+              await renewPortiaProviderFence()
               const known = new Set(
                 lifecycle.survivors.map((candidate) => candidate.candidateId),
               )

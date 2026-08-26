@@ -5644,6 +5644,80 @@ describe('durable HTTP service adapter', () => {
       .not.toHaveBeenCalled()
   })
 
+  it('renews the Portia provider fence before one corrective turn without duplicating progress', async () => {
+    dependencies = currentDirectionalDependencies(
+      makeTrajectoryDirectionalFixture(),
+    )
+    const defaultGenerator = vi.mocked(
+      dependencies.portiaGenerator!,
+    ).getMockImplementation()
+    if (!defaultGenerator) {
+      throw new Error('The Portia fixture generator is missing.')
+    }
+    vi.mocked(dependencies.portiaGenerator!).mockImplementation(
+      async (input, context) => {
+        await context.onCorrectiveTurnStart?.()
+        return defaultGenerator(input, context)
+      },
+    )
+
+    const lifecycle = await createApiServicesWithDependencies(
+      dependencies,
+    ).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })
+
+    expect(lifecycle.state).toBe('gate_passed')
+    expect(dependencies.usage.beginProviderCall).toHaveBeenCalledTimes(3)
+    expect(dependencies.lifecycleRepository?.updatePortiaProgress)
+      .toHaveBeenCalledOnce()
+    expect(dependencies.usage.settleModelRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'succeeded' }),
+    )
+  })
+
+  it('does not dispatch a corrective Portia turn after lease renewal is denied', async () => {
+    dependencies = currentDirectionalDependencies(
+      makeTrajectoryDirectionalFixture(),
+    )
+    vi.mocked(dependencies.usage.beginProviderCall)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 'in_progress',
+        alreadyStarted: false,
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        code: 'LEASE_EXPIRED',
+        httpStatus: 410,
+      })
+    let correctiveTurnDispatched = false
+    vi.mocked(dependencies.portiaGenerator!).mockImplementation(
+      async (_input, context) => {
+        await context.onCorrectiveTurnStart?.()
+        correctiveTurnDispatched = true
+        throw new Error('A corrective turn must not start without its lease.')
+      },
+    )
+
+    await expect(createApiServicesWithDependencies(dependencies).runPortia({
+      ...operationInput(),
+      gameId: GAME_ID,
+      expectedRevision: 2,
+    })).rejects.toMatchObject({
+      code: 'CONFLICT',
+      status: 410,
+    })
+
+    expect(dependencies.usage.beginProviderCall).toHaveBeenCalledTimes(2)
+    expect(correctiveTurnDispatched).toBe(false)
+    expect(dependencies.usage.settleModelRequest).not.toHaveBeenCalled()
+    expect(dependencies.lifecycleRepository?.updatePortiaProgress)
+      .not.toHaveBeenCalled()
+  })
+
   it('settles an assembled Portia payload failure without leaving its provider request active', async () => {
     const fixture = makeTrajectoryDirectionalFixture()
     dependencies = currentDirectionalDependencies(fixture)

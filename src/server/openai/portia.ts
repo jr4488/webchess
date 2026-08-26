@@ -57,6 +57,8 @@ export interface PortiaProgress {
 
 export interface PortiaRequestContext extends ModelRequestContext {
   readonly onProgress?: (progress: PortiaProgress) => void | Promise<void>
+  /** Renew the existing durable request fence before the sole correction turn. */
+  readonly onCorrectiveTurnStart?: () => void | Promise<void>
 }
 
 export const portiaCandidateModelSchema = portiaCandidateAssessmentBaseSchema.omit({
