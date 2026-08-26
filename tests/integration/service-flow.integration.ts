@@ -57,6 +57,7 @@ const SOFTWARE_VERSION = 'service-flow-integration'
 const HMAC_SECRET = 'service-flow-hmac-secret-material'.repeat(2)
 const DELETION_HMAC_SECRET =
   'service-flow-deletion-secret-material'.repeat(2)
+const MIN_SUBSTANTIAL_ANSWER_PROMPT_CHARS = 100_000
 
 const USAGE_CONFIG: UsageConfig = {
   hmacSecret: HMAC_SECRET,
@@ -491,9 +492,14 @@ describe('complete API service flow against PostgreSQL', () => {
       },
     })
     expect(portiaGenerator).toHaveBeenCalledOnce()
-    expect(lifecycle.answerUserPrompt?.length).toBeGreaterThan(200_000)
+    expect(lifecycle.answerUserPrompt?.length).toBeGreaterThan(
+      MIN_SUBSTANTIAL_ANSWER_PROMPT_CHARS,
+    )
     expect(lifecycle.answerUserPrompt?.length).toBeLessThanOrEqual(
       MAX_PERSISTED_MODEL_PROMPT_CHARS,
+    )
+    expect(lifecycle.answerUserPrompt).toContain(
+      lifecycle.trajectoryDirectionalRecord?.digest,
     )
 
     const gatePrompt = await database.adapter.query({
@@ -505,7 +511,9 @@ describe('complete API service flow against PostgreSQL', () => {
       values: [lifecycle.id],
     })
     expect(gatePrompt.rows).toHaveLength(1)
-    expect(gatePrompt.rows[0]?.prompt_characters).toBeGreaterThan(200_000)
+    expect(gatePrompt.rows[0]?.prompt_characters).toBeGreaterThan(
+      MIN_SUBSTANTIAL_ANSWER_PROMPT_CHARS,
+    )
     expect(gatePrompt.rows[0]?.prompt_characters).toBeLessThanOrEqual(
       MAX_PERSISTED_MODEL_PROMPT_CHARS,
     )
