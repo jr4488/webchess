@@ -526,6 +526,51 @@ describe('OpenClaw WebChess 2.2 model generation', () => {
     )
   })
 
+  it('classifies a schema-valid trajectory mismatch as a Portia contract failure', async () => {
+    const { input, review } = directionalPortiaCase()
+    const [candidate] = portiaProviderOutputs(review)
+    const onProgress = vi.fn()
+    harness.runOpenClawModel.mockResolvedValueOnce(modelResult({
+      ...(candidate as Record<string, unknown>),
+      directionalSignalKeys: ['not-a-surviving-direction'],
+    }))
+
+    await expect(generateOpenClawPortiaV2(input, {
+      ...requestContext,
+      idempotencyKey: 'semantic-portia-contract-failure',
+      onProgress,
+    })).rejects.toBeInstanceOf(ModelContractError)
+
+    expect(harness.runOpenClawModel).toHaveBeenCalledOnce()
+    expect(onProgress).toHaveBeenCalledOnce()
+    expect(onProgress).toHaveBeenCalledWith({
+      currentCandidateId: orderPortiaCandidates(input.survivors)[0]!.candidateId,
+      completedCandidateIds: [],
+      completedAssessments: [],
+      totalCandidateCount: input.survivors.length,
+    })
+  })
+
+  it('classifies a schema-valid Portia summary mismatch as a contract failure', async () => {
+    const { input, review } = directionalPortiaCase()
+    const outputs = portiaProviderOutputs(review)
+    outputs[outputs.length - 1] = {
+      ...(outputs.at(-1) as Record<string, unknown>),
+      directionalRecordDigest: '0'.repeat(64),
+    }
+    harness.runOpenClawModel.mockImplementation(async () =>
+      modelResult(outputs.shift()))
+
+    await expect(generateOpenClawPortiaV2(input, {
+      ...requestContext,
+      idempotencyKey: 'semantic-portia-summary-failure',
+    })).rejects.toBeInstanceOf(ModelContractError)
+
+    expect(harness.runOpenClawModel).toHaveBeenCalledTimes(
+      input.survivors.length + 1,
+    )
+  })
+
   it('uses Charlotte\'s strict qualification-list transport and normalizes wounds', async () => {
     const directional = directionalPortiaCase()
     const record = directional.input.answerPromptPackage

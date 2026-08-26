@@ -394,10 +394,17 @@ export async function generateOpenClawPortiaV2(
         `:candidate-${index + 1}`,
       ),
     )
-    validatePortiaCandidateAssessment({
-      ...generated.result,
-      redundancyClusterId: null,
-    }, candidate, directionalRecord)
+    try {
+      validatePortiaCandidateAssessment({
+        ...generated.result,
+        redundancyClusterId: null,
+      }, candidate, directionalRecord)
+    } catch (error) {
+      throw new ModelContractError(
+        'The selected OpenAI account model did not satisfy the Portia candidate semantic contract.',
+        { cause: error },
+      )
+    }
     drafts.push(generated.result)
     attribution = generated.model
     const nextCandidate = ordered[index + 1] ?? null
@@ -433,14 +440,22 @@ export async function generateOpenClawPortiaV2(
     'low',
     suffixedIdempotencyKey(context.idempotencyKey, ':summary'),
   )
-  const review = validatePortiaReview({
-    ...summary.result,
-    contractVersion: directionalRecord
-      ? CURRENT_LIFECYCLE_VERSIONS.portiaContract
-      : LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
-    reviewedAnswerPromptDigest: normalized.answerPromptDigest,
-    assessments: mergePortiaAssessments(drafts, summary.result),
-  }, normalized.survivors, normalized.answerPromptDigest, directionalRecord)
+  let review: PortiaReview
+  try {
+    review = validatePortiaReview({
+      ...summary.result,
+      contractVersion: directionalRecord
+        ? CURRENT_LIFECYCLE_VERSIONS.portiaContract
+        : LEGACY_PROMPT_BOUND_PORTIA_CONTRACT_VERSION,
+      reviewedAnswerPromptDigest: normalized.answerPromptDigest,
+      assessments: mergePortiaAssessments(drafts, summary.result),
+    }, normalized.survivors, normalized.answerPromptDigest, directionalRecord)
+  } catch (error) {
+    throw new ModelContractError(
+      'The selected OpenAI account model did not satisfy the Portia summary semantic contract.',
+      { cause: error },
+    )
+  }
   return {
     providerId: null,
     model: summary.model || attribution,
