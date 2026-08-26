@@ -122,7 +122,7 @@ function lifecycleStatusText(
     return 'WebChess lifecycle stopped at Charlotte: audience qualification was unavailable after the bounded provider-attempt budget. The board-derived Answer remains available, but it is not Charlotte-qualified. Wilbur and Web are waiting.'
   }
   if (lifecycle.state === 'gate_passed' && gameStatus === 'answered') {
-    return 'WebChess lifecycle is at Charlotte: the generated board answer is ready for qualification.'
+    return 'WebChess lifecycle is at Charlotte: the generated Board Answer is ready for Charlotte\u2019s final review.'
   }
 
   if (currentIndex === 3) {

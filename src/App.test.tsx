@@ -898,7 +898,7 @@ describe('durable WebChess client flow', () => {
 
     expect(screen.getByText(PROBLEM)).toBeInTheDocument()
     expect(screen.getByRole('heading', {
-      name: /the answer, qualified for people and action/i,
+      name: /final answer after Charlotte review/i,
     })).toBeInTheDocument()
   })
 
@@ -1729,11 +1729,11 @@ describe('durable WebChess client flow', () => {
     await renderRestoredApp()
 
     expect(await screen.findByRole('heading', {
-      name: /The substantive board-derived answer/i,
+      name: /The Board Answer retained for provenance/i,
     }))
       .toBeInTheDocument()
     expect(await screen.findByRole('heading', {
-      name: /The answer, qualified for people and action/i,
+      name: /Final answer after Charlotte review/i,
     }))
       .toBeInTheDocument()
     expect(screen.getByText(/Protect the purpose, run the smallest reversible test/i))
@@ -1965,7 +1965,7 @@ describe('durable WebChess client flow', () => {
       name: 'Charlotte qualification is unavailable',
     })).toBeInTheDocument()
     expect(screen.getByRole('heading', {
-      name: 'The substantive board-derived answer',
+      name: 'The Board Answer retained for provenance',
     })).toBeInTheDocument()
     expect(screen.getByText(ANSWER.answer)).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: /Let the web meet reality/i }))

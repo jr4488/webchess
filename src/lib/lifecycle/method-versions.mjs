@@ -11,5 +11,5 @@ export const CURRENT_METHOD_VERSION_TUPLE = Object.freeze({
   portiaReview: 'webchess-portia-review-v3',
   gateAlgorithm: 'webchess-gate-v5',
   answerPrompt: 'webchess-answer-v5',
-  charlottePrompt: 'webchess-charlotte-v6',
+  charlottePrompt: 'webchess-charlotte-v7',
 })

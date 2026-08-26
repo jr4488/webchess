@@ -496,7 +496,7 @@ describe('production OpenAI division service', () => {
     expect(DIVISION_PROMPT_VERSION).toBe('webchess-division-v5')
     expect(ANSWER_PROMPT_VERSION).toBe('webchess-answer-v5')
     expect(CURRENT_LIFECYCLE_VERSIONS.charlottePrompt).toBe(
-      'webchess-charlotte-v6',
+      'webchess-charlotte-v7',
     )
     expect(DIVISION_PROMPT_VERSION.length).toBeLessThanOrEqual(80)
     expect(ANSWER_PROMPT_VERSION.length).toBeLessThanOrEqual(80)
@@ -1581,8 +1581,8 @@ describe('production OpenAI Charlotte service', () => {
     )
 
     expect(generated.result.structured).toEqual(output)
-    expect(generated.result.renderedAnswer).toContain("Charlotte’s qualification")
-    expect(generated.result.renderedAnswer).not.toContain(
+    expect(generated.result.renderedAnswer).toContain('Final answer after Charlotte')
+    expect(generated.result.renderedAnswer).toContain(
       portia.assessments[1].requiredQualification,
     )
     expect(generated.result.wordCount).toBeGreaterThan(0)
@@ -1619,9 +1619,12 @@ describe('production OpenAI Charlotte service', () => {
     expect(String(body.instructions)).toContain(
       'smallest materially sufficient set of one to 4',
     )
+    expect(String(body.instructions)).toContain(
+      'complete, standalone final answer shown to the player',
+    )
   })
 
-  it('accepts a concise review of a live-like all-wounded field without counting exact qualifications twice', () => {
+  it('appends each exact qualification once without requiring model prose duplication', () => {
     const basePortia = validPortiaReview()
     const assessments = Array.from({ length: 8 }, (_, index) => ({
       ...basePortia.assessments[index % basePortia.assessments.length],
@@ -1651,7 +1654,7 @@ describe('production OpenAI Charlotte service', () => {
     const normalized = normalizeCharlotteGeneration(result, portia)
 
     expect(normalized.structured.supportingCandidateIds).toHaveLength(4)
-    expect(normalized.renderedAnswer).not.toContain(
+    expect(normalized.renderedAnswer).toContain(
       selected[0].requiredQualification,
     )
     expect(Object.values(
@@ -1669,6 +1672,35 @@ describe('production OpenAI Charlotte service', () => {
         ]),
       ),
     }, portia)).toThrow(/too_big|Too big|4/u)
+  })
+
+  it('rejects a Charlotte result that only tells an editor how to revise the stored Answer', () => {
+    const portia = validPortiaReview()
+    const result = {
+      ...validCharlotteResult(portia),
+      directAnswer:
+        'Keep the stored answer\u2019s supported core, but revise it to foreground uncertainty, affected people, and a reversible test before presenting the corrected result.',
+    }
+
+    expect(() => normalizeCharlotteGeneration(result, portia)).toThrow(
+      /standalone final answer/u,
+    )
+    expect(() => normalizeCharlotteGeneration({
+      ...validCharlotteResult(portia),
+      recommendation:
+        'Revise the stored answer before showing it to the player, then add the missing uncertainty and affected-party constraints.',
+    }, portia)).toThrow(/standalone final answer/u)
+  })
+
+  it('does not confuse operational response language or evidence-sensitive conclusions with deferred editing', () => {
+    const portia = validPortiaReview()
+    const result = {
+      ...validCharlotteResult(portia),
+      directAnswer:
+        'Update your incident response plan through one bounded tabletop exercise, record the observed recovery gaps, and change the answer when new evidence materially changes the decision threshold.',
+    }
+
+    expect(() => normalizeCharlotteGeneration(result, portia)).not.toThrow()
   })
 
   it('fails closed without Gate authority, provenance, or valid grounded output', async () => {

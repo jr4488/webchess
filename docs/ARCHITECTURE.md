@@ -51,9 +51,10 @@ access separate so that each has an inspectable provenance and failure mode.
    ends at `insufficient_basis`.
 10. **Answer, then Charlotte** — Portia permission and a persisted Gate pass
     authorize generation from the exact reviewed prompt and directional
-    record. Charlotte then qualifies that exact generated answer and its
-    directional provenance for evidence boundaries, values, stakeholders,
-    audience, and reversible action; it cannot substitute an unrelated answer.
+    record. Charlotte then applies its evidence-boundary, values, stakeholder,
+    audience, and reversible-action review to produce one standalone corrected
+    final answer. The generated Answer remains immutable provenance; Charlotte
+    cannot defer edits or substitute unrelated analysis.
 11. **Wilbur and Web** — the player owns action status and appends observations
     to the immutable genealogy; model output cannot declare real-world success.
 
@@ -660,8 +661,10 @@ dedicated OpenClaw profile and one loopback PostgreSQL database.
 - Answer generation is allowed only after Portia permits that exact prompt and
   directional binding and the deterministic Gate passes them.
 - Charlotte is allowed only after the approved Answer is durably stored; it
-  qualifies that exact generated answer and directional provenance and cannot
-  replace either.
+  produces the standalone corrected final answer from that exact generated
+  Answer and directional provenance. The source Answer remains immutable
+  provenance, and Charlotte cannot defer edits or replace it with unrelated
+  analysis.
 - Portia progress is persisted per signal and technical failure is bounded to
   three provider-started attempts before `portia_unavailable`.
 - Retry is bounded to two same-field games and one regenerated field.

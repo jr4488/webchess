@@ -65,6 +65,10 @@ describe('public candidate mapping and method taxonomy', () => {
     expect(scoped.getByRole('heading', { name: 'Gate' })).toBeVisible()
     expect(scoped.getByRole('heading', { name: 'Retry' })).toBeVisible()
     expect(scoped.getByRole('heading', { name: 'Answer artifact' })).toBeVisible()
+    expect(scoped.getByRole('heading', { name: 'Charlotte' }).closest('article'))
+      .toHaveTextContent('one standalone corrected final answer')
+    expect(scoped.getByRole('heading', { name: 'Charlotte' }).closest('article'))
+      .toHaveTextContent('defer corrections')
     expect(
       scoped.getByText('Generated artifact · not an authority'),
     ).toBeVisible()

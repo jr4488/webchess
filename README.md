@@ -78,9 +78,10 @@ mistake salience for evidence.
    digest-bound projection of the full directional record: the eight surviving
    signals, their scoring/support provenance, explanation, and usable Portia
    amendments. The complete record remains durable for replay/export.
-9. **Charlotte** qualifies that stored answer from the same directional
-   projection and proposes exactly three reversible actions without silently
-   replacing it.
+9. **Charlotte** turns that stored Answer into one standalone corrected final
+   answer from the same directional projection, visibly applies its material
+   qualifications, and proposes exactly three reversible actions. The earlier
+   Answer remains visible only as provenance; no later correction stage exists.
 10. **Wilbur and the Web** let the person own an action, record observation, and
    preserve the case genealogy for export and later verification.
 
@@ -161,7 +162,7 @@ mkdir -- "$WEBCHESS_INSTALL_WORKSPACE"
 cd -- "$WEBCHESS_INSTALL_WORKSPACE"
 export WEBCHESS_IDENTITY_URL='https://webchess.anansiportia.com/downloads/webchess-release-identity.json'
 curl --fail --location --remove-on-error --output webchess-release-identity.json "$WEBCHESS_IDENTITY_URL"
-node -e 'const m=require("./webchess-release-identity.json"),v={lifecycle:"webchess-lifecycle-v2.5",divisionPrompt:"webchess-division-v5",portiaPrompt:"webchess-portia-v6",portiaReview:"webchess-portia-review-v3",gateAlgorithm:"webchess-gate-v5",answerPrompt:"webchess-answer-v5",charlottePrompt:"webchess-charlotte-v6"}; if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved"||JSON.stringify(m.release?.methodVersions)!==JSON.stringify(v)) process.exit(1)'
+node -e 'const m=require("./webchess-release-identity.json"),v={lifecycle:"webchess-lifecycle-v2.5",divisionPrompt:"webchess-division-v5",portiaPrompt:"webchess-portia-v6",portiaReview:"webchess-portia-review-v3",gateAlgorithm:"webchess-gate-v5",answerPrompt:"webchess-answer-v5",charlottePrompt:"webchess-charlotte-v7"}; if(m.schema!=="webchess-release-identity/1"||m.status!=="resolved"||JSON.stringify(m.release?.methodVersions)!==JSON.stringify(v)) process.exit(1)'
 export WEBCHESS_RELEASE_SHA="$(node -e 'const m=require("./webchess-release-identity.json"); process.stdout.write(m.source.commit ?? "")')"
 test "${#WEBCHESS_RELEASE_SHA}" -eq 40
 ```
@@ -470,7 +471,8 @@ Use the visible interface, not a hidden endpoint:
    initial board reaches a real terminal game state;
 6. inspect the trajectory-direction record and its digest, how **What survived
    scrutiny** carries those directions through Portia, the Gate decision,
-   Retry ancestry if any, the approved Answer, and Charlotte's qualifications;
+   Retry ancestry if any, the approved Answer retained as provenance, and the
+   standalone corrected final answer after Charlotte review;
 7. choose one reversible Wilbur action, update it, and add an observation;
 8. reload the page and confirm the same case and lifecycle return from
    PostgreSQL;
@@ -681,7 +683,7 @@ reruns must not be added together as if they were new tests.
 | Audited Linux 2.2 candidate | `7a3749cf7f2c4e4c5ebfeb9b9aa870a11843f3a2` | Historical audit input, not this final RC |
 | Historical V3 manuscript/software snapshot | paper 3.0 / `0384978b2ba709da4c9824f2821c8623d3f84364` | Preserved audit evidence |
 | Integrated candidate | WebChess `2.2.0-rc.1` / full SHA and archive digest in generated release identity | Resolved only when the manifest says `resolved` and its local byte checks pass; that alone is not publication |
-| Current method-version tuple | lifecycle `webchess-lifecycle-v2.5`; Division `webchess-division-v5`; Portia `webchess-portia-v6`; Portia review `webchess-portia-review-v3`; Gate `webchess-gate-v5`; Answer `webchess-answer-v5`; Charlotte `webchess-charlotte-v6` | One canonical tuple in [`src/lib/lifecycle/method-versions.mjs`](src/lib/lifecycle/method-versions.mjs), copied into and strictly verified by the release identity |
+| Current method-version tuple | lifecycle `webchess-lifecycle-v2.5`; Division `webchess-division-v5`; Portia `webchess-portia-v6`; Portia review `webchess-portia-review-v3`; Gate `webchess-gate-v5`; Answer `webchess-answer-v5`; Charlotte `webchess-charlotte-v7` | One canonical tuple in [`src/lib/lifecycle/method-versions.mjs`](src/lib/lifecycle/method-versions.mjs), copied into and strictly verified by the release identity |
 | Candidate paper mapped to integrated candidate | [Arachne paper edition 3.1](docs/ARACHNE_METHOD_WHITE_PAPER_3_1.md) / PDF SHA-256 in generated release identity | Manifest-dependent; resolved only when the candidate PDF and source mapping pass together |
 | Provider harness | OpenClaw `2026.7.1-2` / `0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c` | Pinned external dependency |
 | Hosted Search provider | `@openclaw/codex@2026.7.1-1` / npm integrity `sha512-fRQITjqjC4Q/M6WmkR9XPWPuL+7vcvyVUWIDztB08X2G/mhzSwCYwQp4hugxAtuKmO3yx/7ULMK3nyeKsg5zGw==` | Pinned official provider dependency; inventory proves local registration, not account execution |

@@ -220,7 +220,7 @@ function activeHeadline(
     return 'Charlotte is checking truthfulness and audience fit'
   }
   if (lifecycle.state === 'charlotte_pending' || lifecycle.state === 'charlotte_running') {
-    return 'Charlotte is qualifying the generated answer'
+    return 'Charlotte is applying corrections to the final answer'
   }
   if (lifecycle.state === 'gate_failed') return 'The web needs another path'
   if (lifecycle.state === 'retry_ready' || lifecycle.state === 'retry_running') {
@@ -1305,12 +1305,13 @@ export function LifecycleStage({
               <div className="lifecycle-card__title">
                 <span><FlaskConical size={17} /></span>
                 <div>
-                  <small>Answer · generated from approved board weights</small>
-                  <h2>The substantive board-derived answer</h2>
+                  <small>Answer · Portia-approved draft provenance</small>
+                  <h2>The Board Answer retained for provenance</h2>
                 </div>
               </div>
               <p className="board-answer-provenance">
-                Generated only after Portia reviewed the candidate prompt and the Gate permitted it.
+                This Portia/Gate-approved draft is retained for comparison. Charlotte's
+                corrected final answer appears below when its review completes.
               </p>
               <div className="charlotte-answer">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -1371,24 +1372,25 @@ export function LifecycleStage({
                 <div>
                   <small>Charlotte · truthfulness and audience review</small>
                   <h2 id="charlotte-qualified-heading">
-                    The answer, qualified for people and action
+                    Final answer after Charlotte review
                   </h2>
                 </div>
               </div>
+              <p className="board-answer-provenance">
+                Charlotte has already applied its material corrections and qualifications
+                in the standalone final answer below. No later correction stage follows.
+              </p>
               <div className="charlotte-answer">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {lifecycle.charlotteRenderedAnswer}
                 </ReactMarkdown>
               </div>
               <div className="charlotte-support">
-                <h3>Grounded in Portia's surviving candidates</h3>
+                <h3>Support lineage retained from Portia</h3>
                 <ul>
                   {lifecycle.charlotte.supportingCandidateIds.map((candidateId) => (
                     <li key={candidateId}>
                       <code>{candidateId}</code>
-                      {lifecycle.charlotte?.qualificationsByCandidateId[candidateId] ? (
-                        <span>{lifecycle.charlotte.qualificationsByCandidateId[candidateId]}</span>
-                      ) : null}
                     </li>
                   ))}
                 </ul>

@@ -143,7 +143,8 @@ export function QuestionStage({
                 browser, Next.js child, PostgreSQL records, or a WebChess-operated service. After
                 play, Portia validates the board-derived answer
                 prompt, the internal Gate checks sufficiency, Answer generation runs only after
-                permission, Charlotte reviews and qualifies it, and Wilbur carries the result into
+                permission, Charlotte applies its review to produce the corrected final answer,
+                and Wilbur carries the result into
                 action.{' '}
                 <a href={provider.dataControlsUrl} target="_blank" rel="noreferrer">
                   {provider.dataControlsLabel ?? 'How OpenClaw runs model requests'}

@@ -128,7 +128,7 @@ describe('LifecycleRail', () => {
       'step',
     )
     expect(screen.getByRole('status')).toHaveTextContent(
-      /Charlotte: the generated board answer is ready for qualification/i,
+      /Charlotte: the generated Board Answer is ready for Charlotte\u2019s final review/i,
     )
   })
 

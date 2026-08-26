@@ -849,8 +849,8 @@ describe('LifecycleStage terminal Gate experience', () => {
     ['gate_passed', 'answering', 'The approved board prompt is generating the answer'],
     ['gate_passed', 'answer_failed', 'The approved prompt is waiting for a fresh Answer attempt'],
     ['gate_passed', 'answered', 'Charlotte is checking truthfulness and audience fit'],
-    ['charlotte_pending', 'answered', 'Charlotte is qualifying the generated answer'],
-    ['charlotte_running', 'answered', 'Charlotte is qualifying the generated answer'],
+    ['charlotte_pending', 'answered', 'Charlotte is applying corrections to the final answer'],
+    ['charlotte_running', 'answered', 'Charlotte is applying corrections to the final answer'],
     ['gate_failed', 'completed', 'The web needs another path'],
     ['retry_ready', 'completed', 'Retry is changing one variable'],
     ['retry_running', 'completed', 'Retry is changing one variable'],
@@ -1217,10 +1217,10 @@ describe('LifecycleStage terminal Gate experience', () => {
       /Stale terminal candidate/i,
     )
     expect(screen.queryByRole('heading', {
-      name: 'The substantive board-derived answer',
+      name: 'The Board Answer retained for provenance',
     })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', {
-      name: 'The answer, qualified for people and action',
+      name: 'Final answer after Charlotte review',
     })).not.toBeInTheDocument()
     expect(screen.queryByTestId('process-graphic')).not.toBeInTheDocument()
 
@@ -1230,7 +1230,7 @@ describe('LifecycleStage terminal Gate experience', () => {
     expect(within(budget).getAllByText('0 authorized · Portia stop')).toHaveLength(2)
   })
 
-  it('shows the board-derived Answer before Charlotte’s separate qualification', () => {
+  it('retains the Board Answer as provenance before Charlotte’s corrected final answer', () => {
     const lifecycle = aggregate('charlotte_complete', 'answer')
     const exactQualifications = [
       'Use this wounded signal only as a bounded hypothesis until direct observation confirms it.',
@@ -1253,7 +1253,16 @@ describe('LifecycleStage terminal Gate experience', () => {
         },
         exactlyThreeNextActions: [],
       },
-      charlotteRenderedAnswer: 'Charlotte preserves the claim while naming its limits.',
+      charlotteRenderedAnswer: [
+        '# Final answer after Charlotte',
+        '',
+        '## Corrected audience-ready answer',
+        'Charlotte preserves the claim while naming its limits.',
+        '',
+        '## Applied Portia qualifications',
+        `- candidate-wounded-1: ${exactQualifications[0]}`,
+        `- candidate-wounded-2: ${exactQualifications[1]}`,
+      ].join('\n'),
     } as unknown as LifecycleAggregate
 
     renderStage(completedLifecycle, {
@@ -1265,17 +1274,19 @@ describe('LifecycleStage terminal Gate experience', () => {
     })
 
     const boardHeading = screen.getByRole('heading', {
-      name: 'The substantive board-derived answer',
+      name: 'The Board Answer retained for provenance',
     })
     const charlotteHeading = screen.getByRole('heading', {
-      name: 'The answer, qualified for people and action',
+      name: 'Final answer after Charlotte review',
     })
 
     expect(screen.getByText(/weighted board supports a small, reversible trial/i))
       .toBeInTheDocument()
-    expect(screen.getByText(/Generated only after Portia reviewed the candidate prompt/i))
+    expect(screen.getByText(/Portia\/Gate-approved draft is retained for comparison/i))
       .toBeInTheDocument()
     expect(screen.getByText(/Charlotte preserves the claim while naming its limits/i))
+      .toBeInTheDocument()
+    expect(screen.getByText(/already applied its material corrections and qualifications/i))
       .toBeInTheDocument()
     const charlotteCard = charlotteHeading.closest('section')
     expect(charlotteCard).not.toBeNull()
@@ -1284,8 +1295,9 @@ describe('LifecycleStage terminal Gate experience', () => {
     expect(structuredSupport).not.toBeNull()
     if (!structuredSupport) throw new Error('Charlotte’s structured support was not rendered.')
     for (const exactQualification of exactQualifications) {
-      expect(within(structuredSupport).getByText(exactQualification)).toBeInTheDocument()
-      expect(within(charlotteCard).getAllByText(exactQualification)).toHaveLength(1)
+      expect(within(structuredSupport).queryByText(exactQualification)).not.toBeInTheDocument()
+      expect(charlotteCard).toHaveTextContent(exactQualification)
+      expect(charlotteCard.textContent?.split(exactQualification)).toHaveLength(2)
     }
     expect(
       boardHeading.compareDocumentPosition(charlotteHeading)
@@ -1447,7 +1459,7 @@ describe('LifecycleStage terminal Gate experience', () => {
       name: 'Portia permits the candidate answer prompt.',
     })
     const boardHeading = screen.getByRole('heading', {
-      name: 'The substantive board-derived answer',
+      name: 'The Board Answer retained for provenance',
     })
     expect(
       gateHeading.compareDocumentPosition(disclosure)
@@ -1748,7 +1760,7 @@ describe('LifecycleStage terminal Gate experience', () => {
     })
 
     expect(screen.getByRole('heading', {
-      name: 'The substantive board-derived answer',
+      name: 'The Board Answer retained for provenance',
     })).toBeInTheDocument()
     expect(screen.getByText(/weighted board supports a small, reversible trial/i))
       .toBeInTheDocument()

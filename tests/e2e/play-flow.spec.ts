@@ -875,10 +875,10 @@ test.describe('complete durable play flow', () => {
     )
     expect(copiedFullPrompt).toBe(answer.prompt)
     await expect(
-      page.getByRole('heading', { name: 'The substantive board-derived answer' }),
+      page.getByRole('heading', { name: 'The Board Answer retained for provenance' }),
     ).toBeVisible()
     await expect(
-      page.getByRole('heading', { name: 'The answer, qualified for people and action' }),
+      page.getByRole('heading', { name: 'Final answer after Charlotte review' }),
     ).toBeVisible()
     await expect(page.getByText(/Let the web meet reality/i)).toBeVisible()
     await expect(

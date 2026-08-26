@@ -23,7 +23,7 @@ describe('canonical current method-version tuple', () => {
       portiaReview: 'webchess-portia-review-v3',
       gateAlgorithm: 'webchess-gate-v5',
       answerPrompt: 'webchess-answer-v5',
-      charlottePrompt: 'webchess-charlotte-v6',
+      charlottePrompt: 'webchess-charlotte-v7',
     })
   })
 

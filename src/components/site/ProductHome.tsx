@@ -67,8 +67,8 @@ const LIFECYCLE_PANELS = [
     authority: 'Model-mediated authority',
     authorityClass: 'wc-authority-model',
     title: 'Charlotte',
-    body: 'Qualifies the stored answer with the same directional record—truth boundaries, stakeholders, audience—and returns exactly three reversible actions.',
-    prohibition: 'silently replace the analysis.',
+    body: 'Applies truth, stakeholder, audience, and directional review to the stored Answer and returns one standalone corrected final answer plus exactly three reversible actions.',
+    prohibition: 'defer corrections or substitute unrelated analysis.',
   },
   {
     glyph: '䷒',

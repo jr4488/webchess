@@ -90,7 +90,7 @@ describe('local OpenClaw WebChess experience', () => {
     expect(screen.getByText(/Portia validates the board-derived answer prompt/i)).toBeInTheDocument()
     expect(screen.getByText(/internal Gate checks sufficiency/i)).toBeInTheDocument()
     expect(screen.getByText(/Answer generation runs only after permission/i)).toBeInTheDocument()
-    expect(screen.getByText(/Charlotte reviews and qualifies it/i)).toBeInTheDocument()
+    expect(screen.getByText(/Charlotte applies its review to produce the corrected final answer/i)).toBeInTheDocument()
     expect(screen.getByText(/sends model turns through your local OpenClaw/i)).toBeInTheDocument()
     expect(screen.getByText(/credentials never enter the browser, Next\.js child, PostgreSQL records, or a WebChess-operated service/i)).toBeInTheDocument()
     expect(screen.getByText(/runs locally through your OpenClaw configuration/i)).toBeInTheDocument()

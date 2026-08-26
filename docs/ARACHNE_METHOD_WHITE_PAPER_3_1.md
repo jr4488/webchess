@@ -62,7 +62,7 @@ observed outcome. The exact current method-version tuple is:
 | Portia review contract | `webchess-portia-review-v3` |
 | Gate algorithm | `webchess-gate-v5` |
 | Answer prompt | `webchess-answer-v5` |
-| Charlotte prompt | `webchess-charlotte-v6` |
+| Charlotte prompt | `webchess-charlotte-v7` |
 
 The dependency-free authority is
 [`src/lib/lifecycle/method-versions.mjs`](../src/lib/lifecycle/method-versions.mjs);
@@ -111,7 +111,7 @@ are defined in
 | Gate | Deterministically evaluate sufficiency, coverage, contradiction, prompt binding, and directional binding | A pass authorizes generation; it does not certify truth |
 | Retry | Permit at most two additional same-field games and one regenerated field | Exhaustion produces explicit insufficiency, not forced prose |
 | Answer | Generate from the exact approved prompt and a versioned projection of the complete record: its digest, eight surviving signals with contributions/support IDs, explanation, boundary, and usable Portia amendments | Answer cannot silently substitute a different evidence or direction package; the complete record remains durable for replay/export |
-| Charlotte | Qualify the stored Answer from the same directional projection, then produce exactly three reversible actions | Qualification cannot resurrect consumed support or erase uncertainty |
+| Charlotte | Apply its review to produce one standalone corrected final answer from the stored Answer and the same directional projection, then produce exactly three reversible actions | The final answer cannot defer edits, resurrect consumed support, or erase uncertainty; the stored Answer remains provenance |
 | Wilbur | Let the person own an action, its status, and an observation | Model output cannot declare that reality succeeded |
 | Web | Persist genealogy, versions, provenance, feedback, and selected memory | A durable record is not causal proof or permission for surveillance |
 
@@ -252,11 +252,13 @@ OpenClaw adapter in
 [`src/server/openclaw/v2-generation.ts`](../src/server/openclaw/v2-generation.ts).
 
 Charlotte runs only after the approved Answer is durably stored. It receives
-and retains the same directional version/digest and trace, then qualifies that
-exact Answer against evidence boundaries, values, stakeholders,
-uncertainty, audience, and reversal conditions, then supplies exactly three
-bounded next actions. It cannot replace the Answer with unrelated prose or use
-a consumed survivor as support. See
+and retains the same directional version/digest and trace, applies its review
+against evidence boundaries, values, stakeholders, uncertainty, audience, and
+reversal conditions, and returns one standalone corrected final answer plus
+exactly three bounded next actions. The earlier Answer remains immutable
+provenance. Charlotte's final answer may narrow or correct it but cannot defer
+those edits to a nonexistent later stage, substitute unrelated prose, or use a
+consumed survivor as support. See
 [`src/server/openai/charlotte.ts`](../src/server/openai/charlotte.ts) and
 [`src/lib/lifecycle/charlotte.ts`](../src/lib/lifecycle/charlotte.ts).
 
@@ -489,7 +491,8 @@ In connected Chrome, the researcher should:
 5. inspect the trajectory-direction version/digest and explanation, verify how
    **What survived scrutiny** and every usable Portia interpretation/amendment
    retain it, then inspect the Gate decision, any Retry ancestry, the approved
-   Answer, and Charlotte's directional qualifications;
+   Answer retained as provenance and Charlotte's standalone corrected final
+   answer with its directional qualifications already applied;
 6. choose and update one Wilbur action and record an observation;
 7. reload and confirm that PostgreSQL restores the same case and lifecycle;
 8. export a chosen redaction profile, inspect its omission summary, and run the
